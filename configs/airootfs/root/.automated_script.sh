@@ -70,6 +70,9 @@ fi
 # Stop prefetch before disk wipe / pacstrap so it cannot contend with install I/O.
 if command -v omarchy-offline-mirror-prefetch >/dev/null; then
   omarchy-offline-mirror-prefetch stop || true
+  if [[ -f /run/omarchy-offline-prefetch.status ]]; then
+    echo "offline-mirror-prefetch: $(cat /run/omarchy-offline-prefetch.status)"
+  fi
 fi
 
 # The foreground dashboard is now the sole visible install UI owner. It starts

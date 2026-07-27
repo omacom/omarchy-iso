@@ -9,14 +9,17 @@
 #
 # Tunables (env):
 #   OMARCHY_OFFLINE_MIRROR          mirror dir (default below)
-#   OMARCHY_PREFETCH_RESERVE_MIB    RAM to leave free (default 2048)
+#   OMARCHY_PREFETCH_RESERVE_MIB    RAM to leave free (default: half of MemTotal)
+#   OMARCHY_PREFETCH_MAX_MIB        hard cap on bytes warmed (default 1536)
 
 set -euo pipefail
 
 MIRROR="${OMARCHY_OFFLINE_MIRROR:-/var/cache/omarchy/mirror/offline}"
 PIDFILE=/run/omarchy-offline-prefetch.pid
 STATUS=/run/omarchy-offline-prefetch.status
-RESERVE_MIB="${OMARCHY_PREFETCH_RESERVE_MIB:-2048}"
+# Keep install decompress/extract headroom. Over-filling page cache on 8G
+# machines made pacstrap *slower* under memory pressure.
+MAX_MIB="${OMARCHY_PREFETCH_MAX_MIB:-1536}"
 SELF=/usr/local/bin/omarchy-offline-mirror-prefetch
 
 # Packages installed before / alongside omarchy-base.packages. Keep in sync with
@@ -47,8 +50,29 @@ log_status() {
   printf '%s\n' "$*" >"$STATUS"
 }
 
-mem_available_kib() {
-  awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo
+mem_field_kib() {
+  awk -v key="$1" '$1 == key ":" { print $2; exit }' /proc/meminfo
+}
+
+prefetch_budget_kib() {
+  local avail_kib total_kib reserve_kib budget_kib max_kib
+  avail_kib=$(mem_field_kib MemAvailable)
+  total_kib=$(mem_field_kib MemTotal)
+  if [[ -n ${OMARCHY_PREFETCH_RESERVE_MIB:-} ]]; then
+    reserve_kib=$((OMARCHY_PREFETCH_RESERVE_MIB * 1024))
+  else
+    # Default: leave at least half of RAM for install extract/writeback.
+    reserve_kib=$((total_kib / 2))
+  fi
+  budget_kib=$((avail_kib - reserve_kib))
+  max_kib=$((MAX_MIB * 1024))
+  if ((budget_kib > max_kib)); then
+    budget_kib=$max_kib
+  fi
+  if ((budget_kib < 0)); then
+    budget_kib=0
+  fi
+  printf '%s %s %s' "$avail_kib" "$reserve_kib" "$budget_kib"
 }
 
 resolve_pkg() {
@@ -104,14 +128,9 @@ prefetch_worker() {
   local budget_kib file size_kib loaded_kib=0 count=0
   local avail_kib reserve_kib
 
-  avail_kib=$(mem_available_kib)
-  reserve_kib=$((RESERVE_MIB * 1024))
-  budget_kib=$((avail_kib - reserve_kib))
-  if ((budget_kib < 0)); then
-    budget_kib=0
-  fi
+  read -r avail_kib reserve_kib budget_kib <<<"$(prefetch_budget_kib)"
 
-  log_status "started avail_kib=$avail_kib budget_kib=$budget_kib reserve_mib=$RESERVE_MIB"
+  log_status "started avail_kib=$avail_kib reserve_kib=$reserve_kib budget_kib=$budget_kib max_mib=$MAX_MIB"
 
   while read -r file; do
     [[ -f $file ]] || continue

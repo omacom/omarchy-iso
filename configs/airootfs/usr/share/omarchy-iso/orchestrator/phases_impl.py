@@ -208,6 +208,14 @@ def prepare_install_target(ctx: InstallContext) -> None:
         verify_protected_mounts(ctx)
 
 
+def _stop_offline_mirror_prefetch() -> None:
+    """Best-effort stop for the wizard-time page-cache warmer."""
+    prefetch = Path("/usr/local/bin/omarchy-offline-mirror-prefetch")
+    if not prefetch.exists():
+        return
+    subprocess.run([str(prefetch), "stop"], check=False, capture_output=True)
+
+
 def arch_install_system(ctx: InstallContext) -> None:
     """Install the target system from the archinstall JSON.
 
@@ -216,6 +224,8 @@ def arch_install_system(ctx: InstallContext) -> None:
     a pre-mounted target, and Omarchy derives boot/fstab details from that same
     input.
     """
+    _stop_offline_mirror_prefetch()
+
     handler = ctx.state["arch_config_handler"]
     mirror_handler = ctx.state["mirror_handler"]
     config = handler.config

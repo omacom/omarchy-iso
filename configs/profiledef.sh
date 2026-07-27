@@ -33,6 +33,7 @@ file_permissions=(
   ["/usr/local/bin/omarchy-iso-cleanup-disk"]="0:0:755"
   ["/usr/local/bin/omarchy-install-dashboard"]="0:0:755"
   ["/usr/local/bin/omarchy-iso-install"]="0:0:755"
+  ["/usr/local/bin/omarchy-offline-mirror-prefetch"]="0:0:755"
   ["/usr/local/bin/omarchy-upload-log"]="0:0:755"
   ["/var/cache/omarchy/mirror/offline/"]="0:0:775"
 )

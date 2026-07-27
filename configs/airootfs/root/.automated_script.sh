@@ -58,7 +58,19 @@ if [[ ${OMARCHY_INSTALL_DEBUG:-} == "1" ]]; then
 fi
 
 cd /root
+
+# Overlap USB/squashfs reads with wizard think-time: warm offline .pkg.tar.zst
+# files into the page cache at idle I/O priority before pacstrap begins.
+if command -v omarchy-offline-mirror-prefetch >/dev/null; then
+  omarchy-offline-mirror-prefetch start || true
+fi
+
 ./configurator
+
+# Stop prefetch before disk wipe / pacstrap so it cannot contend with install I/O.
+if command -v omarchy-offline-mirror-prefetch >/dev/null; then
+  omarchy-offline-mirror-prefetch stop || true
+fi
 
 # The foreground dashboard is now the sole visible install UI owner. It starts
 # the actual installer as a non-interactive child, logs child output, waits for

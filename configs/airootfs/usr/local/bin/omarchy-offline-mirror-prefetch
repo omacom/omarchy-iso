@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+#
+# Warm the offline package mirror into the page cache while the install
+# wizard runs, so pacstrap hits RAM instead of waiting on USB/squashfs.
+#
+# Usage:
+#   omarchy-offline-mirror-prefetch start
+#   omarchy-offline-mirror-prefetch stop
+#
+# Tunables (env):
+#   OMARCHY_OFFLINE_MIRROR          mirror dir (default below)
+#   OMARCHY_PREFETCH_RESERVE_MIB    RAM to leave free (default 2048)
+
+set -euo pipefail
+
+MIRROR="${OMARCHY_OFFLINE_MIRROR:-/var/cache/omarchy/mirror/offline}"
+PIDFILE=/run/omarchy-offline-prefetch.pid
+STATUS=/run/omarchy-offline-prefetch.status
+RESERVE_MIB="${OMARCHY_PREFETCH_RESERVE_MIB:-2048}"
+SELF=/usr/local/bin/omarchy-offline-mirror-prefetch
+
+# Packages installed before / alongside omarchy-base.packages. Keep in sync with
+# builder/archinstall.packages and orchestrator EARLY_* lists.
+PRIORITY_PACKAGES=(
+  base
+  linux
+  linux-firmware
+  amd-ucode
+  intel-ucode
+  mkinitcpio
+  btrfs-progs
+  base-devel
+  git
+  limine
+  efibootmgr
+  omarchy-keyring
+  openssh
+  pipewire
+  snapper
+  sof-firmware
+  alsa-firmware
+  lua51
+  luarocks
+)
+
+log_status() {
+  printf '%s\n' "$*" >"$STATUS"
+}
+
+mem_available_kib() {
+  awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo
+}
+
+resolve_pkg() {
+  local name=$1 path
+  # Prefer exact latest match for "name-version-release.pkg.tar.zst".
+  path=$(compgen -G "$MIRROR/$name-*.pkg.tar.zst" | sort -V | tail -n1 || true)
+  [[ -n $path && -f $path ]] || return 1
+  printf '%s\n' "$path"
+}
+
+# Emit offline .pkg.tar.zst paths: priority names + omarchy-base.packages first,
+# then remaining archives largest-first.
+list_prefetch_targets() {
+  local -A seen=()
+  local name path list
+
+  for name in "${PRIORITY_PACKAGES[@]}"; do
+    path=$(resolve_pkg "$name" || true)
+    [[ -n ${path:-} ]] || continue
+    [[ ${seen[$path]+x} ]] && continue
+    seen[$path]=1
+    printf '%s\n' "$path"
+  done
+
+  for list in /usr/share/omarchy-iso/omarchy-base.packages; do
+    [[ -f $list ]] || continue
+    while read -r name; do
+      [[ -z $name || $name == \#* ]] && continue
+      path=$(resolve_pkg "$name" || true)
+      [[ -n ${path:-} ]] || continue
+      [[ ${seen[$path]+x} ]] && continue
+      seen[$path]=1
+      printf '%s\n' "$path"
+    done <"$list"
+  done
+
+  while read -r path; do
+    [[ ${seen[$path]+x} ]] && continue
+    seen[$path]=1
+    printf '%s\n' "$path"
+  done < <(ls -1S "$MIRROR"/*.pkg.tar.zst 2>/dev/null || true)
+}
+
+warm_file() {
+  # Sequential read into page cache (no DONTNEED / O_DIRECT).
+  dd if="$1" of=/dev/null bs=1M status=none 2>/dev/null || true
+}
+
+prefetch_worker() {
+  renice -n 19 $$ >/dev/null 2>&1 || true
+  ionice -c 3 -p $$ >/dev/null 2>&1 || true
+
+  local budget_kib file size_kib loaded_kib=0 count=0
+  local avail_kib reserve_kib
+
+  avail_kib=$(mem_available_kib)
+  reserve_kib=$((RESERVE_MIB * 1024))
+  budget_kib=$((avail_kib - reserve_kib))
+  if ((budget_kib < 0)); then
+    budget_kib=0
+  fi
+
+  log_status "started avail_kib=$avail_kib budget_kib=$budget_kib reserve_mib=$RESERVE_MIB"
+
+  while read -r file; do
+    [[ -f $file ]] || continue
+    size_kib=$(du -k "$file" | awk '{ print $1 }')
+    if ((loaded_kib + size_kib > budget_kib)); then
+      log_status "budget_exhausted files=$count loaded_kib=$loaded_kib next=$(basename "$file") size_kib=$size_kib"
+      return 0
+    fi
+    warm_file "$file"
+    loaded_kib=$((loaded_kib + size_kib))
+    count=$((count + 1))
+    # Keep status fresh without flooding the filesystem every file on tiny pkgs.
+    if ((count % 5 == 0)); then
+      log_status "progress files=$count loaded_kib=$loaded_kib last=$(basename "$file")"
+    fi
+  done < <(list_prefetch_targets)
+
+  log_status "finished files=$count loaded_kib=$loaded_kib"
+}
+
+stop_prefetch() {
+  local pid child
+  [[ -f $PIDFILE ]] || return 0
+  pid=$(cat "$PIDFILE" 2>/dev/null || true)
+  rm -f "$PIDFILE"
+  [[ -n ${pid:-} ]] || return 0
+  if kill -0 "$pid" 2>/dev/null; then
+    # Stop any in-flight dd children, then the worker.
+    while read -r child; do
+      kill "$child" 2>/dev/null || true
+    done < <(ps -o pid= --ppid "$pid" 2>/dev/null || true)
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    log_status "stopped pid=$pid"
+  fi
+}
+
+start_prefetch() {
+  stop_prefetch
+
+  if [[ ! -d $MIRROR ]]; then
+    log_status "skipped missing_mirror=$MIRROR"
+    return 0
+  fi
+
+  if [[ ! -x $SELF ]]; then
+    SELF=$0
+  fi
+
+  "$SELF" _worker >/dev/null 2>&1 &
+  echo $! >"$PIDFILE"
+  disown $! 2>/dev/null || true
+  log_status "spawned pid=$(cat "$PIDFILE")"
+}
+
+case "${1:-}" in
+  start) start_prefetch ;;
+  stop) stop_prefetch ;;
+  _worker) prefetch_worker ;;
+  *)
+    echo "Usage: $0 {start|stop}" >&2
+    exit 2
+    ;;
+esac

@@ -26,12 +26,17 @@ This is Ryan Hughes' suggestion from PR #72 and it is what keeps the diff small:
 
 ### What the ISO already does for us
 
-Two things that would otherwise need building are already true on a stock quattro install, per `manifests/fresh-4-semantic.json`:
+One thing that would otherwise need building is already true on a stock install: `NetworkManager.service` is enabled and active with DHCP by default, so autoinstall needs no `systemd-networkd` unit — one would contend with NetworkManager.
 
-- `sshd.service` is enabled.
-- `NetworkManager.service` is enabled and active, with DHCP by default.
+Remote access needs three things, all verified against a real install rather than inferred:
 
-So remote access needs only an `authorized_keys` file. No `systemd-networkd` unit (it would contend with NetworkManager), no `systemctl enable sshd`, and specifically no loosening of `PasswordAuthentication` — key auth is the only thing autoinstall adds.
+- `authorized_keys` for the user.
+- `systemctl enable sshd.service`. Omarchy ships `openssh` but leaves the service disabled.
+- `ufw allow ssh`. `install/config/firewall.sh` opens LocalSend (53317) and docker DNS and nothing else, and ufw runs default-deny incoming.
+
+Still no loosening of `PasswordAuthentication` — key auth only.
+
+Do not take `manifests/fresh-4-semantic.json` as the authority on any of this. It claims `sshd.service: enabled` and carries an `allow tcp 22` ufw rule; a real install of this ISO has neither. It is a snapshot of one machine's state, not a contract about stock behavior, and trusting it cost two test cycles.
 
 ### Non-interactivity belongs to the dashboard
 
@@ -109,12 +114,14 @@ The dashboard is the only process that owns the visible UI. Suppressing its prom
 ### Changes
 - `omarchy-iso-install`: add `--ssh-keys-file` to the arg loop, exporting `OMARCHY_INSTALL_SSH_KEYS_FILE`. Same shape as the five existing flags, ahead of the `unknown arg` catch-all (`:19`).
 - `context.py`: add an `ssh_keys_path: Path | None` field populated from that variable in `from_env`, `None` when unset or when the file does not exist.
-- `phases_impl.py`: add `configure_remote_access(ctx)`:
+- `phases_impl.py`: add `configure_ssh_access(ctx)`:
   - Return immediately when `ctx.ssh_keys_path` is `None`.
   - Parse the file as a JSON array of public key strings; write them one per line to `<target>/home/<user>/.ssh/authorized_keys`.
   - `.ssh` at `0700`, `authorized_keys` at `0600`, both owned by the user via `arch-chroot <target> chown -R <user>:<user>`. Do not hardcode uid 1000 as PR #72 did — ask the target for it.
+  - `arch-chroot <target> systemctl enable sshd.service`. Works cleanly in the chroot.
+  - `arch-chroot <target> ufw allow ssh` when the target has ufw. This one exits **non-zero** in a chroot (`ERROR: problem running`) because ufw cannot reach netfilter, but it writes the rule to `/etc/ufw/user.rules` before failing, and that file is what `ufw.service` loads on first boot. So ignore the exit status and assert the rule landed in the file instead.
   - A malformed or empty `ssh.json` must fail the phase loudly. A machine that installs "successfully" and is then unreachable is worse than one that stops with an error on screen.
-- `main.py`: register `("Configuring remote access", configure_remote_access)` in `build_phases` after `configure_login` (`:52`) and before `validate_boot`.
+- `main.py`: register `("Configuring SSH access", configure_ssh_access)` in `build_phases` after `configure_login` (`:52`) and before `validate_boot`.
 
 ### Model to follow
 `configure_login` (`phases_impl.py:1251`) — direct writes against `ctx.target`, `arch-chroot` reserved for ownership and `systemctl`. Match its structure.
@@ -123,6 +130,7 @@ The dashboard is the only process that owns the visible UI. Suppressing its prom
 - Install with `ssh.json`: `ssh <user>@<vm>` works with the corresponding private key on first boot, no password.
 - Install without `ssh.json`: phase runs, does nothing, install unaffected; `~/.ssh` is not created.
 - `authorized_keys` is `0600` and owned by the install user, not root.
+- Port 22 is open in ufw on the installed system. Test this by connecting, not by reading the phase log — the rule is written from a chroot that cannot verify it.
 - Password SSH auth is left at the distro default — autoinstall does not enable it.
 - Interactive installs are unaffected: the flag is passed but the file never exists.
 
@@ -169,4 +177,4 @@ PR #72 targeted the pre-`quattro` tree and cannot be rebased: `use_omarchy_helpe
 - The `systemd-networkd` DHCP unit — unnecessary; NetworkManager is already enabled and would contend with it.
 - The `PasswordAuthentication yes` rewrite — unnecessary and a security downgrade.
 
-`load_cidata` is the one piece that carries over close to intact.
+`load_cidata` is the one piece that carries over close to intact. PR #72's `ufw allow ssh` also carries over: it was dropped from the first draft of this plan on the reasoning that an enabled sshd is a reachable sshd, and a test install proved otherwise. That PR was right to include it.

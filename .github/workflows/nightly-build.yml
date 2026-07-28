@@ -2,40 +2,34 @@ name: Nightly ISO Build
 
 on:
   schedule:
-    - cron: '1 0 * * *'  # Daily at 00:01 UTC
-  workflow_dispatch:  # Allow manual triggering
+    - cron: "1 0 * * *" # Daily at 00:01 UTC
+  workflow_dispatch: # Allow manual triggering
 
 jobs:
   build-iso:
     runs-on: ubuntu-latest
-
-    container:
-      image: archlinux/archlinux:latest
-      options: --privileged
-    
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-      
-    - name: Build ISO in Arch Linux container
-      run: |
-        docker run --rm \
-          --privileged \
-          -v "${{ github.workspace }}:/workspace" \
-          -w /workspace \
-          archlinux:latest \
-          bash -c "
-            pacman -Syu --noconfirm && \
-            chmod +x build_iso.sh && \
-            ./build_iso.sh
-          "
-    
-    - name: Upload ISO artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: omarchy-iso-${{ github.run_number }}
-        path: out/*.iso
-        retention-days: 30
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@v1.3.1
+
+      - name: Build ISO
+        run: NO_BOOT_OFFER=1 ./bin/omarchy-iso-make
+
+      - name: Delete previously uploaded ISO artifact
+        uses: philips-labs/action-delete-artifacts@v1.0.0
+        with:
+          workflow: nightly-build.yml
+        continue-on-error: true
+
+      - name: Upload newly built ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: omarchy-iso-${{ github.run_number }}
+          path: ./release/*.iso
+          retention-days: 1

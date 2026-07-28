@@ -16,6 +16,7 @@ while [[ $# -gt 0 ]]; do
     --full-name-file)   export OMARCHY_INSTALL_FULL_NAME_FILE="$2"; shift 2 ;;
     --email-file)       export OMARCHY_INSTALL_EMAIL_FILE="$2"; shift 2 ;;
     --encrypt-file)     export OMARCHY_INSTALL_ENCRYPT_FILE="$2"; shift 2 ;;
+    --ssh-keys-file)    export OMARCHY_INSTALL_SSH_KEYS_FILE="$2"; shift 2 ;;
     *)                  echo "omarchy-iso-install: unknown arg $1" >&2; exit 2 ;;
   esac
 done

@@ -2,49 +2,89 @@
 # Preview the shipped Omarchy installer dashboard without building an ISO.
 set -euo pipefail
 
+# The dashboard drives the package phase from the target's pacman database, so
+# fake one here; without it the preview falls back to its time curve and the bar
+# barely moves, which reads as a bug.
+PREVIEW_PACKAGES="${PREVIEW_PACKAGES:-925}"
+
 write_simulation_state() {
   local state_file="$1" started_at="$2" phase_started_at="$3" current_phase="$4"
-  local finished_at="${5:-null}" temporary="${state_file}.tmp"
+  local target="$5" index="$6" total="$7"
+  local finished_at="${8:-null}" temporary="${state_file}.tmp"
 
   jq -n \
     --argjson started_at "$started_at" \
     --argjson phase_started_at "$phase_started_at" \
     --arg current_phase "$current_phase" \
+    --arg target "$target" \
+    --argjson current_index "$index" \
+    --argjson total_phases "$total" \
     --argjson finished_at "$finished_at" \
     '{
       started_at: $started_at,
       phase_started_at: $phase_started_at,
-      current_phase: $current_phase
+      current_phase: $current_phase,
+      target: $target,
+      current_index: $current_index,
+      total_phases: $total_phases
     } + if $finished_at == null then {} else {finished_at: $finished_at} end' \
     >"$temporary"
   mv -f -- "$temporary" "$state_file"
 }
 
+# Fill the fake database over the phase's duration, so the bar is driven by the
+# same count it uses on a real install.
+simulate_packages() {
+  local db="$1" duration="$2" total="$3" steps=25 i n
+  for ((i = 1; i <= steps; i++)); do
+    n=$(( total * i / steps ))
+    while (( $(ls -1 "$db" 2>/dev/null | wc -l) < n )); do
+      mkdir -p "$db/preview-$(( $(ls -1 "$db" 2>/dev/null | wc -l) ))-1.0-1"
+    done
+    sleep "$(awk -v d="$duration" -v s="$steps" 'BEGIN { printf "%.3f", d / s }')"
+  done
+}
+
 simulate_install() {
   local state_file="$1"
   local started_at="$EPOCHREALTIME"
-  local phase phase_started_at finished_at duration i
+  local phase phase_started_at finished_at duration i index total
+  local target db
+  target="$(dirname -- "$state_file")/target"
+  db="$target/var/lib/pacman/local"
+  mkdir -p "$db"
   local -a phases=(
     "Starting installation" 0.5
     "Preparing live environment" 0.8
+    "Preparing install target" 0.3
     "Installing Arch + Omarchy" 5.0
+    "Configuring hibernation" 0.4
     "Configuring system" 1.2
     "Finalizing Limine boot" 1.0
     "Finalizing user" 1.0
     "Configuring login" 0.6
+    "Configuring DNS resolver" 0.3
     "Validating boot setup" 0.8
   )
+  total=$(( ${#phases[@]} / 2 ))
 
   for ((i = 0; i < ${#phases[@]}; i += 2)); do
     phase="${phases[i]}"
     duration="${phases[i + 1]}"
+    index=$(( i / 2 ))
     phase_started_at="$EPOCHREALTIME"
-    write_simulation_state "$state_file" "$started_at" "$phase_started_at" "$phase"
-    sleep "$duration"
+    write_simulation_state "$state_file" "$started_at" "$phase_started_at" \
+      "$phase" "$target" "$index" "$total"
+    if [[ $phase == "Installing Arch + Omarchy" ]]; then
+      simulate_packages "$db" "$duration" "$PREVIEW_PACKAGES"
+    else
+      sleep "$duration"
+    fi
   done
 
   finished_at="$EPOCHREALTIME"
-  write_simulation_state "$state_file" "$started_at" "$finished_at" "Installation complete" "$finished_at"
+  write_simulation_state "$state_file" "$started_at" "$finished_at" \
+    "Installation complete" "$target" "$(( total - 1 ))" "$total" "$finished_at"
   sleep 0.3
 }
 
@@ -91,6 +131,12 @@ log_file="$preview_dir/install.log"
 state_file="$preview_dir/state.json"
 touch "$log_file"
 
+# Match what the simulated database will reach, so the preview shows the
+# package-driven bar rather than the missing-signal fallback.
+printf '%s\n' "$PREVIEW_PACKAGES" >"$preview_dir/expected-packages"
+
 OMARCHY_UI_AUTO_REBOOT=no \
+  OMARCHY_EXPECTED_PACKAGES_FILE="$preview_dir/expected-packages" \
+  PREVIEW_PACKAGES="$PREVIEW_PACKAGES" \
   "$dashboard" "$log_file" "$state_file" -- \
   "$0" --simulate-install "$state_file"

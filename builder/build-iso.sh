@@ -234,6 +234,70 @@ repo-add "$offline_mirror_dir/offline.db.tar.gz" "$offline_mirror_dir/"*.pkg.tar
 mkdir -p /var/cache/omarchy/mirror
 ln -sf "$offline_mirror_dir" /var/cache/omarchy/mirror/offline
 
+# Denominator for the install dashboard's progress bar. Resolving the mirror's
+# own package lists against the mirror we just indexed, with an empty local db,
+# is the question pacstrap asks at install time — same resolver, same repo, same
+# lists — so no hand-kept constant can drift.
+#
+# It over-counts by ~1 in 925: archinstall.packages lists both amd-ucode and
+# intel-ucode because the mirror must contain either. phases.py records expected
+# and actual in the timing JSON, so growing drift shows up in acceptance runs.
+# The early-bootstrap set is already inside this closure, so restating it would
+# only add a second list to drift.
+resolve_expected_packages() {
+  local resolve_root=/tmp/omarchy-expected-packages
+  local resolved
+  local -a targets
+
+  rm -rf "$resolve_root"
+  mkdir -p "$resolve_root/var/lib/pacman"
+
+  mapfile -t targets < <(
+    {
+      grep -hv '^#\|^$' /builder/archinstall.packages
+      # Read the shipped copy, which is what _runtime_package_list reads at
+      # install time, not the build-time source it came from.
+      grep -hv '^#\|^$' \
+        "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
+      printf '%s\n' "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" \
+        "$OMARCHY_NVIM_PACKAGE"
+    } | sort -u
+  )
+
+  pacman --config "$build_cache_dir/pacman-offline.conf" \
+    --root "$resolve_root" --dbpath "$resolve_root/var/lib/pacman" \
+    --noconfirm -Sy >/dev/null || return 1
+
+  # Capture before counting: no pipefail here, so a pacman failure inside a
+  # pipeline would become a plausible partial count, which never trips the
+  # dashboard's fallback.
+  resolved="$(pacman --config "$build_cache_dir/pacman-offline.conf" \
+    --root "$resolve_root" --dbpath "$resolve_root/var/lib/pacman" \
+    --noconfirm -S --print --print-format '%n' "${targets[@]}")" || return 1
+
+  printf '%s\n' "$resolved" | sort -u | grep -c .
+}
+
+# Worth failing the build over: -S --print only aborts when a target is missing
+# from the offline repo, which would fail pacstrap the same way. A count that
+# merely looks wrong is not — the dashboard falls back without the file.
+if ! expected_packages="$(resolve_expected_packages)"; then
+  echo "ERROR: could not resolve the target package count from the offline mirror." >&2
+  echo "       pacman -S --print aborts the whole transaction if any single target" >&2
+  echo "       is missing, so this almost certainly means pacstrap would fail the" >&2
+  echo "       same way at install time." >&2
+  exit 1
+fi
+if (( expected_packages < 600 || expected_packages > 2000 )); then
+  echo "WARNING: resolved target package count $expected_packages is outside the" >&2
+  echo "         expected 600-2000 range; shipping no denominator so the install" >&2
+  echo "         dashboard falls back to its time-based curve." >&2
+else
+  printf '%s\n' "$expected_packages" \
+    >"$build_cache_dir/airootfs/usr/share/omarchy-iso/expected-packages"
+  echo "Target install resolves to $expected_packages packages."
+fi
+
 # Live ISO uses the same offline pacman.conf.
 cp "$build_cache_dir/pacman-offline.conf" "$build_cache_dir/airootfs/etc/pacman.conf"
 

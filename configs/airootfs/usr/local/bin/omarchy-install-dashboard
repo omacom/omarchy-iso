@@ -137,7 +137,63 @@ LOGO_HEIGHT="$(logo_height)"
 (( LOGO_HEIGHT > 0 )) || LOGO_HEIGHT=1
 CONTENT_WIDTH="$LOGO_WIDTH"
 DYNAMIC_ROW=$((LOGO_HEIGHT + 3))
-LAST_PCT=1
+LAST_PM=10
+
+# ── Install progress ─────────────────────────────────────────────────────────
+#
+# Position = max(floor, work), both non-decreasing, in per-mille of the bar.
+#
+#   floor  lo + (span-1) * t / (t+tau), on time since this process saw the
+#          phase. Asymptotic, so it approaches the band end without reaching it.
+#          tau is a shape constant, not a duration prediction.
+#   work   packages installed / PKG_TOTAL, for the package phase only (~85% of
+#          the install). libalpm makes one directory per package under
+#          <target>/var/lib/pacman/local; the denominator comes from
+#          build-iso.sh, so there is no second package list to drift.
+#
+# Per-mille because a whole-percent asymptote over a 2-point band has two
+# reachable values and stops moving. No give-up predicate: two discontinuous
+# curves behind a monotonic clamp freeze. With no signal the floor alone still
+# finishes the band.
+EXPECTED_PACKAGES_FILE="${OMARCHY_EXPECTED_PACKAGES_FILE:-/usr/share/omarchy-iso/expected-packages}"
+PKG_TOTAL=0
+if [[ -r $EXPECTED_PACKAGES_FILE ]]; then
+  read -r PKG_TOTAL _ <"$EXPECTED_PACKAGES_FILE" 2>/dev/null || PKG_TOTAL=0
+fi
+[[ $PKG_TOTAL =~ ^[0-9]+$ ]] || PKG_TOTAL=0
+# A wrong denominator is worse than none: it never triggers the fallback.
+(( PKG_TOTAL < 300 || PKG_TOTAL > 5000 )) && PKG_TOTAL=0
+
+PKG_BONUS_MAX_PM=100   # cap on how far the bar may run ahead of the count
+PKG_TAIL_PM=40         # band held back so a stalled bar has somewhere to go
+PKG_FLOOR_TAU=900      # with a work signal, time is only a backstop until the
+                       # first package, so slow it until it cannot outrun data
+
+POS=10                 # position, per-mille, monotonic
+PROGRESS_PM=10
+NOW=0                  # monotonic seconds, refreshed once per frame
+DASH_T0=0
+PHASE_NAME=""          # last phase this process observed
+PHASE_T0=0             # NOW when it was first observed
+PHASE_LO=10            # POS on entry, for an unknown phase with no index
+PKG_DB_DIR=""
+PKG_COUNT=0
+PKG_BASE=-1            # package count when the phase started
+PKG_SEEN=0             # running max of packages since PKG_BASE
+PKG_LAST_CHANGE=0
+PKG_BONUS=0
+
+# Monotonic clock: tzupdate and systemd-timesyncd can step the wall clock
+# mid-install, which would jump every time-driven band to its ceiling.
+set_now() {
+  local up rest
+  if read -r up rest </proc/uptime 2>/dev/null && [[ $up == [0-9]* ]]; then
+    NOW=${up%%.*}
+  else
+    NOW=$EPOCHSECONDS
+  fi
+  return 0
+}
 
 left_padding() {
   local width="${1:-$CONTENT_WIDTH}" cols pad
@@ -183,72 +239,146 @@ render_logo() {
 }
 
 progress_bar() {
-  local pct="$1" width="${2:-34}" filled empty
-  (( pct < 0 )) && pct=0
-  (( pct > 100 )) && pct=100
-  filled=$(( pct * width / 100 ))
+  local pm="$1" width="${2:-34}" filled empty
+  (( pm < 0 )) && pm=0
+  (( pm > 1000 )) && pm=1000
+  filled=$(( pm * width / 1000 ))
   empty=$(( width - filled ))
   printf '%s%s%s%s%s' "$WHITE" "$(repeat █ "$filled")" "$DARK" "$(repeat ░ "$empty")" "$RESET"
 }
 
+# Packages libalpm has finished installing. local/ holds one directory per
+# package and nothing else in it is a directory, so */ is exact. One glob, no
+# forks: this runs twice a second while the disk is saturated.
+count_packages() {
+  local -a entries
+  PKG_COUNT=0
+  [[ -n $PKG_DB_DIR ]] || return 0
+  entries=("$PKG_DB_DIR"/*/)
+  # Unmatched globs expand to the pattern; nullglob stays off script-wide.
+  if (( ${#entries[@]} == 1 )) && [[ ! -d ${entries[0]} ]]; then
+    return 0
+  fi
+  PKG_COUNT=${#entries[@]}
+  return 0
+}
+
+# Sets PROGRESS_PM. Never call in a command substitution: POS, the phase timer
+# and the package counters must survive between frames. Print nothing — output
+# here would land on the TTY between the cursor escape and the bar.
 install_progress() {
-  local phase finished phase_started elapsed span active pct
-  local start=1 end=99 expected=90
+  local phase finished index total target
+  local lo hi tau span t pos work gap n pkg_signal=0
   local -a state
 
-  [[ -f $STATE_FILE ]] || { printf '1'; return; }
+  PROGRESS_PM=$POS
+  [[ -f $STATE_FILE ]] || return 0
 
   mapfile -t state < <(jq -r '
     (.current_phase // "Starting installation"),
     ((.finished_at // 0) | tonumber? // 0 | floor),
-    ((.phase_started_at // .started_at // 0) | tonumber? // 0 | floor)
+    ((.current_index // -1) | tonumber? // -1 | floor),
+    ((.total_phases // 0) | tonumber? // 0 | floor),
+    (.target // "/mnt")
   ' "$STATE_FILE" 2>/dev/null)
-  (( ${#state[@]} == 3 )) || { printf '1'; return; }
-  phase="${state[0]}" finished="${state[1]}" phase_started="${state[2]}"
+  (( ${#state[@]} == 5 )) || return 0
+  phase="${state[0]}" finished="${state[1]}"
+  index="${state[2]}" total="${state[3]}" target="${state[4]}"
+  [[ -n $target ]] || target="/mnt"
 
   if (( finished > 0 )) || [[ $phase == "Installation complete" ]]; then
-    printf '100'
-    return
+    POS=1000
+    PROGRESS_PM=1000
+    return 0
   fi
 
-  # Phase weights: start%, end%, expected seconds in phase.
+  # Transitions are observed here rather than read from the state file, which
+  # keeps wall clock out of the dashboard entirely.
+  if [[ $phase != "$PHASE_NAME" ]]; then
+    PHASE_NAME="$phase"
+    PHASE_T0=$NOW
+    PHASE_LO=$POS
+    PKG_BASE=-1
+    PKG_SEEN=0
+    PKG_BONUS=0
+    PKG_LAST_CHANGE=$NOW
+  fi
+
+  # Bands in per-mille, plus tau. The tail bands are wide relative to what they
+  # cost on NVMe: run_system_finalizer can DKMS-build a driver and
+  # finalize_limine_boot rebuilds every UKI, so they vary most on real hardware.
+  # Over-allotting costs a step at a boundary; under-allotting costs a stall.
   case "$phase" in
-    "Starting installation")           start=1  end=2   expected=2 ;;
-    "Preparing live environment")      start=2  end=6   expected=5 ;;
-    "Verifying protected mounts")      start=6  end=8   expected=3 ;;
-    "Installing Arch + Omarchy")       start=8  end=86  expected=95 ;;
-    "Installing base system")          start=8  end=84  expected=85 ;;
-    "Configuring protected boot")      start=84 end=86  expected=8 ;;
-    "Configuring hibernation")         start=86 end=88  expected=5 ;;
-    "Configuring system")              start=88 end=93  expected=10 ;;
-    "Finalizing Limine boot")          start=93 end=96  expected=8 ;;
-    "Finalizing user")                 start=96 end=98  expected=10 ;;
-    "Finalizing in chroot")            start=88 end=98  expected=10 ;;
-    "Configuring login")               start=98 end=99  expected=3 ;;
-    "Configuring DNS resolver")        start=99 end=100 expected=2 ;;
-    "Validating protected boot setup") start=99 end=100 expected=5 ;;
-    "Validating boot setup")           start=99 end=100 expected=5 ;;
+    "Starting installation")      lo=10  hi=25   tau=5   ;;
+    "Preparing live environment") lo=25  hi=50   tau=25  ;;
+    "Preparing install target")   lo=50  hi=65   tau=20  ;;
+    "Installing Arch + Omarchy")  lo=65  hi=700  tau=150 pkg_signal=1 ;;
+    "Configuring hibernation")    lo=700 hi=720  tau=10  ;;
+    "Configuring system")         lo=720 hi=850  tau=120 ;;
+    "Finalizing Limine boot")     lo=850 hi=950  tau=90  ;;
+    "Finalizing user")            lo=950 hi=978  tau=30  ;;
+    "Configuring login")          lo=978 hi=988  tau=5   ;;
+    "Configuring DNS resolver")   lo=988 hi=994  tau=5   ;;
+    "Validating boot setup")      lo=994 hi=1000 tau=5   ;;
+    *)
+      # Unknown names used to inherit a 1->99 sweep. Derive an even band from
+      # the published index instead; with no index, a bounded slice, so a
+      # renamed phase degrades to one cell rather than a runaway.
+      if (( total >= 2 && index >= 0 && index < total )); then
+        lo=$(( 10 + 990 * index / total ))
+        hi=$(( 10 + 990 * (index + 1) / total ))
+      else
+        lo=$PHASE_LO
+        hi=$(( PHASE_LO + 30 ))
+      fi
+      tau=60
+      ;;
   esac
 
-  (( phase_started > 0 )) || phase_started=$EPOCHSECONDS
-  elapsed=$(( EPOCHSECONDS - phase_started ))
-  (( elapsed < 0 )) && elapsed=0
-  span=$(( end - start ))
-  (( span < 0 )) && span=0
-  (( expected < 1 )) && expected=1
-  active=$(( elapsed * span / expected ))
-  (( active > span - 1 )) && active=$(( span - 1 ))
-  (( active < 0 )) && active=0
-  pct=$(( start + active ))
-  (( pct > 100 )) && pct=100
-  printf '%s' "$pct"
+  (( pkg_signal && PKG_TOTAL > 0 )) || pkg_signal=0
+  (( pkg_signal )) && tau=$PKG_FLOOR_TAU
+
+  t=$(( NOW - PHASE_T0 ))
+  (( t < 0 )) && t=0
+  span=$(( hi - lo ))
+  (( span < 2 )) && span=2
+  (( tau < 1 )) && tau=1
+
+  pos=$(( lo + (span - 1) * t / (t + tau) ))
+
+  if (( pkg_signal )); then
+    PKG_DB_DIR="$target/var/lib/pacman/local"
+    count_packages
+    # Baseline on first sight: a target that already holds packages would
+    # otherwise pin the bar at the band ceiling for the whole phase.
+    (( PKG_BASE < 0 )) && PKG_BASE=$PKG_COUNT
+    n=$(( PKG_COUNT - PKG_BASE ))
+    (( n < 0 )) && n=0
+    # Running max: a reinstalled package briefly drops its version-stamped dir.
+    if (( n > PKG_SEEN )); then
+      PKG_SEEN=$n
+      PKG_LAST_CHANGE=$NOW
+    fi
+    gap=$(( NOW - PKG_LAST_CHANGE ))
+    (( gap < 0 )) && gap=0
+    (( gap > PKG_BONUS_MAX_PM )) && gap=$PKG_BONUS_MAX_PM
+    (( gap > PKG_BONUS )) && PKG_BONUS=$gap
+    work=$(( lo + (span - 1 - PKG_TAIL_PM) * PKG_SEEN / PKG_TOTAL + PKG_BONUS ))
+    (( work > pos )) && pos=$work
+  fi
+
+  (( pos > hi - 1 )) && pos=$(( hi - 1 ))
+  (( pos > POS )) && POS=$pos
+  (( POS > 1000 )) && POS=1000
+  PROGRESS_PM=$POS
+  return 0
 }
 
-# One tip per ~8 seconds (frames tick every 0.5s), in order, so each stays
-# readable and none are skipped when progress jumps.
+# One tip per 8 seconds, in order. On elapsed time, not a frame counter: a frame
+# is 0.5s of sleep plus a render, which stretches under pacstrap I/O — on the
+# machine where the tips, not the bar, are carrying liveness.
 current_tip() {
-  local frame="$1"
-  printf '%s' "${tips[$(( frame / 16 % ${#tips[@]} ))]}"
+  printf '%s' "${tips[$(( (NOW - DASH_T0) / 8 % ${#tips[@]} ))]}"
 }
 
 render_static() {
@@ -259,21 +389,24 @@ render_static() {
 }
 
 render_dynamic() {
-  local frame="$1" pct
-  pct="$(install_progress)"
-  [[ $pct =~ ^[0-9]+$ ]] || pct=$LAST_PCT
-  (( pct > 100 )) && pct=100
-  (( pct < LAST_PCT )) && pct=$LAST_PCT
-  LAST_PCT=$pct
+  local pm
+  set_now
+  install_progress
+  pm=$PROGRESS_PM
+  [[ $pm =~ ^[0-9]+$ ]] || pm=$LAST_PM
+  (( pm > 1000 )) && pm=1000
+  # POS is monotone by construction; this is a guard, not the mechanism.
+  (( pm < LAST_PM )) && pm=$LAST_PM
+  LAST_PM=$pm
 
   printf '%s%d;1H' "$CSI" "$DYNAMIC_ROW"
   center "Installing Omarchy" "$CONTENT_WIDTH"
   blank_line
   line_at "$CONTENT_WIDTH" $(( (CONTENT_WIDTH - 34) / 2 )) ""
-  progress_bar "$pct" 34
+  progress_bar "$pm" 34
   printf '\n'
   blank_line
-  center "${DIM}Tip:${RESET} ${GREEN}$(current_tip "$frame")${RESET}" "$CONTENT_WIDTH"
+  center "${DIM}Tip:${RESET} ${GREEN}$(current_tip)${RESET}" "$CONTENT_WIDTH"
   printf '%s' "$CLEAR_TO_END"
 }
 
@@ -541,12 +674,14 @@ launch_child() {
 [[ -e $TTY_PATH ]] || exit 2
 printf '%s' "$HIDE_CURSOR" >"$TTY_PATH"
 render_static >"$TTY_PATH"
+set_now
+DASH_T0=$NOW
+PHASE_T0=$NOW
+PKG_LAST_CHANGE=$NOW
 launch_child
 
-frame=0
 while jobs -pr | grep -qx "$child_pid"; do
-  render_dynamic "$frame" >"$TTY_PATH" 2>/dev/null || true
-  frame=$((frame + 1))
+  render_dynamic >"$TTY_PATH" 2>/dev/null || true
   sleep 0.5
 done
 
@@ -558,6 +693,13 @@ child_pid=""
 child_pgid=""
 
 dashboard_log "installer child exited with status $status"
+
+if (( status == 0 )); then
+  # finished_at lands microseconds before the child exits, so the 0.5s poll
+  # rarely renders a full bar before the finish screen replaces it.
+  render_dynamic >"$TTY_PATH" 2>/dev/null || true
+  sleep 0.4
+fi
 
 if (( status != 0 )); then
   failure_status="$status"

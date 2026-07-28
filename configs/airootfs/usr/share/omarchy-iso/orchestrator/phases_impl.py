@@ -216,6 +216,68 @@ def _stop_offline_mirror_prefetch() -> None:
     subprocess.run([str(prefetch), "stop"], check=False, capture_output=True)
 
 
+def _cpu_governor_paths() -> list[Path]:
+    base = Path("/sys/devices/system/cpu")
+    if not base.is_dir():
+        return []
+    return sorted(base.glob("cpu*/cpufreq/scaling_governor"))
+
+
+def _read_cpu_governors() -> dict[Path, str]:
+    saved: dict[Path, str] = {}
+    for path in _cpu_governor_paths():
+        try:
+            saved[path] = path.read_text().strip()
+        except OSError:
+            continue
+    return saved
+
+
+def _write_cpu_governor(path: Path, governor: str) -> bool:
+    try:
+        available = (path.parent / "scaling_available_governors").read_text().split()
+    except OSError:
+        available = []
+    if available and governor not in available:
+        return False
+    try:
+        path.write_text(f"{governor}\n")
+        return True
+    except OSError:
+        return False
+
+
+def _boost_cpu_governor_for_install() -> dict[Path, str]:
+    """Raise live CPUs to the performance governor during package extract.
+
+    No-op on hosts without cpufreq (common in VMs) or without a performance
+    governor. Returns the prior per-CPU governors for restore.
+    """
+    saved = _read_cpu_governors()
+    if not saved:
+        return {}
+
+    boosted = 0
+    for path in saved:
+        if _write_cpu_governor(path, "performance"):
+            boosted += 1
+
+    if boosted:
+        info(f"› CPU governor set to performance ({boosted} CPUs) for package install")
+    return saved
+
+
+def _restore_cpu_governors(saved: dict[Path, str]) -> None:
+    if not saved:
+        return
+    restored = 0
+    for path, governor in saved.items():
+        if governor and _write_cpu_governor(path, governor):
+            restored += 1
+    if restored:
+        info(f"› CPU governor restored ({restored} CPUs)")
+
+
 def arch_install_system(ctx: InstallContext) -> None:
     """Install the target system from the archinstall JSON.
 
@@ -254,6 +316,7 @@ def arch_install_system(ctx: InstallContext) -> None:
 
         _mount_offline_package_cache(ctx)
         _mask_mkinitcpio_pacman_hooks(ctx)
+        prior_governors = _boost_cpu_governor_for_install()
         try:
             info("› installing base system (mkinitcpio deferred to final Limine UKI build)")
             installer.minimal_installation(
@@ -288,6 +351,7 @@ def arch_install_system(ctx: InstallContext) -> None:
             info("› installing Omarchy runtime + omarchy-base.packages")
             installer.add_additional_packages(_runtime_package_list(ctx))
         finally:
+            _restore_cpu_governors(prior_governors)
             _unmask_mkinitcpio_pacman_hooks(ctx)
             _unmount_offline_package_cache(ctx)
 

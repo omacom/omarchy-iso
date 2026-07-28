@@ -278,6 +278,92 @@ def _restore_cpu_governors(saved: dict[Path, str]) -> None:
         info(f"› CPU governor restored ({restored} CPUs)")
 
 
+def _cpuidle_disable_paths() -> list[Path]:
+    """Per-CPU cpuidle state disable knobs, excluding POLL (state0).
+
+    Deeper C-states (C1+) add wake latency when a core idles between extract
+    bursts. POLL is left alone — it is the zero-latency idle fallback.
+    """
+    base = Path("/sys/devices/system/cpu")
+    if not base.is_dir():
+        return []
+
+    paths: list[Path] = []
+    for cpu_dir in sorted(base.glob("cpu[0-9]*")):
+        cpuidle = cpu_dir / "cpuidle"
+        if not cpuidle.is_dir():
+            continue
+        for state_dir in sorted(cpuidle.glob("state[0-9]*")):
+            name_path = state_dir / "name"
+            disable_path = state_dir / "disable"
+            if not disable_path.is_file():
+                continue
+            try:
+                name = name_path.read_text().strip() if name_path.is_file() else ""
+            except OSError:
+                name = ""
+            if name == "POLL":
+                continue
+            paths.append(disable_path)
+    return paths
+
+
+def _read_cpuidle_disables() -> dict[Path, str]:
+    saved: dict[Path, str] = {}
+    for path in _cpuidle_disable_paths():
+        try:
+            saved[path] = path.read_text().strip()
+        except OSError:
+            continue
+    return saved
+
+
+def _write_cpuidle_disable(path: Path, value: str) -> bool:
+    try:
+        path.write_text(f"{value}\n")
+        return True
+    except OSError:
+        return False
+
+
+def _disable_cpuidle_cstates_for_install() -> dict[Path, str]:
+    """Disable deeper per-CPU idle C-states during package extract.
+
+    Orthogonal to the performance governor (P-states/frequency). No-op when
+    cpuidle sysfs is missing (some VMs). Returns prior disable values for
+    restore.
+    """
+    saved = _read_cpuidle_disables()
+    if not saved:
+        return {}
+
+    disabled = 0
+    for path in saved:
+        if _write_cpuidle_disable(path, "1"):
+            disabled += 1
+
+    if disabled:
+        # path: .../cpuN/cpuidle/stateM/disable
+        cpu_names = {path.parent.parent.parent.name for path in saved}
+        info(
+            f"› CPU idle C-states disabled ({len(cpu_names)} CPUs, {disabled} states) "
+            "for package install"
+        )
+    return saved
+
+
+def _restore_cpuidle_cstates(saved: dict[Path, str]) -> None:
+    if not saved:
+        return
+    restored = 0
+    for path, value in saved.items():
+        if value != "" and _write_cpuidle_disable(path, value):
+            restored += 1
+    if restored:
+        cpu_names = {path.parent.parent.parent.name for path in saved}
+        info(f"› CPU idle C-states restored ({len(cpu_names)} CPUs, {restored} states)")
+
+
 def arch_install_system(ctx: InstallContext) -> None:
     """Install the target system from the archinstall JSON.
 
@@ -317,6 +403,7 @@ def arch_install_system(ctx: InstallContext) -> None:
         _mount_offline_package_cache(ctx)
         _mask_mkinitcpio_pacman_hooks(ctx)
         prior_governors = _boost_cpu_governor_for_install()
+        prior_cpuidle = _disable_cpuidle_cstates_for_install()
         try:
             info("› installing base system (mkinitcpio deferred to final Limine UKI build)")
             installer.minimal_installation(
@@ -351,6 +438,7 @@ def arch_install_system(ctx: InstallContext) -> None:
             info("› installing Omarchy runtime + omarchy-base.packages")
             installer.add_additional_packages(_runtime_package_list(ctx))
         finally:
+            _restore_cpuidle_cstates(prior_cpuidle)
             _restore_cpu_governors(prior_governors)
             _unmask_mkinitcpio_pacman_hooks(ctx)
             _unmount_offline_package_cache(ctx)

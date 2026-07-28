@@ -15,12 +15,14 @@ Phase ordering (full-disk and protected/pre-mounted):
     finalize_limine_boot   → final Limine config/UKI build after hardware drop-ins
     run_chroot_finalizer   → arch-chroot -u user omarchy-finalize-user
     configure_login        → sddm state + encrypted-install autologin
+    configure_ssh_access   → authorized_keys for autoinstall; no-op otherwise
     validate_boot          → assert UKI / limine.conf / kernel cmdline are sane
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -1284,6 +1286,93 @@ def configure_login(ctx: InstallContext) -> None:
         ["arch-chroot", str(ctx.target), "systemctl", "enable", "sddm.service"],
         check=False, capture_output=True,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# configure_ssh_access: make the installed machine reachable over SSH with the
+# keys an autoinstall drive supplied. A stock Omarchy install ships openssh but
+# leaves sshd disabled, and its firewall.sh opens only LocalSend and docker DNS,
+# so all three pieces -- keys, service, firewall -- have to be done here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def configure_ssh_access(ctx: InstallContext) -> None:
+    if ctx.ssh_keys_path is None:
+        return
+
+    keys = _authorized_keys(ctx.ssh_keys_path)
+    info(f"› installing {len(keys)} SSH key(s) for {ctx.username}")
+
+    ssh_dir = ctx.target / "home" / ctx.username / ".ssh"
+    ssh_dir.mkdir(parents=True, exist_ok=True)
+    ssh_dir.chmod(0o700)
+
+    authorized_keys = ssh_dir / "authorized_keys"
+    authorized_keys.write_text("".join(f"{key}\n" for key in keys))
+    authorized_keys.chmod(0o600)
+
+    # Ask the target for the uid rather than assuming the first user is 1000.
+    # Uncaptured so a failure shows up in the install log, and checked because
+    # a root-owned authorized_keys is one sshd refuses to read.
+    subprocess.run(
+        ["arch-chroot", str(ctx.target), "chown", "-R",
+         f"{ctx.username}:{ctx.username}", f"/home/{ctx.username}/.ssh"],
+        check=True,
+    )
+
+    info("› enabling sshd")
+    subprocess.run(
+        ["arch-chroot", str(ctx.target), "systemctl", "enable", "sshd.service"],
+        check=True,
+    )
+
+    _allow_ssh_through_firewall(ctx)
+
+
+def _allow_ssh_through_firewall(ctx: InstallContext) -> None:
+    """Open port 22 in the target's ufw.
+
+    Omarchy's install/config/firewall.sh opens LocalSend and docker DNS and
+    nothing else, and ufw runs default-deny incoming, so an enabled sshd is
+    still unreachable -- connections time out rather than being refused.
+
+    ufw cannot reach netfilter from inside the chroot and exits non-zero saying
+    so, but it writes the rule to user.rules first, and that file is what
+    ufw.service loads on first boot. So the exit status is the wrong thing to
+    check here; the rule landing in the file is the thing that matters.
+    """
+    if not (ctx.target / "usr" / "bin" / "ufw").exists():
+        info("› no ufw in target, leaving firewall alone")
+        return
+
+    info("› allowing SSH through ufw")
+    subprocess.run(["arch-chroot", str(ctx.target), "ufw", "allow", "ssh"], check=False)
+
+    rules = ctx.target / "etc" / "ufw" / "user.rules"
+    text = rules.read_text() if rules.exists() else ""
+    if "--dport 22 -j ACCEPT" not in text:
+        raise RuntimeError(f"ufw did not record an allow rule for port 22 in {rules}")
+
+
+def _authorized_keys(path: Path) -> list[str]:
+    """Parse the autoinstall ssh.json: a JSON array of public key strings.
+
+    Raise rather than skip on anything unusable. An install that "succeeds"
+    into a machine nobody can log into is worse than one that stops with the
+    reason on screen.
+    """
+    try:
+        keys = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"{path} is not readable JSON: {exc}") from exc
+
+    if not isinstance(keys, list) or not all(isinstance(key, str) for key in keys):
+        raise RuntimeError(f"{path} must be a JSON array of public key strings")
+
+    keys = [key.strip() for key in keys if key.strip()]
+    if not keys:
+        raise RuntimeError(f"{path} contains no SSH keys")
+
+    return keys
 
 
 # ─────────────────────────────────────────────────────────────────────────────

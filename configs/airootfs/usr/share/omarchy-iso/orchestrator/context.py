@@ -18,6 +18,7 @@ class InstallContext:
     full_name: str
     email: str
     encrypt: bool
+    ssh_keys_path: Path | None
 
     user_configuration: dict
     user_credentials: dict
@@ -59,6 +60,7 @@ class InstallContext:
             full_name=_read_text(os.environ.get("OMARCHY_INSTALL_FULL_NAME_FILE")),
             email=_read_text(os.environ.get("OMARCHY_INSTALL_EMAIL_FILE")),
             encrypt=_read_text(os.environ.get("OMARCHY_INSTALL_ENCRYPT_FILE")).lower() in ("true", "yes", "1"),
+            ssh_keys_path=_optional_path(os.environ.get("OMARCHY_INSTALL_SSH_KEYS_FILE")),
             user_configuration=user_configuration,
             user_credentials=json.loads(creds_path.read_text()),
             arch_config_path=arch_config_path,
@@ -101,6 +103,16 @@ def _default_omarchy_install(user_configuration: dict) -> dict[str, Any]:
         },
         "storage": {},
     }
+
+
+def _optional_path(path: str | None) -> Path | None:
+    """A path the caller always passes but that need not exist. The live ISO
+    passes --ssh-keys-file on every install; only autoinstall drives put a file
+    there."""
+    if not path:
+        return None
+    p = Path(path)
+    return p if p.exists() else None
 
 
 def _read_text(path: str | None) -> str:

@@ -23,6 +23,12 @@ INSTALL_CMD=("$@")
 
 TTY_PATH="${OMARCHY_DASHBOARD_TTY:-/dev/tty}"
 LOGO_PATH="${OMARCHY_PATH:-/usr/share/omarchy}/logo.txt"
+
+# Autoinstall has no one at the keyboard, and every prompt this dashboard owns
+# reads from the TTY, so each would hang forever. Suppress them here rather than
+# in the scripts they live in: this process is the only owner of the visible UI.
+interactive() { [[ ${OMARCHY_UI_INTERACTIVE:-} != "no" ]]; }
+
 CSI=$'\033['
 RESET="${CSI}0m"
 DIM="${CSI}2m"
@@ -474,6 +480,10 @@ render_finish() {
 reboot_prompt() {
   local prompt_pad
 
+  # Nobody to confirm; the OMARCHY_UI_AUTO_REBOOT check at the call site still
+  # applies, so setting both stops on the finish screen without a keyboard.
+  interactive || return 0
+
   # Position the cursor one blank line below the title so the button sits right there.
   printf '%s%d;1H%s' "$CSI" "$((LOGO_HEIGHT + 5))" "$CLEAR_LINE" >"$TTY_PATH"
 
@@ -598,6 +608,9 @@ failure_menu() {
   local choice uploader
 
   [[ ${OMARCHY_UI_FAILURE_ACTION:-} == "exit" ]] && return 0
+  # The failure screen and log tail have already rendered; exit with the
+  # installer's status instead of blocking on a menu nobody can answer.
+  interactive || return 0
 
   while true; do
     uploader=""

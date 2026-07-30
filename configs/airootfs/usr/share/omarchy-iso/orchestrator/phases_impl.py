@@ -246,16 +246,17 @@ def arch_install_system(ctx: InstallContext) -> None:
         _mask_mkinitcpio_pacman_hooks(ctx)
         try:
             info("› installing base system (mkinitcpio deferred to final Limine UKI build)")
-            installer.minimal_installation(
-                optional_repositories=(
-                    config.mirror_config.optional_repositories
-                    if config.mirror_config else []
-                ),
-                mkinitcpio=False,
-                hostname=config.hostname,
-                locale_config=config.locale_config,
-                pacman_config=config.pacman_config,
-            )
+            with arch.direct_keyboard_configuration(installer):
+                installer.minimal_installation(
+                    optional_repositories=(
+                        config.mirror_config.optional_repositories
+                        if config.mirror_config else []
+                    ),
+                    mkinitcpio=False,
+                    hostname=config.hostname,
+                    locale_config=config.locale_config,
+                    pacman_config=config.pacman_config,
+                )
 
             if config.mirror_config:
                 installer.set_mirrors(mirror_handler, config.mirror_config, on_target=True)

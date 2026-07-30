@@ -37,6 +37,7 @@ from __future__ import annotations
 import importlib
 from contextlib import contextmanager
 from pathlib import Path
+from types import MethodType
 from typing import Iterator
 
 # Imports are top-level so a missing/incompatible archinstall surfaces at
@@ -52,7 +53,8 @@ from archinstall.lib.models import Bootloader
 from archinstall.lib.models.device import DiskLayoutType, EncryptionType
 from archinstall.lib.models.users import User
 
-from .ui import info
+from .keyboard import configure_keyboard
+from .ui import error, info
 
 
 def load_arch_config(config_path: Path, creds_path: Path) -> ArchConfigHandler:
@@ -140,6 +142,24 @@ def open_installer(
         silent=silent,
     ) as installer:
         yield installer
+
+
+@contextmanager
+def direct_keyboard_configuration(installer: Installer) -> Iterator[None]:
+    """Configure the target keymap without booting a temporary container."""
+    original = installer.set_keyboard_language
+
+    def configure(_installer: Installer, language: str) -> bool:
+        configured = configure_keyboard(installer.target, language)
+        if not configured:
+            error(f"Invalid keyboard language specified: {language}")
+        return configured
+
+    installer.set_keyboard_language = MethodType(configure, installer)
+    try:
+        yield
+    finally:
+        installer.set_keyboard_language = original
 
 
 def is_encrypted(arch_config: ArchConfig) -> bool:

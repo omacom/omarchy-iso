@@ -437,7 +437,13 @@ def _register_limine_efi_entry(
         raise RuntimeError("efibootmgr --create reported success but no Limine entry found")
     limine_num = new_limine[0]
 
-    keep = [num for num in pre_state["order"] if num not in stale_limine and num != limine_num]
+    keep = [
+        num
+        for num in pre_state["order"]
+        if num not in stale_limine
+        and num != limine_num
+        and num in pre_state["entries"]
+    ]
     subprocess.run(
         ["efibootmgr", "--bootorder", ",".join([limine_num, *keep])],
         check=True, capture_output=True,

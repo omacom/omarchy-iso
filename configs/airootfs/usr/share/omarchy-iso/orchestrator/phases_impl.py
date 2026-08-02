@@ -27,11 +27,13 @@ import shutil
 import subprocess
 import textwrap
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from . import archinstall_adapter as arch
 from .context import InstallContext
-from .ui import info
+from .keyboard import configure_keyboard
+from .ui import error, info
 
 
 # Package targets are written by builder/build-iso.sh. Stable ISOs use the
@@ -246,17 +248,26 @@ def arch_install_system(ctx: InstallContext) -> None:
         _mask_mkinitcpio_pacman_hooks(ctx)
         try:
             info("› installing base system (mkinitcpio deferred to final Limine UKI build)")
-            with arch.direct_keyboard_configuration(installer):
-                installer.minimal_installation(
-                    optional_repositories=(
-                        config.mirror_config.optional_repositories
-                        if config.mirror_config else []
-                    ),
-                    mkinitcpio=False,
-                    hostname=config.hostname,
-                    locale_config=config.locale_config,
-                    pacman_config=config.pacman_config,
-                )
+            # An empty kb_layout makes archinstall's set_keyboard_language skip
+            # booting the target in a container just to run localectl; the
+            # keymap is configured offline right after instead.
+            kb_layout = config.locale_config.kb_layout if config.locale_config else ""
+            installer.minimal_installation(
+                optional_repositories=(
+                    config.mirror_config.optional_repositories
+                    if config.mirror_config else []
+                ),
+                mkinitcpio=False,
+                hostname=config.hostname,
+                locale_config=(
+                    replace(config.locale_config, kb_layout="")
+                    if config.locale_config else None
+                ),
+                pacman_config=config.pacman_config,
+            )
+
+            if not configure_keyboard(installer.target, kb_layout):
+                error(f"Invalid keyboard language specified: {kb_layout}")
 
             if config.mirror_config:
                 installer.set_mirrors(mirror_handler, config.mirror_config, on_target=True)

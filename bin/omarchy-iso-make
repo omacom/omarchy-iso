@@ -157,5 +157,5 @@ mv -f "$latest_iso" "$iso_ref"
 
 if [[ -z "${NO_BOOT_OFFER:-}" ]]; then
   echo
-  gum confirm "Boot $iso_ref?" && omarchy-iso-boot "$iso_ref"
+  gum confirm "Boot $iso_ref?" && "$BUILD_ROOT/bin/omarchy-iso-boot" "$iso_ref"
 fi

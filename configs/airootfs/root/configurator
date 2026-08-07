@@ -435,6 +435,21 @@ disk_abort_hook() {
   abort "$1"
 }
 
+# Argon2id --pbkdf-memory (KiB) for live-ISO luksFormat.
+# Requires omarchy-luks-pbkdf-memory to exit 0 with a numeric value; do not
+# probe with `command -v` (bash reports non-executables as found).
+luks_pbkdf_memory_kib() {
+  local out
+  if ! out=$(omarchy-luks-pbkdf-memory); then
+    return 1
+  fi
+  if ! [[ $out =~ ^[0-9]+$ ]]; then
+    echo "omarchy-luks-pbkdf-memory produced non-numeric output: ${out}" >&2
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
 # Save the configurator answers the installer consumes: git identity and
 # encryption choice as plain files, account details as archinstall credentials.
 # Deferred-provisioning installs defer the user to first boot: no credentials, and on encrypted
@@ -730,11 +745,18 @@ run_partition_execute() {
 
     if [[ "$encrypt_installation" == "true" ]]; then
       step "Setting up LUKS2 on $root_partition_device"
+      local pbkdf_memory
+      if ! pbkdf_memory=$(luks_pbkdf_memory_kib); then
+        disk_abort_hook "Could not choose a safe LUKS Argon2id memory cost"
+      fi
+      say --foreground 8 "LUKS Argon2id memory cost: ${pbkdf_memory} KiB"
       # Kept as pipes rather than routed through disk_step: the passphrase must
       # not become an argv the process table can show. Folding stderr into
       # stdout still lands any error in the install log.
       if ! printf "%s" "$password" |
-        cryptsetup luksFormat --type luks2 --batch-mode "$root_partition_device" - 2>&1; then
+        cryptsetup luksFormat --type luks2 --batch-mode \
+          --pbkdf argon2id --pbkdf-memory "$pbkdf_memory" --iter-time 2000 \
+          "$root_partition_device" - 2>&1; then
         disk_abort_hook "Formatting LUKS2 on $root_partition_device failed"
       fi
       if ! printf "%s" "$password" |

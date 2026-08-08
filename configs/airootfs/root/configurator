@@ -78,32 +78,57 @@ clear_logo() {
 greeter() {
   measure_terminal
 
-  local rows logo_h content_h top i
+  local rows logo_h content_h top cols logo_row tagline_row hint_row
+  local tagline hint tpad hpad anim
+  cols=$TERM_WIDTH
   rows=$(stty size 2>/dev/null </dev/tty | awk '{print $1}')
   [[ $rows =~ ^[0-9]+$ ]] || rows=${LINES:-24}
   logo_h=$(wc -l <"$LOGO_PATH")
 
-  # logo + blank + tagline + blank + button (gum draws the button over ~2 rows).
-  content_h=$((logo_h + 5))
+  # logo + blank + tagline + blank + hint
+  content_h=$((logo_h + 4))
   top=$(((rows - content_h) / 2))
   (( top < 0 )) && top=0
+  logo_row=$((top + 1))
+  tagline_row=$((top + logo_h + 2))
+  hint_row=$((top + logo_h + 4))
 
-  printf "\033[H\033[2J"
-  for ((i = 0; i < top; i++)); do echo; done
+  printf '\033[?25l\033[H\033[2J'
+
+  printf '\033[%d;1H' "$logo_row"
   gum style --foreground 2 --padding "0 0 0 $PADDING_LEFT" "$(<"$LOGO_PATH")"
-  echo
 
-  local tagline="Beautiful, Modern & Opinionated Linux by DHH"
-  local tpad=$(((TERM_WIDTH - ${#tagline}) / 2))
-  (( tpad < 0 )) && tpad=0
-  gum style --padding "0 0 0 $tpad" "$tagline"
-  echo
+  tagline="Beautiful, Modern & Opinionated Linux by DHH"
+  tpad=$(((cols - ${#tagline}) / 2)); (( tpad < 0 )) && tpad=0
+  printf '\033[%d;%dH%s' "$tagline_row" "$((tpad + 1))" "$tagline"
 
-  local btn="Start install"
-  local bpad=$(((TERM_WIDTH - ${#btn} - 8) / 2))
-  (( bpad < 0 )) && bpad=0
-  gum confirm --padding "0 0 0 $bpad" --show-help=false --default \
-    --affirmative "$btn" --negative "" "" || true
+  hint="Press Return to Start Install"
+  hpad=$(((cols - ${#hint}) / 2)); (( hpad < 0 )) && hpad=0
+  printf '\033[%d;%dH\033[2m%s\033[0m' "$hint_row" "$((hpad + 1))" "$hint"
+
+  # Loop a ColorShift over the logo until Return. The effect reads from
+  # /dev/null so it never swallows the Return; --reuse-canvas paints upward
+  # from the saved cursor, anchored one row below the logo.
+  if command -v tte >/dev/null 2>&1; then
+    printf '\033[%d;1H\0337' "$((logo_row + logo_h))"
+    (
+      while true; do
+        tte -i "$LOGO_PATH" \
+          --canvas-width "$cols" \
+          --anchor-text c \
+          --frame-rate 100 \
+          --reuse-canvas \
+          colorshift --cycles 2 --final-gradient-stops 9ece6a \
+          </dev/null 2>/dev/null
+        printf '\0338'
+      done
+    ) >/dev/tty 2>/dev/null &
+    anim=$!
+  fi
+
+  IFS= read -r _ </dev/tty || true
+  [[ -n ${anim:-} ]] && { kill "$anim" 2>/dev/null; wait "$anim" 2>/dev/null; }
+  printf '\033[?25h'
 }
 
 abort() {

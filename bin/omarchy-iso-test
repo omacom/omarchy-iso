@@ -606,6 +606,11 @@ audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel|omarchy.audio'
 drive_configurator() {
   log "Driving the installer wizard"
 
+  # A greeter (animated logo + tagline) opens the installer; Return begins.
+  wait_for_screen "Opinionated" 300
+  capture_console "success-installer-00-greeter"
+  press ret
+
   # Keyboard is the first screen. Ctrl+C there is the hidden entry into deferred provisioning
   # mode; a normal install just selects the layout.
   wait_for_screen "keyboard layout" 300
@@ -710,7 +715,12 @@ drive_provision_owner() {
   # verifier can prove the deferred step applied a non-default layout — UK
   # leaves every letter identical to US, so the typed password (sent as raw
   # keycodes) still matches the literal one the harness pipes to sudo.
-  wait_for_screen "keyboard layout" 600
+  # A greeter (animated logo + tagline) opens first boot; Return begins.
+  wait_for_screen "Opinionated" 600
+  capture_console "success-provision-00-greeter"
+  press ret
+
+  wait_for_screen "keyboard layout" 120
   press up
   capture_console "success-provision-01-keyboard-layout-uk"
   press ret

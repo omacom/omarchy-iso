@@ -71,6 +71,41 @@ clear_logo() {
   gum style --foreground 2 --padding "1 0 0 $PADDING_LEFT" "$(<"$LOGO_PATH")"
 }
 
+# Vertically-centered welcome shown once before the keyboard step — the same
+# frame the deferred-provisioning first boot opens on, so install and first boot
+# bookend the setup identically. Logo, the Omarchy tagline, and a single button,
+# centered like the boot logo. No animation.
+greeter() {
+  measure_terminal
+
+  local rows logo_h content_h top i
+  rows=$(stty size 2>/dev/null </dev/tty | awk '{print $1}')
+  [[ $rows =~ ^[0-9]+$ ]] || rows=${LINES:-24}
+  logo_h=$(wc -l <"$LOGO_PATH")
+
+  # logo + blank + tagline + blank + button (gum draws the button over ~2 rows).
+  content_h=$((logo_h + 5))
+  top=$(((rows - content_h) / 2))
+  (( top < 0 )) && top=0
+
+  printf "\033[H\033[2J"
+  for ((i = 0; i < top; i++)); do echo; done
+  gum style --foreground 2 --padding "0 0 0 $PADDING_LEFT" "$(<"$LOGO_PATH")"
+  echo
+
+  local tagline="Beautiful, Modern & Opinionated Linux by DHH"
+  local tpad=$(((TERM_WIDTH - ${#tagline}) / 2))
+  (( tpad < 0 )) && tpad=0
+  gum style --padding "0 0 0 $tpad" "$tagline"
+  echo
+
+  local btn="Start install"
+  local bpad=$(((TERM_WIDTH - ${#btn} - 8) / 2))
+  (( bpad < 0 )) && bpad=0
+  gum confirm --padding "0 0 0 $bpad" --show-help=false --default \
+    --affirmative "$btn" --negative "" "" || true
+}
+
 abort() {
   gum style "${1:-Aborted installation}"
   echo
@@ -974,6 +1009,8 @@ install_target="full_disk"
 # Let the live VT reach its settled width before the first screen so the logo
 # isn't measured against the transient 80-column boot console.
 wait_for_stable_terminal
+
+greeter
 
 keyboard_form true
 

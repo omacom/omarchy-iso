@@ -975,7 +975,13 @@ install_phase() {
       sleep 10
       ((waited += 10))
     done
+
+    # Setup ends on the celebration screen with a Start Omarchy Now button
+    # gating the SDDM handoff, so confirm it like the installer's Reboot Now.
+    log "Confirming the Start Omarchy Now prompt"
+    wait_for_screen "Start Omarchy Now" 120
     capture_console "success-provision-06-setup-complete"
+    press ret
   fi
 
   ssh_guest "echo $GUEST_PASSWORD | sudo -S cat /var/log/omarchy-install-timing.json 2>/dev/null" \

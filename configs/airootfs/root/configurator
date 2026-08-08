@@ -135,7 +135,8 @@ greeter() {
   fi
 
   IFS= read -r _ </dev/tty || true
-  [[ -n ${anim:-} ]] && { kill "$anim" 2>/dev/null; wait "$anim" 2>/dev/null; }
+  # Tolerate tte's kill signal in `wait` so a future `set -e` here can't abort.
+  [[ -n ${anim:-} ]] && { kill "$anim" 2>/dev/null; wait "$anim" 2>/dev/null || true; }
   # tte leaves the tty in raw/no-echo mode when killed; restore it or the gum
   # prompts in the keyboard step that follows silently die.
   stty sane </dev/tty 2>/dev/null || true

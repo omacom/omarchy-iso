@@ -42,14 +42,12 @@ measure_terminal
 # console and only grows once the kernel framebuffer/KMS takes over (noticeably
 # late in VMs). The logo is wider than 80 columns, so a first draw against that
 # transient narrow console wraps the logo ("smushed") and can't center it
-# (padding clamps to 0, so it hugs the left). Every later screen re-measures and
-# looks right, so this only bites the very first screen. Hold that first draw
-# until the width settles at (or above) the logo width. Terminal emulators (dry
-# runs) are already at final size, so skip them; a real VT that never widens
-# (e.g. nomodeset) still proceeds after the cap rather than hanging.
+# (padding clamps to 0, so it hugs the left). A terminal emulator (or sudo's
+# pty) has the same problem the other way: it reports a stale 24x80 for a few
+# hundred ms after start before its real winsize is set. Either way, hold the
+# first draw until the width settles at (or above) the logo width. A real VT
+# that never widens (e.g. nomodeset) still proceeds after the cap.
 wait_for_stable_terminal() {
-  [[ $(tty 2>/dev/null) == /dev/tty* ]] || return 0
-
   local width last="" stable=0 waited=0
   while (( waited < 5000 )); do
     width=$(stty size 2>/dev/null </dev/tty | awk '{print $2}')

@@ -188,7 +188,6 @@ keyboard_form() {
   keyboards=$'Azerbaijani|azerty
 Belarusian|by
 Belgian|be-latin1
-Bosnian|ba
 Bulgarian|bg-cp1251
 Croatian|croat
 Czech|cz
@@ -214,7 +213,6 @@ Irish|ie
 Italian|it
 Japanese|jp106
 Kazakh|kazakh
-Khmer (Cambodia)|khmer
 Kyrgyz|kyrgyz
 Lao|la-latin1
 Latvian|lv

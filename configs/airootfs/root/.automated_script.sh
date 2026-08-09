@@ -104,8 +104,10 @@ fi
 # Deferred-provisioning installs skip the celebration/reboot prompt and reboot on
 # their own — the owner completes setup at first boot. Signalled by the config's
 # defer_provisioning flag (interactive) or the defer-provisioning marker (cidata).
+# Parse the flag with jq (the same JSON semantics the orchestrator uses) rather
+# than a line regex, so a reformatted config can't read as a direct install.
 if [[ -f /root/defer-provisioning ]] ||
-  grep -qE '"defer_provisioning"[[:space:]]*:[[:space:]]*true' /root/user_configuration.json 2>/dev/null; then
+  [[ "$(jq -r '.omarchy_install.defer_provisioning // false' /root/user_configuration.json 2>/dev/null)" == "true" ]]; then
   export OMARCHY_UI_DEFER_PROVISIONING=yes
 fi
 

@@ -9,6 +9,21 @@ OMARCHY_SETTINGS_PACKAGE="${OMARCHY_SETTINGS_PACKAGE:-omarchy-settings}"
 
 LOGO_PATH="$OMARCHY_PATH/logo.txt"
 
+# The setup form — keyboard, account, hostname, and timezone questions, plus the
+# rules their answers are checked against — shared verbatim with the first-boot
+# owner setup that finishes a deferred install. build-iso.sh vendors it out of
+# the runtime package this ISO bundles, so the two can never offer different
+# layouts or accept different usernames. On the ISO that vendored copy is what
+# loads; a dry run outside the ISO falls back to the omarchy checkout
+# bin/omarchy-iso-configurator already points OMARCHY_PATH at.
+SETUP_FORM="${SETUP_FORM:-/usr/share/omarchy-iso/setup-form.sh}"
+[[ -r $SETUP_FORM ]] || SETUP_FORM="$OMARCHY_PATH/install/provisioning/setup-form.sh"
+if [[ ! -r $SETUP_FORM ]]; then
+  echo "ERROR: shared setup form not found at $SETUP_FORM" >&2
+  exit 1
+fi
+source "$SETUP_FORM"
+
 LOGO_WIDTH=$(awk '{ if (length > max) max = length } END { print max+0 }' "$LOGO_PATH")
 
 export GUM_CONFIRM_PROMPT_FOREGROUND="6"
@@ -177,76 +192,32 @@ keyboard_form() {
   # screen is the hidden entry into deferred provisioning; $1 is "true" only for that first
   # invocation, so the review-loop re-edit can't flip a user install into it.
   local allow_defer_provisioning="${1:-false}"
-  clear_logo
-  echo
-  say "Let's setup your machine..."
-  if $allow_defer_provisioning; then
-    say --foreground 8 "Press Ctrl+C to prepare this machine for another owner."
-  fi
-  echo
+  local status
 
-  keyboards=$'Azerbaijani|azerty
-Belarusian|by
-Belgian|be-latin1
-Bulgarian|bg-cp1251
-Croatian|croat
-Czech|cz
-Danish|dk-latin1
-Dutch|nl
-English (UK)|uk
-English (US)|us
-English (US, Dvorak)|dvorak
-English (US, Colemak)|colemak
-Estonian|et
-Finnish|fi
-French|fr
-French (Canada)|cf
-French (Switzerland)|fr_CH
-Georgian|ge
-German|de
-German (Switzerland)|de_CH-latin1
-Greek|gr
-Hebrew|il
-Hungarian|hu
-Icelandic|is-latin1
-Irish|ie
-Italian|it
-Japanese|jp106
-Kazakh|kazakh
-Kyrgyz|kyrgyz
-Lao|la-latin1
-Latvian|lv
-Lithuanian|lt
-Macedonian|mk-utf
-Norwegian|no-latin1
-Polish|pl
-Portuguese|pt-latin1
-Portuguese (Brazil)|br-abnt2
-Romanian|ro
-Russian|ru
-Serbian|sr-latin
-Slovak|sk-qwertz
-Slovenian|slovene
-Spanish|es
-Spanish (Latin American)|la-latin1
-Swedish|sv-latin1
-Tajik|tj_alt-UTF8
-Turkish|trq
-Ukrainian|ua'
-  choice=$(printf '%s\n' "$keyboards" | cut -d'|' -f1 | gum choose --height 10 --selected "English (US)" --header "Select keyboard layout")
-  local status=$?
-
-  if $allow_defer_provisioning && (( status == 130 )); then
-    if confirm_prepare_for_another_owner; then
-      defer_provisioning=true
-      return 0
+  while true; do
+    clear_logo
+    echo
+    say "Let's setup your machine..."
+    if $allow_defer_provisioning; then
+      say --foreground 8 "Press Ctrl+C to prepare this machine for another owner."
     fi
-    keyboard_form true # declined: back to the keyboard picker
-    return
-  fi
-  (( status == 0 )) || abort
+    echo
 
-  keyboard=$(printf '%s\n' "$keyboards" | awk -F'|' -v c="$choice" '$1==c{print $2; exit}')
+    omarchy_prompt_keyboard && status=0 || status=$?
+    ((status == 0)) && break
+
+    # Esc means "back", and nothing precedes the first screen, so re-ask.
+    ((status == OMARCHY_FORM_BACK)) && continue
+
+    if $allow_defer_provisioning && ((status == OMARCHY_FORM_SIGNAL)); then
+      if confirm_prepare_for_another_owner; then
+        defer_provisioning=true
+        return 0
+      fi
+      continue # declined: back to the keyboard picker
+    fi
+    abort
+  done
 
   # Only attempt to load keyboard layout if we're on a real console
   # loadkeys only works on Linux virtual consoles (tty), not in terminal emulators
@@ -275,66 +246,34 @@ confirm_prepare_for_another_owner() {
 user_form() {
   step "Let's setup your user account..."
 
-  while true; do
-    username=$(gum input --placeholder "Alphanumeric without spaces (like dhh)" --prompt.foreground="#845DF9" --prompt "Username> ") || abort
-
-    if [[ "$username" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]]; then
-      if [[ "$username" =~ ^(root|bin|daemon|mail|ftp|http|nobody|dbus|systemd-coredump|systemd-network|systemd-oom|systemd-journal-remote|systemd-resolve|systemd-timesync|tss|uuidd|alpm|git|avahi|cups|lp|_talkd|polkitd|rtkit|qemu|brltty|gluster|rpc|libvirt-qemu|pcscd|nvidia-persistenced|sddm)$ ]] ; then
-        notice "Username is reserved for system" 1
-      else
-        break
-      fi
-    else
-      notice "Username must be alphanumeric with no spaces" 1
-    fi
-  done
-
-  while true; do
-    password=$(gum input --placeholder "Used for user + root, and disk encryption when enabled" --prompt.foreground="#845DF9" --password --prompt "Password> ") || abort
-    password_confirmation=$(gum input --placeholder "Must match the password you just typed" --prompt.foreground="#845DF9" --password --prompt "Confirm> ") || abort
-
-    if [[ -n "$password" && "$password" == "$password_confirmation" ]]; then
-      break
-    elif [[ -z "$password" ]]; then
-      notice "Your password can't be blank!" 1
-    else
-      notice "Passwords didn't match!" 1
-    fi
-  done
+  # Each prompt reports 0 (set), OMARCHY_FORM_BACK (Esc), or OMARCHY_FORM_SIGNAL
+  # (Ctrl+C). Both non-zero cases unwind to user_step, which decides what they
+  # mean here; the form itself never aborts.
+  omarchy_prompt_username || return $?
+  omarchy_prompt_password || return $?
 
   # Hash the password using yescrypt
   password_hash=$(printf '%s' "$password" | openssl passwd -6 -stdin)
 
-  full_name=$(gum input --placeholder "Used for git authentication (hit return to skip)" --prompt.foreground="#845DF9" --prompt "Full name> ")
-  email_address=$(gum input --placeholder "Used for git authentication (hit return to skip)" --prompt.foreground="#845DF9" --prompt "Email address> ")
-
-  while true; do
-    hostname=$(gum input --placeholder "Letters, digits, and dashes (or return for 'omarchy')" --prompt.foreground="#845DF9" --prompt "Hostname> ")
-
-    if [[ "$hostname" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]]; then
-      break
-    elif [[ -z $hostname ]]; then
-      hostname="omarchy"
-      break
-    else
-      notice "Hostname must be 1-63 letters, digits, or dashes, and cannot start or end with a dash" 1
-    fi
-  done
-
-  # Pick timezone
-  geo_guessed_timezone=$(tzupdate -p 2>/dev/null)
-
-  if [[ -n $geo_guessed_timezone ]]; then
-    timezone=$(timedatectl list-timezones | gum choose --height 10 --selected "$geo_guessed_timezone" --header "Timezone") || abort
-  else
-    timezone=$(timedatectl list-timezones | gum filter --height 10 --header "Timezone") || abort
-  fi
+  omarchy_prompt_identity || return $?
+  omarchy_prompt_hostname || return $?
+  omarchy_prompt_timezone || return $?
 }
 
 user_step() {
-  user_form
+  local status
 
   while true; do
+    user_form && status=0 || status=$?
+    if ((status != 0)); then
+      # Esc unwinds to the start of the form. Ctrl+C has no side channel in the
+      # user step (only the keyboard and disk screens give it a meaning), so it
+      # keeps its long-standing behaviour of ending the install.
+      ((status == OMARCHY_FORM_BACK)) || abort
+      keyboard_form
+      continue
+    fi
+
     # Add manual padding since gum table -p doesn't respect padding
     echo -e "Field,Value
 Username,$username
@@ -351,7 +290,6 @@ Keyboard,$keyboard" |
       break
     else
       keyboard_form
-      user_form
     fi
   done
 }

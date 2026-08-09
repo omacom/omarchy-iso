@@ -18,8 +18,9 @@ from pathlib import Path
 def configure_keyboard(target: Path, language: str) -> bool:
     """Write the console keymap into a mounted target without booting it.
 
-    Returns False for layouts localectl doesn't know (the configurator offers
-    two, ba and khmer), matching archinstall: warn and keep the default.
+    Returns False for layouts localectl doesn't know, matching archinstall:
+    warn and keep the default. Every layout the configurator offers is known;
+    the guard is for the kb_layout an autoinstall drive can name freely.
     """
     if not language.strip():
         return True

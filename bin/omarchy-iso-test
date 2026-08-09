@@ -711,17 +711,17 @@ drive_provision_owner() {
   log "Driving the deferred-provisioning first-boot setup"
 
   # Deferred provisioning defers the keyboard step to first boot; it comes before the user form.
-  # Pick English (UK) (one row above the preselected English (US)) so the
-  # verifier can prove the deferred step applied a non-default layout — UK
-  # leaves every letter identical to US, so the typed password (sent as raw
-  # keycodes) still matches the literal one the harness pipes to sudo.
+  # Pick English (UK) (one row below the preselected English (US), which leads
+  # the list) so the verifier can prove the deferred step applied a non-default
+  # layout — UK leaves every letter identical to US, so the typed password (sent
+  # as raw keycodes) still matches the literal one the harness pipes to sudo.
   # A greeter (animated logo + tagline) opens first boot; Return begins.
   wait_for_screen "Opinionated" 600
   capture_console "success-provision-00-greeter"
   press ret
 
   wait_for_screen "keyboard layout" 120
-  press up
+  press down
   capture_console "success-provision-01-keyboard-layout-uk"
   press ret
 

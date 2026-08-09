@@ -139,6 +139,7 @@ sed -i -E '/^(linux|broadcom-wl)$/d' "$build_cache_dir/packages.x86_64"
 # pulls the published omarchy* from the network mirror like any other package.
 if [[ -d /omarchy-source ]]; then
   base_pkg_lists=(/omarchy-source/install/omarchy-base.packages /omarchy-source/install/omarchy-other.packages)
+  setup_form=/omarchy-source/install/provisioning/setup-form.sh
 else
   # Pull the same package lists out of the freshly-downloaded Omarchy runtime
   # package so we don't need a local checkout in the non-local-source path.
@@ -154,11 +155,31 @@ else
   mkdir -p /tmp/omarchy-pkglists
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/omarchy-base.packages usr/share/omarchy/install/omarchy-other.packages
   base_pkg_lists=(/tmp/omarchy-pkglists/usr/share/omarchy/install/omarchy-base.packages /tmp/omarchy-pkglists/usr/share/omarchy/install/omarchy-other.packages)
+  # Extracted on its own, tolerating a miss: bsdtar exits non-zero for a member
+  # it can't find, so asking for this alongside the package lists would abort the
+  # build here (set -e) with a bare "Not found in archive" instead of the
+  # actionable error below.
+  bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/setup-form.sh 2>/dev/null || true
+  setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
 fi
 
 mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
 cp "${base_pkg_lists[0]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
 cp "${base_pkg_lists[1]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-other.packages"
+
+# The configurator's setup form comes from the runtime this ISO bundles, so the
+# installer and the first-boot setup that finishes a deferred install can never
+# disagree. A runtime predating the split ships no such file, which would leave
+# the configurator with no prompts at all.
+if [[ ! -f $setup_form ]]; then
+  echo "ERROR: $OMARCHY_RUNTIME_PACKAGE does not ship install/provisioning/setup-form.sh" >&2
+  echo "       The configurator sources its prompts from that file, so this ISO" >&2
+  echo "       would boot into an installer with no questions to ask." >&2
+  echo "       Publish a runtime carrying the shared setup form, or build with" >&2
+  echo "       --local-source against a checkout that has it." >&2
+  exit 1
+fi
+cp "$setup_form" "$build_cache_dir/airootfs/usr/share/omarchy-iso/setup-form.sh"
 
 # Collect every package we want available in the offline mirror.
 declare -a all_packages

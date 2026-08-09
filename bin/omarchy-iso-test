@@ -989,8 +989,10 @@ install_phase() {
     log "Waiting for provisioning first-boot setup to finish"
     local waited=0 rc
     while true; do
-      ssh_guest "test -f /var/lib/omarchy/provisioning/pending" 2>/dev/null
-      rc=$?
+      # Capture rc via `|| rc=$?` so a non-zero result doesn't trip `set -e`
+      # (this command is intentionally allowed to "fail" — that's the signal).
+      rc=0
+      ssh_guest "test -f /var/lib/omarchy/provisioning/pending" 2>/dev/null || rc=$?
       # rc 0 = flag still present; rc 255 = SSH not up yet (finalization may
       # still be running) — keep waiting. Only a clean "file absent" (rc 1)
       # means provisioning finished, so we don't snapshot mid-finalization on a
@@ -1009,9 +1011,9 @@ install_phase() {
     # into the install — confirm they actually landed on the running system.
     # Hostname is deterministic (we typed it), so a mismatch is a hard failure;
     # timezone is geo-guessed, so just report what landed.
-    local got_host got_tz
-    got_host=$(ssh_guest "cat /etc/hostname" 2>/dev/null | tr -d '\r\n')
-    got_tz=$(ssh_guest "timedatectl show -p Timezone --value" 2>/dev/null | tr -d '\r\n')
+    local got_host="" got_tz=""
+    got_host=$(ssh_guest "cat /etc/hostname" 2>/dev/null | tr -d '\r\n') || got_host=""
+    got_tz=$(ssh_guest "timedatectl show -p Timezone --value" 2>/dev/null | tr -d '\r\n') || got_tz=""
     if [[ $got_host != "$GUEST_HOSTNAME" ]]; then
       capture_console "failure-provision-hostname-not-applied"
       echo "First-boot hostname is '${got_host:-<empty>}', expected '$GUEST_HOSTNAME'" >&2

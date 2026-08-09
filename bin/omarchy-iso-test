@@ -760,7 +760,8 @@ drive_provision_owner() {
   press ret
 
   # Timezone is deferred to first boot too; accept the geo-guessed default.
-  wait_for_screen "Timezone" 60
+  # Generous timeout: the tzupdate geo-guess over first-boot networking can lag.
+  wait_for_screen "Timezone" 180
   capture_console "success-provision-06-timezone"
   press ret
 
@@ -986,8 +987,15 @@ install_phase() {
   # flag to clear before powering off.
   if $PROVISION; then
     log "Waiting for provisioning first-boot setup to finish"
-    local waited=0
-    while ssh_guest "test -f /var/lib/omarchy/provisioning/pending" 2>/dev/null; do
+    local waited=0 rc
+    while true; do
+      ssh_guest "test -f /var/lib/omarchy/provisioning/pending" 2>/dev/null
+      rc=$?
+      # rc 0 = flag still present; rc 255 = SSH not up yet (finalization may
+      # still be running) — keep waiting. Only a clean "file absent" (rc 1)
+      # means provisioning finished, so we don't snapshot mid-finalization on a
+      # transient SSH blip.
+      (( rc == 0 || rc == 255 )) || break
       if ((waited >= 900)); then
         capture_console "failure-provision-finalization-timeout"
         echo "Timed out waiting for provisioning first-boot setup to complete" >&2
@@ -999,14 +1007,17 @@ install_phase() {
 
     # The owner's hostname and timezone are set at first boot now, not baked
     # into the install — confirm they actually landed on the running system.
+    # Hostname is deterministic (we typed it), so a mismatch is a hard failure;
+    # timezone is geo-guessed, so just report what landed.
     local got_host got_tz
     got_host=$(ssh_guest "cat /etc/hostname" 2>/dev/null | tr -d '\r\n')
     got_tz=$(ssh_guest "timedatectl show -p Timezone --value" 2>/dev/null | tr -d '\r\n')
-    if [[ $got_host == "$GUEST_HOSTNAME" ]]; then
-      log "hostname applied at first boot: $got_host"
-    else
-      echo "WARN: hostname is '${got_host:-<empty>}', expected '$GUEST_HOSTNAME'" >&2
+    if [[ $got_host != "$GUEST_HOSTNAME" ]]; then
+      capture_console "failure-provision-hostname-not-applied"
+      echo "First-boot hostname is '${got_host:-<empty>}', expected '$GUEST_HOSTNAME'" >&2
+      return 1
     fi
+    log "hostname applied at first boot: $got_host"
     if [[ -n $got_tz && $got_tz != "UTC" ]]; then
       log "timezone applied at first boot: $got_tz"
     else

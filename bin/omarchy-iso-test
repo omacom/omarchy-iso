@@ -753,13 +753,18 @@ drive_provision_owner() {
   capture_console "success-provision-04-email"
   press ret
 
+  # Timezone is deferred to first boot too; accept the geo-guessed default.
+  wait_for_screen "Timezone" 60
+  capture_console "success-provision-05-timezone"
+  press ret
+
   wait_for_screen "look right" 60
-  capture_console "success-provision-05-review"
+  capture_console "success-provision-06-review"
   press ret
 
   # Finalization (offline Node unpack, LUKS re-key on encrypted installs)
   # runs before SDDM appears.
-  capture_console "success-provision-06-finalizing"
+  capture_console "success-provision-07-finalizing"
 }
 
 wait_for_install() {
@@ -986,12 +991,9 @@ install_phase() {
       ((waited += 10))
     done
 
-    # Setup ends on the celebration screen with a Start Omarchy Now button
-    # gating the SDDM handoff, so confirm it like the installer's Reboot Now.
-    log "Confirming the Start Omarchy Now prompt"
-    wait_for_screen "Start Omarchy Now" 120
-    capture_console "success-provision-06-setup-complete"
-    press ret
+    # Deferred first-boot setup hands straight off to SDDM once the oneshot
+    # service exits — no celebration screen, no Start Omarchy button to confirm.
+    capture_console "success-provision-08-handoff"
   fi
 
   ssh_guest "echo $GUEST_PASSWORD | sudo -S cat /var/log/omarchy-install-timing.json 2>/dev/null" \

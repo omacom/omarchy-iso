@@ -1032,11 +1032,10 @@ if $defer_provisioning; then
   password_hash=""
   full_name=""
   email_address=""
-  # Leave hostname and timezone unset: the owner picks them in the first-boot
-  # OOBE. The orchestrator skips an empty timezone (system stays UTC until then)
-  # and falls back to a neutral hostname for the install.
-  hostname=""
-  timezone=""
+  # Neutral defaults for the install; the owner overwrites both in the
+  # first-boot OOBE (omarchy-provision-owner).
+  hostname="omarchy"
+  timezone="UTC"
 
   # Jump straight to disk selection + overwrite confirmation (encrypted by
   # default, Ctrl+C toggles unencrypted). deferred provisioning is always a full-disk install.

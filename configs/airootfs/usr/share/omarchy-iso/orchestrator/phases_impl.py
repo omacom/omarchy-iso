@@ -260,10 +260,7 @@ def arch_install_system(ctx: InstallContext) -> None:
                     if config.mirror_config else []
                 ),
                 mkinitcpio=False,
-                # Deferred-provisioning installs leave the hostname unset (the
-                # owner names the machine in the first-boot OOBE); give
-                # archinstall a neutral default so the install still succeeds.
-                hostname=config.hostname or "archlinux",
+                hostname=config.hostname,
                 locale_config=(
                     replace(config.locale_config, kb_layout="")
                     if config.locale_config else None

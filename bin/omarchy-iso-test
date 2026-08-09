@@ -753,18 +753,24 @@ drive_provision_owner() {
   capture_console "success-provision-04-email"
   press ret
 
+  # Hostname is deferred to first boot too.
+  wait_for_screen "Hostname" 60
+  type_text "$GUEST_HOSTNAME"
+  capture_console "success-provision-05-hostname"
+  press ret
+
   # Timezone is deferred to first boot too; accept the geo-guessed default.
   wait_for_screen "Timezone" 60
-  capture_console "success-provision-05-timezone"
+  capture_console "success-provision-06-timezone"
   press ret
 
   wait_for_screen "look right" 60
-  capture_console "success-provision-06-review"
+  capture_console "success-provision-07-review"
   press ret
 
   # Finalization (offline Node unpack, LUKS re-key on encrypted installs)
   # runs before SDDM appears.
-  capture_console "success-provision-07-finalizing"
+  capture_console "success-provision-08-finalizing"
 }
 
 wait_for_install() {
@@ -991,9 +997,25 @@ install_phase() {
       ((waited += 10))
     done
 
+    # The owner's hostname and timezone are set at first boot now, not baked
+    # into the install — confirm they actually landed on the running system.
+    local got_host got_tz
+    got_host=$(ssh_guest "cat /etc/hostname" 2>/dev/null | tr -d '\r\n')
+    got_tz=$(ssh_guest "timedatectl show -p Timezone --value" 2>/dev/null | tr -d '\r\n')
+    if [[ $got_host == "$GUEST_HOSTNAME" ]]; then
+      log "hostname applied at first boot: $got_host"
+    else
+      echo "WARN: hostname is '${got_host:-<empty>}', expected '$GUEST_HOSTNAME'" >&2
+    fi
+    if [[ -n $got_tz && $got_tz != "UTC" ]]; then
+      log "timezone applied at first boot: $got_tz"
+    else
+      echo "WARN: timezone is '${got_tz:-<empty>}' (expected the owner's choice, not UTC)" >&2
+    fi
+
     # Deferred first-boot setup hands straight off to SDDM once the oneshot
     # service exits — no celebration screen, no Start Omarchy button to confirm.
-    capture_console "success-provision-08-handoff"
+    capture_console "success-provision-09-handoff"
   fi
 
   ssh_guest "echo $GUEST_PASSWORD | sudo -S cat /var/log/omarchy-install-timing.json 2>/dev/null" \

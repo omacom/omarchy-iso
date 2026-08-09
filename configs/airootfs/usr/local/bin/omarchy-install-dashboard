@@ -736,6 +736,17 @@ if (( status != 0 )); then
   exit "$failure_status"
 fi
 
+# Deferred-provisioning installs finish silently and reboot on their own — the
+# owner completes setup (and sees the send-off) at first boot, so the "Installed
+# Omarchy in ..." celebration and the Reboot Now prompt belong to a direct
+# install only.
+if [[ ${OMARCHY_UI_DEFER_PROVISIONING:-} == "yes" ]]; then
+  printf '%s' "$CLEAR" >"$TTY_PATH" 2>/dev/null || true
+  [[ ${OMARCHY_UI_AUTO_REBOOT:-} == "no" ]] && exit 0
+  reboot 2>/dev/null || systemctl reboot 2>/dev/null || true
+  exit 0
+fi
+
 set +e
 render_finish
 finish_render_status=$?

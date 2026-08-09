@@ -788,6 +788,15 @@ wait_for_install() {
       return 0
     fi
 
+    # Deferred-provisioning installs skip the celebration and reboot on their own
+    # (no Reboot Now prompt); the first-boot greeter tagline appearing means the
+    # install finished and rebooted into setup.
+    if $PROVISION && grep -qi "Opinionated" <<<"$text"; then
+      log "Install finished and auto-rebooted into first-boot setup."
+      capture_console "success-installer-15-autoreboot"
+      return 0
+    fi
+
     if grep -qi "installation stopped" <<<"$text"; then
       capture_console "failure-installer-installation-stopped"
       echo "Install failed — screenshot saved to $RUN_DIR" >&2

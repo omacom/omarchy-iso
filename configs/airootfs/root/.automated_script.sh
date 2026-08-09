@@ -101,6 +101,14 @@ else
   ./configurator
 fi
 
+# Deferred-provisioning installs skip the celebration/reboot prompt and reboot on
+# their own — the owner completes setup at first boot. Signalled by the config's
+# defer_provisioning flag (interactive) or the defer-provisioning marker (cidata).
+if [[ -f /root/defer-provisioning ]] ||
+  grep -qE '"defer_provisioning"[[:space:]]*:[[:space:]]*true' /root/user_configuration.json 2>/dev/null; then
+  export OMARCHY_UI_DEFER_PROVISIONING=yes
+fi
+
 # The foreground dashboard is now the sole visible install UI owner. It starts
 # the actual installer as a non-interactive child, logs child output, waits for
 # completion, then renders the final installed-time/reboot prompt itself.

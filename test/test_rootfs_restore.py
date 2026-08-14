@@ -127,5 +127,61 @@ class RestoreRootfsImageTest(unittest.TestCase):
         self.assertEqual([int(v) for v in self.progress], [0, 100])
 
 
+class FakeKeyringProc:
+    def __init__(self, returncode, output="keyring output"):
+        self.returncode = returncode
+        self._output = output
+
+    def communicate(self):
+        return self._output, None
+
+
+class FinishTargetKeyringInitTest(unittest.TestCase):
+    def setUp(self):
+        self.run_cmds = []
+
+        info_patch = mock.patch.object(phases_impl, "info")
+        info_patch.start()
+        self.addCleanup(info_patch.stop)
+
+        run_patch = mock.patch.object(
+            phases_impl.subprocess, "run", side_effect=self.fake_run
+        )
+        run_patch.start()
+        self.addCleanup(run_patch.stop)
+
+    def fake_run(self, cmd, **kwargs):
+        self.run_cmds.append(cmd)
+        return types.SimpleNamespace(returncode=0)
+
+    def ctx(self):
+        return types.SimpleNamespace(target=Path("/mnt/target"))
+
+    def assert_gpg_daemons_killed(self):
+        self.assertEqual(self.run_cmds, [[
+            "gpgconf", "--homedir", "/mnt/target/etc/pacman.d/gnupg",
+            "--kill", "all",
+        ]])
+
+    def test_failure_raises_with_output_and_kills_gpg_daemons(self):
+        with self.assertRaisesRegex(RuntimeError, "keyring output"):
+            phases_impl._finish_target_keyring_init(
+                self.ctx(), FakeKeyringProc(returncode=1), raise_on_error=True
+            )
+        self.assert_gpg_daemons_killed()
+
+    def test_failure_is_swallowed_on_the_exception_path(self):
+        phases_impl._finish_target_keyring_init(
+            self.ctx(), FakeKeyringProc(returncode=1), raise_on_error=False
+        )
+        self.assert_gpg_daemons_killed()
+
+    def test_success_does_not_raise(self):
+        phases_impl._finish_target_keyring_init(
+            self.ctx(), FakeKeyringProc(returncode=0), raise_on_error=True
+        )
+        self.assert_gpg_daemons_killed()
+
+
 if __name__ == "__main__":
     unittest.main()

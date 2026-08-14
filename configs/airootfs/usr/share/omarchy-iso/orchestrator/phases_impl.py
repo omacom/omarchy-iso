@@ -371,11 +371,22 @@ def _install_via_rootfs_image(ctx: InstallContext, installer, config, mirror_han
 
     info("› writing per-machine identity")
     subprocess.run(["systemd-machine-id-setup", f"--root={ctx.target}"], check=True)
-    # Synchronous on purpose: the init takes a few seconds and overlapping it
-    # with the rest of the install buys little for the lifecycle bookkeeping
-    # (kill/join on every exit path) it would demand.
-    _init_target_keyring(ctx)
+    # Backgrounded: nothing during the install consumes the keyring (the
+    # offline repo is SigLevel = Never) and the init is chroot-free, so there
+    # is no mount teardown to race the chroots below. Killed and joined on
+    # every exit path so a failure cannot leak the process, and the original
+    # error always wins over a keyring one.
+    keyring_proc = _start_target_keyring_init(ctx)
+    try:
+        _rootfs_image_configure(ctx, installer, config, mirror_handler)
+    except BaseException:
+        keyring_proc.kill()
+        _finish_target_keyring_init(ctx, keyring_proc, raise_on_error=False)
+        raise
+    _finish_target_keyring_init(ctx, keyring_proc, raise_on_error=True)
 
+
+def _rootfs_image_configure(ctx: InstallContext, installer, config, mirror_handler) -> None:
     # Config side-effects minimal_installation used to perform. Locale is
     # baked (en_US.UTF-8 in locale.gen + locale.conf at build time);
     # hostname is ours to write. archinstall's application handler
@@ -561,7 +572,11 @@ def _write_restore_progress(value: str) -> None:
         pass
 
 
-def _init_target_keyring(ctx: InstallContext) -> None:
+def _target_gpgdir(ctx: InstallContext) -> Path:
+    return ctx.target / "etc" / "pacman.d" / "gnupg"
+
+
+def _start_target_keyring_init(ctx: InstallContext) -> subprocess.Popen:
     """Recreate the per-machine pacman keyring a legacy pacstrap left behind.
 
     The image ships no /etc/pacman.d/gnupg (a shared keyring key must never be
@@ -570,34 +585,46 @@ def _init_target_keyring(ctx: InstallContext) -> None:
 
     Chroot-free on purpose: pacman-key --gpgdir writes the target's keyring
     directory directly, reading the live environment's
-    /usr/share/pacman/keyrings (same package snapshot as the target's), so no
-    API mounts are held or torn down. The trailing gpgconf --kill matters:
-    pacman-key leaves gpg-agent/dirmngr holding sockets under the target's
-    gnupg dir, which would keep the target busy at umount time — pacstrap
-    kills them for the same reason.
+    /usr/share/pacman/keyrings (same package snapshot as the target's). With
+    no chroot there are no API mounts to hold or tear down, which is what
+    makes running this in the background safe — an arch-chroot's exit-time
+    teardown unmounts by path and can pop a concurrent chroot's mounts.
     """
-    info("› initializing per-machine pacman keyring")
-    gpgdir = ctx.target / "etc" / "pacman.d" / "gnupg"
-    quoted = shlex.quote(str(gpgdir))
+    info("› initializing per-machine pacman keyring (background)")
+    gpgdir = shlex.quote(str(_target_gpgdir(ctx)))
     script = (
-        f"pacman-key --gpgdir {quoted} --init && "
-        f"pacman-key --gpgdir {quoted} --populate archlinux omarchy"
+        f"pacman-key --gpgdir {gpgdir} --init && "
+        f"pacman-key --gpgdir {gpgdir} --populate archlinux omarchy"
     )
-    res = subprocess.run(
+    return subprocess.Popen(
         ["sh", "-c", script],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     )
+
+
+def _finish_target_keyring_init(
+    ctx: InstallContext,
+    proc: subprocess.Popen,
+    *,
+    raise_on_error: bool,
+) -> None:
+    """Join the keyring init and always kill its gpg daemons: gpg-agent and
+    dirmngr hold sockets under the target's gnupg dir and would keep the
+    target busy at umount time — pacstrap kills them for the same reason.
+    raise_on_error=False is the exception path, where the original error must
+    not be masked by a keyring failure."""
+    out, _ = proc.communicate()
     subprocess.run(
-        ["gpgconf", "--homedir", str(gpgdir), "--kill", "all"],
+        ["gpgconf", "--homedir", str(_target_gpgdir(ctx)), "--kill", "all"],
         check=False,
         capture_output=True,
     )
-    if res.returncode != 0:
+    if raise_on_error and proc.returncode != 0:
         raise RuntimeError(
             "per-machine pacman keyring init failed "
-            f"(exit {res.returncode}):\n{(res.stdout or '').strip()}"
+            f"(exit {proc.returncode}):\n{(out or '').strip()}"
         )
 
 

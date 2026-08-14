@@ -27,6 +27,11 @@ airootfs_image_tool_options=(
   '-Xcompression-level' '19'
   '-b' '1M'
   '-action' 'uncompressed@subpathname(var/cache/omarchy/mirror/offline)'
+  # The prebuilt rootfs image is itself a zstd squashfs (built by
+  # build_rootfs_image in builder/build-iso.sh); recompressing it here would
+  # cost build time and make the installer decompress two layers on the
+  # dominant read of the whole install.
+  '-action' 'uncompressed@pathname(var/cache/omarchy/rootfs/omarchy-rootfs.sfs)'
 )
 bootstrap_tarball_compression=('zstd' '-c' '-T0' '--auto-threads=logical' '--long' '-19')
 file_permissions=(

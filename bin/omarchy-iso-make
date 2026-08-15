@@ -3,12 +3,17 @@
 set -e
 
 NO_CACHE=""
+KEEP_PKG_CACHE=""
 LOCAL_OMARCHY_PATH=""
 LOCAL_PKGS_PATH=""
 while [[ $# -gt 0 ]]; do
   case $1 in
   --no-cache)
     NO_CACHE=1
+    shift
+    ;;
+  --keep-pkg-cache)
+    KEEP_PKG_CACHE=1
     shift
     ;;
   --no-boot-offer)
@@ -52,7 +57,7 @@ while [[ $# -gt 0 ]]; do
     ;;
   *)
     echo "Unknown option: $1"
-    echo "Usage: $0 [--no-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
+    echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
     exit 1
     ;;
   esac
@@ -100,7 +105,11 @@ lint_file_permissions() {
 
 lint_file_permissions
 
-sudo rm -rf /var/cache/pacman/pkg/*
+# Purging the host package cache needs interactive sudo; --keep-pkg-cache
+# skips it so unattended builds (test rigs, agents) can run without a prompt.
+if [[ -z $KEEP_PKG_CACHE ]]; then
+  sudo rm -rf /var/cache/pacman/pkg/*
+fi
 git submodule update --init --recursive --jobs=8
 
 BUILD_SCRIPT="builder/build-iso.sh"

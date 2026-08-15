@@ -1,13 +1,16 @@
 #!/bin/bash
+#
+# Fast, VM-free tests only. The integration scenarios that boot the ISO in
+# QEMU live in test/integration.d/ and run via ./test/integration.
 
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 
-for test in "$ROOT"/test/*-test.sh; do
+for test in "$ROOT"/test/unit/*-test.sh; do
   printf '==> %s\n' "${test#$ROOT/}"
   bash "$test"
 done
 
-printf '==> test/test_*.py\n'
-python3 -m unittest discover -t "$ROOT" -s "$ROOT/test"
+printf '==> test/unit/test_*.py\n'
+python3 -m unittest discover -t "$ROOT" -s "$ROOT/test/unit"

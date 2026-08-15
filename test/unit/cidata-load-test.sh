@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 CIDATA_LOAD="$ROOT/configs/airootfs/usr/local/bin/omarchy-cidata-load"
 
 pass() {

@@ -14,7 +14,7 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "configs/airootfs/usr/share/omarchy-iso"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "configs/airootfs/usr/share/omarchy-iso"))
 
 # phases_impl imports the archinstall adapter at module scope, which pulls in
 # the archinstall library that only exists on the live ISO. configure_ssh_access

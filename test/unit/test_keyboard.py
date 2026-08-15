@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "configs/airootfs/usr/share/omarchy-iso/orchestrator/keyboard.py"
 SPEC = importlib.util.spec_from_file_location("installer_keyboard", MODULE_PATH)
 KEYBOARD = importlib.util.module_from_spec(SPEC)

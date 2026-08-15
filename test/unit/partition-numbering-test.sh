@@ -13,7 +13,7 @@
 
 set -uo pipefail
 
-ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 LIB="$ROOT/configs/airootfs/usr/share/omarchy-iso/disk-partitioning.sh"
 
 if ! command -v parted >/dev/null 2>&1; then

@@ -86,7 +86,7 @@ Encrypted autoinstalls are not fully unattended — the LUKS passphrase prompt s
 
 Run `./bin/omarchy-iso-boot [release/omarchy.iso]`.
 
-Run `./test/all` for the unit tests, which cover cidata autoinstall loading and the orchestrator's SSH access phase without needing a built ISO.
+Run `./test/all` for the fast, VM-free tests under `test/unit/`, which cover cidata autoinstall loading and the orchestrator's phases without needing a built ISO.
 
 To exercise installation alongside existing Windows-style partitions, run
 `./bin/omarchy-iso-test-windows-disk [release/omarchy.iso]`. It creates a
@@ -109,6 +109,20 @@ The harness syncs the acceptance suite from `$OMARCHY_PATH` when it is available
 ```
 
 Pass `--encrypt` to drive the encrypted install flow (including typing the LUKS passphrase at boot) instead of the unencrypted one. Pass `--no-preview` to collect the same visual artifacts without opening them in `imv` when the run finishes.
+
+## Integration testing the ISO
+
+Scenarios under `test/integration.d/` boot a real ISO install in QEMU and assert on what the running system actually does. The runner installs the ISO once — unattended, from a generated cidata drive — and saves the result as a reusable base image; every scenario then boots a throwaway overlay of that base with its own copy of the firmware vars, so neither disk nor NVRAM state leaks between runs. Shared machinery (VM lifecycle, QMP screendump + OCR console driving, virtual keystrokes, guest SSH, the cidata build) lives in `test/integration.d/base-test.sh`, so a new scenario is one file.
+
+```bash
+./test/integration release/omarchy.iso                   # install once, run all scenarios
+./test/integration release/omarchy.iso --reuse-base      # fast loop against the saved base
+./test/integration release/omarchy.iso factory-reset     # a single named scenario
+```
+
+The first scenario is `factory-reset`: it proves `omarchy-system-factory-reset` hands a machine on without destroying a shared ESP. The installed ESP gets a Windows entry with payload plus a second Linux cloned under a foreign machine-id with its own boot directory and UKIs; a real factory reset is then driven through a guest pty, and the harness asserts the foreign entries survive both the staged reset and first-boot provisioning, that the old Omarchy identity is fully retired, and that the machine reaches first-boot setup unattended.
+
+Artifacts — screenshots, the fixtured/staged/final `limine.conf`, the reset typescript, and the factory-reset log — land under `test-runs/<iso>-integration/runs/<timestamp>-<scenario>/`, and `--no-preview` skips the `imv` review just like the acceptance harness.
 
 ## Signing the ISO
 

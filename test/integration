@@ -1,0 +1,95 @@
+#!/bin/bash
+#
+# Integration runner: boots an ISO's installed system in QEMU and runs the
+# scenarios in test/integration.d/ against it. The unattended cidata install
+# happens once per ISO and is saved as a reusable base image; every scenario
+# then boots a throwaway overlay of that base.
+#
+# Usage: test/integration [release/omarchy.iso] [scenario ...] [options]
+#
+#   scenario       Basename of a test/integration.d/<scenario>-test.sh file;
+#                  all scenarios run when none are named
+#   --reuse-base   Skip the install if a saved base image exists
+#   --port PORT    Host port forwarded to guest SSH (default 2322)
+#   --memory MB    VM memory (default 8192)
+#   --timeout SECS Install timeout (default 2400)
+#   --no-preview   Do not open the collected screenshots in imv
+
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+
+ISO=""
+REUSE_BASE=false
+SCENARIOS=()
+
+export OMARCHY_INTEGRATION_SSH_PORT=2322
+export OMARCHY_INTEGRATION_MEMORY=8192
+export OMARCHY_INTEGRATION_INSTALL_TIMEOUT=2400
+export OMARCHY_INTEGRATION_NO_PREVIEW=false
+
+while (($#)); do
+  case "$1" in
+    --reuse-base) REUSE_BASE=true ;;
+    --no-preview) OMARCHY_INTEGRATION_NO_PREVIEW=true ;;
+    --port) OMARCHY_INTEGRATION_SSH_PORT="$2"; shift ;;
+    --memory) OMARCHY_INTEGRATION_MEMORY="$2"; shift ;;
+    --timeout) OMARCHY_INTEGRATION_INSTALL_TIMEOUT="$2"; shift ;;
+    -*) echo "Unknown option: $1" >&2; exit 1 ;;
+    *)
+      if [[ $1 == *.iso ]]; then
+        ISO="$1"
+      else
+        SCENARIOS+=("$ROOT/test/integration.d/$1-test.sh")
+      fi
+      ;;
+  esac
+  shift
+done
+
+if [[ -z $ISO && -t 0 ]]; then
+  ISO=$(ls -t "$ROOT"/release/*.iso 2>/dev/null | gum choose --header "Select ISO to test")
+fi
+
+if [[ ! -f ${ISO:-} ]]; then
+  echo "No ISO to test. Pass one explicitly or put it in release/." >&2
+  exit 1
+fi
+
+if (( ${#SCENARIOS[@]} == 0 )); then
+  SCENARIOS=("$ROOT"/test/integration.d/*-test.sh)
+else
+  for scenario in "${SCENARIOS[@]}"; do
+    if [[ $(basename "$scenario") == "base-test.sh" || ! -f $scenario ]]; then
+      echo "No such scenario: $scenario" >&2
+      exit 1
+    fi
+  done
+fi
+
+omarchy-pkg-add qemu-full edk2-ovmf socat imagemagick tesseract tesseract-data-eng mtools
+
+export OMARCHY_INTEGRATION_ISO
+OMARCHY_INTEGRATION_ISO=$(realpath "$ISO")
+
+# The install phase runs in this process; scenarios run in their own so each
+# gets its own VM lifecycle, cleanup trap, and run directory.
+SCENARIO=install
+source "$ROOT/test/integration.d/base-test.sh"
+
+if $REUSE_BASE && base_image_ready; then
+  log "Reusing existing base image: $BASE_DISK"
+else
+  install_phase
+fi
+
+status=0
+for scenario in "${SCENARIOS[@]}"; do
+  [[ $(basename "$scenario") == "base-test.sh" ]] && continue
+  printf '\033[1;35m==> %s\033[0m\n' "${scenario#$ROOT/}"
+  # env -u: a SCENARIO exported by the caller (or leaked from this process)
+  # must not override the name each scenario derives from its own $0.
+  env -u SCENARIO bash "$scenario" || status=1
+done
+
+exit $status

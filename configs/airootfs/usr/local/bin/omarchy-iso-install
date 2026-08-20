@@ -74,19 +74,27 @@ patch_archinstall_luks_pbkdf_memory() {
     return 0
   fi
 
+  # 4.x moved Luks2 to lib/disk/luks.py; 3.x kept it at lib/luks.py. Prefer
+  # 4.x (what the ISO ships) then 3.x so a locator miss does not abort an
+  # encrypted install on an older tree. Fail closed either way.
   luks_py=$(python - <<'PY'
 import sys
 from pathlib import Path
 
+relatives = (
+    Path("archinstall") / "lib" / "disk" / "luks.py",  # 4.x
+    Path("archinstall") / "lib" / "luks.py",           # 3.x
+)
 for entry in sys.path:
-    candidate = Path(entry) / "archinstall" / "lib" / "disk" / "luks.py"
-    if candidate.is_file():
-        print(candidate)
-        sys.exit(0)
+    for rel in relatives:
+        candidate = Path(entry) / rel
+        if candidate.is_file():
+            print(candidate)
+            sys.exit(0)
 sys.exit(1)
 PY
   ) || {
-    echo "omarchy-iso-install: could not locate archinstall lib/disk/luks.py on sys.path" >&2
+    echo "omarchy-iso-install: could not locate archinstall luks.py on sys.path (tried lib/disk/luks.py and lib/luks.py)" >&2
     exit 1
   }
 
@@ -104,7 +112,7 @@ PY
   echo "omarchy-iso-install: capping archinstall LUKS Argon2id memory to ${pbkdf_memory} KiB" >&2
 
   # Insert --pbkdf-memory after the --iter-time value in the cmd list.
-  # Match the stable archinstall 3.x/4.x shape:
+  # Same encrypt argv in 3.x (lib/luks.py) and 4.x (lib/disk/luks.py):
   #   '--iter-time', str(iter_time), *key_file_arg, '--use-urandom',
   python - "$luks_py" "$pbkdf_memory" <<'PY'
 from pathlib import Path

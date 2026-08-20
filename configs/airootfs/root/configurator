@@ -770,8 +770,6 @@ run_partition_execute() {
       mount -o noatime,compress=zstd,subvol=@pkg "$root_mapper" /mnt/var/cache/pacman/pkg
 
     disk_step "creating the ESP filesystem on $efi_dev" mkfs.fat -F32 -n OMARCHY_EFI "$efi_dev"
-    udevadm settle
-    sleep 2
     # Typed, not probed: an unrecognised probe walks /proc/filesystems, and on
     # the live ISO squashfs answers first.
     disk_step "mounting the ESP" mount -t vfat "$efi_dev" /mnt"$esp_mount_in_target"

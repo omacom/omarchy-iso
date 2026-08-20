@@ -772,7 +772,9 @@ run_partition_execute() {
     disk_step "creating the ESP filesystem on $efi_dev" mkfs.fat -F32 -n OMARCHY_EFI "$efi_dev"
     udevadm settle
     sleep 2
-    disk_step "mounting the ESP" mount "$efi_dev" /mnt"$esp_mount_in_target"
+    # Typed, not probed: an unrecognised probe walks /proc/filesystems, and on
+    # the live ISO squashfs answers first.
+    disk_step "mounting the ESP" mount -t vfat "$efi_dev" /mnt"$esp_mount_in_target"
 
     # The orchestrator's first act is to verify this handoff. Check it here so
     # a failure names the step that broke rather than surfacing later as

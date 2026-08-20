@@ -115,11 +115,15 @@ path = Path(sys.argv[1])
 memory = sys.argv[2]
 text = path.read_text()
 
-already = re.search(
-    r"['\"]--iter-time['\"],\s*str\(iter_time\),\s*['\"]--pbkdf-memory['\"]",
-    text,
+# Already patched: refresh the value rather than keep the first run's. A retry
+# in the same live session re-reads MemAvailable and can land on the other side
+# of the floor, and the log would name a cost archinstall never used.
+already = re.compile(
+    r"(['\"]--iter-time['\"],\s*str\(iter_time\),\s*['\"]--pbkdf-memory['\"],\s*)['\"][^'\"]*['\"]",
 )
-if already:
+refreshed, n = already.subn(rf"\g<1>'{memory}'", text, count=1)
+if n == 1:
+    path.write_text(refreshed)
     sys.exit(0)
 
 pattern = re.compile(

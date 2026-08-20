@@ -31,12 +31,27 @@ done
 # Locate luks.py via sys.path (do not importlib.util.find_spec: that imports
 # archinstall as a side effect). Fail closed on the encrypted path: a missed
 # patch would reintroduce the SIGKILL.
+# Ask disk_config.disk_encryption, the same field archinstall_adapter.is_encrypted
+# reads to decide whether luksFormat runs at all. The flag file is only a
+# fallback: README calls it the autologin signal, not the encryption one.
 install_is_encrypted() {
-  local encrypt=true
+  local encryption_type=no_encryption encrypt=true
+
+  if [[ -n ${OMARCHY_INSTALL_CONFIG:-} && -r $OMARCHY_INSTALL_CONFIG ]]; then
+    encryption_type=$(jq -r '
+      .disk_config.disk_encryption
+      | if . == null then "no_encryption" else (.encryption_type // "luks") end
+    ' "$OMARCHY_INSTALL_CONFIG" 2>/dev/null) || encryption_type=luks
+  fi
+  if [[ $encryption_type != no_encryption ]]; then
+    return 0
+  fi
+
   if [[ -n ${OMARCHY_INSTALL_ENCRYPT_FILE:-} && -r $OMARCHY_INSTALL_ENCRYPT_FILE ]]; then
     encrypt=$(tr -d '[:space:]' <"$OMARCHY_INSTALL_ENCRYPT_FILE")
   fi
-  [[ $encrypt == true ]]
+  # The same values context.py accepts for the same file.
+  [[ ${encrypt,,} == true || ${encrypt,,} == yes || ${encrypt,,} == 1 ]]
 }
 
 read_pbkdf_memory() {

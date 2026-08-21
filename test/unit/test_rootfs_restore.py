@@ -1,6 +1,7 @@
 """Unit tests for rootfs-image restore via multithreaded unsquashfs."""
 
 import io
+import signal
 import sys
 import tempfile
 import types
@@ -322,7 +323,7 @@ class InstallViaRootfsImageKeyFilesTest(unittest.TestCase):
         for patch in patches:
             patch.start()
             self.addCleanup(patch.stop)
-        ctx = types.SimpleNamespace(target=Path("/mnt/target"))
+        ctx = types.SimpleNamespace(target=Path("/mnt/target"), state={})
         phases_impl._install_via_rootfs_image(ctx, installer, object(), object())
         return calls
 
@@ -340,27 +341,149 @@ class InstallViaRootfsImageKeyFilesTest(unittest.TestCase):
         )
 
 
+class KeyringSigtermWindowTest(unittest.TestCase):
+    """A dashboard stop SIGTERMs the orchestrator's process group, which the
+    detached (start_new_session) keyring init survives. While the init runs,
+    SIGTERM must raise so the except-BaseException path kills and joins it,
+    and the previous disposition must come back afterwards."""
+
+    def run_install(self, *, configure_side_effect):
+        seen = {}
+
+        def configure(ctx, installer, config, mirror_handler):
+            seen["handler"] = signal.getsignal(signal.SIGTERM)
+            if configure_side_effect is not None:
+                raise configure_side_effect
+
+        def start_keyring(ctx):
+            ctx.state["target_keyring_proc"] = FakeKeyringProc(returncode=0)
+            ctx.state["target_keyring_proc"].pid = 1234
+
+        patches = [
+            mock.patch.object(phases_impl, "info"),
+            mock.patch.object(phases_impl.subprocess, "run"),
+            mock.patch.object(phases_impl.os, "killpg"),
+            mock.patch.object(
+                phases_impl, "_assert_rootfs_image_supported_config"
+            ),
+            mock.patch.object(phases_impl, "_restore_rootfs_image"),
+            mock.patch.object(
+                phases_impl, "_rootfs_image_configure", side_effect=configure
+            ),
+            mock.patch.object(
+                phases_impl, "_start_target_keyring_init",
+                side_effect=start_keyring,
+            ),
+            mock.patch.object(
+                phases_impl.arch, "is_pre_mount",
+                lambda config: False, create=True,
+            ),
+            mock.patch.object(
+                phases_impl.arch, "is_encrypted",
+                lambda config: False, create=True,
+            ),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        ctx = types.SimpleNamespace(target=Path("/mnt/target"), state={})
+        phases_impl._install_via_rootfs_image(ctx, installer=mock.Mock(),
+                                             config=object(),
+                                             mirror_handler=object())
+        return ctx, seen
+
+    def test_sigterm_raises_inside_the_keyring_window(self):
+        before = signal.getsignal(signal.SIGTERM)
+        _, seen = self.run_install(configure_side_effect=None)
+        self.assertIs(seen["handler"], phases_impl._raise_on_sigterm)
+        with self.assertRaises(SystemExit):
+            seen["handler"](signal.SIGTERM, None)
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)
+
+    def test_exception_path_kills_and_joins_the_init(self):
+        boom = RuntimeError("configure failed")
+        with self.assertRaises(RuntimeError) as raised:
+            self.run_install(configure_side_effect=boom)
+        self.assertIs(raised.exception, boom)
+        phases_impl.os.killpg.assert_called_once_with(
+            1234, phases_impl.signal.SIGKILL
+        )
+
+
 class StartTargetKeyringInitTest(unittest.TestCase):
     def test_shell_leads_its_own_process_group(self):
+        ctx = types.SimpleNamespace(target=Path("/mnt/target"), state={})
         with mock.patch.object(phases_impl, "info"), \
                 mock.patch.object(phases_impl.subprocess, "Popen") as popen:
-            phases_impl._start_target_keyring_init(
-                types.SimpleNamespace(target=Path("/mnt/target"))
-            )
+            phases_impl._start_target_keyring_init(ctx)
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        self.assertIs(ctx.state["target_keyring_proc"], popen.return_value)
 
 
 class KillTargetKeyringInitTest(unittest.TestCase):
+    def ctx(self):
+        return types.SimpleNamespace(
+            state={"target_keyring_proc": types.SimpleNamespace(pid=1234)}
+        )
+
     def test_kills_the_whole_process_group(self):
         with mock.patch.object(phases_impl.os, "killpg") as killpg:
-            phases_impl._kill_target_keyring_init(types.SimpleNamespace(pid=1234))
+            phases_impl._kill_target_keyring_init(self.ctx())
         killpg.assert_called_once_with(1234, phases_impl.signal.SIGKILL)
 
     def test_tolerates_an_already_dead_group(self):
         with mock.patch.object(
             phases_impl.os, "killpg", side_effect=ProcessLookupError
         ):
-            phases_impl._kill_target_keyring_init(types.SimpleNamespace(pid=1234))
+            phases_impl._kill_target_keyring_init(self.ctx())
+
+    def test_noop_without_a_pending_init(self):
+        with mock.patch.object(phases_impl.os, "killpg") as killpg:
+            phases_impl._kill_target_keyring_init(types.SimpleNamespace(state={}))
+        killpg.assert_not_called()
+
+
+class AwaitTargetKeyringInitTest(unittest.TestCase):
+    """pacstrap -K runs its own pacman-key --init on the target's gnupg dir,
+    so every pacstrap-semantics site must join the background init first."""
+
+    def test_joins_the_pending_init_exactly_once(self):
+        ctx = types.SimpleNamespace(
+            target=Path("/mnt/target"),
+            state={"target_keyring_proc": FakeKeyringProc(returncode=0)},
+        )
+        with mock.patch.object(phases_impl, "info"), mock.patch.object(
+            phases_impl, "_finish_target_keyring_init"
+        ) as finish:
+            phases_impl._await_target_keyring_init(ctx)
+            phases_impl._await_target_keyring_init(ctx)
+        finish.assert_called_once()
+        self.assertNotIn("target_keyring_proc", ctx.state)
+
+    def test_noop_without_a_pending_init(self):
+        with mock.patch.object(
+            phases_impl, "_finish_target_keyring_init"
+        ) as finish:
+            phases_impl._await_target_keyring_init(
+                types.SimpleNamespace(state={})
+            )
+        finish.assert_not_called()
+
+    def test_accessibility_install_joins_before_pacstrap(self):
+        ctx = types.SimpleNamespace(
+            target=Path("/mnt/target"),
+            state={"target_keyring_proc": FakeKeyringProc(returncode=0)},
+        )
+        installer = mock.Mock()
+        with mock.patch.object(phases_impl, "info"), \
+                mock.patch.object(phases_impl.subprocess, "run"), \
+                mock.patch.object(
+                    phases_impl.arch, "accessibility_tools_in_use",
+                    lambda: True, create=True,
+                ):
+            phases_impl._install_accessibility_tools(ctx, installer)
+        self.assertNotIn("target_keyring_proc", ctx.state)
+        installer.add_additional_packages.assert_called_once()
 
 
 class FinishTargetKeyringInitTest(unittest.TestCase):

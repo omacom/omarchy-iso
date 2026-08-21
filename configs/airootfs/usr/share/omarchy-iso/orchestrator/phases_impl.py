@@ -418,19 +418,29 @@ def _install_via_rootfs_image(ctx: InstallContext, installer, config, mirror_han
 
     info("› writing per-machine identity")
     subprocess.run(["systemd-machine-id-setup", f"--root={ctx.target}"], check=True)
-    # Backgrounded: nothing during the install consumes the keyring (the
-    # offline repo is SigLevel = Never) and the init is chroot-free, so there
-    # is no mount teardown to race the chroots below. Killed and joined on
-    # every exit path so a failure cannot leak the process, and the original
-    # error always wins over a keyring one.
-    keyring_proc = _start_target_keyring_init(ctx)
+    # Backgrounded: SigLevel = Never means nothing READS the keyring during
+    # the install, and the init is chroot-free, so there is no mount teardown
+    # to race the chroots below. pacstrap -K WRITES the same gnupg dir though
+    # (it runs its own pacman-key --init), so every pacstrap-semantics site
+    # joins via _await_target_keyring_init before touching the target db.
+    # Killed and joined on every exit path so a failure cannot leak the
+    # process, and the original error always wins over a keyring one. The
+    # SIGTERM handler is what makes "every exit path" true under a dashboard
+    # stop: start_new_session puts the init outside the process group the
+    # dashboard kills, and Python's default SIGTERM disposition would end the
+    # orchestrator without unwinding the except path below.
+    prev_sigterm = signal.signal(signal.SIGTERM, _raise_on_sigterm)
     try:
-        _rootfs_image_configure(ctx, installer, config, mirror_handler)
-    except BaseException:
-        _kill_target_keyring_init(keyring_proc)
-        _finish_target_keyring_init(ctx, keyring_proc, raise_on_error=False)
-        raise
-    _finish_target_keyring_init(ctx, keyring_proc, raise_on_error=True)
+        try:
+            _start_target_keyring_init(ctx)
+            _rootfs_image_configure(ctx, installer, config, mirror_handler)
+            _await_target_keyring_init(ctx, raise_on_error=True)
+        except BaseException:
+            _kill_target_keyring_init(ctx)
+            _await_target_keyring_init(ctx, raise_on_error=False)
+            raise
+    finally:
+        signal.signal(signal.SIGTERM, prev_sigterm)
 
 
 def _rootfs_image_configure(ctx: InstallContext, installer, config, mirror_handler) -> None:
@@ -490,6 +500,7 @@ def _rootfs_image_configure(ctx: InstallContext, installer, config, mirror_handl
         # configures the join.
         if ctx.tailscale_authkey_path is not None:
             info("› installing tailscale (auth key staged for first boot)")
+            _await_target_keyring_init(ctx)
             installer.add_additional_packages(["tailscale"])
             ctx.state["target_db_synced"] = True
 
@@ -508,6 +519,7 @@ def _install_accessibility_tools(ctx: InstallContext, installer) -> None:
     if not arch.accessibility_tools_in_use():
         return
     info("› installing accessibility stack (brltty espeakup alsa-utils)")
+    _await_target_keyring_init(ctx)
     installer.add_additional_packages(["brltty", "espeakup", "alsa-utils"])
     ctx.state["target_db_synced"] = True
 
@@ -674,12 +686,21 @@ def _target_gpgdir(ctx: InstallContext) -> Path:
     return ctx.target / "etc" / "pacman.d" / "gnupg"
 
 
-def _start_target_keyring_init(ctx: InstallContext) -> subprocess.Popen:
+def _raise_on_sigterm(signum, frame) -> None:
+    """Installed for the duration of the background keyring init: turns the
+    dashboard's group SIGTERM (its stop escalates to SIGKILL only after a
+    grace period) into an exception so the except-BaseException path kills
+    and joins the detached keyring session instead of leaking it."""
+    raise SystemExit(128 + signum)
+
+
+def _start_target_keyring_init(ctx: InstallContext) -> None:
     """Recreate the per-machine pacman keyring a legacy pacstrap left behind.
 
     The image ships no /etc/pacman.d/gnupg (a shared keyring key must never be
-    distributed). Nothing during the install needs the keyring — the offline
-    repo is SigLevel = Never — but the installed system does.
+    distributed). Nothing during the install READS the keyring — the offline
+    repo is SigLevel = Never — but the installed system does, and pacstrap -K
+    WRITES it (see _await_target_keyring_init).
 
     Chroot-free on purpose: pacman-key --gpgdir writes the target's keyring
     directory directly, reading the live environment's
@@ -697,7 +718,7 @@ def _start_target_keyring_init(ctx: InstallContext) -> subprocess.Popen:
     # start_new_session makes the shell a process-group leader, so
     # _kill_target_keyring_init reaches pacman-key and its gpg children —
     # killing just the sh wrapper would leave them mutating the target keyring.
-    return subprocess.Popen(
+    ctx.state["target_keyring_proc"] = subprocess.Popen(
         ["sh", "-c", script],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -706,11 +727,42 @@ def _start_target_keyring_init(ctx: InstallContext) -> subprocess.Popen:
     )
 
 
-def _kill_target_keyring_init(proc: subprocess.Popen) -> None:
+def _kill_target_keyring_init(ctx: InstallContext) -> None:
+    proc = ctx.state.get("target_keyring_proc")
+    if proc is None:
+        return
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+
+
+def _await_target_keyring_init(ctx: InstallContext, *, raise_on_error: bool = True) -> None:
+    """Join the background keyring init if it is still pending; no-op after.
+
+    Every pacstrap-semantics install (installer.add_additional_packages) must
+    call this first: pacstrap -K unconditionally runs its own pacman-key
+    --init on the target's gnupg dir — the very directory the background init
+    is writing — and two concurrent inits on one gpg homedir can generate
+    competing master keys or trip over gpg's keybox/trustdb locks. SigLevel =
+    Never only skips keyring reads, not pacstrap's writes. Installs that never
+    pacstrap (default kernel, no tailscale key, no screen reader) keep the
+    full overlap and join at the end of _install_via_rootfs_image."""
+    proc = ctx.state.get("target_keyring_proc")
+    if proc is None:
+        return
+    try:
+        _finish_target_keyring_init(ctx, proc, raise_on_error=raise_on_error)
+    except RuntimeError:
+        # The join completed and the init failed: nothing is left running, so
+        # drop the proc before the error unwinds into the kill path.
+        ctx.state.pop("target_keyring_proc", None)
+        raise
+    # Popped only after a completed join: an interrupting SIGTERM/SIGINT mid
+    # communicate() must leave the proc in state so the exception path in
+    # _install_via_rootfs_image can still kill and re-join it (a joined proc
+    # must never be joined twice — communicate() raises on closed pipes).
+    ctx.state.pop("target_keyring_proc", None)
 
 
 def _finish_target_keyring_init(
@@ -839,6 +891,7 @@ def _reconcile_target_kernel(ctx: InstallContext, installer, config) -> None:
     _mask_mkinitcpio_pacman_hooks(ctx, ctx.target, TARGET_DEFERRED_BOOT_HOOKS)
     try:
         if missing:
+            _await_target_keyring_init(ctx)
             installer.add_additional_packages(missing)
             ctx.state["target_db_synced"] = True
         if drop_linux:

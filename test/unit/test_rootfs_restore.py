@@ -136,6 +136,29 @@ class FakeKeyringProc:
         return self._output, None
 
 
+class StartTargetKeyringInitTest(unittest.TestCase):
+    def test_shell_leads_its_own_process_group(self):
+        with mock.patch.object(phases_impl, "info"), \
+                mock.patch.object(phases_impl.subprocess, "Popen") as popen:
+            phases_impl._start_target_keyring_init(
+                types.SimpleNamespace(target=Path("/mnt/target"))
+            )
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+
+
+class KillTargetKeyringInitTest(unittest.TestCase):
+    def test_kills_the_whole_process_group(self):
+        with mock.patch.object(phases_impl.os, "killpg") as killpg:
+            phases_impl._kill_target_keyring_init(types.SimpleNamespace(pid=1234))
+        killpg.assert_called_once_with(1234, phases_impl.signal.SIGKILL)
+
+    def test_tolerates_an_already_dead_group(self):
+        with mock.patch.object(
+            phases_impl.os, "killpg", side_effect=ProcessLookupError
+        ):
+            phases_impl._kill_target_keyring_init(types.SimpleNamespace(pid=1234))
+
+
 class FinishTargetKeyringInitTest(unittest.TestCase):
     def setUp(self):
         self.run_cmds = []

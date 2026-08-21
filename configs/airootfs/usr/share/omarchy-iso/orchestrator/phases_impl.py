@@ -28,6 +28,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import textwrap
 import time
@@ -380,7 +381,7 @@ def _install_via_rootfs_image(ctx: InstallContext, installer, config, mirror_han
     try:
         _rootfs_image_configure(ctx, installer, config, mirror_handler)
     except BaseException:
-        keyring_proc.kill()
+        _kill_target_keyring_init(keyring_proc)
         _finish_target_keyring_init(ctx, keyring_proc, raise_on_error=False)
         raise
     _finish_target_keyring_init(ctx, keyring_proc, raise_on_error=True)
@@ -600,12 +601,23 @@ def _start_target_keyring_init(ctx: InstallContext) -> subprocess.Popen:
         f"pacman-key --gpgdir {gpgdir} --init && "
         f"pacman-key --gpgdir {gpgdir} --populate archlinux omarchy"
     )
+    # start_new_session makes the shell a process-group leader, so
+    # _kill_target_keyring_init reaches pacman-key and its gpg children —
+    # killing just the sh wrapper would leave them mutating the target keyring.
     return subprocess.Popen(
         ["sh", "-c", script],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        start_new_session=True,
     )
+
+
+def _kill_target_keyring_init(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def _finish_target_keyring_init(

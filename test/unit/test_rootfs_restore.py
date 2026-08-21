@@ -136,6 +136,70 @@ class FakeKeyringProc:
         return self._output, None
 
 
+class AssertRootfsImageSupportedConfigTest(unittest.TestCase):
+    def config(self, **overrides):
+        base = dict(
+            app_config=None, mirror_config=None, disk_config=None, kernels=None
+        )
+        base.update(overrides)
+        return types.SimpleNamespace(**base)
+
+    def assert_rejected(self, pattern, **overrides):
+        with self.assertRaisesRegex(RuntimeError, pattern):
+            phases_impl._assert_rootfs_image_supported_config(
+                self.config(**overrides)
+            )
+
+    def test_default_config_is_supported(self):
+        phases_impl._assert_rootfs_image_supported_config(self.config())
+
+    def test_non_pipewire_audio_is_rejected(self):
+        self.assert_rejected(
+            "bakes PipeWire",
+            app_config=types.SimpleNamespace(
+                audio_config=types.SimpleNamespace(audio="pulseaudio"),
+                bluetooth_config=None,
+            ),
+        )
+
+    def test_bluetooth_is_rejected(self):
+        self.assert_rejected(
+            "bluetooth_config",
+            app_config=types.SimpleNamespace(
+                audio_config=None,
+                bluetooth_config=types.SimpleNamespace(enabled=True),
+            ),
+        )
+
+    def test_optional_repositories_are_rejected(self):
+        self.assert_rejected(
+            "optional_repositories",
+            mirror_config=types.SimpleNamespace(
+                optional_repositories=["multilib"]
+            ),
+        )
+
+    def test_lvm_is_rejected(self):
+        self.assert_rejected(
+            "lvm_config",
+            disk_config=types.SimpleNamespace(lvm_config=object()),
+        )
+
+    def test_lvm_free_disk_config_is_supported(self):
+        phases_impl._assert_rootfs_image_supported_config(
+            self.config(disk_config=types.SimpleNamespace(lvm_config=None))
+        )
+
+    def test_unsupported_kernel_is_rejected(self):
+        self.assert_rejected("linux-zen", kernels=["linux", "linux-zen"])
+
+    def test_supported_kernels_pass(self):
+        for kernels in (None, ["linux"], ["linux-t2"], ["linux", "linux-t2"]):
+            phases_impl._assert_rootfs_image_supported_config(
+                self.config(kernels=kernels)
+            )
+
+
 class RootfsImageMarkerTest(unittest.TestCase):
     """The install-mode decision is the build-time marker, never the image
     file: an image ISO with a missing image must abort pre-format instead of

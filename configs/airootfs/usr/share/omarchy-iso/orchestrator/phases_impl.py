@@ -223,6 +223,11 @@ def _install_disk(ctx: InstallContext) -> str | None:
 
 ROOTFS_IMAGE_PATH = Path("/var/cache/omarchy/rootfs/omarchy-rootfs.sfs")
 ROOTFS_IMAGE_BUILD_MARKER = Path("/usr/share/omarchy-iso/rootfs-image-build")
+# linux is baked into the image; linux-t2 is the only other kernel the pruned
+# shipped mirror guarantees (build-iso.sh conditional_targets). Anything else
+# would fail mid-install in _reconcile_target_kernel, so the config assert
+# rejects it before the disk is touched.
+ROOTFS_IMAGE_SUPPORTED_KERNELS = {"linux", "linux-t2"}
 RESTORE_PROGRESS_PATH = Path("/run/omarchy-install/restore-progress")
 
 
@@ -518,6 +523,23 @@ def _assert_rootfs_image_supported_config(config) -> None:
             "path (build with OMARCHY_ROOTFS_IMAGE=0)"
         )
 
+    disk_config = getattr(config, "disk_config", None)
+    if getattr(disk_config, "lvm_config", None):
+        raise RuntimeError(
+            "rootfs-image install does not support lvm_config: the image bakes "
+            "neither lvm2 nor its mkinitcpio hook, which minimal_installation "
+            "would have added (build with OMARCHY_ROOTFS_IMAGE=0)"
+        )
+
+    kernels = list(getattr(config, "kernels", None) or ["linux"])
+    unsupported = sorted(set(kernels) - ROOTFS_IMAGE_SUPPORTED_KERNELS)
+    if unsupported:
+        raise RuntimeError(
+            f"rootfs-image install cannot provide kernels {unsupported!r}: the "
+            f"pruned mirror only carries {sorted(ROOTFS_IMAGE_SUPPORTED_KERNELS)} "
+            "(build with OMARCHY_ROOTFS_IMAGE=0)"
+        )
+
 
 def _restore_rootfs_image(ctx: InstallContext) -> None:
     """unsquashfs the image over the mounted target layout.
@@ -748,7 +770,8 @@ def _enable_pipewire_pulse_for_users(ctx: InstallContext, config) -> None:
 def _reconcile_target_kernel(ctx: InstallContext, installer, config) -> None:
     """The image bakes exactly one kernel: linux. Bring the target to the
     configured kernel set (T2 Macs install with kernels=["linux-t2"], the only
-    non-default kernel the pruned mirror is guaranteed to carry).
+    non-default kernel the pruned mirror is guaranteed to carry — any other
+    name was rejected pre-format via ROOTFS_IMAGE_SUPPORTED_KERNELS).
 
     The install goes through pacstrap semantics, whose implicit -Sy also
     rewrites the target's sync db — baked from the FULL build-time mirror —

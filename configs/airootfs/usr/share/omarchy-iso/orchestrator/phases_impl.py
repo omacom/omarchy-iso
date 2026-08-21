@@ -301,6 +301,11 @@ def arch_install_system(ctx: InstallContext) -> None:
             installer.set_timezone(config.timezone)
         if config.ntp:
             installer.activate_time_synchronization()
+        # guided.py enables this post-install, not minimal_installation, so
+        # BOTH paths need it here (packages: baked set via minimal_installation
+        # on legacy, pruned-mirror install in _rootfs_image_configure on image).
+        if arch.accessibility_tools_in_use():
+            installer.enable_espeakup()
         if root := arch.root_user(config):
             installer.set_user_password(root)
 
@@ -480,9 +485,24 @@ def _rootfs_image_configure(ctx: InstallContext, installer, config, mirror_handl
             info("› installing tailscale (auth key staged for first boot)")
             installer.add_additional_packages(["tailscale"])
             ctx.state["target_db_synced"] = True
+
+        _install_accessibility_tools(ctx, installer)
     finally:
         _unmask_mkinitcpio_pacman_hooks(ctx)
         _unmount_offline_package_cache(ctx)
+
+
+def _install_accessibility_tools(ctx: InstallContext, installer) -> None:
+    """The legacy path gets these from minimal_installation, which extends its
+    base set when the live session runs a screen reader (the accessibility=on
+    boot entry). The image bakes none of them, so install from the pruned
+    mirror while it is still bind-mounted; the shared finishers in
+    arch_install_system enable espeakup on both paths."""
+    if not arch.accessibility_tools_in_use():
+        return
+    info("› installing accessibility stack (brltty espeakup alsa-utils)")
+    installer.add_additional_packages(["brltty", "espeakup", "alsa-utils"])
+    ctx.state["target_db_synced"] = True
 
 
 def _assert_rootfs_image_supported_config(config) -> None:

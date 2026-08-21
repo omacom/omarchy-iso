@@ -351,8 +351,9 @@ resolve_expected_packages() {
 # build time, ship it as a zstd squashfs, and let the installer restore it with
 # multithreaded unsquashfs instead of replaying ~925 pacman extractions. The
 # shipped mirror then only carries the hardware-conditional closure
-# (omarchy-other.packages ∪ {linux-t2, tailscale}) that install time can still
-# ask for. Everything here runs after repo-add so the full mirror is indexed.
+# (omarchy-other.packages ∪ {linux-t2, tailscale, brltty, espeakup,
+# alsa-utils}) that install time can still ask for. Everything here runs after
+# repo-add so the full mirror is indexed.
 # ─────────────────────────────────────────────────────────────────────────────
 build_rootfs_image() {
   local rootfs_dir=/tmp/omarchy-target-rootfs
@@ -533,8 +534,10 @@ build_rootfs_image() {
   # ── Pruned shipped mirror: only what install time can still ask for. ──
   # Resolve with the resolver that answers the question at install time — the
   # image's own pacman db: the hardware-conditional pool omarchy-apply-system
-  # draws from (omarchy-other.packages) plus the two orchestrator-side
-  # conditionals, with their not-yet-installed dependency closure.
+  # draws from (omarchy-other.packages) plus the orchestrator-side
+  # conditionals — linux-t2/tailscale, and the screen-reader stack the
+  # accessibility=on boot entry needs — with their not-yet-installed
+  # dependency closure.
   #
   # Deliberately NOT --needed: pool members already baked into the image
   # (e.g. sof-firmware, also in archinstall.packages) must KEEP their db
@@ -545,7 +548,7 @@ build_rootfs_image() {
   mapfile -t conditional_targets < <(
     {
       grep -hv '^#\|^$' "$iso_share_dir/omarchy-other.packages"
-      printf '%s\n' linux-t2 tailscale
+      printf '%s\n' linux-t2 tailscale brltty espeakup alsa-utils
     } | sort -u
   )
   if ! resolved_conditionals="$(

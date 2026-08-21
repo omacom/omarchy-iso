@@ -200,6 +200,30 @@ class AssertRootfsImageSupportedConfigTest(unittest.TestCase):
             )
 
 
+class InstallAccessibilityToolsTest(unittest.TestCase):
+    def run_helper(self, *, in_use):
+        ctx = types.SimpleNamespace(state={})
+        installer = mock.Mock()
+        with mock.patch.object(phases_impl, "info"), mock.patch.object(
+            phases_impl.arch, "accessibility_tools_in_use",
+            lambda: in_use, create=True,
+        ):
+            phases_impl._install_accessibility_tools(ctx, installer)
+        return ctx, installer
+
+    def test_installs_the_screen_reader_stack_when_live_session_uses_one(self):
+        ctx, installer = self.run_helper(in_use=True)
+        installer.add_additional_packages.assert_called_once_with(
+            ["brltty", "espeakup", "alsa-utils"]
+        )
+        self.assertTrue(ctx.state["target_db_synced"])
+
+    def test_noop_without_accessibility_tools(self):
+        ctx, installer = self.run_helper(in_use=False)
+        installer.add_additional_packages.assert_not_called()
+        self.assertEqual(ctx.state, {})
+
+
 class RootfsImageMarkerTest(unittest.TestCase):
     """The install-mode decision is the build-time marker, never the image
     file: an image ISO with a missing image must abort pre-format instead of

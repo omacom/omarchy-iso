@@ -25,6 +25,8 @@ The canonical call sequence (mirrored from archinstall.scripts.guided.py) is:
         inst.activate_time_synchronization()
         inst.set_user_password(root_user)
         inst.enable_service(services)
+        if accessibility_tools_in_use():              # live espeakup running
+            inst.enable_espeakup()
         inst.genfstab()
 
 Our orchestrator installs Omarchy's Limine files directly instead of invoking
@@ -46,7 +48,7 @@ from archinstall.lib.authentication.authentication_handler import Authentication
 from archinstall.lib.disk.filesystem import FilesystemHandler
 from archinstall.lib.disk.utils import get_parent_device_path, get_unique_path_for_device, udev_sync
 from archinstall.lib.hardware import SysInfo
-from archinstall.lib.installer import Installer
+from archinstall.lib.installer import Installer, accessibility_tools_in_use  # noqa: F401
 from archinstall.lib.mirror.mirror_handler import MirrorListHandler
 from archinstall.lib.models import Bootloader
 from archinstall.lib.models.device import DiskLayoutType, EncryptionType

@@ -524,6 +524,12 @@ build_rootfs_image() {
     echo "Rootfs image carries $package_count packages."
   fi
 
+  # Variant stamp the orchestrator keys install-mode decisions off. Distinct
+  # from the image file itself so a missing image on an image ISO fails before
+  # any disk write instead of falling back to a pacstrap the pruned mirror
+  # cannot feed.
+  echo omarchy-rootfs.sfs >"$iso_share_dir/rootfs-image-build"
+
   # ── Pruned shipped mirror: only what install time can still ask for. ──
   # Resolve with the resolver that answers the question at install time — the
   # image's own pacman db: the hardware-conditional pool omarchy-apply-system

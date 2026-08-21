@@ -136,6 +136,38 @@ class FakeKeyringProc:
         return self._output, None
 
 
+class RootfsImageMarkerTest(unittest.TestCase):
+    """The install-mode decision is the build-time marker, never the image
+    file: an image ISO with a missing image must abort pre-format instead of
+    falling back to a pacstrap the pruned mirror cannot feed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.marker = Path(self.tmp.name) / "rootfs-image-build"
+        self.image = Path(self.tmp.name) / "omarchy-rootfs.sfs"
+        for attr, value in (
+            ("ROOTFS_IMAGE_BUILD_MARKER", self.marker),
+            ("ROOTFS_IMAGE_PATH", self.image),
+        ):
+            patch = mock.patch.object(phases_impl, attr, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_marker_presence_decides_the_install_mode(self):
+        self.assertFalse(phases_impl._is_rootfs_image_install())
+        self.marker.write_text("omarchy-rootfs.sfs\n")
+        self.assertTrue(phases_impl._is_rootfs_image_install())
+
+    def test_missing_image_refuses_the_install(self):
+        with self.assertRaisesRegex(RuntimeError, "refusing to touch the disk"):
+            phases_impl._assert_rootfs_image_available()
+
+    def test_present_image_passes(self):
+        self.image.write_bytes(b"sfs")
+        phases_impl._assert_rootfs_image_available()
+
+
 class InstallViaRootfsImageKeyFilesTest(unittest.TestCase):
     """generate_key_files must follow the restore: it appends to the target's
     /etc/crypttab, which unsquashfs -f would otherwise overwrite."""

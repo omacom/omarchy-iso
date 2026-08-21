@@ -222,7 +222,24 @@ def _install_disk(ctx: InstallContext) -> str | None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 ROOTFS_IMAGE_PATH = Path("/var/cache/omarchy/rootfs/omarchy-rootfs.sfs")
+ROOTFS_IMAGE_BUILD_MARKER = Path("/usr/share/omarchy-iso/rootfs-image-build")
 RESTORE_PROGRESS_PATH = Path("/run/omarchy-install/restore-progress")
+
+
+def _is_rootfs_image_install() -> bool:
+    """Build-time variant decision, not runtime file presence: an image ISO
+    whose image file is missing must abort (see _assert_rootfs_image_available),
+    never quietly fall back to pacstrapping against the pruned mirror."""
+    return ROOTFS_IMAGE_BUILD_MARKER.exists()
+
+
+def _assert_rootfs_image_available() -> None:
+    if not ROOTFS_IMAGE_PATH.exists():
+        raise RuntimeError(
+            f"this ISO was built around a rootfs image but {ROOTFS_IMAGE_PATH} "
+            "is missing; refusing to touch the disk (the pruned mirror cannot "
+            "feed a pacstrap fallback)"
+        )
 
 
 def prepare_install_target(ctx: InstallContext) -> None:
@@ -244,6 +261,13 @@ def arch_install_system(ctx: InstallContext) -> None:
     config = handler.config
     pre_mounted = arch.is_pre_mount(config)
 
+    # Both checks must precede any disk write: a broken or unsupported image
+    # install has no pacstrap fallback to save it after formatting.
+    use_rootfs_image = _is_rootfs_image_install()
+    if use_rootfs_image:
+        _assert_rootfs_image_available()
+        _assert_rootfs_image_supported_config(config)
+
     if not pre_mounted:
         info("› partitioning + formatting + encrypting")
         arch.perform_filesystem_operations(config)
@@ -262,7 +286,7 @@ def arch_install_system(ctx: InstallContext) -> None:
         if config.mirror_config:
             installer.set_mirrors(mirror_handler, config.mirror_config, on_target=False)
 
-        if ROOTFS_IMAGE_PATH.exists():
+        if use_rootfs_image:
             _install_via_rootfs_image(ctx, installer, config, mirror_handler)
         else:
             _install_via_pacstrap(ctx, installer, config, mirror_handler)
@@ -366,7 +390,6 @@ def _install_via_rootfs_image(ctx: InstallContext, installer, config, mirror_han
     the chroot that view (and it resyncs the target db then, see
     ctx.state["target_db_synced"]).
     """
-    _assert_rootfs_image_supported_config(config)
     _restore_rootfs_image(ctx)
 
     # After the restore, never before: generate_key_files appends non-root
@@ -1486,7 +1509,7 @@ def _prepare_target_setup(ctx: InstallContext) -> None:
     # shipped repo — the conf copy and bind mounts above are exactly what a
     # chroot pacman needs for that — so apply-system's hardware installs
     # resolve against what the ISO actually carries.
-    if ROOTFS_IMAGE_PATH.exists() and not ctx.state.get("target_db_synced"):
+    if _is_rootfs_image_install() and not ctx.state.get("target_db_synced"):
         subprocess.run(["arch-chroot", str(ctx.target), "pacman", "-Sy"], check=True)
         ctx.state["target_db_synced"] = True
 

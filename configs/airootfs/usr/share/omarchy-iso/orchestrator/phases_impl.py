@@ -259,9 +259,6 @@ def arch_install_system(ctx: InstallContext) -> None:
             skip_wkd=True,
         )
 
-        if not pre_mounted and arch.is_encrypted(config):
-            installer.generate_key_files()
-
         if config.mirror_config:
             installer.set_mirrors(mirror_handler, config.mirror_config, on_target=False)
 
@@ -286,6 +283,8 @@ def arch_install_system(ctx: InstallContext) -> None:
 
 def _install_via_pacstrap(ctx: InstallContext, installer, config, mirror_handler) -> None:
     """Legacy package-by-package install from the full offline mirror."""
+    if not arch.is_pre_mount(config) and arch.is_encrypted(config):
+        installer.generate_key_files()
     _mount_offline_package_cache(ctx)
     _mask_mkinitcpio_pacman_hooks(ctx)
     try:
@@ -369,6 +368,13 @@ def _install_via_rootfs_image(ctx: InstallContext, installer, config, mirror_han
     """
     _assert_rootfs_image_supported_config(config)
     _restore_rootfs_image(ctx)
+
+    # After the restore, never before: generate_key_files appends non-root
+    # volumes to the target's /etc/crypttab, which the filesystem package owns,
+    # so unsquashfs -f would overwrite it (pacstrap preserves it as a backup=
+    # file, hence the legacy path has no such constraint).
+    if not arch.is_pre_mount(config) and arch.is_encrypted(config):
+        installer.generate_key_files()
 
     info("› writing per-machine identity")
     subprocess.run(["systemd-machine-id-setup", f"--root={ctx.target}"], check=True)

@@ -136,6 +136,59 @@ class FakeKeyringProc:
         return self._output, None
 
 
+class InstallViaRootfsImageKeyFilesTest(unittest.TestCase):
+    """generate_key_files must follow the restore: it appends to the target's
+    /etc/crypttab, which unsquashfs -f would otherwise overwrite."""
+
+    def run_install(self, *, encrypted, pre_mounted=False):
+        calls = []
+        installer = mock.Mock()
+        installer.generate_key_files.side_effect = (
+            lambda: calls.append("generate_key_files")
+        )
+        patches = [
+            mock.patch.object(phases_impl, "info"),
+            mock.patch.object(phases_impl.subprocess, "run"),
+            mock.patch.object(
+                phases_impl, "_assert_rootfs_image_supported_config"
+            ),
+            mock.patch.object(
+                phases_impl, "_restore_rootfs_image",
+                side_effect=lambda ctx: calls.append("restore"),
+            ),
+            mock.patch.object(phases_impl, "_rootfs_image_configure"),
+            mock.patch.object(phases_impl, "_start_target_keyring_init"),
+            mock.patch.object(phases_impl, "_finish_target_keyring_init"),
+            mock.patch.object(
+                phases_impl.arch, "is_pre_mount",
+                lambda config: pre_mounted, create=True,
+            ),
+            mock.patch.object(
+                phases_impl.arch, "is_encrypted",
+                lambda config: encrypted, create=True,
+            ),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        ctx = types.SimpleNamespace(target=Path("/mnt/target"))
+        phases_impl._install_via_rootfs_image(ctx, installer, object(), object())
+        return calls
+
+    def test_encrypted_generates_key_files_after_the_restore(self):
+        self.assertEqual(
+            self.run_install(encrypted=True), ["restore", "generate_key_files"]
+        )
+
+    def test_unencrypted_skips_key_files(self):
+        self.assertEqual(self.run_install(encrypted=False), ["restore"])
+
+    def test_pre_mounted_skips_key_files(self):
+        self.assertEqual(
+            self.run_install(encrypted=True, pre_mounted=True), ["restore"]
+        )
+
+
 class StartTargetKeyringInitTest(unittest.TestCase):
     def test_shell_leads_its_own_process_group(self):
         with mock.patch.object(phases_impl, "info"), \

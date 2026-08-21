@@ -190,6 +190,37 @@ class AssertRootfsImageSupportedConfigTest(unittest.TestCase):
             self.config(disk_config=types.SimpleNamespace(lvm_config=None))
         )
 
+    def disk_config_with_fs(self, *fs_values):
+        return types.SimpleNamespace(
+            lvm_config=None,
+            device_modifications=[types.SimpleNamespace(partitions=[
+                types.SimpleNamespace(
+                    fs_type=(
+                        types.SimpleNamespace(value=value)
+                        if value is not None else None
+                    )
+                )
+                for value in fs_values
+            ])],
+        )
+
+    def test_filesystems_without_baked_tools_are_rejected(self):
+        for fs in ("xfs", "f2fs"):
+            self.assert_rejected(
+                "filesystem tools",
+                disk_config=self.disk_config_with_fs("fat32", fs),
+            )
+
+    def test_baked_filesystems_pass(self):
+        phases_impl._assert_rootfs_image_supported_config(self.config(
+            disk_config=self.disk_config_with_fs("fat32", "btrfs", "ext4")
+        ))
+
+    def test_partitions_without_an_fs_type_pass(self):
+        phases_impl._assert_rootfs_image_supported_config(self.config(
+            disk_config=self.disk_config_with_fs(None)
+        ))
+
     def test_unsupported_kernel_is_rejected(self):
         self.assert_rejected("linux-zen", kernels=["linux", "linux-zen"])
 

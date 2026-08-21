@@ -228,6 +228,13 @@ ROOTFS_IMAGE_BUILD_MARKER = Path("/usr/share/omarchy-iso/rootfs-image-build")
 # would fail mid-install in _reconcile_target_kernel, so the config assert
 # rejects it before the disk is touched.
 ROOTFS_IMAGE_SUPPORTED_KERNELS = {"linux", "linux-t2"}
+# Filesystems whose userspace archinstall's legacy minimal_installation would
+# have pacstrapped for the config (FilesystemType.installation_pkg: xfsprogs,
+# f2fs-tools) but that neither the baked image nor the pruned mirror carries
+# (btrfs-progs alone is baked, via snapper). Such a config would format fine
+# and boot without fsck/repair tools, so the config assert rejects it before
+# the disk is touched — same contract as ROOTFS_IMAGE_SUPPORTED_KERNELS.
+ROOTFS_IMAGE_UNSUPPORTED_FS_TYPES = {"xfs", "f2fs"}
 RESTORE_PROGRESS_PATH = Path("/run/omarchy-install/restore-progress")
 
 
@@ -549,6 +556,21 @@ def _assert_rootfs_image_supported_config(config) -> None:
             "rootfs-image install does not support lvm_config: the image bakes "
             "neither lvm2 nor its mkinitcpio hook, which minimal_installation "
             "would have added (build with OMARCHY_ROOTFS_IMAGE=0)"
+        )
+
+    fs_types = set()
+    for mod in list(getattr(disk_config, "device_modifications", None) or []):
+        for part in list(getattr(mod, "partitions", None) or []):
+            fs_type = getattr(part, "fs_type", None)
+            if fs_type is not None:
+                fs_types.add(str(getattr(fs_type, "value", fs_type)).lower())
+    unsupported_fs = sorted(fs_types & ROOTFS_IMAGE_UNSUPPORTED_FS_TYPES)
+    if unsupported_fs:
+        raise RuntimeError(
+            f"rootfs-image install cannot provide filesystem tools for "
+            f"{unsupported_fs!r}: minimal_installation would have installed "
+            "them, but the image bakes only the btrfs userspace and the pruned "
+            "mirror cannot supply the rest (build with OMARCHY_ROOTFS_IMAGE=0)"
         )
 
     kernels = list(getattr(config, "kernels", None) or ["linux"])

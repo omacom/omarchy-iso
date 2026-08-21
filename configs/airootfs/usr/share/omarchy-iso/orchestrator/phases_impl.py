@@ -228,6 +228,11 @@ ROOTFS_IMAGE_BUILD_MARKER = Path("/usr/share/omarchy-iso/rootfs-image-build")
 # would fail mid-install in _reconcile_target_kernel, so the config assert
 # rejects it before the disk is touched.
 ROOTFS_IMAGE_SUPPORTED_KERNELS = {"linux", "linux-t2"}
+# What minimal_installation adds on the legacy path when the live session runs
+# a screen reader (archinstall's own list is private). build-iso.sh's
+# conditional_targets must carry the same names so the pruned mirror can serve
+# them at install time.
+ACCESSIBILITY_PACKAGES = ["brltty", "espeakup", "alsa-utils"]
 # Filesystems whose userspace archinstall's legacy minimal_installation would
 # have pacstrapped for the config (FilesystemType.installation_pkg: xfsprogs,
 # f2fs-tools) but that neither the baked image nor the pruned mirror carries
@@ -236,6 +241,14 @@ ROOTFS_IMAGE_SUPPORTED_KERNELS = {"linux", "linux-t2"}
 # the disk is touched — same contract as ROOTFS_IMAGE_SUPPORTED_KERNELS.
 ROOTFS_IMAGE_UNSUPPORTED_FS_TYPES = {"xfs", "f2fs"}
 RESTORE_PROGRESS_PATH = Path("/run/omarchy-install/restore-progress")
+
+
+def _configured_kernels(config) -> list[str]:
+    """The configured kernel set with archinstall's default. The contract pair
+    _assert_rootfs_image_supported_config / _reconcile_target_kernel must
+    parse config.kernels identically — the assert's pre-format guarantee
+    holds only as long as both go through here."""
+    return list(getattr(config, "kernels", None) or ["linux"])
 
 
 def _is_rootfs_image_install() -> bool:
@@ -322,10 +335,18 @@ def arch_install_system(ctx: InstallContext) -> None:
             installer.genfstab()
 
 
-def _install_via_pacstrap(ctx: InstallContext, installer, config, mirror_handler) -> None:
-    """Legacy package-by-package install from the full offline mirror."""
+def _generate_key_files_if_needed(installer, config) -> None:
+    """Key files (and the crypttab entries referencing them) are only wanted
+    when this install created the encrypted layout itself; each install path
+    calls this at its own deliberately different point (see the ordering
+    comment in _install_via_rootfs_image)."""
     if not arch.is_pre_mount(config) and arch.is_encrypted(config):
         installer.generate_key_files()
+
+
+def _install_via_pacstrap(ctx: InstallContext, installer, config, mirror_handler) -> None:
+    """Legacy package-by-package install from the full offline mirror."""
+    _generate_key_files_if_needed(installer, config)
     _mount_offline_package_cache(ctx)
     _mask_mkinitcpio_pacman_hooks(ctx)
     try:
@@ -413,34 +434,27 @@ def _install_via_rootfs_image(ctx: InstallContext, installer, config, mirror_han
     # volumes to the target's /etc/crypttab, which the filesystem package owns,
     # so unsquashfs -f would overwrite it (pacstrap preserves it as a backup=
     # file, hence the legacy path has no such constraint).
-    if not arch.is_pre_mount(config) and arch.is_encrypted(config):
-        installer.generate_key_files()
+    _generate_key_files_if_needed(installer, config)
 
     info("› writing per-machine identity")
     subprocess.run(["systemd-machine-id-setup", f"--root={ctx.target}"], check=True)
     # Backgrounded: SigLevel = Never means nothing READS the keyring during
     # the install, and the init is chroot-free, so there is no mount teardown
     # to race the chroots below. pacstrap -K WRITES the same gnupg dir though
-    # (it runs its own pacman-key --init), so every pacstrap-semantics site
-    # joins via _await_target_keyring_init before touching the target db.
-    # Killed and joined on every exit path so a failure cannot leak the
-    # process, and the original error always wins over a keyring one. The
-    # SIGTERM handler is what makes "every exit path" true under a dashboard
-    # stop: start_new_session puts the init outside the process group the
-    # dashboard kills, and Python's default SIGTERM disposition would end the
-    # orchestrator without unwinding the except path below.
-    prev_sigterm = signal.signal(signal.SIGTERM, _raise_on_sigterm)
+    # (it runs its own pacman-key --init), so _install_target_packages joins
+    # the init before any pacstrap-semantics install. Killed and joined on
+    # every exit path so a failure cannot leak the process, and the original
+    # error always wins over a keyring one — "every exit path" includes a
+    # dashboard stop because main() turns SIGTERM into an exception (the
+    # detached init sits outside the process group the dashboard kills).
     try:
-        try:
-            _start_target_keyring_init(ctx)
-            _rootfs_image_configure(ctx, installer, config, mirror_handler)
-            _await_target_keyring_init(ctx, raise_on_error=True)
-        except BaseException:
-            _kill_target_keyring_init(ctx)
-            _await_target_keyring_init(ctx, raise_on_error=False)
-            raise
-    finally:
-        signal.signal(signal.SIGTERM, prev_sigterm)
+        _start_target_keyring_init(ctx)
+        _rootfs_image_configure(ctx, installer, config, mirror_handler)
+        _await_target_keyring_init(ctx, raise_on_error=True)
+    except BaseException:
+        _kill_target_keyring_init(ctx)
+        _await_target_keyring_init(ctx, raise_on_error=False)
+        raise
 
 
 def _rootfs_image_configure(ctx: InstallContext, installer, config, mirror_handler) -> None:
@@ -494,33 +508,42 @@ def _rootfs_image_configure(ctx: InstallContext, installer, config, mirror_handl
             installer.create_users(config.auth_config.users)
             _enable_pipewire_pulse_for_users(ctx, config)
 
-        # Tailscale is bundled in the pruned mirror but only installed
-        # when an autoinstall drive staged an auth key; must happen here,
-        # while the mirror is still bind-mounted, not in the phase that
-        # configures the join.
+        # Conditional packages are bundled in the pruned mirror and must be
+        # installed here, while it is still bind-mounted — tailscale not in
+        # the phase that configures the join. One batched call: each install
+        # is a full pacstrap run with its own -Sy rewrite of the target db.
+        packages = []
         if ctx.tailscale_authkey_path is not None:
             info("› installing tailscale (auth key staged for first boot)")
-            _await_target_keyring_init(ctx)
-            installer.add_additional_packages(["tailscale"])
-            ctx.state["target_db_synced"] = True
-
-        _install_accessibility_tools(ctx, installer)
+            packages.append("tailscale")
+        packages += _accessibility_packages()
+        if packages:
+            _install_target_packages(ctx, installer, packages)
     finally:
         _unmask_mkinitcpio_pacman_hooks(ctx)
         _unmount_offline_package_cache(ctx)
 
 
-def _install_accessibility_tools(ctx: InstallContext, installer) -> None:
+def _accessibility_packages() -> list[str]:
     """The legacy path gets these from minimal_installation, which extends its
     base set when the live session runs a screen reader (the accessibility=on
-    boot entry). The image bakes none of them, so install from the pruned
-    mirror while it is still bind-mounted; the shared finishers in
+    boot entry). The image bakes none of them, so they ride the conditional
+    package install from the pruned mirror; the shared finishers in
     arch_install_system enable espeakup on both paths."""
     if not arch.accessibility_tools_in_use():
-        return
-    info("› installing accessibility stack (brltty espeakup alsa-utils)")
+        return []
+    info(f"› installing accessibility stack ({' '.join(ACCESSIBILITY_PACKAGES)})")
+    return list(ACCESSIBILITY_PACKAGES)
+
+
+def _install_target_packages(ctx: InstallContext, installer, packages: list[str]) -> None:
+    """Pacstrap-semantics install from the pruned mirror (LIVE pacman.conf +
+    --root, see the _install_via_rootfs_image docstring). Owns the two
+    obligations every such install carries: joining the background keyring
+    init first (pacstrap -K writes the target's gnupg dir) and recording that
+    pacstrap's implicit -Sy already rewrote the target's sync db."""
     _await_target_keyring_init(ctx)
-    installer.add_additional_packages(["brltty", "espeakup", "alsa-utils"])
+    installer.add_additional_packages(packages)
     ctx.state["target_db_synced"] = True
 
 
@@ -570,12 +593,12 @@ def _assert_rootfs_image_supported_config(config) -> None:
             "would have added (build with OMARCHY_ROOTFS_IMAGE=0)"
         )
 
-    fs_types = set()
-    for mod in list(getattr(disk_config, "device_modifications", None) or []):
-        for part in list(getattr(mod, "partitions", None) or []):
-            fs_type = getattr(part, "fs_type", None)
-            if fs_type is not None:
-                fs_types.add(str(getattr(fs_type, "value", fs_type)).lower())
+    fs_types = {
+        part.fs_type.value.lower()
+        for mod in (getattr(disk_config, "device_modifications", None) or [])
+        for part in mod.partitions
+        if part.fs_type is not None
+    }
     unsupported_fs = sorted(fs_types & ROOTFS_IMAGE_UNSUPPORTED_FS_TYPES)
     if unsupported_fs:
         raise RuntimeError(
@@ -585,8 +608,7 @@ def _assert_rootfs_image_supported_config(config) -> None:
             "mirror cannot supply the rest (build with OMARCHY_ROOTFS_IMAGE=0)"
         )
 
-    kernels = list(getattr(config, "kernels", None) or ["linux"])
-    unsupported = sorted(set(kernels) - ROOTFS_IMAGE_SUPPORTED_KERNELS)
+    unsupported = sorted(set(_configured_kernels(config)) - ROOTFS_IMAGE_SUPPORTED_KERNELS)
     if unsupported:
         raise RuntimeError(
             f"rootfs-image install cannot provide kernels {unsupported!r}: the "
@@ -686,14 +708,6 @@ def _target_gpgdir(ctx: InstallContext) -> Path:
     return ctx.target / "etc" / "pacman.d" / "gnupg"
 
 
-def _raise_on_sigterm(signum, frame) -> None:
-    """Installed for the duration of the background keyring init: turns the
-    dashboard's group SIGTERM (its stop escalates to SIGKILL only after a
-    grace period) into an exception so the except-BaseException path kills
-    and joins the detached keyring session instead of leaking it."""
-    raise SystemExit(128 + signum)
-
-
 def _start_target_keyring_init(ctx: InstallContext) -> None:
     """Recreate the per-machine pacman keyring a legacy pacstrap left behind.
 
@@ -740,14 +754,15 @@ def _kill_target_keyring_init(ctx: InstallContext) -> None:
 def _await_target_keyring_init(ctx: InstallContext, *, raise_on_error: bool = True) -> None:
     """Join the background keyring init if it is still pending; no-op after.
 
-    Every pacstrap-semantics install (installer.add_additional_packages) must
-    call this first: pacstrap -K unconditionally runs its own pacman-key
-    --init on the target's gnupg dir — the very directory the background init
-    is writing — and two concurrent inits on one gpg homedir can generate
-    competing master keys or trip over gpg's keybox/trustdb locks. SigLevel =
-    Never only skips keyring reads, not pacstrap's writes. Installs that never
-    pacstrap (default kernel, no tailscale key, no screen reader) keep the
-    full overlap and join at the end of _install_via_rootfs_image."""
+    Every pacstrap-semantics install must run behind this join — enforced by
+    routing them through _install_target_packages: pacstrap -K
+    unconditionally runs its own pacman-key --init on the target's gnupg dir
+    — the very directory the background init is writing — and two concurrent
+    inits on one gpg homedir can generate competing master keys or trip over
+    gpg's keybox/trustdb locks. SigLevel = Never only skips keyring reads,
+    not pacstrap's writes. Installs that never pacstrap (default kernel, no
+    tailscale key, no screen reader) keep the full overlap and join at the
+    end of _install_via_rootfs_image."""
     proc = ctx.state.get("target_keyring_proc")
     if proc is None:
         return
@@ -881,7 +896,7 @@ def _reconcile_target_kernel(ctx: InstallContext, installer, config) -> None:
     TARGET_DEFERRED_BOOT_HOOKS: pruning Limine entries is exactly what
     removing the stock kernel needs, and with no limine.conf yet they no-op.
     """
-    kernels = list(getattr(config, "kernels", None) or ["linux"])
+    kernels = _configured_kernels(config)
     missing = [k for k in kernels if k != "linux"]
     drop_linux = "linux" not in kernels
     if not missing and not drop_linux:
@@ -891,9 +906,7 @@ def _reconcile_target_kernel(ctx: InstallContext, installer, config) -> None:
     _mask_mkinitcpio_pacman_hooks(ctx, ctx.target, TARGET_DEFERRED_BOOT_HOOKS)
     try:
         if missing:
-            _await_target_keyring_init(ctx)
-            installer.add_additional_packages(missing)
-            ctx.state["target_db_synced"] = True
+            _install_target_packages(ctx, installer, missing)
         if drop_linux:
             subprocess.run(
                 ["arch-chroot", str(ctx.target), "pacman", "-Rdd", "--noconfirm", "linux"],

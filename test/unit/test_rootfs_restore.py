@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "configs/airootfs/u
 
 sys.modules["orchestrator.archinstall_adapter"] = types.ModuleType("orchestrator.archinstall_adapter")
 
+from orchestrator import main as orchestrator_main  # noqa: E402
 from orchestrator import phases_impl  # noqa: E402
 
 
@@ -232,28 +233,21 @@ class AssertRootfsImageSupportedConfigTest(unittest.TestCase):
             )
 
 
-class InstallAccessibilityToolsTest(unittest.TestCase):
-    def run_helper(self, *, in_use):
-        ctx = types.SimpleNamespace(state={})
-        installer = mock.Mock()
+class AccessibilityPackagesTest(unittest.TestCase):
+    def packages(self, *, in_use):
         with mock.patch.object(phases_impl, "info"), mock.patch.object(
             phases_impl.arch, "accessibility_tools_in_use",
             lambda: in_use, create=True,
         ):
-            phases_impl._install_accessibility_tools(ctx, installer)
-        return ctx, installer
+            return phases_impl._accessibility_packages()
 
-    def test_installs_the_screen_reader_stack_when_live_session_uses_one(self):
-        ctx, installer = self.run_helper(in_use=True)
-        installer.add_additional_packages.assert_called_once_with(
-            ["brltty", "espeakup", "alsa-utils"]
+    def test_screen_reader_session_gets_the_stack(self):
+        self.assertEqual(
+            self.packages(in_use=True), phases_impl.ACCESSIBILITY_PACKAGES
         )
-        self.assertTrue(ctx.state["target_db_synced"])
 
-    def test_noop_without_accessibility_tools(self):
-        ctx, installer = self.run_helper(in_use=False)
-        installer.add_additional_packages.assert_not_called()
-        self.assertEqual(ctx.state, {})
+    def test_empty_without_a_screen_reader(self):
+        self.assertEqual(self.packages(in_use=False), [])
 
 
 class RootfsImageMarkerTest(unittest.TestCase):
@@ -288,29 +282,35 @@ class RootfsImageMarkerTest(unittest.TestCase):
         phases_impl._assert_rootfs_image_available()
 
 
-class InstallViaRootfsImageKeyFilesTest(unittest.TestCase):
-    """generate_key_files must follow the restore: it appends to the target's
-    /etc/crypttab, which unsquashfs -f would otherwise overwrite."""
+class InstallViaRootfsImageTestBase(unittest.TestCase):
+    """Shared harness driving _install_via_rootfs_image with every
+    collaborator patched out; subclasses pass their deltas."""
 
-    def run_install(self, *, encrypted, pre_mounted=False):
-        calls = []
-        installer = mock.Mock()
-        installer.generate_key_files.side_effect = (
-            lambda: calls.append("generate_key_files")
+    def run_install(self, *, encrypted=False, pre_mounted=False,
+                    configure=None, start_keyring=None):
+        self.calls = []
+        self.installer = mock.Mock()
+        self.installer.generate_key_files.side_effect = (
+            lambda: self.calls.append("generate_key_files")
         )
         patches = [
             mock.patch.object(phases_impl, "info"),
             mock.patch.object(phases_impl.subprocess, "run"),
+            mock.patch.object(phases_impl.os, "killpg"),
             mock.patch.object(
                 phases_impl, "_assert_rootfs_image_supported_config"
             ),
             mock.patch.object(
                 phases_impl, "_restore_rootfs_image",
-                side_effect=lambda ctx: calls.append("restore"),
+                side_effect=lambda ctx: self.calls.append("restore"),
             ),
-            mock.patch.object(phases_impl, "_rootfs_image_configure"),
-            mock.patch.object(phases_impl, "_start_target_keyring_init"),
-            mock.patch.object(phases_impl, "_finish_target_keyring_init"),
+            mock.patch.object(
+                phases_impl, "_rootfs_image_configure", side_effect=configure
+            ),
+            mock.patch.object(
+                phases_impl, "_start_target_keyring_init",
+                side_effect=start_keyring,
+            ),
             mock.patch.object(
                 phases_impl.arch, "is_pre_mount",
                 lambda config: pre_mounted, create=True,
@@ -323,9 +323,16 @@ class InstallViaRootfsImageKeyFilesTest(unittest.TestCase):
         for patch in patches:
             patch.start()
             self.addCleanup(patch.stop)
-        ctx = types.SimpleNamespace(target=Path("/mnt/target"), state={})
-        phases_impl._install_via_rootfs_image(ctx, installer, object(), object())
-        return calls
+        self.ctx = types.SimpleNamespace(target=Path("/mnt/target"), state={})
+        phases_impl._install_via_rootfs_image(
+            self.ctx, self.installer, object(), object()
+        )
+        return self.calls
+
+
+class InstallViaRootfsImageKeyFilesTest(InstallViaRootfsImageTestBase):
+    """generate_key_files must follow the restore: it appends to the target's
+    /etc/crypttab, which unsquashfs -f would otherwise overwrite."""
 
     def test_encrypted_generates_key_files_after_the_restore(self):
         self.assertEqual(
@@ -341,73 +348,35 @@ class InstallViaRootfsImageKeyFilesTest(unittest.TestCase):
         )
 
 
-class KeyringSigtermWindowTest(unittest.TestCase):
-    """A dashboard stop SIGTERMs the orchestrator's process group, which the
-    detached (start_new_session) keyring init survives. While the init runs,
-    SIGTERM must raise so the except-BaseException path kills and joins it,
-    and the previous disposition must come back afterwards."""
+class KeyringExceptionPathTest(InstallViaRootfsImageTestBase):
+    """A failure while the detached keyring init runs must kill its process
+    group and join it, and the original error must win. main()'s SIGTERM
+    handler is what routes a dashboard stop through this same path."""
 
-    def run_install(self, *, configure_side_effect):
-        seen = {}
-
-        def configure(ctx, installer, config, mirror_handler):
-            seen["handler"] = signal.getsignal(signal.SIGTERM)
-            if configure_side_effect is not None:
-                raise configure_side_effect
-
-        def start_keyring(ctx):
-            ctx.state["target_keyring_proc"] = FakeKeyringProc(returncode=0)
-            ctx.state["target_keyring_proc"].pid = 1234
-
-        patches = [
-            mock.patch.object(phases_impl, "info"),
-            mock.patch.object(phases_impl.subprocess, "run"),
-            mock.patch.object(phases_impl.os, "killpg"),
-            mock.patch.object(
-                phases_impl, "_assert_rootfs_image_supported_config"
-            ),
-            mock.patch.object(phases_impl, "_restore_rootfs_image"),
-            mock.patch.object(
-                phases_impl, "_rootfs_image_configure", side_effect=configure
-            ),
-            mock.patch.object(
-                phases_impl, "_start_target_keyring_init",
-                side_effect=start_keyring,
-            ),
-            mock.patch.object(
-                phases_impl.arch, "is_pre_mount",
-                lambda config: False, create=True,
-            ),
-            mock.patch.object(
-                phases_impl.arch, "is_encrypted",
-                lambda config: False, create=True,
-            ),
-        ]
-        for patch in patches:
-            patch.start()
-            self.addCleanup(patch.stop)
-        ctx = types.SimpleNamespace(target=Path("/mnt/target"), state={})
-        phases_impl._install_via_rootfs_image(ctx, installer=mock.Mock(),
-                                             config=object(),
-                                             mirror_handler=object())
-        return ctx, seen
-
-    def test_sigterm_raises_inside_the_keyring_window(self):
-        before = signal.getsignal(signal.SIGTERM)
-        _, seen = self.run_install(configure_side_effect=None)
-        self.assertIs(seen["handler"], phases_impl._raise_on_sigterm)
-        with self.assertRaises(SystemExit):
-            seen["handler"](signal.SIGTERM, None)
-        self.assertIs(signal.getsignal(signal.SIGTERM), before)
+    @staticmethod
+    def start_keyring(ctx):
+        proc = FakeKeyringProc(returncode=0)
+        proc.pid = 1234
+        ctx.state["target_keyring_proc"] = proc
 
     def test_exception_path_kills_and_joins_the_init(self):
         boom = RuntimeError("configure failed")
+
+        def configure(ctx, installer, config, mirror_handler):
+            raise boom
+
         with self.assertRaises(RuntimeError) as raised:
-            self.run_install(configure_side_effect=boom)
+            self.run_install(configure=configure,
+                             start_keyring=self.start_keyring)
         self.assertIs(raised.exception, boom)
         phases_impl.os.killpg.assert_called_once_with(
             1234, phases_impl.signal.SIGKILL
         )
+
+    def test_sigterm_converts_to_a_normal_unwind(self):
+        with self.assertRaises(SystemExit) as raised:
+            orchestrator_main._raise_on_sigterm(signal.SIGTERM, None)
+        self.assertEqual(raised.exception.code, 128 + signal.SIGTERM)
 
 
 class StartTargetKeyringInitTest(unittest.TestCase):
@@ -469,21 +438,23 @@ class AwaitTargetKeyringInitTest(unittest.TestCase):
             )
         finish.assert_not_called()
 
-    def test_accessibility_install_joins_before_pacstrap(self):
+class InstallTargetPackagesTest(unittest.TestCase):
+    """Owns the pacstrap-semantics obligations: join the background keyring
+    init before pacstrap -K touches the target's gnupg dir, then record that
+    the implicit -Sy already rewrote the target's sync db."""
+
+    def test_joins_installs_and_records_the_sync(self):
         ctx = types.SimpleNamespace(
             target=Path("/mnt/target"),
             state={"target_keyring_proc": FakeKeyringProc(returncode=0)},
         )
         installer = mock.Mock()
         with mock.patch.object(phases_impl, "info"), \
-                mock.patch.object(phases_impl.subprocess, "run"), \
-                mock.patch.object(
-                    phases_impl.arch, "accessibility_tools_in_use",
-                    lambda: True, create=True,
-                ):
-            phases_impl._install_accessibility_tools(ctx, installer)
+                mock.patch.object(phases_impl.subprocess, "run"):
+            phases_impl._install_target_packages(ctx, installer, ["tailscale"])
         self.assertNotIn("target_keyring_proc", ctx.state)
-        installer.add_additional_packages.assert_called_once()
+        installer.add_additional_packages.assert_called_once_with(["tailscale"])
+        self.assertTrue(ctx.state["target_db_synced"])
 
 
 class FinishTargetKeyringInitTest(unittest.TestCase):

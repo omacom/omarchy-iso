@@ -492,8 +492,12 @@ def _assert_rootfs_image_supported_config(config) -> None:
 def _restore_rootfs_image(ctx: InstallContext) -> None:
     """unsquashfs the image over the mounted target layout.
 
-    Runs as root, so ownership, modes, xattrs/capabilities, ACLs and hardlinks
-    are restored by default. -f because the mounted subvolume layout already
+    Runs as root, so ownership, modes, xattrs/capabilities and hardlinks are
+    restored by default. POSIX ACLs are not: mksquashfs drops the
+    system.posix_acl_* xattrs at build. Harmless today — the only ACL carriers
+    on an installed system are tmpfiles.d a+ lines reapplied at boot — but a
+    package that ships an ACL directly would lose it.
+    -f because the mounted subvolume layout already
     created the top-level directories; writes pass through the mounted
     @home/@log/@pkg subvolumes, and the ESP mountpoint is untouched (the
     image's /boot is empty — boot hooks were masked at build).

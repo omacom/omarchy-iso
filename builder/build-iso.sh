@@ -493,8 +493,10 @@ build_rootfs_image() {
 
   # The outer airootfs squashfs stores this file uncompressed (see
   # profiledef.sh), so this is the only compression pass it gets.
+  # -exit-on-error because source-read and metadata failures otherwise only
+  # warn, and a silently degraded image would ship.
   mksquashfs "$rootfs_dir" "$rootfs_sfs_dir/omarchy-rootfs.sfs" \
-    -comp zstd -Xcompression-level 19 -b 1M -noappend -xattrs
+    -comp zstd -Xcompression-level 19 -b 1M -noappend -xattrs -exit-on-error
 
   pacman --root "$rootfs_dir" --dbpath "$rootfs_dir/var/lib/pacman" -Q |
     LC_ALL=C sort >"$iso_share_dir/rootfs-manifest"

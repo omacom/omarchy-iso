@@ -830,7 +830,7 @@ def _ensure_target_locale(ctx: InstallContext, config) -> None:
     locale_gen = ctx.target / "etc" / "locale.gen"
     entry = f"{lang} {encoding}\n"
     existing = locale_gen.read_text() if locale_gen.exists() else ""
-    if entry not in existing:
+    if entry.rstrip("\n") not in existing.splitlines():
         with locale_gen.open("a", encoding="utf-8") as f:
             f.write(entry)
     subprocess.run(["arch-chroot", str(ctx.target), "locale-gen"], check=True)

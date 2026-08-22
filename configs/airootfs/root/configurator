@@ -870,26 +870,44 @@ disk_form() {
   boot_source=$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null || true)
   exclude_disk=$(get_root_disk "$boot_source")
 
-  # List all installable disks, excluding the boot device if present
-  local available_disks
-  available_disks=$(
-    lsblk -dpno NAME,TYPE |
-      awk '$2=="disk"{print $1}' |
-      grep -E '/dev/(sd|hd|vd|nvme|mmcblk|xv)' |
-      { if [[ -n "$exclude_disk" ]]; then grep -Fvx "$exclude_disk"; else cat; fi; }
-  )
+  while true; do
+    # List all installable disks, excluding the boot device if present. Scanned
+    # on every loop pass so a drive hot-plugged after the first failure is
+    # picked up on rescan rather than forcing a full restart.
+    local available_disks
+    available_disks=$(
+      lsblk -dpno NAME,TYPE |
+        awk '$2=="disk"{print $1}' |
+        grep -E '/dev/(sd|hd|vd|nvme|mmcblk|xv)' |
+        { if [[ -n "$exclude_disk" ]]; then grep -Fvx "$exclude_disk"; else cat; fi; }
+    )
 
-  # Get available disks and format them with info
-  local disk_options=""
-  while IFS= read -r device; do
-    if [[ -n "$device" ]]; then
-      disk_info=$(get_disk_info "$device")
-      disk_options="$disk_options$disk_info"$'\n'
+    # No drive detected: don't hand an empty list to `gum choose` (it crashes
+    # with no options). Offer to rescan for a hot-plugged drive, else abort.
+    if [[ -z "$available_disks" ]]; then
+      clear_logo
+      echo
+      say --foreground 1 "No installable drives were detected."
+      say "Connect a drive and return here to continue, or abort the install."
+      echo
+      gum confirm --affirmative "Rescan for drives" --negative "Abort install" \
+        "No drives found — rescan?" || abort "Aborted: no installable drives found"
+      continue
     fi
-  done <<<"$available_disks"
 
-  selected_display=$(echo "$disk_options" | gum choose --header "Select install disk") || abort
-  disk=$(echo "$selected_display" | awk '{print $1}')
+    # Get available disks and format them with info
+    local disk_options=""
+    while IFS= read -r device; do
+      if [[ -n "$device" ]]; then
+        disk_info=$(get_disk_info "$device")
+        disk_options="$disk_options$disk_info"$'\n'
+      fi
+    done <<<"$available_disks"
+
+    selected_display=$(echo "$disk_options" | gum choose --header "Select install disk") || abort
+    disk=$(echo "$selected_display" | awk '{print $1}')
+    return 0
+  done
 }
 
 # STEP 4: INSTALL MODE

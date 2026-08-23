@@ -5,8 +5,8 @@
 The orchestrator reads firmware and filesystem metadata out of commands whose
 output is not required to be UTF-8: noise in a boot entry must not stop an
 install, while a mangled identifier must stop one. These tests run stand-in
-commands that print the byte sequence an HP ProBook's legacy BBS entry actually
-produced, so they exercise the decode itself rather than a mocked result.
+commands emitting the bytes two HP firmwares actually put in a legacy BBS entry,
+so they exercise the decode itself rather than a mocked result.
 """
 
 import os

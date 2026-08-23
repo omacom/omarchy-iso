@@ -7,11 +7,16 @@ bytes verbatim, and subprocess's strict text decoding turned a boot entry
 nothing here reads into a failed install.
 
 So capture() replaces what it cannot decode, and the boot-entry parsing that
-reads its output stays tolerant on purpose: the decisions taken from a firmware
-label are advisory, and refusing a junk one would abort the install this exists
-to let finish. An identifier is the other case entirely — require_text() refuses
-a UUID or a device name that came through mangled, because that one is written
-into fstab and the kernel cmdline, or handed to mount.
+reads its output stays tolerant on purpose: an entry's text is its label and its
+device path together, and the junk lives in the path, so refusing one would abort
+the install this exists to let finish. Nothing mangled reaches efibootmgr from
+there either way — only four-digit ASCII boot numbers become arguments, and a
+boot order is filtered through the entries that parsed — so a label that loses a
+byte costs a stale entry left behind rather than a broken system.
+
+An identifier is the other case entirely: require_text() refuses a UUID or a
+device name that came through mangled, because that one is written into fstab and
+the kernel cmdline, or handed to mount.
 """
 
 from __future__ import annotations

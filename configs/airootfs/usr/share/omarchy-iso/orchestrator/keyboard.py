@@ -11,8 +11,9 @@ generated: nothing on an Omarchy system reads it.
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
+
+from .command import capture
 
 
 def configure_keyboard(target: Path, language: str) -> bool:
@@ -25,12 +26,7 @@ def configure_keyboard(target: Path, language: str) -> bool:
     if not language.strip():
         return True
 
-    result = subprocess.run(
-        ["localectl", "--no-pager", "list-keymaps"],
-        check=False,
-        text=True,
-        capture_output=True,
-    )
+    result = capture(["localectl", "--no-pager", "list-keymaps"])
     if result.returncode != 0:
         detail = result.stderr.strip() or "localectl returned an error"
         raise RuntimeError(f"Unable to list keyboard layouts: {detail}")
@@ -47,12 +43,7 @@ def configure_keyboard(target: Path, language: str) -> bool:
             None,
         )
 
-    result = subprocess.run(
-        ["systemd-firstboot", f"--root={target}", f"--keymap={language}", "--force"],
-        check=False,
-        text=True,
-        capture_output=True,
-    )
+    result = capture(["systemd-firstboot", f"--root={target}", f"--keymap={language}", "--force"])
     if result.returncode != 0:
         detail = result.stderr.strip() or "systemd-firstboot returned an error"
         raise RuntimeError(f"Unable to configure keyboard layout {language}: {detail}")

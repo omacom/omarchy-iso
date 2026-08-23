@@ -33,6 +33,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import archinstall_adapter as arch
+from .command import capture, capture_identifier, require_text
 from .context import InstallContext
 from .keyboard import configure_keyboard
 from .ui import error, info
@@ -793,11 +794,7 @@ def verify_protected_mounts(ctx: InstallContext) -> None:
 
 
 def _is_mountpoint(path: Path) -> bool:
-    res = subprocess.run(
-        ["findmnt", "-rn", str(path)],
-        capture_output=True,
-        text=True,
-    )
+    res = capture(["findmnt", "-rn", str(path)])
     return res.returncode == 0 and bool(res.stdout.strip())
 
 
@@ -811,11 +808,9 @@ def _btrfs_root_device(ctx: InstallContext) -> str:
 
 
 def _blkid_uuid(device: str) -> str:
-    res = subprocess.run(
-        ["blkid", "-s", "UUID", "-o", "value", device],
-        capture_output=True, text=True, check=True,
+    uuid = capture_identifier(
+        ["blkid", "-s", "UUID", "-o", "value", device], f"the UUID of {device}"
     )
-    uuid = res.stdout.strip()
     if not uuid:
         raise RuntimeError(f"blkid returned no UUID for {device}")
     return uuid
@@ -828,11 +823,9 @@ def _esp_device(ctx: InstallContext) -> str:
 
     boot = _boot_intent(ctx)
     esp_mp = ctx.target / boot["esp_mount"].lstrip("/")
-    res = subprocess.run(
-        ["findmnt", "-n", "-o", "SOURCE", str(esp_mp)],
-        capture_output=True, text=True, check=True,
+    dev = capture_identifier(
+        ["findmnt", "-n", "-o", "SOURCE", str(esp_mp)], f"the ESP device at {esp_mp}"
     )
-    dev = res.stdout.strip()
     if not dev:
         raise RuntimeError(f"could not resolve ESP device at {esp_mp}")
     return dev
@@ -904,10 +897,7 @@ _BOOT_ORDER_RE = re.compile(r"^BootOrder:\s*(.*)$")
 
 
 def _read_efibootmgr() -> dict:
-    res = subprocess.run(
-        ["efibootmgr"],
-        capture_output=True, text=True, check=True,
-    )
+    res = capture(["efibootmgr"], check=True)
     entries: dict[str, str] = {}
     order: list[str] = []
     for line in res.stdout.splitlines():
@@ -926,16 +916,14 @@ def _find_label_entries(entries: dict[str, str], needle: str) -> list[str]:
 
 
 def _split_partition_device(part_dev: str) -> tuple[str, int]:
-    parent = subprocess.run(
-        ["lsblk", "-ndo", "PKNAME", part_dev],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
+    parent = capture_identifier(
+        ["lsblk", "-ndo", "PKNAME", part_dev], f"the parent disk of {part_dev}"
+    )
     if not parent:
         raise RuntimeError(f"could not find parent disk for {part_dev}")
-    part_num = subprocess.run(
-        ["lsblk", "-ndo", "PARTN", part_dev],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
+    part_num = capture_identifier(
+        ["lsblk", "-ndo", "PARTN", part_dev], f"the partition number of {part_dev}"
+    )
     if not part_num:
         raise RuntimeError(f"could not find partition number for {part_dev}")
     return f"/dev/{parent}", int(part_num)
@@ -994,7 +982,7 @@ def _debug_run(ctx: InstallContext, cmd: list[str]) -> None:
     if not _install_debug_enabled():
         return
     _debug_log(ctx, "+ " + " ".join(cmd))
-    proc = subprocess.run(cmd, check=False, text=True, capture_output=True)
+    proc = capture(cmd)
     if proc.stdout:
         with ctx.log_path.open("a", encoding="utf-8") as log:
             for line in proc.stdout.splitlines():
@@ -1805,7 +1793,10 @@ def create_factory_snapshot(ctx: InstallContext) -> None:
         info("› target root is not the @ subvolume; skipping factory snapshot")
         return
 
-    device = (_findmnt_value(ctx.target, "SOURCE") or "").split("[")[0]
+    device = require_text(
+        (_findmnt_value(ctx.target, "SOURCE") or "").split("[")[0],
+        f"the btrfs device backing {ctx.target}",
+    )
     if not device:
         raise RuntimeError(f"could not determine the btrfs device backing {ctx.target}")
 
@@ -1862,10 +1853,7 @@ def _scrub_factory_snapshot(factory: Path) -> None:
 
 
 def _findmnt_value(path: Path, column: str) -> str | None:
-    res = subprocess.run(
-        ["findmnt", "-no", column, str(path)],
-        capture_output=True, text=True,
-    )
+    res = capture(["findmnt", "-no", column, str(path)])
     value = res.stdout.strip()
     return value if res.returncode == 0 and value else None
 

@@ -1,18 +1,16 @@
 #!/usr/bin/python
 
-import importlib.util
 import re
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MODULE_PATH = ROOT / "configs/airootfs/usr/share/omarchy-iso/orchestrator/keyboard.py"
-SPEC = importlib.util.spec_from_file_location("installer_keyboard", MODULE_PATH)
-KEYBOARD = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader
-SPEC.loader.exec_module(KEYBOARD)
+sys.path.insert(0, str(ROOT / "configs/airootfs/usr/share/omarchy-iso"))
+
+from orchestrator import keyboard as KEYBOARD  # noqa: E402
 
 # The layout list lives in the Omarchy runtime now, shared verbatim with the
 # first-boot owner setup; build-iso.sh vendors it onto the ISO. Read it from

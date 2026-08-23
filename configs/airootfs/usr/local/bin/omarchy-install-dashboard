@@ -643,14 +643,44 @@ view_failure_log() {
   fi
 }
 
+# A failure the medium explains is worth saying before the log tail, because
+# the tail is where "invalid or corrupted package" already scrolled past
+# without ever naming the USB stick it came off.
+diagnose_media() {
+  local logs=("$LOG_FILE")
+
+  [[ -f /mnt/var/log/omarchy-install.log ]] && logs+=(/mnt/var/log/omarchy-install.log)
+  [[ -n ${OMARCHY_FAILURE_TAIL_LOG:-} ]] && logs+=("$OMARCHY_FAILURE_TAIL_LOG")
+
+  omarchy-install-diagnose-media "${logs[@]}" 2>/dev/null
+}
+
+render_media_diagnosis() {
+  local diagnosis="$1" line first=1
+
+  [[ -n $diagnosis ]] || return 0
+  blank_line
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    if (( first )); then
+      center "${RED}$(truncate_for_width "$line" "$CONTENT_WIDTH")${RESET}" "$CONTENT_WIDTH"
+      first=0
+    else
+      center "$(truncate_for_width "$line" "$CONTENT_WIDTH")" "$CONTENT_WIDTH"
+    fi
+  done <<<"$diagnosis"
+}
+
 render_failure() {
-  local status="$1" state_summary="${2:-}" line
+  local status="$1" state_summary="${2:-}" media_diagnosis="${3:-}" line
   printf '%s%s' "$SHOW_CURSOR" "$CLEAR"
   blank_line
   render_logo
   blank_line
   center "${RED}Omarchy installation stopped${RESET}" "$CONTENT_WIDTH"
   center "Installer exited with status $status" "$CONTENT_WIDTH"
+
+  render_media_diagnosis "$media_diagnosis"
 
   if [[ -n $state_summary ]]; then
     blank_line
@@ -702,11 +732,11 @@ failure_menu() {
     case "$choice" in
       "Upload log for support")
         upload_failure_log
-        render_failure "${failure_status:-1}" "${failure_summary:-}" >"$TTY_PATH" 2>/dev/null || true
+        render_failure "${failure_status:-1}" "${failure_summary:-}" "${failure_media_diagnosis:-}" >"$TTY_PATH" 2>/dev/null || true
         ;;
       "View full log")
         view_failure_log
-        render_failure "${failure_status:-1}" "${failure_summary:-}" >"$TTY_PATH" 2>/dev/null || true
+        render_failure "${failure_status:-1}" "${failure_summary:-}" "${failure_media_diagnosis:-}" >"$TTY_PATH" 2>/dev/null || true
         ;;
       "Reboot")
         reboot 2>/dev/null || systemctl reboot 2>/dev/null || true
@@ -792,7 +822,13 @@ if (( status != 0 )); then
       done <<<"$failure_summary"
     fi
   fi
-  render_failure "$failure_status" "$failure_summary" >"$TTY_PATH" 2>/dev/null || true
+  failure_media_diagnosis="$(diagnose_media || true)"
+  if [[ -n $failure_media_diagnosis ]]; then
+    while IFS= read -r line; do
+      [[ -n $line ]] && dashboard_log "$line"
+    done <<<"$failure_media_diagnosis"
+  fi
+  render_failure "$failure_status" "$failure_summary" "$failure_media_diagnosis" >"$TTY_PATH" 2>/dev/null || true
   failure_menu
   exit "$failure_status"
 fi

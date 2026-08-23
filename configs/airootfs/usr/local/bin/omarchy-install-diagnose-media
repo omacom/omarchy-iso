@@ -1,0 +1,114 @@
+#!/bin/bash
+#
+# Say whether an install failure was the install medium, and say it in words
+# that name the fix.
+#
+# The ISO's offline mirror is bind-mounted onto the target's package cache for
+# the duration of pacstrap (see _mount_offline_package_cache), so a package
+# pacman calls corrupt under that path is a byte that came off the medium --
+# nothing else ever writes there. That much is certain, and it is the part
+# worth saying out loud, because the failure screen otherwise ends at "get help
+# at discord" with the word USB nowhere on it.
+#
+# What is not certain is which way the medium failed. Bytes written wrong and
+# bytes read wrong produce the same checksum mismatch, and pacstrap runs with
+# --noconfirm, which answers yes to pacman's "delete it?" and unlinks the
+# package through the bind mount before anything here can weigh it. So the
+# usual verdict names the medium and gives both remedies in the order worth
+# trying. When the package does survive, its checksum in the mirror's database
+# tells the two apart, and then this says which.
+#
+# Prints the diagnosis on stdout, one line per line, headline first. Exits 1
+# with no output when there is nothing here to diagnose, so the caller can ask
+# unconditionally.
+
+set -uo pipefail
+
+TARGET_PACKAGE_CACHE="${OMARCHY_TARGET_PACKAGE_CACHE:-/mnt/var/cache/pacman/pkg}"
+OFFLINE_MIRROR="${OMARCHY_OFFLINE_MIRROR:-/var/cache/omarchy/mirror/offline}"
+
+if (( $# == 0 )); then
+  echo "Usage: omarchy-install-diagnose-media <log-file>..." >&2
+  exit 2
+fi
+
+# Only packages under the target cache count. A corrupt package anywhere else
+# was not read off this ISO, and guessing wrong here sends someone to buy a USB
+# stick they did not need.
+corrupt_package() {
+  local log match package=""
+
+  for log in "$@"; do
+    [[ -f $log ]] || continue
+    match=$(sed -n "s|.*${TARGET_PACKAGE_CACHE}/\([^ ]*\) is corrupted.*|\1|p" "$log" | tail -n 1)
+    [[ -n $match ]] && package="$match"
+  done
+
+  printf '%s' "$package"
+}
+
+expected_checksum() {
+  local package="$1" reader
+
+  [[ -f $OFFLINE_MIRROR/offline.db ]] || return 1
+
+  if command -v bsdtar >/dev/null 2>&1; then
+    reader=(bsdtar -xOf "$OFFLINE_MIRROR/offline.db")
+  else
+    reader=(tar -xOzf "$OFFLINE_MIRROR/offline.db")
+  fi
+
+  # repo-add writes %FILENAME% before %SHA256SUM% in every desc record, so the
+  # name in hand when a checksum arrives is the name it belongs to. The wanted
+  # name comes through the environment rather than -v, which would read a
+  # backslash in a package version as an escape sequence.
+  "${reader[@]}" 2>/dev/null | want="$package" awk '
+    BEGIN { want = ENVIRON["want"] }
+    $0 == "%FILENAME%" { getline name; next }
+    $0 == "%SHA256SUM%" { getline sha; if (name == want) { print sha; exit } }
+  '
+}
+
+actual_checksum() {
+  local package="$1" sum
+
+  [[ -f $OFFLINE_MIRROR/$package ]] || return 1
+  sum=$(sha256sum "$OFFLINE_MIRROR/$package" 2>/dev/null) || return 1
+  printf '%s' "${sum%% *}"
+}
+
+package=$(corrupt_package "$@")
+if [[ -z $package ]]; then
+  exit 1
+fi
+
+# The name reaches a terminal, and a package version may legally hold a
+# backslash that the renderer would read as an escape. Strip anything a package
+# filename has no business containing before printing it.
+display_package="${package//[^A-Za-z0-9._+:@%-]/}"
+
+expected=$(expected_checksum "$package")
+actual=$(actual_checksum "$package")
+
+if [[ -n $expected && -n $actual ]]; then
+  if [[ $expected == "$actual" ]]; then
+    # Intact now, so the bytes were misread rather than written wrong, and
+    # re-downloading fixes neither of the things that could have done it.
+    echo "The install medium was misread"
+    echo "$display_package is intact on this ISO, so the download and the write were fine"
+    echo "Try another USB port or another stick, and test this machine's memory"
+  else
+    echo "The install medium is damaged"
+    echo "$display_package on this ISO no longer matches the checksum it was built with"
+    echo "Re-download the ISO, verify it with sha256sum, and write the USB again"
+    echo "If a verified ISO fails here too, the USB stick itself is the problem"
+  fi
+  exit 0
+fi
+
+# The usual case: pacman deleted the package it rejected, so the medium is the
+# answer but the manner of its failure is not recoverable from here.
+echo "The install medium is damaged or misread"
+echo "pacman rejected $display_package, read straight off this ISO"
+echo "Verify your download with sha256sum, then write the USB again"
+echo "If the download verifies, the stick or this machine's memory is at fault"

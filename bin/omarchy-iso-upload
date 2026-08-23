@@ -10,8 +10,24 @@ if [[ ! -f ~/.config/rclone/rclone.conf ]]; then
   exit 1
 fi
 
-rclone copy $1 Omarchy:omarchy/ -P
+# Every copy reports, and one failure fails the upload. Without the tally the
+# last copy decides the exit status, so a signature that never made it is
+# hidden by a checksum that did.
+status=0
 
-if [[ -f $1.sig ]]; then
-  rclone copy $1.sig Omarchy:omarchy/ -P
+rclone copy "$1" Omarchy:omarchy/ -P || status=1
+
+# The signature and the checksum are only worth anything to someone who can
+# reach them beside the ISO, so they go up in the same run rather than a step
+# a release can finish without.
+for sidecar in "$1.sig" "$1.sha256"; do
+  if [[ -f $sidecar ]]; then
+    rclone copy "$sidecar" Omarchy:omarchy/ -P || status=1
+  fi
+done
+
+if [[ ! -f $1.sha256 ]]; then
+  echo "Warning: no $1.sha256 to publish, so nobody can verify this download" >&2
 fi
+
+exit $status

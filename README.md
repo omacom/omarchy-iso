@@ -6,6 +6,14 @@ The Omarchy ISO is the only supported way to install Omarchy. It ships the Omarc
 
 See the ISO link on [omarchy.org](https://omarchy.org).
 
+Every published ISO has a `.sha256` beside it at the same URL. Download both into the same directory and check the ISO before writing it to a USB stick:
+
+```bash
+sha256sum -c omarchy-3.0.iso.sha256
+```
+
+Corruption anywhere in the ISO is worth catching before the write, and corruption in the bundled package mirror is worth catching most: the mirror lives inside the ISO and the installer reads it straight off the medium, so those bytes surface minutes into the install as a pacman "invalid or corrupted package" error rather than as anything that names the download. Corruption elsewhere is louder and earlier — it stops the medium booting or mounting. There is a `.sig` beside the ISO too for anyone who wants to verify it against the Omarchy signing key.
+
 ## Creating the ISO
 
 Run `./bin/omarchy-iso-make`; output goes into `./release`. By default the ISO uses the Omarchy packages and tracks the `quattro` branch, from the stable mirror. Pass `--edge` to use `omarchy-dev` and `omarchy-settings-dev` from the edge mirror.
@@ -130,7 +138,7 @@ Run `./bin/omarchy-iso-sign [release/omarchy.iso]`. The signing key is retrieved
 
 ## Uploading the ISO
 
-Run `./bin/omarchy-iso-upload [release/omarchy.iso]`. This requires rclone configuration (`rclone config`).
+Run `./bin/omarchy-iso-upload [release/omarchy.iso]`. This requires rclone configuration (`rclone config`). The `.sig` and `.sha256` sidecars go up with the ISO when they exist beside it.
 
 ## Full release of the ISO
 

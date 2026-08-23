@@ -56,7 +56,17 @@ cp "$latest_iso" "$release_iso"
 echo -e "\e[32mSigning $ISO_REF ISO\e[0m"
 omarchy-iso-sign "$release_iso"
 
+# The checksum sidecar names the ISO alone, never the build path: it is
+# downloaded next to the ISO and has to verify with `sha256sum -c` from
+# whatever directory the person who downloaded it happens to be in. A release
+# that cannot write it stops here, because the sidecar left over from the last
+# release reads as a checksum for this one.
 iso_sha=$(sha256sum "$release_iso")
+iso_sha=${iso_sha%% *}
+if [[ -z $iso_sha ]] || ! printf '%s  %s\n' "$iso_sha" "${release_iso##*/}" >"$release_iso.sha256"; then
+  echo -e "\e[31mCould not write the checksum for $release_iso\e[0m" >&2
+  exit 1
+fi
 echo -e "\e[32mSHA256 for $ISO_REF ISO: $iso_sha\e[0m"
 
 omarchy-iso-upload "$release_iso"

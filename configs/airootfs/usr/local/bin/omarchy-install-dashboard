@@ -661,7 +661,12 @@ render_media_diagnosis() {
   [[ -n $diagnosis ]] || return 0
   blank_line
   while IFS= read -r line; do
-    [[ -n $line ]] || continue
+    # A blank line inside the diagnosis is deliberate: it separates what
+    # happened from what to do about it, so it is drawn rather than skipped.
+    if [[ -z $line ]]; then
+      blank_line
+      continue
+    fi
     if (( first )); then
       center "${RED}$(truncate_for_width "$line" "$CONTENT_WIDTH")${RESET}" "$CONTENT_WIDTH"
       first=0

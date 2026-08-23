@@ -270,7 +270,9 @@ run_dashboard() {
 }
 
 visible_screen() {
-  sed -E $'s/\x1b\\[[0-9;?]*[A-Za-z]//g' "$screen"
+  # Carriage returns as well as escapes: the pty ends every line with one, and
+  # a row that looks blank still carries it.
+  sed -E $'s/\x1b\\[[0-9;?]*[A-Za-z]//g; s/\r//g' "$screen"
 }
 
 dashboard_log="$work/dashboard.log"
@@ -301,7 +303,16 @@ grep -qF "[dashboard] The install medium is damaged" "$dashboard_log" ||
 headline_count=$(visible_screen | grep -cF "The install medium is damaged or misread" || true)
 (( headline_count == 1 )) ||
   fail "the diagnosis appears once on the screen" "found $headline_count times"
-pass "the dashboard renders the diagnosis once and records it in the support log"
+
+# The renderer used to drop blank lines, so the break has to be checked where
+# it matters: on the screen, not only in the text the helper produced.
+package_row=$(visible_screen | grep -nF "$PACKAGE" | grep -v "dashboard" | head -n 1 | cut -d: -f1)
+[[ -n $package_row ]] ||
+  fail "the screen names the package on its own row" "$(visible_screen | tail -n 25)"
+next_row=$(visible_screen | sed -n "$((package_row + 1))p")
+[[ -z ${next_row// /} ]] ||
+  fail "the screen breaks after the package" "next row was: $next_row"
+pass "the dashboard renders the diagnosis once, with the break, and logs it"
 
 # The screen is only as wide as the logo and the dashboard truncates to it with
 # an ellipsis. Every sentence has to survive that, whatever the package is
@@ -318,16 +329,40 @@ check_widths() {
   done < <(diagnose "$long_log")
 }
 
+# The package line and the remedy that follows it are two different thoughts,
+# so a blank line separates them in every verdict.
+check_break() {
+  local label="$1" package="$2" out
+  out=$(diagnose "$long_log")
+  local -a lines
+  mapfile -t lines <<<"$out"
+
+  local i
+  for i in "${!lines[@]}"; do
+    [[ ${lines[i]} == "$package" ]] || continue
+    [[ -z ${lines[i + 1]-x} ]] ||
+      fail "a break follows the package ($label)" "$out"
+    [[ -n ${lines[i + 2]-} ]] ||
+      fail "the remedy follows the break ($label)" "$out"
+    return 0
+  done
+  fail "the package is on a line of its own ($label)" "$out"
+}
+
 # All three verdicts, since each writes its own sentences.
 rm -f "$mirror/$long_package"
 check_widths "deleted"
+check_break "deleted" "$long_package"
 printf 'these are not the bytes that were built\n' >"$mirror/$long_package"
 write_mirror_db "$(printf '0%.0s' {1..64})" "$long_package"
 check_widths "damaged"
+check_break "damaged" "$long_package"
 write_mirror_db "$(sha256sum "$mirror/$long_package" | cut -d " " -f 1)" "$long_package"
 check_widths "misread"
+check_break "misread" "$long_package"
 rm -f "$mirror/$long_package"
 pass "no diagnosis line outruns the screen, even with a long package name"
+pass "a break separates the package from the remedy in every verdict"
 
 # A failure with no media explanation must leave the screen as it was, rather
 # than gaining a banner or an empty gap where the diagnosis would go.

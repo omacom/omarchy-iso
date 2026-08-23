@@ -92,7 +92,8 @@ actual=$(actual_checksum "$package")
 
 # The package name goes on a line of its own throughout. Names run past fifty
 # characters and the screen is only as wide as the logo, so a name sharing a
-# line with the sentence that explains it truncates the explanation away.
+# line with the sentence that explains it truncates the explanation away. The
+# blank line after it separates what happened from what to do about it.
 if [[ -n $expected && -n $actual ]]; then
   if [[ $expected == "$actual" ]]; then
     # Intact now, so the bytes were misread rather than written wrong, and
@@ -100,11 +101,13 @@ if [[ -n $expected && -n $actual ]]; then
     echo "The install medium was misread"
     echo "This package is intact on this ISO, so the download and the write were fine:"
     echo "$display_package"
+    echo
     echo "Try another USB port or another stick, and test this machine's memory"
   else
     echo "The install medium is damaged"
     echo "This package no longer matches the checksum it was built with:"
     echo "$display_package"
+    echo
     echo "Re-download the ISO, verify it with sha256sum, and write the USB again"
     echo "If a verified ISO fails here too, the USB stick itself is the problem"
   fi
@@ -116,5 +119,6 @@ fi
 echo "The install medium is damaged or misread"
 echo "pacman rejected this package, read straight off this ISO:"
 echo "$display_package"
+echo
 echo "Verify your download with sha256sum, then write the USB again"
 echo "If the download verifies, the stick or this machine's memory is at fault"

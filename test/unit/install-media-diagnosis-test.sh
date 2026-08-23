@@ -276,6 +276,12 @@ visible_screen() {
 dashboard_log="$work/dashboard.log"
 write_log "$dashboard_log"
 
+# State the case rather than inheriting whichever verdict the previous one left
+# behind: this is the shape a real install fails in, with pacman having deleted
+# the package it rejected.
+rm -f "$mirror/$PACKAGE"
+write_mirror_db "$(printf '0%.0s' {1..64})"
+
 set +e
 run_dashboard "$dashboard_log"
 dashboard_status=$?
@@ -289,7 +295,39 @@ visible_screen | grep -qF "$PACKAGE" ||
   fail "the failure screen names the package" "$(visible_screen | tail -n 25)"
 grep -qF "[dashboard] The install medium is damaged" "$dashboard_log" ||
   fail "the diagnosis is written to the support log" "$(tail -n 20 "$dashboard_log")"
-pass "the dashboard renders the diagnosis and records it in the support log"
+
+# Once on the screen. The log tail rendered underneath reads the same file the
+# diagnosis is recorded in, and the same finding printed twice reads as two.
+headline_count=$(visible_screen | grep -cF "The install medium is damaged or misread" || true)
+(( headline_count == 1 )) ||
+  fail "the diagnosis appears once on the screen" "found $headline_count times"
+pass "the dashboard renders the diagnosis once and records it in the support log"
+
+# The screen is only as wide as the logo and the dashboard truncates to it with
+# an ellipsis. Every sentence has to survive that, whatever the package is
+# called, or the advice arrives with its second half cut off.
+long_package="linux-firmware-nvidia-tegra-20250917.0e800e46-1-any.pkg.tar.zst"
+long_log="$work/long.log"
+write_log "$long_log" "$TARGET_CACHE/$long_package"
+
+check_widths() {
+  local label="$1" line
+  while IFS= read -r line; do
+    (( ${#line} <= 81 )) ||
+      fail "no diagnosis line outruns the screen ($label)" "${#line} chars: $line"
+  done < <(diagnose "$long_log")
+}
+
+# All three verdicts, since each writes its own sentences.
+rm -f "$mirror/$long_package"
+check_widths "deleted"
+printf 'these are not the bytes that were built\n' >"$mirror/$long_package"
+write_mirror_db "$(printf '0%.0s' {1..64})" "$long_package"
+check_widths "damaged"
+write_mirror_db "$(sha256sum "$mirror/$long_package" | cut -d " " -f 1)" "$long_package"
+check_widths "misread"
+rm -f "$mirror/$long_package"
+pass "no diagnosis line outruns the screen, even with a long package name"
 
 # A failure with no media explanation must leave the screen as it was, rather
 # than gaining a banner or an empty gap where the diagnosis would go.

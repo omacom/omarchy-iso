@@ -823,12 +823,14 @@ if (( status != 0 )); then
     fi
   fi
   failure_media_diagnosis="$(diagnose_media || true)"
+  render_failure "$failure_status" "$failure_summary" "$failure_media_diagnosis" >"$TTY_PATH" 2>/dev/null || true
+  # Recorded after the screen is drawn, not before: the log tail on that screen
+  # reads this same file, and the diagnosis printed twice reads as two findings.
   if [[ -n $failure_media_diagnosis ]]; then
     while IFS= read -r line; do
       [[ -n $line ]] && dashboard_log "$line"
     done <<<"$failure_media_diagnosis"
   fi
-  render_failure "$failure_status" "$failure_summary" "$failure_media_diagnosis" >"$TTY_PATH" 2>/dev/null || true
   failure_menu
   exit "$failure_status"
 fi

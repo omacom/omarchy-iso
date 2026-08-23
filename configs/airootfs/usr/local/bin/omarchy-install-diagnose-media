@@ -90,16 +90,21 @@ display_package="${package//[^A-Za-z0-9._+:@%-]/}"
 expected=$(expected_checksum "$package")
 actual=$(actual_checksum "$package")
 
+# The package name goes on a line of its own throughout. Names run past fifty
+# characters and the screen is only as wide as the logo, so a name sharing a
+# line with the sentence that explains it truncates the explanation away.
 if [[ -n $expected && -n $actual ]]; then
   if [[ $expected == "$actual" ]]; then
     # Intact now, so the bytes were misread rather than written wrong, and
     # re-downloading fixes neither of the things that could have done it.
     echo "The install medium was misread"
-    echo "$display_package is intact on this ISO, so the download and the write were fine"
+    echo "This package is intact on this ISO, so the download and the write were fine:"
+    echo "$display_package"
     echo "Try another USB port or another stick, and test this machine's memory"
   else
     echo "The install medium is damaged"
-    echo "$display_package on this ISO no longer matches the checksum it was built with"
+    echo "This package no longer matches the checksum it was built with:"
+    echo "$display_package"
     echo "Re-download the ISO, verify it with sha256sum, and write the USB again"
     echo "If a verified ISO fails here too, the USB stick itself is the problem"
   fi
@@ -109,6 +114,7 @@ fi
 # The usual case: pacman deleted the package it rejected, so the medium is the
 # answer but the manner of its failure is not recoverable from here.
 echo "The install medium is damaged or misread"
-echo "pacman rejected $display_package, read straight off this ISO"
+echo "pacman rejected this package, read straight off this ISO:"
+echo "$display_package"
 echo "Verify your download with sha256sum, then write the USB again"
 echo "If the download verifies, the stick or this machine's memory is at fault"

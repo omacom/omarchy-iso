@@ -260,12 +260,31 @@ chmod +x "$stubs/omarchy-install-diagnose-media"
 state_file="$work/state.json"
 screen="$work/screen"
 
+# A ten-line logo, the height of the real one. Without it the dashboard falls
+# back to a single centred word and the screen can never be tall enough to
+# overflow, which is exactly the case worth testing.
+omarchy_share="$work/share"
+mkdir -p "$omarchy_share"
+# 81 columns wide, like the real logo: the dashboard takes its content width
+# from the logo, and a narrow one would truncate every line under test.
+{
+  printf 'LOGO TOP ROW%*s\n' 69 ''
+  for n in 2 3 4 5 6 7 8 9; do printf 'logo row %s%*s\n' "$n" 71 ''; done
+  printf 'logo bottom row%*s\n' 66 ''
+} >"$omarchy_share/logo.txt"
+
 run_dashboard() {
   local install_log="$1"
 
-  printf '{"current_phase":"Installing Arch + Omarchy","phases":[]}\n' >"$state_file"
+  # A real failure carries the failed phase as well as the current one, and
+  # that second summary line is another row the screen has to find space for.
+  cat >"$state_file" <<'STATE'
+{"current_phase": "Installing Arch + Omarchy",
+ "phases": [{"name": "Installing Arch + Omarchy", "status": "failed",
+             "error": "Pacstrap failed. See /var/log/archinstall.log"}]}
+STATE
   : >"$screen"
-  script -qefc "PATH='$stubs:$PATH' OMARCHY_UI_INTERACTIVE=no OMARCHY_UI_FAILURE_ACTION=exit OMARCHY_FAILURE_TAIL_LOG='$install_log' '$DASHBOARD' '$install_log' '$state_file' -- bash -c 'exit 1'" \
+  script -qefc "stty rows 40 cols 120; PATH='$stubs:$PATH' OMARCHY_PATH='$omarchy_share' OMARCHY_UI_INTERACTIVE=no OMARCHY_UI_FAILURE_ACTION=exit OMARCHY_FAILURE_TAIL_LOG='$install_log' '$DASHBOARD' '$install_log' '$state_file' -- bash -c 'exit 1'" \
     "$screen" >/dev/null 2>&1
 }
 
@@ -277,6 +296,14 @@ visible_screen() {
 
 dashboard_log="$work/dashboard.log"
 write_log "$dashboard_log"
+
+# A real install log is longer than the tail can show, so the tail actually
+# spends its whole budget. A short one hides an over-tall screen.
+{
+  for n in $(seq 1 20); do printf '[dashboard] installing package %s\n' "$n"; done
+  cat "$dashboard_log"
+} >"$dashboard_log.padded"
+mv "$dashboard_log.padded" "$dashboard_log"
 
 # State the case rather than inheriting whichever verdict the previous one left
 # behind: this is the shape a real install fails in, with pacman having deleted
@@ -313,6 +340,43 @@ next_row=$(visible_screen | sed -n "$((package_row + 1))p")
 [[ -z ${next_row// /} ]] ||
   fail "the screen breaks after the package" "next row was: $next_row"
 pass "the dashboard renders the diagnosis once, with the break, and logs it"
+
+# The diagnosis costs rows the log tail's budget knew nothing about, so a
+# screen carrying one scrolled its own logo off the top of the console. The
+# tail gives those rows back now, which is visible as a shorter tail: count the
+# filler lines it reaches, with a diagnosis and without one.
+#
+# Asserting the logo is still on screen would be the direct test, and it cannot
+# be written here: this reads the output stream, which keeps every row ever
+# emitted whether or not it stayed visible. Only a terminal emulator could tell
+# the difference, so the mechanism is what gets checked.
+tail_filler_rows() {
+  visible_screen | grep -c "installing package" || true
+}
+
+with_diagnosis=$(tail_filler_rows)
+
+# The same log line for line, differing only in the one path that decides
+# whether there is a diagnosis at all. Two differently shaped logs would show
+# different amounts of filler for reasons that have nothing to do with the
+# budget, and the comparison would prove nothing.
+elsewhere_log="$work/elsewhere-padded.log"
+write_log "$elsewhere_log" "/var/tmp/build/$PACKAGE"
+{
+  for n in $(seq 1 20); do printf '[dashboard] installing package %s\n' "$n"; done
+  cat "$elsewhere_log"
+} >"$elsewhere_log.padded"
+mv "$elsewhere_log.padded" "$elsewhere_log"
+
+set +e
+run_dashboard "$elsewhere_log"
+set -e
+without_diagnosis=$(tail_filler_rows)
+
+(( with_diagnosis < without_diagnosis )) ||
+  fail "the tail gives up rows to the diagnosis" \
+    "with: $with_diagnosis, without: $without_diagnosis"
+pass "the log tail gives up rows to the diagnosis so the screen still fits"
 
 # The screen is only as wide as the logo and the dashboard truncates to it with
 # an ellipsis. Every sentence has to survive that, whatever the package is

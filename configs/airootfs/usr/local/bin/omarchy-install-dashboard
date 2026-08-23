@@ -571,10 +571,13 @@ truncate_for_width() {
 }
 
 render_failure_log_tail() {
-  local rows lines width line tail_log label
+  # The caller passes the rows it spent above this point that the constant below
+  # does not know about, so the tail gives way rather than pushing the top of
+  # the screen off a short console.
+  local reserved="${1:-0}" rows lines width line tail_log label
   rows=$(term_size)
   rows=${rows%% *}
-  lines=$((rows - LOGO_HEIGHT - 18))
+  lines=$((rows - LOGO_HEIGHT - 18 - reserved))
   (( lines < 6 )) && lines=6
   (( lines > 14 )) && lines=14
   width=$((CONTENT_WIDTH - 4))
@@ -655,6 +658,17 @@ diagnose_media() {
   omarchy-install-diagnose-media "${logs[@]}" 2>/dev/null
 }
 
+# Rows the diagnosis occupies, its leading blank included.
+media_diagnosis_rows() {
+  local diagnosis="$1"
+
+  if [[ -z $diagnosis ]]; then
+    printf '0\n'
+  else
+    printf '%s\n' "$(( $(grep -c '' <<<"$diagnosis") + 1 ))"
+  fi
+}
+
 render_media_diagnosis() {
   local diagnosis="$1" line first=1
 
@@ -696,7 +710,7 @@ render_failure() {
   fi
 
   blank_line
-  render_failure_log_tail
+  render_failure_log_tail "$(media_diagnosis_rows "$media_diagnosis")"
   blank_line
   center "${DIM}Get help at https://omarchy.org/discord${RESET}" "$CONTENT_WIDTH"
   blank_line

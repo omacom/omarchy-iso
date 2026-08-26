@@ -397,6 +397,18 @@ def _install_pre_mounted_limine(ctx: InstallContext) -> None:
         raise RuntimeError("Windows boot entry disappeared during Limine install — aborting")
 
 
+class EfiEntryRegistrationError(RuntimeError):
+    """efibootmgr refused to write the boot variable.
+
+    Separated from every other failure in here because it is the one the
+    removable-path fallback can actually rescue. Old firmware — the same HP
+    ProBook whose NVRAM prompted the tolerant decode in command.py, among
+    others — answers reads fine and then rejects a new Boot#### variable,
+    usually with NVRAM full. That is survivable: the firmware still boots the
+    default removable loader off the ESP without any variable at all.
+    """
+
+
 def _install_limine_efi(
     ctx: InstallContext,
     *,
@@ -422,7 +434,52 @@ def _install_limine_efi(
     _write_limine_pacman_hook(ctx.target, hook_command)
 
     loader = "\\" + str(Path(esp_path) / efi_binary).strip("/").replace("/", "\\")
-    _register_limine_efi_entry(disk, part, loader, pre_state=pre_state)
+    try:
+        _register_limine_efi_entry(disk, part, loader, pre_state=pre_state)
+    except EfiEntryRegistrationError as exc:
+        if removable:
+            # Already at the removable path, so the loader firmware looks for by
+            # default is in place and the missing variable costs nothing.
+            info(f"› warning: {exc}")
+            info("› boot entry not registered; the removable loader still boots")
+            return
+
+        error(f"efibootmgr could not register a boot entry: {exc}")
+        info("› falling back to the removable ESP path")
+        _install_removable_fallback(
+            ctx,
+            esp_mount=esp_mount,
+            source=limine_path / source_name,
+            primary=target_path,
+        )
+
+
+def _install_removable_fallback(
+    ctx: InstallContext,
+    *,
+    esp_mount: str,
+    source: Path,
+    primary: Path,
+) -> None:
+    r"""Put the loader where firmware looks with no Boot#### variable.
+
+    \EFI\BOOT\BOOTX64.EFI is the removable-media path every UEFI
+    implementation falls back to when nothing in NVRAM matches. Writing it costs
+    one file and rescues machines whose firmware will not take a new variable.
+
+    The copy at the configured path stays, so this machine boots either way if
+    its NVRAM is cleared later. The pacman hook is rewritten to refresh both, or
+    a limine upgrade would quietly leave the path actually being booted stale.
+    """
+    fallback = Path(esp_mount) / "EFI" / "BOOT" / "BOOTX64.EFI"
+    _copy_required(source, ctx.target / fallback.relative_to("/"))
+    info(f"› installed removable fallback loader at {fallback}")
+
+    _write_limine_pacman_hook(
+        ctx.target,
+        f"/usr/bin/cp /usr/share/limine/{source.name} {primary} && "
+        f"/usr/bin/cp /usr/share/limine/{source.name} {fallback}",
+    )
 
 
 def _register_limine_efi_entry(
@@ -440,7 +497,11 @@ def _register_limine_efi_entry(
             check=False, capture_output=True,
         )
 
-    subprocess.run(
+    # capture() rather than check=True: the reason efibootmgr refused is the
+    # whole diagnosis, and a bare CalledProcessError throws it away. It also
+    # decodes tolerantly, which matters here — firmware that rejects writes is
+    # the same firmware that keeps non-UTF-8 legacy BBS entries in NVRAM.
+    created = capture(
         [
             "efibootmgr",
             "--create",
@@ -450,14 +511,21 @@ def _register_limine_efi_entry(
             "--loader", loader,
             "--unicode",
             "--verbose",
-        ],
-        check=True,
+        ]
     )
+    if created.returncode != 0:
+        detail = (created.stderr or created.stdout or "").strip().splitlines()
+        raise EfiEntryRegistrationError(
+            f"efibootmgr exited {created.returncode}"
+            + (f": {detail[-1]}" if detail else "")
+        )
 
     post_state = _read_efibootmgr()
     new_limine = _find_label_entries(post_state["entries"], "Limine")
     if not new_limine:
-        raise RuntimeError("efibootmgr --create reported success but no Limine entry found")
+        raise EfiEntryRegistrationError(
+            "efibootmgr --create reported success but no Limine entry appeared"
+        )
     limine_num = new_limine[0]
 
     keep = [

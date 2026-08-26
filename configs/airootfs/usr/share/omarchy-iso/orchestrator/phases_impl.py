@@ -472,7 +472,9 @@ def _install_removable_fallback(
     a limine upgrade would quietly leave the path actually being booted stale.
     """
     fallback = Path(esp_mount) / "EFI" / "BOOT" / "BOOTX64.EFI"
-    _copy_required(source, ctx.target / fallback.relative_to("/"))
+    fallback_on_target = ctx.target / fallback.relative_to("/")
+    _preserve_foreign_removable_loader(fallback_on_target, source, fallback)
+    _copy_required(source, fallback_on_target)
     info(f"› installed removable fallback loader at {fallback}")
 
     _write_limine_pacman_hook(
@@ -480,6 +482,35 @@ def _install_removable_fallback(
         f"/usr/bin/cp /usr/share/limine/{source.name} {primary} && "
         f"/usr/bin/cp /usr/share/limine/{source.name} {fallback}",
     )
+
+
+def _preserve_foreign_removable_loader(path: Path, source: Path, esp_path: Path) -> None:
+    """Move another system's fallback loader aside instead of destroying it.
+
+    A protected install shares the ESP with whatever was already on it, and a
+    Windows install commonly keeps a copy of its boot manager at the removable
+    path. That copy is not what boots Windows — its own Boot#### entry is — but
+    it is the route that still works once NVRAM has been cleared, which is
+    exactly the firmware condition this fallback exists for. Taking it away to
+    fix our own boot problem would hand the other system ours.
+
+    Renaming is enough: the displaced loader keeps working the moment it is put
+    back, and the name says where it came from.
+    """
+    if not path.exists():
+        return
+    if path.read_bytes() == source.read_bytes():
+        # Ours already, from an earlier attempt at this same install.
+        return
+
+    backup = path.with_name(path.name + ".omarchy-backup")
+    if backup.exists():
+        # Preserved on a previous attempt; what is at the live path now is ours,
+        # and the backup is the real original. Do not bury it.
+        return
+
+    path.rename(backup)
+    info(f"› preserved the existing removable loader as {esp_path}.omarchy-backup")
 
 
 def _register_limine_efi_entry(

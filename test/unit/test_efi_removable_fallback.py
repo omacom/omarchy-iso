@@ -154,6 +154,46 @@ class EfiRemovableFallbackTest(unittest.TestCase):
         self.assertTrue(self.removable.exists())
         self.assertNotIn("&&", self.hook())
 
+    def test_another_systems_fallback_loader_is_moved_aside_not_destroyed(self):
+        # A protected install shares the ESP with Windows, which keeps a copy of
+        # its boot manager here. Overwriting it would take away the route that
+        # still works once NVRAM is cleared — the exact condition we are in.
+        self.fake_efibootmgr(create_succeeds=False)
+        self.removable.parent.mkdir(parents=True)
+        self.removable.write_bytes(b"windows boot manager")
+
+        self.install()
+
+        self.assertEqual(self.removable.read_bytes(), b"limine loader")
+        preserved = self.removable.with_name("BOOTX64.EFI.omarchy-backup")
+        self.assertTrue(preserved.exists(), "the displaced loader was destroyed")
+        self.assertEqual(preserved.read_bytes(), b"windows boot manager")
+
+    def test_a_second_attempt_does_not_bury_the_preserved_original(self):
+        # Re-running the install must not overwrite the backup with our own
+        # loader, which would lose the original for good.
+        self.fake_efibootmgr(create_succeeds=False)
+        self.removable.parent.mkdir(parents=True)
+        self.removable.write_bytes(b"windows boot manager")
+
+        self.install()
+        self.install()
+
+        preserved = self.removable.with_name("BOOTX64.EFI.omarchy-backup")
+        self.assertEqual(preserved.read_bytes(), b"windows boot manager")
+
+    def test_our_own_loader_is_not_backed_up_over_and_over(self):
+        self.fake_efibootmgr(create_succeeds=False)
+        self.removable.parent.mkdir(parents=True)
+        self.removable.write_bytes(b"limine loader")
+
+        self.install()
+
+        self.assertFalse(
+            self.removable.with_name("BOOTX64.EFI.omarchy-backup").exists(),
+            "backed up a loader that was already ours",
+        )
+
     def test_firmware_that_accepts_the_variable_gets_no_fallback_copy(self):
         self.fake_efibootmgr(create_succeeds=True)
 

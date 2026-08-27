@@ -114,6 +114,43 @@ check "no install was started" "no" "$(installed)"
 [[ -e $sandbox/root/user_configuration.json ]]
 check "the stale configuration was cleared" "1" "$?"
 
+# An autoinstall attempt that aborts and is retried with the cidata drive
+# pulled never reaches the loader's own cleanup — it exits as soon as no drive
+# is found. The orchestrator treats these files as "present means use it", so
+# anything left here is the previous attempt's remote access on the new machine.
+echo "==> a pulled cidata drive leaves no remote-access credentials behind"
+new_sandbox
+echo 'ssh-ed25519 AAAA rig@imaging' >"$sandbox/root/authorized_keys"
+echo 'tskey-auth-rig' >"$sandbox/root/tailscale_authkey"
+echo '{"disk_config": {}}' >"$sandbox/root/user_configuration.json"
+: >"$sandbox/root/defer-provisioning"
+CONFIGURATOR_EXIT=0 CONFIGURATOR_WRITES_CONFIG=1 run_handoff
+check "the interactive retry starts its own install" "yes" "$(installed)"
+[[ -e $sandbox/root/authorized_keys ]]
+check "the rig's SSH key was cleared" "1" "$?"
+[[ -e $sandbox/root/tailscale_authkey ]]
+check "the rig's Tailscale key was cleared" "1" "$?"
+[[ -e $sandbox/root/defer-provisioning ]]
+check "the stale defer-provisioning marker was cleared" "1" "$?"
+
+# The launcher clears these because omarchy-cidata-load cannot: its cleanup is
+# behind the drive-found check. Drift between the two lists reopens the leak,
+# so compare them rather than trusting two hand-maintained copies.
+echo "==> the launcher clears every input the cidata loader knows about"
+CIDATA_LOAD="$ROOT/configs/airootfs/usr/local/bin/omarchy-cidata-load"
+loader_inputs=$(
+  sed -n 's/^optional_inputs=(\(.*\))$/\1/p' "$CIDATA_LOAD" |
+    tr ' ' '\n' | sed '/^$/d' | sort -u
+)
+loader_inputs=$(printf '%s\nuser_configuration.json\n' "$loader_inputs" | sort -u)
+launcher_inputs=$(
+  awk '/^rm -f / { grab = 1 }
+       grab { sub(/^rm -f /, ""); cont = /\\$/; sub(/\\$/, ""); print; if (!cont) exit }' "$LAUNCHER" |
+    tr ' ' '\n' | sed '/^$/d' | sort -u
+)
+check "the loader's input list was parsed" "0" "$([[ -n $loader_inputs ]] && echo 0 || echo 1)"
+check "the two cleanup lists match" "$loader_inputs" "$launcher_inputs"
+
 echo "==> a configurator that produced nothing does not start an install"
 new_sandbox
 CONFIGURATOR_EXIT=0 CONFIGURATOR_WRITES_CONFIG=0 run_handoff

@@ -92,12 +92,21 @@ trap 'kill "$warm_pid" 2>/dev/null' EXIT
 
 cd /root
 # A run that aborted — a refused cfdisk Resize, a failed partition snapshot,
-# Ctrl+C — leaves its outputs behind, and the retry it recommends comes
-# straight back here. Clear them first so the gate below can only ever pass on
-# a configuration this run produced, never on one describing a partition
-# layout that no longer exists.
-rm -f user_configuration.json user_credentials.json user_full_name.txt \
-  user_email_address.txt user_encrypt_installation.txt defer-provisioning
+# Ctrl+C — leaves its inputs behind, and the retry it recommends comes straight
+# back here. Clear them first so the gate below can only ever pass on a
+# configuration this run produced, never on one describing a partition layout
+# that no longer exists.
+#
+# This is the same set omarchy-cidata-load clears before it copies, and it has
+# to stay the same set. Its cleanup only runs once a cidata drive is found, so
+# an autoinstall attempt that aborts and is retried with the drive pulled never
+# reaches it: authorized_keys and tailscale_authkey would survive into the
+# interactive install, which passes both to the orchestrator whenever the files
+# exist, and the new machine would authorize the rig's SSH key and enroll with
+# its Tailscale key.
+rm -f user_configuration.json user_credentials.json defer-provisioning \
+  user_full_name.txt user_email_address.txt user_encrypt_installation.txt \
+  authorized_keys tailscale_authkey
 
 # Autoinstall: a cidata drive carrying the configurator's own output files
 # stands in for the wizard. omarchy-cidata-load copies them into /root and

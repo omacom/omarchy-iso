@@ -139,6 +139,53 @@ restore_shrunk_partitions "$IMG" "$dump" "$before"
 check "no-op is left alone" "1" "$?"
 check "layout unchanged" "$before" "$(partition_starts_and_sizes "$IMG")"
 
+# Everything above is the guard working. The rest is the guard failing, which
+# is where a data-safety check earns its keep: every way of not knowing must
+# come back as "do not continue", never as the "table is fine" status that
+# lets the install proceed.
+echo "==> a table that cannot be read or snapshotted is refused, not assumed safe"
+
+save_partition_table "$WORK/missing.img" "$WORK/empty.dump"
+check "save_partition_table rejects a disk it cannot read" "1" "$?"
+[[ -s $WORK/empty.dump ]]
+check "a failed dump is not accepted as a snapshot" "1" "$?"
+
+partition_starts_and_sizes "$WORK/missing.img" >/dev/null
+check "partition_starts_and_sizes reports an unreadable disk" "1" "$?"
+
+build_disk
+before=$(partition_starts_and_sizes "$IMG")
+dump="$WORK/table.dump"
+save_partition_table "$IMG" "$dump"
+check "snapshot of a real table succeeds" "0" "$?"
+
+restore_shrunk_partitions "$IMG" "" "$before"
+check "no snapshot is 'cannot tell', not 'fine'" "3" "$?"
+restore_shrunk_partitions "$IMG" "$WORK/empty.dump" "$before"
+check "an empty snapshot is 'cannot tell', not 'fine'" "3" "$?"
+
+# The restore itself can fail — a disk that went away mid-session, an sfdisk
+# that refuses the dump. The shrink is real and still on the table at that
+# point, so this must never look like the untouched-table case.
+echo "==> a shrink that cannot be undone stops the install"
+
+build_disk
+before=$(partition_starts_and_sizes "$IMG")
+echo "not an sfdisk dump" >"$WORK/corrupt.dump"
+shrink_first_partition_sectors 400000
+restore_shrunk_partitions "$IMG" "$WORK/corrupt.dump" "$before" >/dev/null 2>&1
+check "a failed restore is reported as a failed restore" "2" "$?"
+[[ $(layout) == "$before" ]]
+check "the shrink is still on the table after a failed restore" "1" "$?"
+
+build_disk
+before=$(partition_starts_and_sizes "$IMG")
+dump="$WORK/table.dump"
+save_partition_table "$IMG" "$dump"
+truncate -s 0 "$IMG"
+restore_shrunk_partitions "$IMG" "$dump" "$before"
+check "a table that will not read back is 'cannot tell', not 'fine'" "3" "$?"
+
 if (( failures > 0 )); then
   printf '\n%d check(s) failed\n' "$failures"
   exit 1

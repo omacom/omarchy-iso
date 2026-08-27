@@ -91,6 +91,14 @@ warm_pid=$!
 trap 'kill "$warm_pid" 2>/dev/null' EXIT
 
 cd /root
+# A run that aborted — a refused cfdisk Resize, a failed partition snapshot,
+# Ctrl+C — leaves its outputs behind, and the retry it recommends comes
+# straight back here. Clear them first so the gate below can only ever pass on
+# a configuration this run produced, never on one describing a partition
+# layout that no longer exists.
+rm -f user_configuration.json user_credentials.json user_full_name.txt \
+  user_email_address.txt user_encrypt_installation.txt defer-provisioning
+
 # Autoinstall: a cidata drive carrying the configurator's own output files
 # stands in for the wizard. omarchy-cidata-load copies them into /root and
 # everything downstream runs the ordinary path against ordinary inputs.
@@ -98,8 +106,17 @@ if /usr/local/bin/omarchy-cidata-load; then
   echo "Autoinstall configuration found on cidata drive; skipping the configurator."
   export OMARCHY_UI_INTERACTIVE=no
 else
-  ./configurator
+  # The else body already inherits set -e, but the dashboard launch below is
+  # unconditional and the guards it stands between are data-safety guards.
+  # State the contract in the code so a configurator abort (a Resize of an
+  # existing OS, a table that would not snapshot) cannot start an install.
+  ./configurator || exit 1
 fi
+
+# Both branches must have produced a configuration. Nothing downstream re-reads
+# the partition table, so an install started without one would run against
+# whatever the disk happens to look like now.
+[[ -f user_configuration.json ]] || exit 1
 
 # Deferred-provisioning installs skip the celebration/reboot prompt and reboot on
 # their own — the owner completes setup at first boot. Signalled by the config's

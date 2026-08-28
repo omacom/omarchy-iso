@@ -48,7 +48,10 @@ class ContextDeferProvisioningTest(unittest.TestCase):
     def from_env(self, **extra_env):
         env = {**self.env, **extra_env}
         with mock.patch.dict(os.environ, env, clear=False):
-            for key in ("OMARCHY_INSTALL_DEFER_PROVISIONING_FILE",):
+            for key in (
+                "OMARCHY_INSTALL_DEFER_PROVISIONING_FILE",
+                "OMARCHY_INSTALL_BLUETOOTH_UNLOCK_FILE",
+            ):
                 if key not in env:
                     os.environ.pop(key, None)
             return InstallContext.from_env()
@@ -85,6 +88,17 @@ class ContextDeferProvisioningTest(unittest.TestCase):
         ctx = self.from_env(OMARCHY_INSTALL_DEFER_PROVISIONING_FILE=str(self.dir / "missing-defer_provisioning"))
         self.assertFalse(ctx.defer_provisioning)
         self.assertEqual(ctx.username, "jeff")
+
+    def test_bluetooth_unlock_marker_is_optional(self):
+        self.write_config(self.base_config())
+        self.write_creds({"users": [{"username": "jeff"}]})
+        marker = self.dir / "bluetooth-unlock.json"
+        marker.write_text("{}")
+        ctx = self.from_env(OMARCHY_INSTALL_BLUETOOTH_UNLOCK_FILE=str(marker))
+        self.assertEqual(ctx.bluetooth_unlock_path, marker)
+
+        ctx = self.from_env(OMARCHY_INSTALL_BLUETOOTH_UNLOCK_FILE=str(self.dir / "missing.json"))
+        self.assertIsNone(ctx.bluetooth_unlock_path)
 
     def test_missing_credentials_without_defer_provisioning_raises(self):
         self.write_config(self.base_config())

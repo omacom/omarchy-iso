@@ -42,6 +42,31 @@ while read -r dev type; do
   [[ $type == crypt ]] && cryptsetup close "$dev" 2>/dev/null || true
 done < <(lsblk -rnpo PATH,TYPE "$disk")
 
+# Clear the signatures archinstall is about to overwrite. Everything above
+# only releases holders; nothing yet removes what is written on the disk, so a
+# previous install's LUKS header still reaches archinstall intact. Archinstall's
+# own per-partition `wipefs --all` is then the first command to touch that
+# header, and when it fails the install aborts mid-run with a SysCallError --
+# after the user has already asked for the whole disk to be erased.
+#
+# Only the wipe path gets here: the orchestrator skips cleanup entirely in
+# protected mode and passes a device only when its modification carries
+# wipe: true, so the whole disk is in scope by construction.
+#
+# Partitions before the disk. The table is what makes the child nodes
+# addressable, so taking the disk first would strip it and strand the old
+# headers in space nothing can name any more.
+while read -r dev type; do
+  [[ $type == part ]] || continue
+  wipefs -af "$dev" 2>/dev/null || true
+done < <(lsblk -rnpo PATH,TYPE "$disk")
+
+# The disk last, and failures tolerated the same way. This takes the GPT, its
+# backup header and the PMBR with it, which is what makes a partition whose own
+# wipe just failed stop existing -- the manual `wipefs -a /dev/sda` that gets a
+# stuck full-disk install running again, done for the user this time.
+wipefs -af "$disk" 2>/dev/null || true
+
 blockdev --flushbufs "$disk" 2>/dev/null || true
 partprobe "$disk" 2>/dev/null || true
 udevadm settle || true

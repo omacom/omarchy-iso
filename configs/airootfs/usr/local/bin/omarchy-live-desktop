@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+#
+# Omarchy live desktop bootstrap.
+#
+# Booted with omarchy.live on the kernel command line, this brings up the full
+# Hyprland + Quickshell desktop for a dedicated `live` user so a user can "try
+# Omarchy" before installing. Without omarchy.live it does nothing, preserving
+# the classic TTY installer boot (root autologin + configurator wizard).
+#
+# The desktop is a normal Omarchy user session started by SDDM, exactly as it
+# would run after installation: the live user's config comes from /etc/skel,
+# which the omarchy-settings package populates, so the bar, menus, launcher and
+# keybindings are identical to the installed look.
+#
+# A stock install provisions the user at first login (omarchy-provision-user ->
+# install/user/all.sh), which materializes the active theme into
+# ~/.local/state/omarchy/current/theme/ — the foot.ini include, colors.toml and
+# the wallpaper background link. The unavoidable network-heavy dev-tool steps
+# (mise installs) are deliberately skipped here; the live session re-runs the
+# theme provisioning so the desktop wallpaper, foot theme and apps menu are
+# present immediately.
+set -euo pipefail
+
+grep -qw omarchy.live /proc/cmdline || exit 0
+
+LIVE_USER="live"
+LIVE_PASSWORD="omarchy"
+
+# --- Create the live user (from /etc/skel) on first boot. --------------
+if ! id -u "$LIVE_USER" >/dev/null 2>&1; then
+  useradd --create-home --user-group --shell /bin/bash "$LIVE_USER"
+fi
+
+# Give the live user a usable password. Idempotent: applied on every boot so the
+# account can never be left password-less (SDDM sudo/polkit prompt for it).
+echo "$LIVE_USER:$LIVE_PASSWORD" | chpasswd
+
+HOMEDIR="$(getent passwd "$LIVE_USER" | cut -d: -f6)"
+if [[ ! -d "$HOMEDIR" ]]; then
+  mkdir -p "$HOMEDIR"
+fi
+# /etc/skel carries the Omarchy user config; ensure it is in place and fresh.
+cp -aT /etc/skel/ "$HOMEDIR" 2>/dev/null || true
+chown -R "$LIVE_USER:$LIVE_USER" "$HOMEDIR"
+chmod 700 "$HOMEDIR"
+
+# --- Provision the live user theme (wallpaper + foot.ini). --------------
+# Equivalent of install/user/theme.sh, run headlessly before the session exists:
+# materializes the active theme into ~/.local/state/omarchy/current/theme/
+# (fixing foot.ini's [main] include) and sets the current/background link the
+# omarchy-shell reads for the desktop wallpaper, plus the SDDM/lock background.
+runuser -l "$LIVE_USER" -- bash -lc '
+  export OMARCHY_PATH=/usr/share/omarchy
+  export PATH="$OMARCHY_PATH/bin:$PATH"
+  export OMARCHY_SETUP_CONTEXT=iso-chroot
+  mkdir -p "$HOME/.config/omarchy/themes"
+  if [[ ! -s "$HOME/.local/state/omarchy/current/theme.name" ]]; then
+    OMARCHY_THEME_HEADLESS=1 omarchy-theme-set "Tokyo Night"
+  fi
+  OMARCHY_THEME_HEADLESS=1 omarchy-theme-set-pi --activate
+' || true
+
+# --- Register the Omarchy Wayland session for SDDM. ---------------------
+# The omarchy runtime ships /usr/share/omarchy/default/wayland-sessions/omarchy.desktop
+# but provisioning (which normally lands it in /usr/share/wayland-sessions/) is
+# deferred to first boot on an installed system. The live session needs it now.
+if [[ -f /usr/share/omarchy/default/wayland-sessions/omarchy.desktop &&
+      ! -f /usr/share/wayland-sessions/omarchy.desktop ]]; then
+  install -m 0644 /usr/share/omarchy/default/wayland-sessions/omarchy.desktop \
+    /usr/share/wayland-sessions/omarchy.desktop
+fi
+
+# --- Configure SDDM autologin into the live session. --------------------
+mkdir -p /etc/sddm.conf.d
+cat > /etc/sddm.conf.d/20-live-autologin.conf <<EOF
+[Autologin]
+User=$LIVE_USER
+Session=omarchy.desktop
+EOF
+
+# --- "Install Omarchy" desktop entry (apps menu + launcher grid). -------
+# A proper .desktop so it shows up in the omarchy apps provider (which lists
+# DesktopEntries) and the launcher, not just inside a JSONC submenu.
+install -d /usr/share/applications
+cat > /usr/share/applications/omarchy-install.desktop <<EOF
+[Desktop Entry]
+Type=Application
+Name=Install Omarchy
+Comment=Install Omarchy to this machine from the live desktop
+Exec=pkexec omarchy-live-install
+Icon=system-installer
+Terminal=false
+Categories=System;
+Keywords=Install;Omarchy;Setup;
+EOF
+
+# And a root-level entry in the command-menu extension for launcher/IPC access.
+mkdir -p "$HOMEDIR/.config/omarchy/extensions"
+cat > "$HOMEDIR/.config/omarchy/extensions/omarchy-menu.jsonc" <<EOF
+{
+  // Live desktop only: install Omarchy from the desktop.
+  "install-omarchy": {
+    "icon": "\uf101",
+    "label": "Install Omarchy",
+    "description": "Install Omarchy to this machine from the live desktop",
+    "action": "pkexec omarchy-live-install"
+  }
+}
+EOF
+chown -R "$LIVE_USER:$LIVE_USER" "$HOMEDIR/.config/omarchy"
+
+# Refresh the desktop-file index so the new entry appears without a relogin.
+# Note: deliberately NOT omarchy-refresh-applications, which also runs the
+# network-heavy mise/dev-tool installer; we only want the .desktop index here.
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+fi
+
+# --- Start the display manager. The desktop is the graphical.target. ---
+# On the live image there is no display-manager symlink yet; point it at SDDM
+# exactly as a stock Omarchy install does, then start it.
+if [[ ! -L /etc/systemd/system/display-manager.service ]]; then
+  ln -sf /usr/lib/systemd/system/sddm.service /etc/systemd/system/display-manager.service
+fi
+systemctl restart display-manager.service || \
+  systemctl start display-manager.service || true

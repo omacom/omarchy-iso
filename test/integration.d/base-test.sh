@@ -500,9 +500,30 @@ detect_packages() {
   fi
 }
 
+# The ISO default boot entry is now the live desktop (stock linux). The TTY
+# installer lives on its own grub entry at menu index 1 — immediately after the
+# default `omarchy-live` entry — so a single Down + Return from the default lands
+# on it. NOTE: keep the `omarchy-install` entry at index 1 in configs/grub/grub.cfg
+# or this navigation breaks.
+boot_installer_entry() {
+  log "Selecting the TTY installer entry from the boot menu"
+  # Watch for the menu but never exceed grub's 15s auto-boot timeout.
+  local waited=0
+  while ((waited < 12)); do
+    if ocr_screen | grep -qi "Install"; then
+      break
+    fi
+    sleep 3
+    ((waited += 3))
+  done
+  capture_console "success-boot-select-installer"
+  press down
+  sleep 1
+  press ret
+}
+
 install_phase() {
   log "Installing $(basename "$ISO") unattended via cidata (headless)"
-
   [[ -f $SSH_KEY ]] || ssh-keygen -t ed25519 -N "" -q -C "omarchy-integration" -f "$SSH_KEY"
   detect_packages
   build_cidata
@@ -519,6 +540,8 @@ install_phase() {
     -device ide-cd,drive=cdrom0,bootindex=2 \
     -drive "file=$CIDATA_IMG,format=raw,if=none,id=cidata" \
     -device usb-storage,drive=cidata
+
+  boot_installer_entry
 
   log "Waiting for the unattended install to finish (timeout ${INSTALL_TIMEOUT}s)"
   local waited=0 text progress_name

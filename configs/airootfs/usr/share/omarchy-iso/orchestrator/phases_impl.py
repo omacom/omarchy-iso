@@ -182,7 +182,7 @@ def prepare_live(ctx: InstallContext) -> None:
         disk = _install_disk(ctx)
         if disk:
             info(f"› cleaning up holders on install disk: {disk}")
-            subprocess.run(["omarchy-iso-cleanup-disk", disk], check=True)
+            subprocess.run(["/usr/local/bin/omarchy-iso-cleanup-disk", disk], check=True)
 
     info("› loading configurator output")
     ctx.state["arch_config_handler"] = arch.load_arch_config(
@@ -422,7 +422,83 @@ def _install_limine_efi(
     _write_limine_pacman_hook(ctx.target, hook_command)
 
     loader = "\\" + str(Path(esp_path) / efi_binary).strip("/").replace("/", "\\")
-    _register_limine_efi_entry(disk, part, loader, pre_state=pre_state)
+    try:
+        _register_limine_efi_entry(disk, part, loader, pre_state=pre_state)
+    except _NvramWriteError as nvram_err:
+        # The firmware refused a new boot variable (a full NVRAM above all). The
+        # machine can still boot: every UEFI firmware scans the removable
+        # fallback path <ESP>/EFI/BOOT/BOOTX64.EFI even with no NVRAM entry at
+        # all. Deploy that binary so a full NVRAM never bricks the install, and
+        # surface the limitation (including efibootmgr's own reason) instead of
+        # aborting. Per issue #127 the refusal reason used to be discarded.
+        info(
+            f"› firmware refused a Limine NVRAM entry; installing the removable "
+            f"fallback at EFI/BOOT/BOOTX64.EFI ({nvram_err})"
+        )
+        fallback_dir = Path(esp_mount) / "EFI" / "BOOT"
+        fallback_dir.mkdir(parents=True, exist_ok=True)
+        _copy_required(limine_path / source_name, ctx.target / (fallback_dir / "BOOTX64.EFI").relative_to("/"))
+        # Keep both the normal Limine binary and the fallback in sync on package
+        # upgrades: the fallback may be the only thing the firmware will boot.
+        fallback_target = Path(esp_mount) / "EFI" / "BOOT" / "BOOTX64.EFI"
+        _write_limine_pacman_hook(
+            ctx.target,
+            f"/usr/bin/cp /usr/share/limine/{source_name} {target_path} && "
+            f"/usr/bin/cp /usr/share/limine/{source_name} {fallback_target}",
+        )
+        ctx.state.setdefault("limine", {})["boot_entry_failed"] = True
+        ctx.state["limine"]["fallback_binary"] = str(fallback_dir / "BOOTX64.EFI")
+
+
+class _NvramWriteError(RuntimeError):
+    """efibootmgr cannot add a Limine boot entry because NVRAM is full."""
+
+
+def _purge_dangling_boot_entries(pre_state: dict) -> int:
+    """Delete NVRAM entries pointing at partitions that no longer exist.
+
+    NVRAM fills with entries left over from OSes uninstalled long ago; running
+    out of space usually means this pool is what is clogging it. We reclaim only
+    an entry whose GPT partition UUID is not present on any live block device —
+    never an entry whose partition still exists, so Windows and any real OS are
+    untouched. Returns how many were removed.
+    """
+    live_part_uuids = _live_partition_uuids()
+    removed = 0
+    for num, entry in pre_state["entries"].items():
+        part_uuid = _entry_partition_uuid(entry)
+        if part_uuid is None:
+            continue
+        if part_uuid.lower() in live_part_uuids:
+            continue
+        res = subprocess.run(
+            ["efibootmgr", "--bootnum", num, "--delete-bootnum"],
+            check=False, capture_output=True,
+        )
+        if res.returncode == 0:
+            removed += 1
+    return removed
+
+
+def _live_partition_uuids() -> set[str]:
+    res = subprocess.run(
+        ["lsblk", "-nro", "PARTUUID"], check=False, capture_output=True, text=True
+    )
+    return {
+        line.strip().lower()
+        for line in res.stdout.splitlines()
+        if line.strip()
+    }
+
+
+def _entry_partition_uuid(entry: str) -> str | None:
+    """The GPT partition UUID an efibootmgr entry boots from, if any."""
+    # efibootmgr prints the HD() device path, e.g.
+    #   HD(1,GPT,0d9c9d4f-...-...,0x1000,0x100000)/File(...)
+    m = re.search(r"HD\(\d+,GPT,([0-9a-fA-F-]+)", entry)
+    if not m:
+        return None
+    return m.group(1).lower()
 
 
 def _register_limine_efi_entry(
@@ -440,19 +516,48 @@ def _register_limine_efi_entry(
             check=False, capture_output=True,
         )
 
-    subprocess.run(
-        [
-            "efibootmgr",
-            "--create",
-            "--disk", str(disk),
-            "--part", str(part),
-            "--label", "Limine",
-            "--loader", loader,
-            "--unicode",
-            "--verbose",
-        ],
-        check=True,
-    )
+    failure = {"reason": ""}
+
+    def _write_entry() -> bool:
+        # Never check=True: efibootmgr refusing a write (a full NVRAM above all)
+        # is the trigger for the cleanup+fallback path below, and its own stderr
+        # is the one piece of evidence that explains the refusal — a bare
+        # CalledProcessError would discard exactly that. Keep it and surface it.
+        res = subprocess.run(
+            [
+                "efibootmgr",
+                "--create",
+                "--disk", str(disk),
+                "--part", str(part),
+                "--label", "Limine",
+                "--loader", loader,
+                "--unicode",
+                "--verbose",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        if res.returncode == 0:
+            return True
+        reason = (res.stderr or res.stdout or "").strip()
+        if reason:
+            failure["reason"] = reason
+        return False
+
+    if not _write_entry():
+        # First failure: try to reclaim NVRAM by dropping entries that point at
+        # hardware that is gone, then retry once. Only done for stale entries to
+        # stay out of the user's boot config.
+        try:
+            _purge_dangling_boot_entries(
+                {k: v for k, v in pre_state["entries"].items() if k not in stale_limine}
+            )
+        except Exception:
+            pass
+        if not _write_entry():
+            raise _NvramWriteError(
+                "efibootmgr could not create the Limine boot entry"
+                + (f": {failure['reason']}" if failure["reason"] else " (NVRAM full)")
+            )
 
     post_state = _read_efibootmgr()
     new_limine = _find_label_entries(post_state["entries"], "Limine")
@@ -465,7 +570,7 @@ def _register_limine_efi_entry(
         for num in pre_state["order"]
         if num not in stale_limine
         and num != limine_num
-        and num in pre_state["entries"]
+        and num in post_state["entries"]
     ]
     subprocess.run(
         ["efibootmgr", "--bootorder", ",".join([limine_num, *keep])],
@@ -529,7 +634,13 @@ def _write_limine_defaults_from_config(ctx: InstallContext, installer, config) -
         raise RuntimeError(f"Could not detect root at mountpoint {ctx.target}")
 
     cmdline = " ".join(installer._get_kernel_params(root))
-    _write_limine_defaults(ctx, cmdline, esp_mount=_installer_esp_mount(installer))
+    enable_fallback = None
+    if ctx.state.get("limine", {}).get("boot_entry_failed"):
+        enable_fallback = True
+    _write_limine_defaults(
+        ctx, cmdline, esp_mount=_installer_esp_mount(installer),
+        enable_fallback=enable_fallback,
+    )
 
 
 def _write_limine_defaults(
@@ -882,11 +993,17 @@ def _write_pre_mounted_limine_defaults(ctx: InstallContext) -> None:
     cmdline = _build_pre_mounted_cmdline(ctx, btrfs_uuid)
 
     _write_pre_mounted_crypttab(ctx)
+    # A failed NVRAM write means boot depends on the removable fallback, so the
+    # limine UKI build must produce it even though the free-space flow normally
+    # keeps ENABLE_LIMINE_FALLBACK off.
+    enable_fallback = bool(boot.get("enable_fallback")) or bool(
+        ctx.state.get("limine", {}).get("boot_entry_failed")
+    )
     _write_limine_defaults(
         ctx,
         cmdline,
         esp_mount=boot["esp_mount"],
-        enable_fallback=bool(boot.get("enable_fallback")),
+        enable_fallback=enable_fallback,
     )
 
 
@@ -1683,8 +1800,21 @@ def validate_boot(ctx: InstallContext) -> None:
             raise RuntimeError(f"{' / '.join(str(uki) for uki in ukis)} missing or empty")
 
         post = _read_efibootmgr()
-        if not _find_label_entries(post["entries"], "Limine"):
-            raise RuntimeError("no 'Limine' entry registered in efibootmgr")
+        nvram_ok = bool(_find_label_entries(post["entries"], "Limine"))
+        if not nvram_ok:
+            # A Limine NVRAM entry can be impossible when the firmware's NVRAM
+            # is full; the install then boots through the removable fallback
+            # binary instead. Accept that, but only if the fallback actually
+            # exists on the ESP and the firmware was told about the shortfall.
+            if ctx.state.get("limine", {}).get("boot_entry_failed"):
+                fallback = esp_mount / "EFI" / "BOOT" / "BOOTX64.EFI"
+                if not fallback.exists() or fallback.stat().st_size == 0:
+                    raise RuntimeError(
+                        "Limine NVRAM entry missing and no removable fallback "
+                        f"binary at {fallback}"
+                    )
+            else:
+                raise RuntimeError("no 'Limine' entry registered in efibootmgr")
 
     if ctx.is_protected:
         _validate_pre_mounted_filesystems(ctx)

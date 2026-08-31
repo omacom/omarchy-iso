@@ -158,15 +158,7 @@ else
   DOCKER_ARGS+=(--pull=always)
 fi
 
-# The docker group is root-equivalent, so Omarchy operators stay out of it on
-# purpose. When the socket refuses the calling user, run the client through
-# sudo instead of requiring group membership.
-DOCKER=(docker)
-if ! docker version &>/dev/null; then
-  DOCKER=(sudo docker)
-fi
-
-"${DOCKER[@]}" run "${DOCKER_ARGS[@]}" archlinux/archlinux:latest /$BUILD_SCRIPT
+docker run "${DOCKER_ARGS[@]}" archlinux/archlinux:latest /$BUILD_SCRIPT
 
 latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*.iso | head -n1)
 iso_ref="${latest_iso%.*}-$OMARCHY_ISO_REF.iso"

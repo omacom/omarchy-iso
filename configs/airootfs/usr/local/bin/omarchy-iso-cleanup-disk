@@ -42,6 +42,38 @@ while read -r dev type; do
   [[ $type == crypt ]] && cryptsetup close "$dev" 2>/dev/null || true
 done < <(lsblk -rnpo PATH,TYPE "$disk")
 
+# The user has explicitly chosen to erase this whole disk ("Full Install /
+# wipe the entire disk"), so this script's job is to clear it, not just release
+# holders. Anything written here — a previous install's LUKS header above all —
+# survives the holder-release loops above and reaches archinstall intact, where
+# its per-partition `wipefs --all` is the first command to touch it and aborts
+# the install mid-run when it hits a stale signature (issue #137). Wiping the
+# signatures here, after releasing every holder, clears that path entirely and
+# makes archinstall's re-partitioning a pure create instead of a fragile wipe.
+#
+# Wipe the partitions first, then the whole disk (which clears GPT/PMBR plus any
+# signature in the gaps). Both are best-effort with a short retry: this runs
+# before archinstall formats the disk anyway, and a busy device here must not
+# replace archinstall's old abort with a new one — so failures are tolerated.
+clear_signatures() {
+  local dev="$1" i
+  for i in 1 2 3; do
+    if wipefs -af "$dev" >/dev/null 2>&1; then
+      sync
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+while read -r dev; do
+  [[ -b $dev ]] || continue
+  clear_signatures "$dev" || true
+done < <(lsblk -rnpo PATH "$disk" | awk '$1 != ""')
+
+clear_signatures "$disk" || true
+
 blockdev --flushbufs "$disk" 2>/dev/null || true
 partprobe "$disk" 2>/dev/null || true
 udevadm settle || true

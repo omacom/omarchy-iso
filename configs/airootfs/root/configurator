@@ -122,7 +122,7 @@ greeter() {
   printf '\033[%d;1H' "$logo_row"
   gum style --foreground 2 --padding "0 0 0 $PADDING_LEFT" "$(<"$LOGO_PATH")"
 
-  tagline="Beautiful, Fun & Opinionated Linux by DHH"
+  tagline="Beautiful, Modern & Opinionated Linux by DHH"
   tpad=$(((cols - ${#tagline}) / 2)); (( tpad < 0 )) && tpad=0
   printf '\033[%d;%dH%s' "$tagline_row" "$((tpad + 1))" "$tagline"
 
@@ -435,6 +435,31 @@ disk_abort_hook() {
   abort "$1"
 }
 
+# Scrub every filesystem signature from a freshly created partition. This is a
+# retried, error-tolerant wipefs: a reinstall can race udev auto-scanning the
+# leftover signature from whatever the user deleted to free the space (a stale
+# btrfs above all), which mounts the device or holds it busy right as we format.
+# A single wipefs -af that returns non-zero then aborts the install with
+# disk_abort_hook — and a Retry runs the exact same failing step again, so the
+# failure never clears on its own. This is the "stale btrfs partition signature
+# breaks the reinstall" loop, fixed by letting the wipe win instead of letting a
+# transient busy state abort us.
+clear_stale_signatures() {
+  local dev="$1" attempt
+  # If udev already mounted a mis-detected leftover, release it before wiping.
+  umount "$dev" 2>/dev/null || true
+  for attempt in 1 2 3; do
+    if wipefs -af "$dev" >/dev/null 2>&1; then
+      sync
+      return 0
+    fi
+    sleep 1
+  done
+  # Give up quietly rather than abort: the wipe is best-effort on a brand-new
+  # partition, and mkfs formats over whatever is left anyway.
+  return 0
+}
+
 # Save the configurator answers the installer consumes: git identity and
 # encryption choice as plain files, account details as archinstall credentials.
 # Deferred-provisioning installs defer the user to first boot: no credentials, and on encrypted
@@ -724,9 +749,11 @@ run_partition_execute() {
       disk_abort_hook "Root partition $root_partition_device never appeared"
 
     # Both partitions are ours and brand new, but the space they occupy may
-    # carry signatures from whatever was deleted to free it.
-    disk_step "clearing stale signatures on $efi_dev" wipefs -af "$efi_dev"
-    disk_step "clearing stale signatures on $root_partition_device" wipefs -af "$root_partition_device"
+    # carry signatures from whatever was deleted to free it. Cleared here so
+    # nothing (mkfs, blkid, and especially udev's auto-scan of a stale btrfs)
+    # mistakes the freshly carved region for an old filesystem.
+    clear_stale_signatures "$efi_dev"
+    clear_stale_signatures "$root_partition_device"
 
     if [[ "$encrypt_installation" == "true" ]]; then
       step "Setting up LUKS2 on $root_partition_device"
@@ -898,7 +925,7 @@ open_partition_tool() {
   step "Partition tool for $disk"
   gum style "Create unallocated free space for Omarchy, then write changes and quit."
   gum style --foreground 8 "Do not create an Omarchy partition here — leave the target area as Free space."
-  gum style --foreground 8 "Tip: free-space install needs at least 32GB unallocated, plus 2GB more if no ESP already exists."
+  gum style --foreground 8 "The installer always creates its own EFI + root here, even on a disk that already has data or another OS."
   echo
   gum confirm --affirmative "Open cfdisk" --negative "Back" "Open partition tool for $disk?" || return 0
 

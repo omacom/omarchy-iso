@@ -28,6 +28,12 @@ Despite the local folder name, the first argument is the Omarchy source checkout
 
 Use `--dev` or `--rc` to build against those package channels. Both `--dev` and `--edge` select the dev packages from the edge mirror.
 
+## Live desktop
+
+The ISO's default boot entry lands in a live Omarchy desktop (Hyprland + Quickshell) so you can try the environment before installing. A dedicated `live` user session is started by SDDM from `/etc/skel` — the same config that appears after an install — and an **Install Omarchy** launcher row opens the installer wizard inside a terminal on the desktop.
+
+The classic TTY installer is still available as a separate boot-menu entry ("Omarchy - Install (TTY wizard)", kernel cmdline `omarchy.install`). The desktop and TTY boots are distinguished by the `omarchy.live` kernel command line; the TTY path, including the headless cidata autoinstall used by the acceptance/integration harnesses, is unchanged. The acceptance harness selects the TTY entry from the boot menu before driving the wizard.
+
 ## Autoinstall
 
 The shipped ISO installs itself with no keyboard when it finds its configuration on a second drive. Attach a drive labeled `cidata` alongside the ISO and the installer copies the config off it and skips the configurator; with no such drive, nothing changes and the wizard runs as usual. No rebuild, no extra boot entry.

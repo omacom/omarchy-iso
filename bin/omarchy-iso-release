@@ -1,10 +1,5 @@
 #!/bin/bash
 
-# A failed step must stop the release: without this, a make that dies (say,
-# docker permission denied) falls through to signing and uploading whatever
-# stale ISO release/ already holds, under the new release's name.
-set -e
-
 MAKE_ARGS=()
 ISO_REF=quattro
 RELEASE_SUFFIX=""
@@ -42,14 +37,6 @@ if [[ -z "${BUILD_VERSION-}" ]]; then
   exit 1
 fi
 
-# A version that already numbers its candidate (4.0.2rc2) is the complete
-# artifact name; the bare -rc suffix exists only for an unnumbered candidate.
-# Without this, every candidate of a train uploads over the same
-# omarchy-X.Y.Z-rc.iso and testers cannot tell which rc they are holding.
-if [[ $BUILD_VERSION == *rc* ]]; then
-  RELEASE_SUFFIX=""
-fi
-
 BUILD_ROOT=$(realpath "${BASH_SOURCE[0]%/*}/..")
 BUILD_RELEASE_PATH="$BUILD_ROOT/release"
 
@@ -83,9 +70,3 @@ fi
 echo -e "\e[32mSHA256 for $ISO_REF ISO: $iso_sha\e[0m"
 
 omarchy-iso-upload "$release_iso"
-
-# The whole point of a release is handing someone this pair.
-echo -e "\e[32mReleased $ISO_REF ISO $BUILD_VERSION\e[0m"
-echo "  URL:    https://iso.omarchy.org/${release_iso##*/}"
-echo "  SHA256: $iso_sha"
-echo "  Local:  $release_iso"

@@ -117,22 +117,51 @@ cp "/tmp/$NODE_FILENAME" "$build_cache_dir/airootfs/opt/packages/"
 # Packages installed into the live ISO environment itself (NOT the target system).
 # The selected omarchy-settings package is needed here so its post_install hook
 # drops Omarchy's plymouthd.conf into /etc/plymouth before mkarchiso builds the
-# live initramfs.
-arch_packages=(linux-t2 git gum jq openssl plymouth ttfx tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
+# live initramfs. The omarchy runtime is also installed into the live root so
+# the live desktop (Hyprland + Quickshell + SDDM, plus the user config it ships
+# in /etc/skel) is present on the medium; its dependency closure pulls in
+# hyprland, quickshell, uwsm, sddm, xdg-desktop-portal-hyprland and friends.
+# foot is the terminal used by the on-desktop installer wizard. The remaining
+# entries mirror the apps a stock Omarchy install ships (see omarchy-base.packages)
+# so a "try Omarchy" live session has the same desktop apps as an installed one:
+# xdg-terminal-exec (the default-terminal backend the omarchy session uses),
+# nautilus(+python) as the file manager, chromium as the default browser,
+# fastfetch for the neofetch-style system info row, and gnome-disk-utility so
+# disks can be managed from the live environment.
+#
+# Two kernels are shipped and both get an initramfs (see customize_airootfs.sh):
+#   - linux-t2   — the T2/Mac kernel (keyboard + trackpad on T2 Macs).
+#   - linux      — the stock kernel, now the default try-desktop boot (broadest
+#                  generic-PC hardware support, and the only kernel the prebuilt
+#                  nvidia driver targets).
+# NVIDIA support for the live desktop uses NVIDIA's OPEN driver, nvidia-open-dkms,
+# paired with the stock linux kernel. The module is COMPILED ONCE AT ISO-BUILD
+# TIME against the stock linux headers (see customize_airootfs.sh: it runs dkms
+# autoinstall and then rebuilds the linux initramfs with the nvidia modules baked
+# in), so the stock-linux try-desktop boot gets NVIDIA modesetting with NO DKMS
+# compile at live boot. After the build the heavyweight build-only packages
+# (linux-headers, dkms) are removed to keep the medium lean. The linux-t2 boot is
+# NOT given the nvidia module (ABI mismatch) — T2 Macs use Mesa/IGP and never
+# need it. nvidia-settings is intentionally absent: it pulls GTK deps for a
+# control panel, against the size budget. The INSTALLED system gets its NVIDIA
+# (nvidia-open-dkms, built at install time by the omarchy nvidia.sh hardware
+# script) from its own offline mirror, unchanged.
+arch_packages=(
+  linux linux-t2 git gum jq openssl plymouth ttfx tzupdate omarchy-keyring
+  "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted
+  polkit foot
+  xdg-terminal-exec nautilus nautilus-python chromium fastfetch gnome-disk-utility
+  nvidia-open-dkms nvidia-utils linux-headers base-devel
+)
 printf '%s\n' "${arch_packages[@]}" >> "$build_cache_dir/packages.x86_64"
 
-# The live ISO boots linux-t2 (see airootfs/etc/mkinitcpio.d/linux-t2.preset), so
-# stock linux is a second kernel nobody boots: ~147MB of ISO, plus its own archiso
-# initramfs, copied into both the ISO tree and the size-constrained FAT EFI image.
-#
-# It cannot just be deleted — releng's broadcom-wl hard-depends on it, and it is
-# the only releng package that does, so pacman would drag the kernel straight back
-# in. broadcom-wl is a prebuilt module for stock linux and cannot load on the
-# kernel we boot, so it has done nothing since we started booting T2 anyway. The
-# install is entirely offline and the live environment needs no Wi-Fi driver.
-#
-# Anchored so linux-t2 and linux-firmware are untouched.
-sed -i -E '/^(linux|broadcom-wl)$/d' "$build_cache_dir/packages.x86_64"
+# The live ISO now ships BOTH linux-t2 and stock linux (see arch_packages above);
+# releng's packages.x86_64 already lists stock linux, so we keep it and only drop
+# broadcom-wl. broadcom-wl hard-depends on stock linux but the live environment
+# installs entirely offline and needs no Wi-Fi driver on the try-it medium, so it
+# only adds ISO weight we don't want. Anchored so linux-t2, linux and
+# linux-firmware are untouched.
+sed -i -E '/^(broadcom-wl)$/d' "$build_cache_dir/packages.x86_64"
 
 # Build the offline mirror: everything pacstrap might want during the target
 # install. With --local-source, the omarchy* packages we just built are

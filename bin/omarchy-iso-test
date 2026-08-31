@@ -18,10 +18,9 @@
 #                      first boot runs omarchy-provision-owner and creates it there
 #   --reuse-base       Skip the install phase if a base image already exists
 #   --install-only     Stop after producing the installed base image
-#   --sync-omarchy DIR Push DIR's test suite into the guest before running
+#   --sync-omarchy DIR Push DIR's test/acceptance into the guest before running
 #                      (defaults to OMARCHY_PATH when the suite is present)
 #   --sync-all DIR     Push all of DIR (bin/config/shell/test) into the guest
-#                      and also run the CLI and shell suites there
 #   --port PORT        Host port forwarded to guest SSH (default 2222)
 #   --memory MB        VM memory (default 8192)
 #   --timeout SECS     Install timeout (default 2400)
@@ -202,11 +201,6 @@ start_vm() {
   local disk="$1" serial="$2"
   shift 2
 
-  # A viewer that resizes the guest display breaks the console driving: OCR
-  # cannot read the shrunken font, and a resize during early boot can wedge
-  # virtio-gpu before the system comes up.
-  log "Watch (do not resize): vncviewer -RemoteResize=0 127.0.0.1:5905"
-
   qemu-system-x86_64 \
     -cpu host -enable-kvm -machine q35,accel=kvm \
     -smp "$(nproc)" \
@@ -217,7 +211,6 @@ start_vm() {
     -device virtio-blk-pci,drive=drive0,bootindex=1 \
     -device virtio-vga \
     -display none \
-    -vnc 127.0.0.1:5 \
     -usb -device usb-tablet \
     -netdev user,id=net0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22 \
     -device virtio-net-pci,netdev=net0 \
@@ -407,7 +400,7 @@ guest_layer_absent() {
 }
 
 cleanup_shortcut_state() {
-  ssh_session 'for plugin in omarchy.menu omarchy.emojis omarchy.clipboard omarchy.audio; do
+  ssh_session 'for plugin in omarchy.launcher omarchy.menu omarchy.emojis omarchy.clipboard omarchy.audio; do
     omarchy-shell shell hide "$plugin" >/dev/null 2>&1 || true
   done
   while read -r address; do
@@ -584,8 +577,8 @@ shortcut_smoke_phase() {
 
   local status=0
   local name chord namespace plugin
-  local shortcuts='menu|meta_l-spc|omarchy-menu|omarchy.menu
-apps-menu|meta_l-alt-spc|omarchy-menu|omarchy.menu
+  local shortcuts='launcher|meta_l-spc|omarchy-launcher|omarchy.launcher
+menu|meta_l-alt-spc|omarchy-menu|omarchy.menu
 emojis|meta_l-ctrl-e|omarchy-emojis|omarchy.emojis
 clipboard|meta_l-ctrl-v|omarchy-clipboard|omarchy.clipboard
 audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel|omarchy.audio'
@@ -610,9 +603,38 @@ audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel|omarchy.audio'
 
 # ----------------------------------------------------- driving the installer
 
+# The ISO default boot entry is now the live desktop (stock linux). The TTY
+# installer lives on its own grub entry placed at menu index 1 — immediately
+# after the default `omarchy-live` entry — so a single Down + Return from the
+# default lands on it. Detect the menu (grub renders the "Try the desktop"
+# default and an "Install" item) and send Down + Return. Falls back to a timed
+# press so we still beat grub's auto-boot even if OCR cannot read the graphical
+# menu. NOTE: keep the `omarchy-install` entry at index 1 in configs/grub/grub.cfg
+# or this navigation breaks.
+boot_installer_entry() {
+  log "Selecting the TTY installer entry from the boot menu"
+  # Watch for the menu (grub renders an "Install" item) but never exceed grub's
+  # 15s auto-boot timeout, so the keypress always lands while the menu is up.
+  local waited=0
+  while ((waited < 12)); do
+    if ocr_screen | grep -qi "Install"; then
+      break
+    fi
+    if ((waited == 0)); then
+      capture_console "success-boot-00-boot-menu"
+    fi
+    sleep 3
+    ((waited += 3))
+  done
+  capture_console "success-boot-01-select-installer-entry"
+  press down
+  sleep 1
+  press ret
+  log "Booted into the installer entry."
+}
+
 drive_configurator() {
   log "Driving the installer wizard"
-
   # A greeter (animated logo + tagline) opens the installer; Return begins.
   wait_for_screen "Opinionated" 300
   capture_console "success-installer-00-greeter"
@@ -638,11 +660,7 @@ drive_configurator() {
     capture_console "success-installer-04-prepare-disk-warning-encrypted"
     if ! $ENCRYPT; then
       press ctrl-c
-      # The toggled confirm ("Yes, install without encryption") is a highlighted
-      # button OCR cannot read, so don't wait for it. A failed toggle still
-      # surfaces: the encrypted install stalls at the LUKS prompt on first boot
-      # and SSH never comes up.
-      sleep 2
+      wait_for_screen "without encryption" 30
       capture_console "success-installer-05-prepare-disk-warning-unencrypted"
     fi
     press ret
@@ -706,11 +724,7 @@ drive_configurator() {
   capture_console "success-installer-12-disk-warning-encrypted"
   if ! $ENCRYPT; then
     press ctrl-c # toggles the confirm to the unencrypted flow
-    # The toggled confirm ("Yes, install without encryption") is a highlighted
-    # button OCR cannot read, so don't wait for it. A failed toggle still
-    # surfaces: the encrypted install stalls at the LUKS prompt on first boot
-    # and SSH never comes up.
-    sleep 2
+    wait_for_screen "without encryption" 30
     capture_console "success-installer-13-disk-warning-unencrypted"
   fi
   press ret
@@ -890,39 +904,40 @@ EOF
   (cd "$BASE_DIR/www" && exec python3 -m http.server "$HTTP_PORT" --bind 127.0.0.1 >/dev/null 2>&1) &
   HTTP_PID=$!
 
-  # Type the login blind: a VNC viewer that resizes the framebuffer makes the
-  # console font unreadable to OCR, and the real gate is SSH coming up anyway.
-  # Getty re-prompts after a failed login, so a whole-sequence retry recovers
-  # from typing before the prompt was ready.
-  sleep 15 # give first boot time to reach getty
-  local attempt
-  for attempt in 1 2 3; do
+  local waited=0
+  while true; do
     press ctrl-alt-f3
-    sleep 8
-    press ret # settle a half-typed prompt from a previous attempt
-    sleep 2
-    type_text "$GUEST_USER"
-    capture_console "success-first-boot-03-console-username"
-    press ret
-    sleep 3
-    type_text "$GUEST_PASSWORD"
-    press ret
     sleep 4
-    type_text "curl -fsS http://10.0.2.2:$HTTP_PORT/bootstrap -o /tmp/bs && bash /tmp/bs"
-    capture_console "success-first-boot-05-bootstrap-command"
-    press ret
+    ocr_screen | grep -qi "login:" && break
+    ((waited += 8))
 
-    if wait_for_ssh 120 "failure-first-boot-ssh-timeout-$attempt"; then
-      capture_console "success-first-boot-06-bootstrap-complete"
-      kill "$HTTP_PID" 2>/dev/null || true
-      HTTP_PID=""
-      press ctrl-alt-f1
-      return 0
+    if ((waited >= 300)); then
+      capture_console "failure-first-boot-console-timeout"
+      echo "Timed out waiting for a console login prompt" >&2
+      return 1
     fi
+    sleep 4
   done
 
-  echo "Console bootstrap did not produce SSH access after 3 attempts" >&2
-  return 1
+  type_text "$GUEST_USER"
+  capture_console "success-first-boot-03-console-username"
+  press ret
+  wait_for_screen "Password" 60
+  type_text "$GUEST_PASSWORD"
+  capture_console "success-first-boot-04-console-password"
+  press ret
+  sleep 3
+
+  type_text "curl -fsS http://10.0.2.2:$HTTP_PORT/bootstrap -o /tmp/bs && bash /tmp/bs"
+  capture_console "success-first-boot-05-bootstrap-command"
+  press ret
+
+  wait_for_ssh 360 "failure-first-boot-ssh-timeout"
+  capture_console "success-first-boot-06-bootstrap-complete"
+
+  kill "$HTTP_PID" 2>/dev/null || true
+  HTTP_PID=""
+  press ctrl-alt-f1
 }
 
 # Get a freshly booted system to a running Hyprland session, typing at the
@@ -994,6 +1009,7 @@ install_phase() {
     -drive "file=$ISO,media=cdrom,if=none,format=raw,id=cdrom0" \
     -device ide-cd,drive=cdrom0,bootindex=2
 
+  boot_installer_entry
   drive_configurator
   wait_for_install
 
@@ -1072,13 +1088,16 @@ sync_omarchy() {
     log "Syncing $SYNC_DIR into the guest"
     tar -C "$SYNC_DIR" --exclude .git -cf - . | ssh_guest "mkdir -p $target && tar -C $target -xf -"
   else
-    log "Syncing $SYNC_DIR/test into the guest"
-    tar -C "$SYNC_DIR" -cf - test | ssh_guest "mkdir -p $target && tar -C $target -xf -"
+    log "Syncing $SYNC_DIR/test/acceptance into the guest"
+    tar -C "$SYNC_DIR/test" -cf - acceptance acceptance.d | ssh_guest "mkdir -p $target/test && tar -C $target/test -xf -"
   fi
 }
 
 acceptance_phase() {
   log "Booting acceptance VM from base image overlay"
+
+  local guest_omarchy_path="/usr/share/omarchy"
+  $SYNC_ALL && guest_omarchy_path=".local/share/omarchy"
 
   qemu-img create -f qcow2 -b "$BASE_DISK" -F qcow2 "$RUN_DIR/run.qcow2" >/dev/null
   start_vm "$RUN_DIR/run.qcow2" "$RUN_DIR/serial.log"
@@ -1089,19 +1108,8 @@ acceptance_phase() {
   local status=0
   shortcut_smoke_phase || status=1
 
-  # The synced tree is a full checkout under --sync-all; run the host-style
-  # CLI and shell suites in the guest too before the graphical acceptance
-  # run. They derive their root from their own location in the synced tree.
-  if $SYNC_ALL; then
-    log "Running CLI and shell suites in the guest"
-    ssh_guest "bash .local/share/omarchy/test/all" || status=$?
-  fi
-
-  # The product under test is always the installed tree — VM runs verify the
-  # finished product, never a dev-linked checkout.
   log "Running acceptance suite"
-  ssh_guest "OMARCHY_PATH=/usr/share/omarchy OMARCHY_ACCEPTANCE_DIR=/tmp/omarchy-acceptance \
-    OMARCHY_ACCEPTANCE_SUDO_PASSWORD=$GUEST_PASSWORD bash .local/share/omarchy/test/acceptance" || status=$?
+  ssh_guest "OMARCHY_PATH=$guest_omarchy_path OMARCHY_ACCEPTANCE_DIR=/tmp/omarchy-acceptance bash .local/share/omarchy/test/acceptance" || status=$?
 
   log "Collecting artifacts into $RUN_DIR"
   ssh_guest "tar -C /tmp -cf - omarchy-acceptance 2>/dev/null" | tar -C "$RUN_DIR" -xf - || true

@@ -12,6 +12,15 @@ set -euo pipefail
 
 [[ $(tty) == /dev/tty1 ]] || exit 0
 
+# When the medium boots into the live desktop (kernel cmdline omarchy.live),
+# the graphical installer is reached from the desktop session instead, so this
+# TTY must not occupy tty1 with the configurator wizard. SDDM starts the desktop
+# (see /usr/lib/systemd/system/omarchy-live-boot.service). Otherwise we are on
+# the classic TTY install path and everything below applies unchanged.
+if grep -qw omarchy.live /proc/cmdline; then
+  exit 0
+fi
+
 export OMARCHY_MIRROR="$(cat /root/omarchy_mirror)"
 if [[ -f /root/omarchy_iso_ref ]]; then
   export OMARCHY_ISO_REF="$(cat /root/omarchy_iso_ref)"

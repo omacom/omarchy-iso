@@ -1,0 +1,16 @@
+[Unit]
+Description=Omarchy live desktop bootstrap
+# Only acts when omarchy.live is on the kernel command line, so this unit is
+# inert on the classic TTY installer boot. Runs after the session/user manager
+# and D-Bus are up so SDDM can bring up the user session.
+After=systemd-user-sessions.service dbus.service
+Wants=dbus.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/omarchy-live-desktop
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

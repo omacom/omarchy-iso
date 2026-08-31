@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+#
+# Launch the Omarchy installer from the live desktop.
+#
+# Intended to be run (as root, via pkexec) from the Omarchy live desktop. It
+# opens the installer wizard (configurator + install dashboard) in a graphical
+# foot terminal so the user can install Omarchy without leaving the desktop.
+#
+# pkexec strips the environment, so we recover the display (the live user's
+# Wayland socket and XDG_RUNTIME_DIR) from a helper that still holds it.
+set -euo pipefail
+
+[[ $EUID -eq 0 ]] || { echo "omarchy-live-install must run as root (pkexec)." >&2; exit 1; }
+
+# The live user's interactive Wayland session env. Prefer foot; fall back to the
+# user's default terminal via foot's own xdg-terminal-exec resolution if absent.
+terminal_cmd=(foot)
+
+# Find a process owned by the live desktop user that has a Wayland socket.
+# Anything on the graphical session carries it; the shell/bar/store do.
+LIVE_UID="$(
+  getent passwd live | cut -d: -f3 2>/dev/null
+)"
+runtime_dir=""
+wayland_display=""
+if [[ -n $LIVE_UID ]]; then
+  for pid in $(pgrep -u "$LIVE_UID" 2>/dev/null); do
+    if [[ -r /proc/$pid/environ ]]; then
+      envfile="/proc/$pid/environ"
+      if grep -qz '^WAYLAND_DISPLAY=' "$envfile" 2>/dev/null; then
+        wayland_display="$(tr '\0' '\n' <"$envfile" | sed -n 's/^WAYLAND_DISPLAY=//p' | head -1)"
+        xdg_runtime="$(tr '\0' '\n' <"$envfile" | sed -n 's/^XDG_RUNTIME_DIR=//p' | head -1)"
+        [[ -n $wayland_display && -n $xdg_runtime ]] && { runtime_dir="$xdg_runtime"; break; }
+      fi
+    fi
+  done
+fi
+
+if [[ -z $runtime_dir || -z $wayland_display ]]; then
+  echo "Could not find the live desktop's Wayland session." >&2
+  exit 1
+fi
+
+exec env \
+  XDG_RUNTIME_DIR="$runtime_dir" \
+  WAYLAND_DISPLAY="$wayland_display" \
+  "${terminal_cmd[@]}" \
+  /usr/local/bin/omarchy-live-install-wizard

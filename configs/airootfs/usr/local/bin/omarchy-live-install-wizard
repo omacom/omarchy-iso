@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#
+# Omarchy installer running inside the live desktop.
+#
+# This is the same configurator + install-dashboard flow that the TTY installer
+# entry runs on tty1 (see /root/.automated_script.sh), presented in a terminal
+# window so it can be launched from the live desktop. A user reaches it through
+# the "Install Omarchy" launcher entry (pkexec omarchy-live-install), which this
+# script drives in a graphical terminal.
+set -euo pipefail
+
+export OMARCHY_MIRROR="$(cat /root/omarchy_mirror)"
+if [[ -f /root/omarchy_iso_ref ]]; then
+  export OMARCHY_ISO_REF="$(cat /root/omarchy_iso_ref)"
+fi
+if [[ -f /usr/share/omarchy-iso/package-targets ]]; then
+  # shellcheck disable=SC1091
+  source /usr/share/omarchy-iso/package-targets
+  export OMARCHY_RUNTIME_PACKAGE OMARCHY_SETTINGS_PACKAGE OMARCHY_NVIM_PACKAGE
+fi
+export OMARCHY_PATH=/usr/share/omarchy
+export OMARCHY_INSTALL=$OMARCHY_PATH/install
+export OMARCHY_INSTALL_LOG_FILE=/var/log/omarchy-install.log
+if [[ -f /usr/share/omarchy-iso/install-debug ]]; then
+  export OMARCHY_INSTALL_DEBUG=1
+fi
+
+mkdir -p /var/log
+touch "$OMARCHY_INSTALL_LOG_FILE"
+
+cd /root
+# Autoinstall: a cidata drive carrying the configurator's own output files
+# stands in for the wizard.
+if /usr/local/bin/omarchy-cidata-load; then
+  echo "Autoinstall configuration found on cidata drive; skipping the configurator."
+  export OMARCHY_UI_INTERACTIVE=no
+else
+  ./configurator
+fi
+
+if [[ -f /root/defer-provisioning ]] ||
+  [[ "$(jq -r '.omarchy_install.defer_provisioning // false' /root/user_configuration.json 2>/dev/null)" == "true" ]]; then
+  export OMARCHY_UI_DEFER_PROVISIONING=yes
+fi
+
+rm -f /run/omarchy-install/state.json
+/usr/local/bin/omarchy-install-dashboard \
+  "$OMARCHY_INSTALL_LOG_FILE" \
+  /run/omarchy-install/state.json \
+  -- \
+  /usr/local/bin/omarchy-iso-install \
+    --config /root/user_configuration.json \
+    --creds /root/user_credentials.json \
+    --full-name-file /root/user_full_name.txt \
+    --email-file /root/user_email_address.txt \
+    --encrypt-file /root/user_encrypt_installation.txt \
+    --authorized-keys-file /root/authorized_keys \
+    --tailscale-authkey-file /root/tailscale_authkey \
+    --defer-provisioning-file /root/defer-provisioning

@@ -35,6 +35,8 @@ from the start.
 from __future__ import annotations
 
 import importlib
+import subprocess
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -87,13 +89,20 @@ def perform_filesystem_operations(arch_config: ArchConfig) -> None:
     object (separate from Installer) so we run it before opening the
     Installer context manager.
 
-    parted's partition-table commit races udev: the disk wipe and the first
-    BLKPG partition registration trigger probes that briefly hold the disk
-    open, and the kernel then refuses to register the remaining partitions
-    (_ped.IOException: "Partition(s) ... have been written, but we have been
-    unable to inform the kernel"). The table is written correctly when that
-    happens — only the kernel's view is stale — so settle udev and redo the
-    operations. The wipe/partition/format sequence is idempotent."""
+    Two of archinstall's failure modes surface here and both are handled:
+
+    1. The partition-table commit races udev (the disk wipe and the first BLKPG
+       partition registration trigger probes that briefly hold the disk open, and
+       the kernel then refuses to register the remaining partitions). The table
+       is written correctly when that happens — only the kernel's view is stale
+       — so settle udev and redo the operations.
+
+    2. Closing the freshly-created LUKS mapping races a lingering reference and
+       fails with "Device or resource busy" / "Device root is still in use"
+       (issue #130). It is intermittent and self-clears once udev settles, so
+       force-close strays and retry. The wipe/partition/format sequence is
+       idempotent, so retrying is safe.
+    """
     if not arch_config.disk_config:
         raise RuntimeError("disk_config missing from arch config")
 
@@ -111,16 +120,124 @@ def perform_filesystem_operations(arch_config: ArchConfig) -> None:
         else {}
     )
 
+    # issue #115: archinstall's device re-scan (DeviceHandler.get_btrfs_info)
+    # tries to mount the raw LUKS partition as btrfs, which fails with
+    # "wrong fs type, bad superblock". Guard that scan for the duration of the
+    # partitioning so crypto_LUKS partitions are never mounted as btrfs.
+    _restore_get_btrfs_info = _guard_get_btrfs_info()
+
     attempts = 3
-    for attempt in range(1, attempts + 1):
-        udev_sync()
-        try:
-            handler.perform_filesystem_operations(**fs_kwargs)
-            return
-        except Exception as exc:
-            if attempt == attempts or "unable to inform the kernel" not in str(exc):
-                raise
-            info(f"› partition commit lost a udev race (attempt {attempt}/{attempts}); retrying")
+    try:
+        for attempt in range(1, attempts + 1):
+            udev_sync()
+            try:
+                handler.perform_filesystem_operations(**fs_kwargs)
+                return
+            except Exception as exc:
+                exc_str = str(exc)
+                if attempt == attempts:
+                    raise
+                if "unable to inform the kernel" in exc_str:
+                    info(f"› partition commit lost a udev race (attempt {attempt}/{attempts}); retrying")
+                elif _is_luks_close_race(exc_str):
+                    _close_stray_crypt_mappings()
+                    info(f"› LUKS close lost a device race (attempt {attempt}/{attempts}); retrying")
+                else:
+                    raise
+    finally:
+        if _restore_get_btrfs_info is not None:
+            _restore_get_btrfs_info()
+
+
+def _is_luks_close_race(message: str) -> bool:
+    """Distinguish a transient LUKS-close race (issue #130) from other errors.
+
+    The failure archinstall surfaces is a `cryptsetup close` SysCallError whose
+    text mentions a busy device + a LUKS mapping name. We must not retry on
+    arbitrary errors (idempotent or not, retrying a genuine failure just loops);
+    scope the retry to the specific "still in use / Device or resource busy"
+    message that accompanies the intermittent close race.
+    """
+    return any(
+        token in message
+        for token in ("Device or resource busy", "Device root is still in use")
+    )
+
+
+def _close_stray_crypt_mappings() -> None:
+    """Force-close any left-over LUKS mapping still referencing the new layout.
+
+    The racy close in issue #130 leaves a mapping with "Open count: 0" that still
+    refuses to close once but closes on the second attempt after udev settles.
+    Iterate every live crypt device and close it. This is deliberately a local
+    loop rather than the full cleanup script: we are mid-install after
+    re-partitioning, and only strays from the previous attempt should be dropped.
+    """
+    lsblk = subprocess.run(
+        ["lsblk", "-rnpo", "PATH,TYPE"], check=False, capture_output=True, text=True
+    )
+    for line in lsblk.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == "crypt" and parts[0].startswith("/dev/"):
+            subprocess.run(
+                ["cryptsetup", "close", parts[0]],
+                check=False, capture_output=True,
+            )
+    udev_sync()
+    time.sleep(2)
+
+
+def _guard_get_btrfs_info():
+    """Temporarily patch archinstall's btrfs-info scan to skip crypto_LUKS.
+
+    issue #115: after we format the LUKS mapper as btrfs, archinstall's
+    DeviceHandler re-scans devices and its get_btrfs_info() tries to mount the
+    *raw* LUKS partition as btrfs, dying on "wrong fs type, bad superblock".
+    The scan has no business opening a LUKS container, so we wrap the class
+    method to return an empty info dict for crypto_LUKS devices and defer to the
+    original otherwise.
+
+    archinstall's internals move between versions, so this is a best-effort,
+    scoped patch: if the class/method cannot be located we leave archinstall
+    alone (None disables the patch and restores nothing) rather than crash the
+    install on a symbol rename.
+    """
+    try:
+        from archinstall.lib.disk.device_handler import DeviceHandler
+    except Exception:
+        return None
+
+    original = getattr(DeviceHandler, "get_btrfs_info", None)
+    if not callable(original):
+        return None
+
+    def _wrapped(self, device, *args, **kwargs):
+        if _device_is_luks(device):
+            return {}
+        return original(self, device, *args, **kwargs)
+
+    setattr(DeviceHandler, "get_btrfs_info", _wrapped)
+
+    def _restore():
+        setattr(DeviceHandler, "get_btrfs_info", original)
+
+    return _restore
+
+
+def _device_is_luks(device) -> bool:
+    """True if `device` (a path or a device-like object) is a LUKS container."""
+    path = device if isinstance(device, str) else None
+    if path is None:
+        # archinstall passes devices around as objects (BlockDevice / _Device);
+        # accept anything carrying a path/device_name attribute.
+        path = getattr(device, "path", None) or getattr(device, "device_name", None)
+    if not path:
+        return False
+    proc = subprocess.run(
+        ["lsblk", "-ndo", "TYPE", str(path)],
+        check=False, capture_output=True, text=True,
+    )
+    return "crypto_LUKS" in proc.stdout or "crypt" in proc.stdout
 
 
 @contextmanager

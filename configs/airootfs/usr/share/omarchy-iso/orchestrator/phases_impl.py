@@ -1288,6 +1288,8 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     if "root=" not in cmdline:
         raise RuntimeError(f"cmdline parsed from {default_limine} has no root=: {cmdline}")
 
+    _configure_initramfs_encryption_hook(ctx)
+
     esp_path = _limine_setting(config_text, "ESP_PATH", "/boot") or "/boot"
     esp_root = ctx.target / esp_path.lstrip("/")
     if not esp_root.is_dir():
@@ -1312,6 +1314,49 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
         raise RuntimeError(f"{limine_conf} has no Omarchy entry")
     if "cryptdevice=" in cmdline and "cryptdevice=" not in limine_conf.read_text():
         raise RuntimeError(f"encrypted install but {limine_conf} has no cryptdevice=")
+
+
+def _configure_initramfs_encryption_hook(ctx: InstallContext) -> None:
+    """Include the busybox encrypt hook exactly when the root uses LUKS.
+
+    omarchy-settings ships a general-purpose drop-in containing ``encrypt``.
+    On an unencrypted installation that hook treats ``root=`` as the legacy
+    encrypted-device syntax, emits a scary boot error, and then falls through.
+    Keep the hook for encrypted installs and remove only that token otherwise.
+    """
+    hooks_path = ctx.target / "etc" / "mkinitcpio.conf.d" / "omarchy_hooks.conf"
+    if not hooks_path.exists():
+        raise RuntimeError(f"{hooks_path} missing")
+
+    encrypted = _provision_install_encrypted(ctx)
+    output: list[str] = []
+    found = False
+    changed = False
+    pattern = re.compile(r"^(\s*HOOKS=\()([^)]*)(\).*)$")
+    for line in hooks_path.read_text().splitlines():
+        match = pattern.match(line)
+        if not match:
+            output.append(line)
+            continue
+
+        found = True
+        hooks = match.group(2).split()
+        has_encrypt = "encrypt" in hooks
+        if encrypted and not has_encrypt:
+            try:
+                hooks.insert(hooks.index("filesystems"), "encrypt")
+            except ValueError:
+                hooks.append("encrypt")
+            changed = True
+        elif not encrypted and has_encrypt:
+            hooks = [hook for hook in hooks if hook != "encrypt"]
+            changed = True
+        output.append(f"{match.group(1)}{' '.join(hooks)}{match.group(3)}")
+
+    if not found:
+        raise RuntimeError(f"{hooks_path} has no HOOKS=(...) assignment")
+    if changed:
+        hooks_path.write_text("\n".join(output) + "\n")
 
 
 def _strip_shell_quotes(value: str) -> str:

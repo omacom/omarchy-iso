@@ -4,6 +4,7 @@ archinstall config handler and mirror list handler)."""
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import secrets
@@ -74,8 +75,13 @@ class InstallContext:
             if encryption_password:
                 user_credentials["encryption_password"] = encryption_password
 
-        arch_configuration = dict(user_configuration)
+        # Keep the persistent identity from cidata for cleanup/support, but
+        # feed archinstall canonical /dev names.  Archinstall 4.4 indexes its
+        # BlockDevice objects by canonical kernel path and silently drops a
+        # layout whose device is a valid /dev/disk/by-id symlink.
+        arch_configuration = copy.deepcopy(user_configuration)
         arch_configuration.pop("omarchy_install", None)
+        _canonicalize_install_devices(arch_configuration)
 
         if defer_provisioning:
             # The userless invariant covers the archinstall config too: a
@@ -93,7 +99,13 @@ class InstallContext:
             # re-key by the stage_provisioning_state phase) and hand it to archinstall
             # through both places it may look: the disk_encryption block and
             # the credentials file.
-            _inject_provisioning_encryption_password(arch_configuration, user_credentials)
+            generated_password = _inject_provisioning_encryption_password(
+                arch_configuration, user_credentials
+            )
+            if generated_password:
+                user_configuration["disk_config"]["disk_encryption"][
+                    "encryption_password"
+                ] = generated_password
             creds_path = state_dir / "provisioning-user_credentials.json"
             creds_path.write_text(json.dumps(user_credentials, indent=2) + "\n")
             creds_path.chmod(0o600)
@@ -157,15 +169,41 @@ def _strip_account_fields(arch_configuration: dict) -> None:
             auth.pop(key, None)
 
 
-def _inject_provisioning_encryption_password(arch_configuration: dict, user_credentials: dict) -> None:
+def _canonicalize_install_devices(arch_configuration: dict) -> None:
+    """Resolve persistent disk aliases before handing JSON to archinstall.
+
+    Cidata deliberately names a stable /dev/disk/by-id path.  Keep that value
+    in ``user_configuration`` for diagnostics, but archinstall needs the
+    canonical runtime name (for example /dev/nvme0n1 or /dev/vda).
+    """
+    modifications = (
+        (arch_configuration.get("disk_config") or {}).get("device_modifications") or []
+    )
+    for modification in modifications:
+        device = modification.get("device")
+        if not device:
+            continue
+        path = Path(device)
+        try:
+            canonical = path.resolve(strict=True)
+        except OSError as exc:
+            raise RuntimeError(f"install device does not exist: {device}") from exc
+        if not canonical.is_block_device():
+            raise RuntimeError(f"install device is not a block device: {device} -> {canonical}")
+        modification["device"] = str(canonical)
+
+
+def _inject_provisioning_encryption_password(
+    arch_configuration: dict, user_credentials: dict
+) -> str | None:
     """Ensure an encrypted deferred-provisioning install has a LUKS passphrase archinstall can
     use. Reuse one the input already carries (an autoinstall rig may supply
-    its own); otherwise generate a throwaway. Mutates the disk_encryption
-    block in place — arch_configuration shares it with user_configuration, so
-    the stage_provisioning_state phase can read the effective passphrase back."""
+    its own); otherwise generate a throwaway. Return the effective passphrase
+    so the caller can explicitly mirror it into the separate persistent install
+    context used by stage_provisioning_state."""
     disk_encryption = (arch_configuration.get("disk_config") or {}).get("disk_encryption")
     if disk_encryption is None:
-        return
+        return None
 
     password = disk_encryption.get("encryption_password") or user_credentials.get("encryption_password")
     if not password:
@@ -173,6 +211,7 @@ def _inject_provisioning_encryption_password(arch_configuration: dict, user_cred
 
     disk_encryption["encryption_password"] = password
     user_credentials["encryption_password"] = password
+    return password
 
 
 def _default_omarchy_install(user_configuration: dict) -> dict[str, Any]:

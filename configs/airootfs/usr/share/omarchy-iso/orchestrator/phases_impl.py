@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -37,6 +38,20 @@ from .command import capture, capture_identifier, require_text
 from .context import InstallContext
 from .keyboard import configure_keyboard
 from .ui import error, info
+
+# Limine ships BOOT{X64,IA32,AA64,RISCV64,LOONGARCH64}.EFI and the Arch package
+# installs *all* of them, so hardcoding the x64 name does not fail on ARM -- it
+# silently installs an x86-64 binary the firmware cannot execute. Derive the
+# name instead, matching limine-common-functions' limine_efi_arch().
+_LIMINE_EFI_ARCH = {
+    "x86_64": "X64",
+    "i686": "IA32",
+    "aarch64": "AA64",
+    "riscv64": "RISCV64",
+    "loongarch64": "LOONGARCH64",
+}.get(platform.machine(), "X64")
+_LIMINE_SOURCE_EFI = f"BOOT{_LIMINE_EFI_ARCH}.EFI"
+_LIMINE_EFI_BINARY = f"limine_{_LIMINE_EFI_ARCH.lower()}.efi"
 
 
 # Package targets are written by builder/build-iso.sh. Stable ISOs use the
@@ -387,7 +402,7 @@ def _install_pre_mounted_limine(ctx: InstallContext) -> None:
         disk=Path(disk),
         part=part,
         esp_path=boot.get("esp_path", "/EFI/limine"),
-        efi_binary=boot.get("efi_binary", "limine_x64.efi"),
+        efi_binary=boot.get("efi_binary", _LIMINE_EFI_BINARY),
         pre_state=pre_state,
     )
 
@@ -405,15 +420,15 @@ def _install_limine_efi(
     part: int,
     removable: bool = False,
     esp_path: str = "/EFI/limine",
-    efi_binary: str = "limine_x64.efi",
+    efi_binary: str = _LIMINE_EFI_BINARY,
     pre_state: dict | None = None,
 ) -> None:
     if removable:
         esp_path = "/EFI/BOOT"
-        efi_binary = "BOOTX64.EFI"
+        efi_binary = _LIMINE_SOURCE_EFI
 
     limine_path = ctx.target / "usr" / "share" / "limine"
-    source_name = "BOOTX64.EFI"
+    source_name = _LIMINE_SOURCE_EFI
     target_dir = Path(esp_mount) / esp_path.lstrip("/")
     target_path = target_dir / efi_binary
     _copy_required(limine_path / source_name, ctx.target / target_path.relative_to("/"))
@@ -755,7 +770,7 @@ def _boot_intent(ctx: InstallContext) -> dict:
     boot = dict(ctx.omarchy_install.get("boot") or {})
     boot.setdefault("esp_mount", "/boot")
     boot.setdefault("esp_path", "/EFI/limine")
-    boot.setdefault("efi_binary", "limine_x64.efi")
+    boot.setdefault("efi_binary", _LIMINE_EFI_BINARY)
     boot.setdefault("enable_fallback", not ctx.is_protected)
     return boot
 
@@ -1160,6 +1175,10 @@ def run_system_finalizer(ctx: InstallContext) -> None:
 PROVISION_STATE_DIR = "var/lib/omarchy/provisioning"
 PROVISION_KEYFILE = "etc/omarchy/provisioning.key"
 NODE_PACKAGES_DIR = Path("/opt/packages")
+# Node ships x64/arm64 builds under different filenames; the ISO bundles the
+# one matching the target architecture.
+_NODE_ARCH = {"x86_64": "x64", "aarch64": "arm64"}.get(platform.machine(), "x64")
+NODE_TARBALL_GLOB = f"node-v*-linux-{_NODE_ARCH}.tar.gz"
 
 
 def stage_provisioning_state(ctx: InstallContext) -> None:
@@ -1200,7 +1219,7 @@ def stage_provisioning_state(ctx: InstallContext) -> None:
 
 
 def _stage_node_tarball(ctx: InstallContext, provisioning_dir) -> None:
-    tarballs = sorted(NODE_PACKAGES_DIR.glob("node-v*-linux-x64.tar.gz"))
+    tarballs = sorted(NODE_PACKAGES_DIR.glob(NODE_TARBALL_GLOB))
     if not tarballs:
         # Hard error on every install, not just deferred-provisioning installs: the stash is what lets a
         # later factory reset finalize the next owner offline, and an ISO
@@ -1669,7 +1688,7 @@ def validate_boot(ctx: InstallContext) -> None:
     kernel = storage.get("kernel") or (ctx.user_configuration.get("kernels") or ["linux"])[0]
 
     if arch.has_uefi():
-        limine_binary = esp_mount / boot.get("esp_path", "/EFI/limine").lstrip("/") / boot.get("efi_binary", "limine_x64.efi")
+        limine_binary = esp_mount / boot.get("esp_path", "/EFI/limine").lstrip("/") / boot.get("efi_binary", _LIMINE_EFI_BINARY)
         if not limine_binary.exists() or limine_binary.stat().st_size == 0:
             raise RuntimeError(f"{limine_binary} missing or empty")
 

@@ -83,7 +83,7 @@ warm_offline_mirror() {
     ((spent_kb + size_kb > budget_kb)) && continue
     cat -- "$path" >/dev/null 2>&1 || true
     spent_kb=$((spent_kb + size_kb))
-  done < <(du -k "$mirror"/*.pkg.tar.zst 2>/dev/null | sort -rn)
+  done < <(du -k "$mirror"/*.pkg.tar.zst "$mirror"/*.pkg.tar.xz 2>/dev/null | sort -rn)
 }
 
 warm_offline_mirror &

@@ -1,0 +1,5 @@
+# The live ISO boots linux-aarch64 (/boot/Image). A stock linux.preset points at
+# /boot/vmlinuz-linux, which does not exist here, and `mkinitcpio -P` fails with
+#   ERROR: Invalid option -k -- '/boot/vmlinuz-linux' must be readable
+# An empty PRESETS array makes this preset a no-op.
+PRESETS=()

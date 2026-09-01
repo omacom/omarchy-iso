@@ -6,10 +6,25 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+# Limine ships BOOT{X64,IA32,AA64,RISCV64,LOONGARCH64}.EFI and the Arch package
+# installs *all* of them, so hardcoding the x64 name does not fail on ARM -- it
+# silently installs an x86-64 binary the firmware cannot execute. Derive the
+# name instead, matching limine-common-functions' limine_efi_arch().
+_LIMINE_EFI_ARCH = {
+    "x86_64": "X64",
+    "i686": "IA32",
+    "aarch64": "AA64",
+    "riscv64": "RISCV64",
+    "loongarch64": "LOONGARCH64",
+}.get(platform.machine(), "X64")
+_LIMINE_SOURCE_EFI = f"BOOT{_LIMINE_EFI_ARCH}.EFI"
+_LIMINE_EFI_BINARY = f"limine_{_LIMINE_EFI_ARCH.lower()}.efi"
 
 
 @dataclass
@@ -184,7 +199,7 @@ def _default_omarchy_install(user_configuration: dict) -> dict[str, Any]:
         "boot": {
             "esp_mount": "/boot",
             "esp_path": "/EFI/limine",
-            "efi_binary": "limine_x64.efi",
+            "efi_binary": _LIMINE_EFI_BINARY,
             "enable_fallback": mode == "full_disk",
         },
         "storage": {},

@@ -507,6 +507,7 @@ not_enough_space() {
   step "Not enough free space on $disk"
   say --foreground 1 "$disk has $(to_gb $available) of usable free space; Omarchy needs at least 32GB."
   say "Open the partition tool to free at least 32GB on $disk, then try again."
+  say --foreground 8 "Do not Resize an existing OS partition in cfdisk — that only changes the table and corrupts the filesystem."
   echo
   if ! gum confirm --affirmative "Back" --negative "Open partition tool" "Return to installation mode?"; then
     open_partition_tool
@@ -895,18 +896,67 @@ disk_form() {
 # STEP 4: INSTALL MODE
 
 open_partition_tool() {
+  local dump="" before status
+
   step "Partition tool for $disk"
   gum style "Create unallocated free space for Omarchy, then write changes and quit."
   gum style --foreground 8 "Do not create an Omarchy partition here — leave the target area as Free space."
+  gum style --foreground 8 "Do not Resize an existing OS partition. cfdisk does not shrink filesystems; that corrupts the other OS."
+  gum style --foreground 8 "Shrink from Windows Disk Management (or the running OS) first, then leave the gap as Free space."
   gum style --foreground 8 "Tip: free-space install needs at least 32GB unallocated, plus 2GB more if no ESP already exists."
   echo
   gum confirm --affirmative "Open cfdisk" --negative "Back" "Open partition tool for $disk?" || return 0
+
+  dump=$(mktemp)
+  # The baseline scan and the snapshot are prerequisites, not conveniences.
+  # Without both there is nothing to compare cfdisk's result against and
+  # nothing to put back, so a Resize of an existing OS would go unnoticed and
+  # unrecoverable. Refuse to open the tool rather than open it unguarded.
+  if ! before=$(partition_starts_and_sizes "$disk") || ! save_partition_table "$disk" "$dump"; then
+    rm -f "$dump"
+    step "Cannot open the partition tool"
+    say --foreground 1 "The current partition table on $disk could not be read and saved, so a Resize could not be undone."
+    say "Make free space from Windows Disk Management (or the other OS) instead, then return here."
+    say --foreground 8 "Leave the space you free as unallocated Free space."
+    echo
+    gum confirm --affirmative "OK" --negative "Quit" "Return to installation mode?" || abort
+    return 1
+  fi
 
   clear
   cfdisk "$disk" || true
   partprobe "$disk" 2>/dev/null || true
   sync
   sleep 1
+
+  restore_shrunk_partitions "$disk" "$dump" "$before"
+  status=$?
+  rm -f "$dump"
+  if (( status == 0 )); then
+    partprobe "$disk" 2>/dev/null || true
+    sync
+    step "Partition table restored"
+    say --foreground 1 "cfdisk Resize only changes the partition table. It does not shrink the filesystem."
+    say "Continuing would have corrupted the existing OS, so the previous partition table was restored."
+    say --foreground 8 "Make free space from Windows Disk Management (or the other OS), then return here."
+    say --foreground 8 "Deleting an unused partition in cfdisk is fine. Resizing one is not."
+    echo
+    if gum confirm --affirmative "OK" --negative "Quit" "Return to installation mode?"; then
+      return 1
+    fi
+    abort
+  elif (( status == 2 )); then
+    step "Partition resize detected"
+    say --foreground 1 "cfdisk Resize only changes the partition table. It does not shrink the filesystem."
+    say "The previous table could not be restored automatically. Do not continue this install."
+    abort "Aborted: shrinking an existing partition would corrupt the other OS."
+  elif (( status == 3 )); then
+    step "Partition table could not be verified"
+    say --foreground 1 "The partition table on $disk could not be read back after cfdisk."
+    say "A Resize of an existing OS cannot be ruled out, and installing into that space would corrupt it."
+    say "Do not continue this install. Reboot and check the disk from the other OS."
+    abort "Aborted: the partition table could not be verified after cfdisk."
+  fi
 }
 
 # If the disk has no partition table or no unallocated free space, the only

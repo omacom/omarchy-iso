@@ -171,8 +171,13 @@ FINISH_TOP_ROW=2
 #   floor  lo + (span-1) * t / (t+tau), on time since this process saw the
 #          phase. Asymptotic, so it approaches the band end without reaching it.
 #          tau is a shape constant, not a duration prediction.
-#   work   packages installed / PKG_TOTAL, for the package phase only (~85% of
-#          the install). libalpm makes one directory per package under
+#   work   for the package phase only. On rootfs-image ISOs the orchestrator
+#          streams unsquashfs -percentage into RESTORE_PROGRESS_FILE and that
+#          percentage IS the work signal — preferred whenever the file exists,
+#          because on image ISOs BOTH signals are present (expected-packages
+#          still ships for phases.py accounting) and the package count only
+#          moves once unsquashfs reaches var/lib/. Otherwise: packages
+#          installed / PKG_TOTAL. libalpm makes one directory per package under
 #          <target>/var/lib/pacman/local; the denominator comes from
 #          build-iso.sh, so there is no second package list to drift.
 #
@@ -181,6 +186,10 @@ FINISH_TOP_ROW=2
 # curves behind a monotonic clamp freeze. With no signal the floor alone still
 # finishes the band.
 EXPECTED_PACKAGES_FILE="${OMARCHY_EXPECTED_PACKAGES_FILE:-/usr/share/omarchy-iso/expected-packages}"
+RESTORE_PROGRESS_FILE="${OMARCHY_RESTORE_PROGRESS_FILE:-/run/omarchy-install/restore-progress}"
+# Presence of the shipped image is what tells this ISO apart from a legacy
+# (full-mirror pacstrap) build; the bands are rebalanced off it below.
+ROOTFS_IMAGE_FILE=/var/cache/omarchy/rootfs/omarchy-rootfs.sfs
 PKG_TOTAL=0
 if [[ -r $EXPECTED_PACKAGES_FILE ]]; then
   read -r PKG_TOTAL _ <"$EXPECTED_PACKAGES_FILE" 2>/dev/null || PKG_TOTAL=0
@@ -207,6 +216,7 @@ PKG_BASE=-1            # package count when the phase started
 PKG_SEEN=0             # running max of packages since PKG_BASE
 PKG_LAST_CHANGE=0
 PKG_BONUS=0
+RESTORE_SEEN=0         # running max of the unsquashfs restore percentage
 
 # Monotonic clock: tzupdate and systemd-timesyncd can step the wall clock
 # mid-install, which would jump every time-driven band to its ceiling.
@@ -293,7 +303,7 @@ count_packages() {
 # here would land on the TTY between the cursor escape and the bar.
 install_progress() {
   local phase finished index total target
-  local lo hi tau span t pos work gap n pkg_signal=0
+  local lo hi tau span t pos work gap n pct pkg_signal=0 restore_signal=0
   local -a state
 
   PROGRESS_PM=$POS
@@ -327,6 +337,7 @@ install_progress() {
     PKG_SEEN=0
     PKG_BONUS=0
     PKG_LAST_CHANGE=$NOW
+    RESTORE_SEEN=0
   fi
 
   # Bands in per-mille, plus tau. The tail bands are wide relative to what they
@@ -362,8 +373,33 @@ install_progress() {
       ;;
   esac
 
+  # Rootfs-image ISOs restore a prebuilt squashfs instead of replaying ~925
+  # pacman transactions, so the package phase shrinks from ~64-85% of the
+  # install to roughly a third, and the tail phases dominate. Rebalance the
+  # named bands; unknown phases keep the index-derived fallback above.
+  # First cut per plan — recalibrate from timing JSON of real runs.
+  if [[ -f $ROOTFS_IMAGE_FILE ]]; then
+    case "$phase" in
+      "Installing Arch + Omarchy")  lo=65  hi=500  tau=150 ;;
+      "Configuring hibernation")    lo=500 hi=520  tau=10  ;;
+      "Configuring system")         lo=520 hi=780  tau=120 ;;
+      "Staging provisioning")       lo=780 hi=785  tau=5   ;;
+      "Finalizing Limine boot")     lo=785 hi=930  tau=90  ;;
+      "Finalizing user")            lo=930 hi=970  tau=30  ;;
+      "Configuring login")          lo=970 hi=985  tau=5   ;;
+    esac
+  fi
+
+  # Prefer the restore percentage whenever the orchestrator is streaming it:
+  # on image ISOs both signal sources exist (expected-packages still ships for
+  # phases.py accounting), so file existence alone is not a valid gate for the
+  # package-count path.
+  if (( pkg_signal )) && [[ -f $RESTORE_PROGRESS_FILE ]]; then
+    restore_signal=1
+    pkg_signal=0
+  fi
   (( pkg_signal && PKG_TOTAL > 0 )) || pkg_signal=0
-  (( pkg_signal )) && tau=$PKG_FLOOR_TAU
+  (( pkg_signal || restore_signal )) && tau=$PKG_FLOOR_TAU
 
   t=$(( NOW - PHASE_T0 ))
   (( t < 0 )) && t=0
@@ -373,7 +409,19 @@ install_progress() {
 
   pos=$(( lo + (span - 1) * t / (t + tau) ))
 
-  if (( pkg_signal )); then
+  if (( restore_signal )); then
+    # The orchestrator rewrites the file atomically with the latest unsquashfs
+    # percentage. Running max, same reasoning as PKG_SEEN, and the same
+    # PKG_TAIL_PM holdback so the band never pins before the phase ends. No
+    # bonus machinery: the percentage is continuous, not bursty.
+    read -r pct _ <"$RESTORE_PROGRESS_FILE" 2>/dev/null || pct=""
+    if [[ $pct =~ ^[0-9]+$ ]]; then
+      (( pct > 100 )) && pct=100
+      (( pct > RESTORE_SEEN )) && RESTORE_SEEN=$pct
+      work=$(( lo + (span - 1 - PKG_TAIL_PM) * RESTORE_SEEN / 100 ))
+      (( work > pos )) && pos=$work
+    fi
+  elif (( pkg_signal )); then
     PKG_DB_DIR="$target/var/lib/pacman/local"
     count_packages
     # Baseline on first sight: a target that already holds packages would

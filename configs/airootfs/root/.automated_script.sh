@@ -57,28 +57,47 @@ if [[ ${OMARCHY_INSTALL_DEBUG:-} == "1" ]]; then
   echo "================================"
 fi
 
-# Warm the page cache for the bundled packages while the user works through the
-# wizard. The install reads ~3GB out of the offline mirror, and pacman consumes
-# it at only ~33MB/s, so on media slower than that the install is read-bound and
-# every byte cached here is a byte it never waits for. On faster media this costs
-# nothing but otherwise-idle bandwidth: the medium is untouched while the user
-# types, and the target disk it writes to later is a different device.
+# Warm the page cache for the bundled install payload while the user works
+# through the wizard. On rootfs-image ISOs the dominant read is the ~3GB
+# rootfs squashfs (restored sequentially by unsquashfs); on legacy ISOs it is
+# the offline mirror, which pacman consumes at only ~33MB/s. On media slower
+# than the consumer the install is read-bound and every byte cached here is a
+# byte it never waits for. On faster media this costs nothing but
+# otherwise-idle bandwidth: the medium is untouched while the user types, and
+# the target disk it writes to later is a different device.
 #
 # Clean page cache only, so the kernel reclaims it under pressure instead of
 # OOMing, and a budget so small machines never evict what was just warmed.
 # Set OMARCHY_NO_PREFETCH=1 to A/B the same ISO with this disabled.
 warm_offline_mirror() {
   local mirror=/var/cache/omarchy/mirror/offline
-  local budget_kb spent_kb=0 size_kb path
+  local rootfs_image=/var/cache/omarchy/rootfs/omarchy-rootfs.sfs
+  local budget_kb spent_kb=0 size_kb read_kb path
 
   [[ ${OMARCHY_NO_PREFETCH:-} == 1 ]] && return 0
-  [[ -d $mirror ]] || return 0
+  [[ -d $mirror || -f $rootfs_image ]] || return 0
 
   budget_kb=$(($(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo) / 2))
   ((budget_kb > 262144)) || return 0
 
-  # Largest first: the install reads most of the mirror, so when the budget
-  # cannot cover all of it this still front-loads the bytes that dominate.
+  # The rootfs image first — it is the dominant read of the whole install,
+  # and unsquashfs consumes it front-to-back, so on a machine whose budget
+  # cannot hold the whole image a head-warm of whatever DOES fit still beats
+  # spending the budget on hardware-conditional packages most machines never
+  # read. Never skip it outright.
+  if [[ -f $rootfs_image ]]; then
+    size_kb=$(du -k "$rootfs_image" | awk '{print $1}')
+    read_kb=$((budget_kb - spent_kb))
+    ((read_kb > size_kb)) && read_kb=$size_kb
+    if ((read_kb > 0)); then
+      head -c "$((read_kb * 1024))" "$rootfs_image" >/dev/null 2>&1 || true
+      spent_kb=$((spent_kb + read_kb))
+    fi
+  fi
+
+  # Then the (pruned) mirror packages, largest first: when the remaining
+  # budget cannot cover all of them this still front-loads the bytes that
+  # dominate.
   while read -r size_kb path; do
     ((spent_kb + size_kb > budget_kb)) && continue
     cat -- "$path" >/dev/null 2>&1 || true
@@ -115,7 +134,10 @@ fi
 # the actual installer as a non-interactive child, logs child output, waits for
 # completion, then renders the final installed-time/reboot prompt itself.
 export OMARCHY_DASHBOARD_TTY="$(tty)"
-rm -f /run/omarchy-install/state.json
+# restore-progress too: the dashboard trusts that file from phase entry, so a
+# retry after a failed attempt must not inherit the previous attempt's
+# terminal percentage and pin the bar there.
+rm -f /run/omarchy-install/state.json /run/omarchy-install/restore-progress
 /usr/local/bin/omarchy-install-dashboard \
   "$OMARCHY_INSTALL_LOG_FILE" \
   /run/omarchy-install/state.json \

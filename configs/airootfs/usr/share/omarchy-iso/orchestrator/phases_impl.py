@@ -8,8 +8,9 @@ Phase ordering (full-disk and protected/pre-mounted):
     prepare_install_target → verify pre-mounted target/ESP when the JSON uses
                              pre_mounted_config; no-op for full-disk installs
     arch_install_system    → one archinstall flow for partition/mount-or-use,
-                             base install, early Omarchy packages, Limine setup,
-                             useradd, runtime Omarchy packages, fstab
+                             system payload (prebuilt rootfs image restore, or
+                             legacy pacstrap from the full mirror), Limine
+                             setup, useradd, fstab
     configure_hibernation  → root-owned swap/resume drop-ins
     run_system_finalizer   → arch-chroot root omarchy-apply-system, including Snapper
     finalize_limine_boot   → final Limine config/UKI build after hardware drop-ins
@@ -25,7 +26,9 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shlex
 import shutil
+import signal
 import subprocess
 import textwrap
 import time
@@ -203,10 +206,67 @@ def _install_disk(ctx: InstallContext) -> str | None:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # arch_install_system: everything inside a single Installer context manager.
-# Reorders guided.py's perform_installation() so early Omarchy packages install
-# before user creation and before our Omarchy-owned Limine setup copies files
-# from the target's limine package.
+# One shipped artifact decides how the system lands on disk:
+#
+#   _install_via_rootfs_image  the ISO carries a prebuilt rootfs squashfs
+#                              (build_rootfs_image in builder/build-iso.sh):
+#                              restore it with multithreaded unsquashfs, then
+#                              reconcile the install-time conditionals (kernel,
+#                              tailscale) against the pruned offline mirror.
+#   _install_via_pacstrap      legacy flow (ISO built with
+#                              OMARCHY_ROOTFS_IMAGE=0): reorders guided.py's
+#                              perform_installation() so early Omarchy packages
+#                              install before user creation and before our
+#                              Omarchy-owned Limine setup copies files from the
+#                              target's limine package. Kept for at least one
+#                              release as the fallback.
 # ─────────────────────────────────────────────────────────────────────────────
+
+ROOTFS_IMAGE_PATH = Path("/var/cache/omarchy/rootfs/omarchy-rootfs.sfs")
+ROOTFS_IMAGE_BUILD_MARKER = Path("/usr/share/omarchy-iso/rootfs-image-build")
+# linux is baked into the image; linux-t2 is the only other kernel the pruned
+# shipped mirror guarantees (build-iso.sh conditional_targets). Anything else
+# would fail mid-install in _reconcile_target_kernel, so the config assert
+# rejects it before the disk is touched.
+ROOTFS_IMAGE_SUPPORTED_KERNELS = {"linux", "linux-t2"}
+# What minimal_installation adds on the legacy path when the live session runs
+# a screen reader (archinstall's own list is private). build-iso.sh's
+# conditional_targets must carry the same names so the pruned mirror can serve
+# them at install time.
+ACCESSIBILITY_PACKAGES = ["brltty", "espeakup", "alsa-utils"]
+# Filesystems whose userspace archinstall's legacy minimal_installation would
+# have pacstrapped for the config (FilesystemType.installation_pkg: xfsprogs,
+# f2fs-tools) but that neither the baked image nor the pruned mirror carries
+# (btrfs-progs alone is baked, via snapper). Such a config would format fine
+# and boot without fsck/repair tools, so the config assert rejects it before
+# the disk is touched — same contract as ROOTFS_IMAGE_SUPPORTED_KERNELS.
+ROOTFS_IMAGE_UNSUPPORTED_FS_TYPES = {"xfs", "f2fs"}
+RESTORE_PROGRESS_PATH = Path("/run/omarchy-install/restore-progress")
+
+
+def _configured_kernels(config) -> list[str]:
+    """The configured kernel set with archinstall's default. The contract pair
+    _assert_rootfs_image_supported_config / _reconcile_target_kernel must
+    parse config.kernels identically — the assert's pre-format guarantee
+    holds only as long as both go through here."""
+    return list(getattr(config, "kernels", None) or ["linux"])
+
+
+def _is_rootfs_image_install() -> bool:
+    """Build-time variant decision, not runtime file presence: an image ISO
+    whose image file is missing must abort (see _assert_rootfs_image_available),
+    never quietly fall back to pacstrapping against the pruned mirror."""
+    return ROOTFS_IMAGE_BUILD_MARKER.exists()
+
+
+def _assert_rootfs_image_available() -> None:
+    if not ROOTFS_IMAGE_PATH.exists():
+        raise RuntimeError(
+            f"this ISO was built around a rootfs image but {ROOTFS_IMAGE_PATH} "
+            "is missing; refusing to touch the disk (the pruned mirror cannot "
+            "feed a pacstrap fallback)"
+        )
+
 
 def prepare_install_target(ctx: InstallContext) -> None:
     if ctx.is_protected:
@@ -219,12 +279,20 @@ def arch_install_system(ctx: InstallContext) -> None:
     The phase sequence is the same for full-disk and protected installs. The
     JSON decides whether archinstall should create/mount a disk layout or use
     a pre-mounted target, and Omarchy derives boot/fstab details from that same
-    input.
+    input. The prologue and the finishers are shared; only the way packages
+    land on disk differs between the image-restore and pacstrap paths.
     """
     handler = ctx.state["arch_config_handler"]
     mirror_handler = ctx.state["mirror_handler"]
     config = handler.config
     pre_mounted = arch.is_pre_mount(config)
+
+    # Both checks must precede any disk write: a broken or unsupported image
+    # install has no pacstrap fallback to save it after formatting.
+    use_rootfs_image = _is_rootfs_image_install()
+    if use_rootfs_image:
+        _assert_rootfs_image_available()
+        _assert_rootfs_image_supported_config(config)
 
     if not pre_mounted:
         info("› partitioning + formatting + encrypting")
@@ -241,74 +309,24 @@ def arch_install_system(ctx: InstallContext) -> None:
             skip_wkd=True,
         )
 
-        if not pre_mounted and arch.is_encrypted(config):
-            installer.generate_key_files()
-
         if config.mirror_config:
             installer.set_mirrors(mirror_handler, config.mirror_config, on_target=False)
 
-        _mount_offline_package_cache(ctx)
-        _mask_mkinitcpio_pacman_hooks(ctx)
-        try:
-            info("› installing base system (mkinitcpio deferred to final Limine UKI build)")
-            # An empty kb_layout makes archinstall's set_keyboard_language skip
-            # booting the target in a container just to run localectl; the
-            # keymap is configured offline right after instead.
-            kb_layout = config.locale_config.kb_layout if config.locale_config else ""
-            installer.minimal_installation(
-                optional_repositories=(
-                    config.mirror_config.optional_repositories
-                    if config.mirror_config else []
-                ),
-                mkinitcpio=False,
-                hostname=config.hostname,
-                locale_config=(
-                    replace(config.locale_config, kb_layout="")
-                    if config.locale_config else None
-                ),
-                pacman_config=config.pacman_config,
-            )
-
-            if not configure_keyboard(installer.target, kb_layout):
-                error(f"Invalid keyboard language specified: {kb_layout}")
-
-            if config.mirror_config:
-                installer.set_mirrors(mirror_handler, config.mirror_config, on_target=True)
-
-            if config.swap and config.swap.enabled:
-                installer.setup_swap(algo=config.swap.algorithm)
-                _drop_archinstall_zram_conf(ctx)
-
-            _install_early_packages(installer)
-            _configure_limine_boot(ctx, installer, config)
-
-            info("› creating user (with /etc/skel populated)")
-            if config.auth_config and config.auth_config.users:
-                installer.create_users(config.auth_config.users)
-
-            if config.app_config:
-                info("› installing archinstall application selections")
-                arch.install_applications(installer, config)
-
-            info("› installing Omarchy runtime + omarchy-base.packages")
-            installer.add_additional_packages(_runtime_package_list(ctx))
-
-            # Tailscale is bundled in the offline mirror but only installed
-            # when an autoinstall drive staged an auth key; must happen here,
-            # while the mirror is still bind-mounted, not in the phase that
-            # configures the join.
-            if ctx.tailscale_authkey_path is not None:
-                info("› installing tailscale (auth key staged for first boot)")
-                installer.add_additional_packages(["tailscale"])
-        finally:
-            _unmask_mkinitcpio_pacman_hooks(ctx)
-            _unmount_offline_package_cache(ctx)
+        if use_rootfs_image:
+            _install_via_rootfs_image(ctx, installer, config, mirror_handler)
+        else:
+            _install_via_pacstrap(ctx, installer, config, mirror_handler)
 
         # Standard arch finishers.
         if config.timezone:
             installer.set_timezone(config.timezone)
         if config.ntp:
             installer.activate_time_synchronization()
+        # guided.py enables this post-install, not minimal_installation, so
+        # BOTH paths need it here (packages: baked set via minimal_installation
+        # on legacy, pruned-mirror install in _rootfs_image_configure on image).
+        if arch.accessibility_tools_in_use():
+            installer.enable_espeakup()
         if root := arch.root_user(config):
             installer.set_user_password(root)
 
@@ -316,6 +334,587 @@ def arch_install_system(ctx: InstallContext) -> None:
             _write_pre_mounted_fstab(ctx)
         else:
             installer.genfstab()
+
+
+def _generate_key_files_if_needed(installer, config) -> None:
+    """Key files (and the crypttab entries referencing them) are only wanted
+    when this install created the encrypted layout itself; each install path
+    calls this at its own deliberately different point (see the ordering
+    comment in _install_via_rootfs_image)."""
+    if not arch.is_pre_mount(config) and arch.is_encrypted(config):
+        installer.generate_key_files()
+
+
+def _install_via_pacstrap(ctx: InstallContext, installer, config, mirror_handler) -> None:
+    """Legacy package-by-package install from the full offline mirror."""
+    _generate_key_files_if_needed(installer, config)
+    _mount_offline_package_cache(ctx)
+    _mask_mkinitcpio_pacman_hooks(ctx)
+    try:
+        info("› installing base system (mkinitcpio deferred to final Limine UKI build)")
+        # An empty kb_layout makes archinstall's set_keyboard_language skip
+        # booting the target in a container just to run localectl; the
+        # keymap is configured offline right after instead.
+        kb_layout = config.locale_config.kb_layout if config.locale_config else ""
+        installer.minimal_installation(
+            optional_repositories=(
+                config.mirror_config.optional_repositories
+                if config.mirror_config else []
+            ),
+            mkinitcpio=False,
+            hostname=config.hostname,
+            locale_config=(
+                replace(config.locale_config, kb_layout="")
+                if config.locale_config else None
+            ),
+            pacman_config=config.pacman_config,
+        )
+
+        if not configure_keyboard(installer.target, kb_layout):
+            error(f"Invalid keyboard language specified: {kb_layout}")
+
+        if config.mirror_config:
+            installer.set_mirrors(mirror_handler, config.mirror_config, on_target=True)
+
+        if config.swap and config.swap.enabled:
+            installer.setup_swap(algo=config.swap.algorithm)
+            _drop_archinstall_zram_conf(ctx)
+
+        _install_early_packages(installer)
+        _configure_limine_boot(ctx, installer, config)
+
+        info("› creating user (with /etc/skel populated)")
+        if config.auth_config and config.auth_config.users:
+            installer.create_users(config.auth_config.users)
+
+        if config.app_config:
+            info("› installing archinstall application selections")
+            arch.install_applications(installer, config)
+
+        info("› installing Omarchy runtime + omarchy-base.packages")
+        installer.add_additional_packages(_runtime_package_list(ctx))
+
+        # Tailscale is bundled in the offline mirror but only installed
+        # when an autoinstall drive staged an auth key; must happen here,
+        # while the mirror is still bind-mounted, not in the phase that
+        # configures the join.
+        if ctx.tailscale_authkey_path is not None:
+            info("› installing tailscale (auth key staged for first boot)")
+            installer.add_additional_packages(["tailscale"])
+    finally:
+        _unmask_mkinitcpio_pacman_hooks(ctx)
+        _unmount_offline_package_cache(ctx)
+
+
+def _install_via_rootfs_image(ctx: InstallContext, installer, config, mirror_handler) -> None:
+    """Restore the prebuilt rootfs image, then reconcile install-time
+    conditionals.
+
+    The image is the legacy flow's package end state (built by
+    build_rootfs_image with the same DEFERRED_BOOT_HOOKS masked, locale baked,
+    machine identity scrubbed), so every phase after this one is unchanged.
+
+    Ordering constraints:
+      - restore BEFORE _mount_offline_package_cache: unsquashfs -f would write
+        the image's empty var/cache/pacman/pkg through the bind onto the
+        mirror.
+      - kernel reconcile BEFORE _configure_limine_boot so the boot config and
+        every later phase see the final kernel set.
+
+    Residual package work goes through installer.add_additional_packages
+    (pacstrap semantics: LIVE pacman.conf + --root). The restored target's own
+    /etc/pacman.conf is the stock pacman default with no [offline] repo, and
+    the mirror path does not exist inside the chroot, so `arch-chroot pacman
+    -S` cannot resolve anything here — only _prepare_target_setup later gives
+    the chroot that view (and it resyncs the target db then, see
+    ctx.state["target_db_synced"]).
+    """
+    _restore_rootfs_image(ctx)
+
+    # After the restore, never before: generate_key_files appends non-root
+    # volumes to the target's /etc/crypttab, which the filesystem package owns,
+    # so unsquashfs -f would overwrite it (pacstrap preserves it as a backup=
+    # file, hence the legacy path has no such constraint).
+    _generate_key_files_if_needed(installer, config)
+
+    info("› writing per-machine identity")
+    subprocess.run(["systemd-machine-id-setup", f"--root={ctx.target}"], check=True)
+    # Backgrounded: SigLevel = Never means nothing READS the keyring during
+    # the install, and the init is chroot-free, so there is no mount teardown
+    # to race the chroots below. pacstrap -K WRITES the same gnupg dir though
+    # (it runs its own pacman-key --init), so _install_target_packages joins
+    # the init before any pacstrap-semantics install. Killed and joined on
+    # every exit path so a failure cannot leak the process, and the original
+    # error always wins over a keyring one — "every exit path" includes a
+    # dashboard stop because main() turns SIGTERM into an exception (the
+    # detached init sits outside the process group the dashboard kills).
+    try:
+        _start_target_keyring_init(ctx)
+        _rootfs_image_configure(ctx, installer, config, mirror_handler)
+        _await_target_keyring_init(ctx, raise_on_error=True)
+    except BaseException:
+        _kill_target_keyring_init(ctx)
+        _await_target_keyring_init(ctx, raise_on_error=False)
+        raise
+
+
+def _rootfs_image_configure(ctx: InstallContext, installer, config, mirror_handler) -> None:
+    # Config side-effects minimal_installation used to perform. Locale is
+    # baked (en_US.UTF-8 in locale.gen + locale.conf at build time);
+    # hostname is ours to write. archinstall's application handler
+    # (PipeWire) is intentionally NOT invoked: its package set is baked
+    # via builder/rootfs-extra.packages, and every other application
+    # selection is rejected up front by _assert_rootfs_image_supported_config
+    # — if a future archinstall handler grows per-user side effects, they
+    # belong in omarchy-provision-user, not here.
+    _write_target_hostname(ctx, config)
+    _ensure_target_locale(ctx, config)
+
+    # Same contract as the legacy path: an empty kb_layout skips
+    # archinstall's localectl-in-container dance; the keymap is configured
+    # offline right after.
+    kb_layout = config.locale_config.kb_layout if config.locale_config else ""
+    if not configure_keyboard(installer.target, kb_layout):
+        error(f"Invalid keyboard language specified: {kb_layout}")
+
+    if config.mirror_config:
+        installer.set_mirrors(mirror_handler, config.mirror_config, on_target=True)
+
+    # No setup_swap: zram-generator is baked and omarchy-settings ships the
+    # vendor drop-in (see _drop_archinstall_zram_conf for why an /etc copy
+    # decides nothing). Deliberate behavior change vs the legacy path: a
+    # config with swap.enabled=false still gets zram.
+    #
+    # config.pacman_config is likewise deliberately ignored: it only tuned
+    # ParallelDownloads/repo toggles in the target's pacman.conf, which is
+    # meaningless offline and overwritten by _prepare_target_setup (and later
+    # by omarchy-apply-system) on every install anyway.
+
+    # archinstall gates some Installer methods on flags its own
+    # minimal_installation sets; the image restore IS our minimal
+    # installation. Precedent: the ["bootloader"] poke in
+    # _install_limine_omarchy. Both spellings are set because the key
+    # changed names across archinstall releases.
+    installer._helper_flags["base"] = True
+    installer._helper_flags["base-strapped"] = True
+
+    _mount_offline_package_cache(ctx)
+    _mask_mkinitcpio_pacman_hooks(ctx)
+    try:
+        _reconcile_target_kernel(ctx, installer, config)
+        _configure_limine_boot(ctx, installer, config)
+
+        info("› creating user (with /etc/skel populated)")
+        if config.auth_config and config.auth_config.users:
+            installer.create_users(config.auth_config.users)
+            _enable_pipewire_pulse_for_users(ctx, config)
+
+        # Conditional packages are bundled in the pruned mirror and must be
+        # installed here, while it is still bind-mounted — tailscale not in
+        # the phase that configures the join. One batched call: each install
+        # is a full pacstrap run with its own -Sy rewrite of the target db.
+        packages = []
+        if ctx.tailscale_authkey_path is not None:
+            info("› installing tailscale (auth key staged for first boot)")
+            packages.append("tailscale")
+        packages += _accessibility_packages()
+        if packages:
+            _install_target_packages(ctx, installer, packages)
+    finally:
+        _unmask_mkinitcpio_pacman_hooks(ctx)
+        _unmount_offline_package_cache(ctx)
+
+
+def _accessibility_packages() -> list[str]:
+    """The legacy path gets these from minimal_installation, which extends its
+    base set when the live session runs a screen reader (the accessibility=on
+    boot entry). The image bakes none of them, so they ride the conditional
+    package install from the pruned mirror; the shared finishers in
+    arch_install_system enable espeakup on both paths."""
+    if not arch.accessibility_tools_in_use():
+        return []
+    info(f"› installing accessibility stack ({' '.join(ACCESSIBILITY_PACKAGES)})")
+    return list(ACCESSIBILITY_PACKAGES)
+
+
+def _install_target_packages(ctx: InstallContext, installer, packages: list[str]) -> None:
+    """Pacstrap-semantics install from the pruned mirror (LIVE pacman.conf +
+    --root, see the _install_via_rootfs_image docstring). Owns the two
+    obligations every such install carries: joining the background keyring
+    init first (pacstrap -K writes the target's gnupg dir) and recording that
+    pacstrap's implicit -Sy already rewrote the target's sync db."""
+    _await_target_keyring_init(ctx)
+    installer.add_additional_packages(packages)
+    ctx.state["target_db_synced"] = True
+
+
+def _assert_rootfs_image_supported_config(config) -> None:
+    """Refuse loudly what the image path would otherwise silently ignore.
+
+    The legacy path feeds app_config through archinstall's application
+    handler and optional_repositories through minimal_installation. The image
+    bakes PipeWire and nothing else, and the pruned mirror cannot supply
+    packages for other selections afterward — an autoinstall author must find
+    out here, not weeks later on the installed machine. Such configs still
+    work on an ISO built with OMARCHY_ROOTFS_IMAGE=0.
+    """
+    app_config = getattr(config, "app_config", None)
+
+    audio = getattr(app_config, "audio_config", None) if app_config else None
+    audio_kind = str(getattr(audio, "audio", "") or "").lower()
+    if audio_kind and "pipewire" not in audio_kind and "no_audio" not in audio_kind:
+        raise RuntimeError(
+            f"rootfs-image install bakes PipeWire; audio selection {audio_kind!r} "
+            "is not supported (build with OMARCHY_ROOTFS_IMAGE=0 for raw "
+            "archinstall behavior)"
+        )
+
+    bluetooth = getattr(app_config, "bluetooth_config", None) if app_config else None
+    if bluetooth is not None and bool(getattr(bluetooth, "enabled", True)):
+        raise RuntimeError(
+            "rootfs-image install does not support archinstall bluetooth_config "
+            "(Omarchy configures bluetooth via omarchy-apply-system; build with "
+            "OMARCHY_ROOTFS_IMAGE=0 for raw archinstall behavior)"
+        )
+
+    mirror_config = getattr(config, "mirror_config", None)
+    optional = list(getattr(mirror_config, "optional_repositories", None) or [])
+    if optional:
+        raise RuntimeError(
+            f"rootfs-image install cannot enable optional_repositories {optional!r}: "
+            "minimal_installation does not write the target's pacman.conf on this "
+            "path (build with OMARCHY_ROOTFS_IMAGE=0)"
+        )
+
+    disk_config = getattr(config, "disk_config", None)
+    if getattr(disk_config, "lvm_config", None):
+        raise RuntimeError(
+            "rootfs-image install does not support lvm_config: the image bakes "
+            "neither lvm2 nor its mkinitcpio hook, which minimal_installation "
+            "would have added (build with OMARCHY_ROOTFS_IMAGE=0)"
+        )
+
+    fs_types = {
+        part.fs_type.value.lower()
+        for mod in (getattr(disk_config, "device_modifications", None) or [])
+        for part in mod.partitions
+        if part.fs_type is not None
+    }
+    unsupported_fs = sorted(fs_types & ROOTFS_IMAGE_UNSUPPORTED_FS_TYPES)
+    if unsupported_fs:
+        raise RuntimeError(
+            f"rootfs-image install cannot provide filesystem tools for "
+            f"{unsupported_fs!r}: minimal_installation would have installed "
+            "them, but the image bakes only the btrfs userspace and the pruned "
+            "mirror cannot supply the rest (build with OMARCHY_ROOTFS_IMAGE=0)"
+        )
+
+    unsupported = sorted(set(_configured_kernels(config)) - ROOTFS_IMAGE_SUPPORTED_KERNELS)
+    if unsupported:
+        raise RuntimeError(
+            f"rootfs-image install cannot provide kernels {unsupported!r}: the "
+            f"pruned mirror only carries {sorted(ROOTFS_IMAGE_SUPPORTED_KERNELS)} "
+            "(build with OMARCHY_ROOTFS_IMAGE=0)"
+        )
+
+
+def _restore_rootfs_image(ctx: InstallContext) -> None:
+    """unsquashfs the image over the mounted target layout.
+
+    Runs as root, so ownership, modes, xattrs/capabilities and hardlinks are
+    restored by default. POSIX ACLs are not: mksquashfs drops the
+    system.posix_acl_* xattrs at build. Harmless today — the only ACL carriers
+    on an installed system are tmpfiles.d a+ lines reapplied at boot — but a
+    package that ships an ACL directly would lose it.
+    -f because the mounted subvolume layout already
+    created the top-level directories; writes pass through the mounted
+    @home/@log/@pkg subvolumes, and the ESP mountpoint is untouched (the
+    image's /boot is empty — boot hooks were masked at build).
+
+    The exit code is checked hard: a partial restore must abort the install,
+    not continue into user creation on a half-written root.
+    """
+    info("› restoring prebuilt system image (unsquashfs)")
+
+    # A retried install in the same live session must not start from the
+    # previous attempt's terminal "100".
+    RESTORE_PROGRESS_PATH.unlink(missing_ok=True)
+    _write_restore_progress("0")
+
+    cmd = [
+        "unsquashfs",
+        "-f",
+        "-p",
+        str(_unsquashfs_processors()),
+        "-d",
+        str(ctx.target),
+    ]
+    if _unsquashfs_supports_percentage():
+        proc = subprocess.Popen(
+            [*cmd, "-percentage", str(ROOTFS_IMAGE_PATH)],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            value = line.strip()
+            if value.isdigit():
+                _write_restore_progress(value)
+        returncode = proc.wait()
+    else:
+        returncode = subprocess.run(
+            [*cmd, "-no-progress", str(ROOTFS_IMAGE_PATH)],
+        ).returncode
+
+    if returncode != 0:
+        raise RuntimeError(
+            f"unsquashfs failed with exit code {returncode}; refusing to "
+            "continue on a partially restored target"
+        )
+    _write_restore_progress("100")
+
+
+def _unsquashfs_processors() -> int:
+    count = getattr(os, "process_cpu_count", os.cpu_count)()
+    return count or 1
+
+
+def _unsquashfs_supports_percentage() -> bool:
+    """-percentage shipped with squashfs-tools 4.6 (2023); probe rather than
+    assume so an older live environment degrades to the dashboard's time
+    curve instead of failing the restore."""
+    res = subprocess.run(
+        ["unsquashfs", "-help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return "-percentage" in f"{res.stdout}{res.stderr}"
+
+
+def _write_restore_progress(value: str) -> None:
+    """Latest restore percentage for the dashboard. Same atomic-replace dance
+    as the phase state file so the twice-a-second reader never sees a torn
+    write. Best effort — progress display must never fail an install."""
+    try:
+        RESTORE_PROGRESS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = RESTORE_PROGRESS_PATH.with_name(f".{RESTORE_PROGRESS_PATH.name}.tmp")
+        tmp.write_text(f"{value}\n")
+        tmp.replace(RESTORE_PROGRESS_PATH)
+    except OSError:
+        pass
+
+
+def _target_gpgdir(ctx: InstallContext) -> Path:
+    return ctx.target / "etc" / "pacman.d" / "gnupg"
+
+
+def _start_target_keyring_init(ctx: InstallContext) -> None:
+    """Recreate the per-machine pacman keyring a legacy pacstrap left behind.
+
+    The image ships no /etc/pacman.d/gnupg (a shared keyring key must never be
+    distributed). Nothing during the install READS the keyring — the offline
+    repo is SigLevel = Never — but the installed system does, and pacstrap -K
+    WRITES it (see _await_target_keyring_init).
+
+    Chroot-free on purpose: pacman-key --gpgdir writes the target's keyring
+    directory directly, reading the live environment's
+    /usr/share/pacman/keyrings (same package snapshot as the target's). With
+    no chroot there are no API mounts to hold or tear down, which is what
+    makes running this in the background safe — an arch-chroot's exit-time
+    teardown unmounts by path and can pop a concurrent chroot's mounts.
+    """
+    info("› initializing per-machine pacman keyring (background)")
+    gpgdir = shlex.quote(str(_target_gpgdir(ctx)))
+    script = (
+        f"pacman-key --gpgdir {gpgdir} --init && "
+        f"pacman-key --gpgdir {gpgdir} --populate archlinux omarchy"
+    )
+    # start_new_session makes the shell a process-group leader, so
+    # _kill_target_keyring_init reaches pacman-key and its gpg children —
+    # killing just the sh wrapper would leave them mutating the target keyring.
+    ctx.state["target_keyring_proc"] = subprocess.Popen(
+        ["sh", "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+
+
+def _kill_target_keyring_init(ctx: InstallContext) -> None:
+    proc = ctx.state.get("target_keyring_proc")
+    if proc is None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _await_target_keyring_init(ctx: InstallContext, *, raise_on_error: bool = True) -> None:
+    """Join the background keyring init if it is still pending; no-op after.
+
+    Every pacstrap-semantics install must run behind this join — enforced by
+    routing them through _install_target_packages: pacstrap -K
+    unconditionally runs its own pacman-key --init on the target's gnupg dir
+    — the very directory the background init is writing — and two concurrent
+    inits on one gpg homedir can generate competing master keys or trip over
+    gpg's keybox/trustdb locks. SigLevel = Never only skips keyring reads,
+    not pacstrap's writes. Installs that never pacstrap (default kernel, no
+    tailscale key, no screen reader) keep the full overlap and join at the
+    end of _install_via_rootfs_image."""
+    proc = ctx.state.get("target_keyring_proc")
+    if proc is None:
+        return
+    try:
+        _finish_target_keyring_init(ctx, proc, raise_on_error=raise_on_error)
+    except RuntimeError:
+        # The join completed and the init failed: nothing is left running, so
+        # drop the proc before the error unwinds into the kill path.
+        ctx.state.pop("target_keyring_proc", None)
+        raise
+    # Popped only after a completed join: an interrupting SIGTERM/SIGINT mid
+    # communicate() must leave the proc in state so the exception path in
+    # _install_via_rootfs_image can still kill and re-join it (a joined proc
+    # must never be joined twice — communicate() raises on closed pipes).
+    ctx.state.pop("target_keyring_proc", None)
+
+
+def _finish_target_keyring_init(
+    ctx: InstallContext,
+    proc: subprocess.Popen,
+    *,
+    raise_on_error: bool,
+) -> None:
+    """Join the keyring init and always kill its gpg daemons: gpg-agent and
+    dirmngr hold sockets under the target's gnupg dir and would keep the
+    target busy at umount time — pacstrap kills them for the same reason.
+    raise_on_error=False is the exception path, where the original error must
+    not be masked by a keyring failure."""
+    out, _ = proc.communicate()
+    subprocess.run(
+        ["gpgconf", "--homedir", str(_target_gpgdir(ctx)), "--kill", "all"],
+        check=False,
+        capture_output=True,
+    )
+    if raise_on_error and proc.returncode != 0:
+        raise RuntimeError(
+            "per-machine pacman keyring init failed "
+            f"(exit {proc.returncode}):\n{(out or '').strip()}"
+        )
+
+
+def _write_target_hostname(ctx: InstallContext, config) -> None:
+    # Same default archinstall's minimal_installation(hostname=...) applies
+    # when the JSON carries none.
+    hostname = getattr(config, "hostname", None) or "archinstall"
+    hostname_path = ctx.target / "etc" / "hostname"
+    hostname_path.parent.mkdir(parents=True, exist_ok=True)
+    hostname_path.write_text(f"{hostname}\n")
+
+
+def _ensure_target_locale(ctx: InstallContext, config) -> None:
+    """en_US.UTF-8 is baked into the image (locale.gen entry, generated data,
+    locale.conf). Both configurator JSONs hardcode it; this escape hatch only
+    exists for a hand-written cidata config that asks for something else."""
+    locale_config = getattr(config, "locale_config", None)
+    if locale_config is None:
+        return
+
+    lang = (getattr(locale_config, "sys_lang", "") or "").strip()
+    if not lang or lang.split(".")[0] == "en_US":
+        return
+
+    encoding = (getattr(locale_config, "sys_enc", "") or "UTF-8").strip()
+    info(f"› generating non-default locale {lang}")
+    locale_gen = ctx.target / "etc" / "locale.gen"
+    entry = f"{lang} {encoding}\n"
+    existing = locale_gen.read_text() if locale_gen.exists() else ""
+    if entry.rstrip("\n") not in existing.splitlines():
+        with locale_gen.open("a", encoding="utf-8") as f:
+            f.write(entry)
+    subprocess.run(["arch-chroot", str(ctx.target), "locale-gen"], check=True)
+    (ctx.target / "etc" / "locale.conf").write_text(f"LANG={lang}\n")
+
+
+def _enable_pipewire_pulse_for_users(ctx: InstallContext, config) -> None:
+    """Replicate the one per-user side effect of archinstall's audio handler.
+
+    AudioApp._enable_pipewire (archinstall 4.4, applications/audio.py) links
+    pipewire-pulse.service/.socket into each user's default.target.wants.
+    That is the only audio state the legacy handler creates that baking the
+    package set cannot: no preset or package enables pipewire-pulse for the
+    user (the fresh-install manifests carry exactly these two symlinks and
+    nothing else), so without them PulseAudio-API clients on an image install
+    would find no socket. The handler's hardware conditionals (sof-firmware,
+    alsa-firmware) are already baked via archinstall.packages.
+    """
+    audio = getattr(getattr(config, "app_config", None), "audio_config", None)
+    if "pipewire" not in str(getattr(audio, "audio", "") or "").lower():
+        return
+
+    for user in config.auth_config.users:
+        username = getattr(user, "username", None)
+        if not username:
+            continue
+        info(f"› enabling pipewire-pulse for {username}")
+        wants_dir = (
+            ctx.target / "home" / username / ".config" / "systemd" / "user"
+            / "default.target.wants"
+        )
+        wants_dir.mkdir(parents=True, exist_ok=True)
+        for unit in ("pipewire-pulse.service", "pipewire-pulse.socket"):
+            link = wants_dir / unit
+            link.unlink(missing_ok=True)
+            link.symlink_to(f"/usr/lib/systemd/user/{unit}")
+        # The dirs above were made as root; hand the subtree to the user the
+        # way the archinstall handler's chown does.
+        subprocess.run(
+            ["arch-chroot", str(ctx.target), "chown", "-R",
+             f"{username}:{username}", f"/home/{username}/.config"],
+            check=True,
+        )
+
+
+def _reconcile_target_kernel(ctx: InstallContext, installer, config) -> None:
+    """The image bakes exactly one kernel: linux. Bring the target to the
+    configured kernel set (T2 Macs install with kernels=["linux-t2"], the only
+    non-default kernel the pruned mirror is guaranteed to carry — any other
+    name was rejected pre-format via ROOTFS_IMAGE_SUPPORTED_KERNELS).
+
+    The install goes through pacstrap semantics, whose implicit -Sy also
+    rewrites the target's sync db — baked from the FULL build-time mirror —
+    against the pruned shipped repo, so later resolution matches what the ISO
+    actually carries.
+
+    The target's own boot hooks are live in the image (limine-entry-tool ships
+    90-mkinitcpio-install.hook) and neither /etc/default/limine nor
+    /etc/kernel/cmdline exists yet, so mask the install hook inside the target
+    for the duration — the live-root masks around this phase do nothing for
+    hooks pacman reads out of the target root (see _mask_mkinitcpio_pacman_hooks).
+    The kernel-removal hooks stay live, same rationale as
+    TARGET_DEFERRED_BOOT_HOOKS: pruning Limine entries is exactly what
+    removing the stock kernel needs, and with no limine.conf yet they no-op.
+    """
+    kernels = _configured_kernels(config)
+    missing = [k for k in kernels if k != "linux"]
+    drop_linux = "linux" not in kernels
+    if not missing and not drop_linux:
+        return
+
+    info(f"› reconciling kernels: baked [linux] → configured {kernels}")
+    _mask_mkinitcpio_pacman_hooks(ctx, ctx.target, TARGET_DEFERRED_BOOT_HOOKS)
+    try:
+        if missing:
+            _install_target_packages(ctx, installer, missing)
+        if drop_linux:
+            subprocess.run(
+                ["arch-chroot", str(ctx.target), "pacman", "-Rdd", "--noconfirm", "linux"],
+                check=True,
+            )
+    finally:
+        _unmask_mkinitcpio_pacman_hooks(ctx, ctx.target, TARGET_DEFERRED_BOOT_HOOKS)
 
 
 def _configure_limine_boot(ctx: InstallContext, installer, config) -> None:
@@ -1022,6 +1621,16 @@ def _prepare_target_setup(ctx: InstallContext) -> None:
             subprocess.run(["mount", "--bind", src, str(target_dst)], check=True)
             ctx.state["bind_mounts"].append(str(target_dst))
             mounted.add(str(target_dst))
+
+    # Rootfs-image installs: the image's sync db was populated from the FULL
+    # build-time mirror. If no residual install has resynced it yet (their
+    # pacstrap semantics rewrite it in passing), refresh it against the pruned
+    # shipped repo — the conf copy and bind mounts above are exactly what a
+    # chroot pacman needs for that — so apply-system's hardware installs
+    # resolve against what the ISO actually carries.
+    if _is_rootfs_image_install() and not ctx.state.get("target_db_synced"):
+        subprocess.run(["arch-chroot", str(ctx.target), "pacman", "-Sy"], check=True)
+        ctx.state["target_db_synced"] = True
 
     ctx.state["target_setup_prepared"] = True
 

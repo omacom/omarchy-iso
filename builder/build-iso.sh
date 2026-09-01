@@ -4,6 +4,10 @@ set -e
 
 OMARCHY_ISO_REF="${OMARCHY_ISO_REF:-quattro}"
 OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
+# 1 (default): bake the target system into a prebuilt rootfs squashfs and ship
+# a mirror pruned to the hardware-conditional closure. 0: legacy-equivalent ISO
+# (full mirror, no image) for A/B comparison and same-day escape.
+OMARCHY_ROOTFS_IMAGE="${OMARCHY_ROOTFS_IMAGE:-1}"
 
 # Edge, dev, and local-source ISOs install the dev packages explicitly. Those
 # package recipes track the quattro branch. This avoids relying on pacman's
@@ -48,9 +52,14 @@ if ! grep -q '^\[omarchy\]' /etc/pacman.conf; then
   awk '/^\[omarchy\]/,/^$/' /configs/pacman-online-${OMARCHY_MIRROR}.conf >> /etc/pacman.conf
 fi
 
-# Build locations
+# Build locations. $build_cache_dir is the mkarchiso profile dir. Package
+# downloads land in $download_cache_dir (host-mounted by omarchy-iso-make at a
+# neutral path), NOT inside the profile's airootfs: the shipped mirror is
+# pruned to the hardware-conditional closure before mkarchiso runs, and pruning
+# a mount of the host cache would prune the host cache.
 build_cache_dir=/var/cache
-offline_mirror_dir="$build_cache_dir/airootfs/var/cache/omarchy/mirror/offline"
+download_cache_dir=/var/cache/omarchy-build
+offline_mirror_dir="$download_cache_dir/mirror/offline"
 mkdir -p "$build_cache_dir" "$offline_mirror_dir"
 
 # Seed from the official Arch releng profile.
@@ -120,6 +129,14 @@ cp "/tmp/$NODE_FILENAME" "$build_cache_dir/airootfs/opt/packages/"
 # live initramfs.
 arch_packages=(linux-t2 git gum jq openssl plymouth ttfx tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
 printf '%s\n' "${arch_packages[@]}" >> "$build_cache_dir/packages.x86_64"
+
+# The installer restores the prebuilt rootfs image with unsquashfs. releng has
+# shipped squashfs-tools for years, but the archiso submodule isn't checked out
+# on the host, so assert rather than assume: a live environment without
+# unsquashfs could only pacstrap. Appended before the offline-mirror package
+# collection below so the live pacstrap can actually resolve it.
+grep -qx 'squashfs-tools' "$build_cache_dir/packages.x86_64" ||
+  echo 'squashfs-tools' >> "$build_cache_dir/packages.x86_64"
 
 # The live ISO boots linux-t2 (see airootfs/etc/mkinitcpio.d/linux-t2.preset), so
 # stock linux is a second kernel nobody boots: ~147MB of ISO, plus its own archiso
@@ -274,15 +291,21 @@ printf '%s\n' "${required_package_files[@]}" |
 rm -f "$offline_mirror_dir"/offline.db* "$offline_mirror_dir"/offline.files*
 repo-add "$offline_mirror_dir/offline.db.tar.gz" "$offline_mirror_dir/"*.pkg.tar.zst
 
-# mkarchiso expects the mirror at /var/cache/omarchy/mirror/offline inside the
-# container (the airootfs path); symlink rather than duplicate.
+# pacman-offline.conf resolves [offline] at /var/cache/omarchy/mirror/offline.
+# Everything that runs against it at BUILD time — the rootfs pacstrap, the
+# expected-package resolvers, and mkarchiso's live-environment pacstrap — must
+# see the FULL mirror in the download cache; symlink rather than duplicate.
+# What ships in the ISO's airootfs at that same path is a separate, real
+# directory (pruned conditional closure, or a full copy for the legacy build).
 mkdir -p /var/cache/omarchy/mirror
 ln -sf "$offline_mirror_dir" /var/cache/omarchy/mirror/offline
 
-# Denominator for the install dashboard's progress bar. Resolving the mirror's
-# own package lists against the mirror we just indexed, with an empty local db,
-# is the question pacstrap asks at install time — same resolver, same repo, same
-# lists — so no hand-kept constant can drift.
+# Denominator for the install dashboard's progress bar, LEGACY VARIANT ONLY
+# (the rootfs-image build counts its local db directly — see
+# build_rootfs_image). Resolving the mirror's own package lists against the
+# mirror we just indexed, with an empty local db, is the question pacstrap asks
+# at install time — same resolver, same repo, same lists — so no hand-kept
+# constant can drift.
 #
 # It over-counts by ~1 in 925: archinstall.packages lists both amd-ucode and
 # intel-ucode because the mirror must contain either. phases.py records expected
@@ -323,24 +346,281 @@ resolve_expected_packages() {
   printf '%s\n' "$resolved" | sort -u | grep -c .
 }
 
-# Worth failing the build over: -S --print only aborts when a target is missing
-# from the offline repo, which would fail pacstrap the same way. A count that
-# merely looks wrong is not — the dashboard falls back without the file.
-if ! expected_packages="$(resolve_expected_packages)"; then
-  echo "ERROR: could not resolve the target package count from the offline mirror." >&2
-  echo "       pacman -S --print aborts the whole transaction if any single target" >&2
-  echo "       is missing, so this almost certainly means pacstrap would fail the" >&2
-  echo "       same way at install time." >&2
-  exit 1
-fi
-if (( expected_packages < 600 || expected_packages > 2000 )); then
-  echo "WARNING: resolved target package count $expected_packages is outside the" >&2
-  echo "         expected 600-2000 range; shipping no denominator so the install" >&2
-  echo "         dashboard falls back to its time-based curve." >&2
+# ─────────────────────────────────────────────────────────────────────────────
+# Prebuilt target rootfs image: pacstrap the full target package set NOW, at
+# build time, ship it as a zstd squashfs, and let the installer restore it with
+# multithreaded unsquashfs instead of replaying ~925 pacman extractions. The
+# shipped mirror then only carries the hardware-conditional closure
+# (omarchy-other.packages ∪ {linux-t2, tailscale, brltty, espeakup,
+# alsa-utils}) that install time can still ask for. Everything here runs after
+# repo-add so the full mirror is indexed.
+# ─────────────────────────────────────────────────────────────────────────────
+build_rootfs_image() {
+  local rootfs_dir=/tmp/omarchy-target-rootfs
+  local rootfs_sfs_dir="$build_cache_dir/airootfs/var/cache/omarchy/rootfs"
+  local rootfs_pacman_conf=/tmp/pacman-rootfs.conf
+  local iso_share_dir="$build_cache_dir/airootfs/usr/share/omarchy-iso"
+  local -a rootfs_packages deferred_boot_hooks conditional_targets
+  local hook resolved_conditionals filename package_count hardlink_conflicts
+  local phases_impl
+  local copied=0
+
+  rm -rf "$rootfs_dir"
+  mkdir -p "$rootfs_dir" "$rootfs_sfs_dir"
+
+  # Target package set: what the legacy install-time flow ends up with, minus
+  # the two install-time conditionals. tailscale is in archinstall.packages so
+  # the MIRROR carries it, but it is only ever installed when an autoinstall
+  # drive stages an auth key — it must never be baked into the image. linux
+  # stays baked; the T2 kernel swap happens at install time against the pruned
+  # mirror. rootfs-extra.packages covers what archinstall used to add at
+  # install time (early bootstrap extras, LuaRocks split, zram-generator,
+  # the PipeWire application set).
+  mapfile -t rootfs_packages < <(
+    {
+      grep -hv '^#\|^$' /builder/archinstall.packages | grep -vx 'tailscale'
+      grep -hv '^#\|^$' "$iso_share_dir/omarchy-base.packages"
+      grep -hv '^#\|^$' /builder/rootfs-extra.packages
+      printf '%s\n' "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" \
+        "$OMARCHY_NVIM_PACKAGE"
+    } | sort -u
+  )
+
+  # Point pacman's CacheDir at the mirror itself so pacstrap -c consumes the
+  # package files in place instead of copying ~3GB through the container's
+  # /var/cache/pacman/pkg — the same trick _mount_offline_package_cache plays
+  # at install time. Nothing is ever downloaded INTO it: every resolved file
+  # is already there.
+  sed '/^\[options\]/a CacheDir = /var/cache/omarchy/mirror/offline/' \
+    "$build_cache_dir/pacman-offline.conf" >"$rootfs_pacman_conf"
+
+  # Mask the same hooks the installer masks around its pacstrap: no initramfs
+  # or UKI is built into the image, leaving the identical end state to the
+  # legacy masked pacstrap — finalize_limine_boot's limine-update builds the
+  # UKI from exactly this state at install time. Masks go in the CONTAINER's
+  # /etc/pacman.d/hooks (config-dir hooks override same-named hooks from the
+  # target's /usr/share/libalpm/hooks) and MUST come off before mkarchiso: the
+  # live environment's initramfs is built by these very hooks during
+  # mkarchiso's own pacstrap.
+  #
+  # The single source of truth is DEFERRED_BOOT_HOOKS in
+  # orchestrator/phases_impl.py — extracted, not copied, so a hook added there
+  # cannot silently bake a boot artifact into the image that the install-time
+  # flow defers. The count guard turns a format change into a build failure
+  # instead of an empty mask list.
+  phases_impl="$build_cache_dir/airootfs/usr/share/omarchy-iso/orchestrator/phases_impl.py"
+  mapfile -t deferred_boot_hooks < <(
+    sed -n '/^DEFERRED_BOOT_HOOKS = (/,/^)/p' "$phases_impl" |
+      grep -oE '"[^"]+\.hook"' | tr -d '"'
+  )
+  if (( ${#deferred_boot_hooks[@]} < 5 )); then
+    echo "ERROR: extracted only ${#deferred_boot_hooks[@]} entries of DEFERRED_BOOT_HOOKS" >&2
+    echo "       from $phases_impl; expected at least 5. Fix the extraction in" >&2
+    echo "       build-iso.sh to match the tuple's current formatting." >&2
+    exit 1
+  fi
+  mkdir -p /etc/pacman.d/hooks
+  for hook in "${deferred_boot_hooks[@]}"; do
+    ln -sf /dev/null "/etc/pacman.d/hooks/$hook"
+  done
+
+  echo "Building target rootfs image (${#rootfs_packages[@]} package targets)..."
+  # -G: never copy the container keyring (installs init a per-machine one);
+  # -M: target keeps the stock mirrorlist (set_mirrors rewrites it on target).
+  pacstrap -C "$rootfs_pacman_conf" -c -G -M "$rootfs_dir" "${rootfs_packages[@]}"
+
+  for hook in "${deferred_boot_hooks[@]}"; do
+    rm -f "/etc/pacman.d/hooks/$hook"
+  done
+
+  # ── Scrub/normalize: nothing machine-specific may ship in the image. ──
+
+  # Empty machine-id; the installer writes a fresh one per machine with
+  # systemd-machine-id-setup right after the restore.
+  : >"$rootfs_dir/etc/machine-id"
+  if [[ -f "$rootfs_dir/var/lib/dbus/machine-id" && ! -L "$rootfs_dir/var/lib/dbus/machine-id" ]]; then
+    rm -f "$rootfs_dir/var/lib/dbus/machine-id"
+  fi
+
+  # Never ship a shared pacman keyring key. pacstrap -G already skipped the
+  # copy; remove whatever a scriptlet may have seeded anyway.
+  rm -rf "$rootfs_dir/etc/pacman.d/gnupg"
+
+  # sshd host keys are generated at first boot by sshdgenkeys, never at
+  # pacstrap. If any show up here, something fundamental changed — every
+  # install would ship the same private host keys. Stop the build.
+  if compgen -G "$rootfs_dir/etc/ssh/ssh_host_*" >/dev/null; then
+    echo "ERROR: rootfs image contains SSH host keys; refusing to ship them" >&2
+    exit 1
+  fi
+
+  # Locale is baked: both configurator JSONs hardcode en_US.UTF-8, and
+  # archinstall's minimal_installation wrote locale.gen AND locale.conf — do
+  # both for parity. The keymap stays install-time (configure_keyboard).
+  sed -i 's/^#\(en_US\.UTF-8 UTF-8\)/\1/' "$rootfs_dir/etc/locale.gen"
+  arch-chroot "$rootfs_dir" locale-gen
+  echo 'LANG=en_US.UTF-8' >"$rootfs_dir/etc/locale.conf"
+
+  # CacheDir pointed at the mirror, so nothing may have landed here: cached
+  # packages inside the image would be dead weight in every install.
+  if [[ -n $(find "$rootfs_dir/var/cache/pacman/pkg" -mindepth 1 -print -quit 2>/dev/null) ]]; then
+    echo "ERROR: rootfs image has a non-empty /var/cache/pacman/pkg" >&2
+    exit 1
+  fi
+
+  # unsquashfs recreates hardlinks with link(2), and the restore target splits
+  # /home, /var/log and /var/cache/pacman/pkg into separate btrfs subvolumes —
+  # a hardlink pair crossing one of those boundaries would EXDEV mid-restore.
+  # No package is expected to do this; fail loudly if one starts to.
+  hardlink_conflicts=$(
+    cd "$rootfs_dir" && find . -type f -links +1 -printf '%i\t%p\n' |
+      LC_ALL=C sort -n | awk -F'\t' '
+        {
+          zone = "root"
+          if (index($2, "./home/") == 1) zone = "home"
+          else if (index($2, "./var/log/") == 1) zone = "log"
+          else if (index($2, "./var/cache/pacman/pkg/") == 1) zone = "pkg"
+          if ($1 == prev_inode && zone != prev_zone) print $2
+          prev_inode = $1; prev_zone = zone
+        }'
+  )
+  if [[ -n $hardlink_conflicts ]]; then
+    echo "ERROR: rootfs image has hardlinks crossing subvolume boundaries:" >&2
+    printf '%s\n' "$hardlink_conflicts" | sed 's/^/  /' >&2
+    exit 1
+  fi
+
+  # ── Image + metadata ──
+
+  # The outer airootfs squashfs stores this file uncompressed (see
+  # profiledef.sh), so this is the only compression pass it gets.
+  # -exit-on-error because source-read and metadata failures otherwise only
+  # warn, and a silently degraded image would ship.
+  mksquashfs "$rootfs_dir" "$rootfs_sfs_dir/omarchy-rootfs.sfs" \
+    -comp zstd -Xcompression-level 19 -b 1M -noappend -xattrs -exit-on-error
+
+  pacman --root "$rootfs_dir" --dbpath "$rootfs_dir/var/lib/pacman" -Q |
+    LC_ALL=C sort >"$iso_share_dir/rootfs-manifest"
+  if grep -q '^tailscale ' "$iso_share_dir/rootfs-manifest"; then
+    echo "ERROR: tailscale leaked into the rootfs image; it must stay an" >&2
+    echo "       install-time conditional (autoinstall auth key only)." >&2
+    exit 1
+  fi
+  if ! grep -q '^linux ' "$iso_share_dir/rootfs-manifest"; then
+    echo "ERROR: the rootfs image does not contain the linux kernel" >&2
+    exit 1
+  fi
+
+  # Denominator for the install dashboard: the restored image IS the installed
+  # set, so count its local db entries (one directory per package). Same
+  # 600-2000 sanity gate as the legacy resolver: a wrong denominator is worse
+  # than none, because it never triggers the dashboard's fallback.
+  package_count=$(find "$rootfs_dir/var/lib/pacman/local" -mindepth 1 -maxdepth 1 -type d | wc -l)
+  if (( package_count < 600 || package_count > 2000 )); then
+    echo "WARNING: rootfs image package count $package_count is outside the" >&2
+    echo "         expected 600-2000 range; shipping no denominator so the install" >&2
+    echo "         dashboard falls back to its time-based curve." >&2
+  else
+    printf '%s\n' "$package_count" >"$iso_share_dir/expected-packages"
+    echo "Rootfs image carries $package_count packages."
+  fi
+
+  # Variant stamp the orchestrator keys install-mode decisions off. Distinct
+  # from the image file itself so a missing image on an image ISO fails before
+  # any disk write instead of falling back to a pacstrap the pruned mirror
+  # cannot feed.
+  echo omarchy-rootfs.sfs >"$iso_share_dir/rootfs-image-build"
+
+  # ── Pruned shipped mirror: only what install time can still ask for. ──
+  # Resolve with the resolver that answers the question at install time — the
+  # image's own pacman db: the hardware-conditional pool omarchy-apply-system
+  # draws from (omarchy-other.packages) plus the orchestrator-side
+  # conditionals — linux-t2/tailscale, and the screen-reader stack the
+  # accessibility=on boot entry needs — with their not-yet-installed
+  # dependency closure.
+  #
+  # Deliberately NOT --needed: pool members already baked into the image
+  # (e.g. sof-firmware, also in archinstall.packages) must KEEP their db
+  # entries and files in the shipped repo. After the install-time resync,
+  # apply-system may run `pacman -S --needed <member>` — pacman resolves
+  # against the sync db before --needed can no-op, so a pruned-out name fails
+  # "target not found" even though the package is already installed.
+  mapfile -t conditional_targets < <(
+    {
+      grep -hv '^#\|^$' "$iso_share_dir/omarchy-other.packages"
+      printf '%s\n' linux-t2 tailscale brltty espeakup alsa-utils
+    } | sort -u
+  )
+  if ! resolved_conditionals="$(
+    pacman --config "$build_cache_dir/pacman-offline.conf" \
+      --root "$rootfs_dir" --dbpath "$rootfs_dir/var/lib/pacman" \
+      --noconfirm -S --print --print-format '%f' \
+      "${conditional_targets[@]}"
+  )"; then
+    echo "ERROR: could not resolve the hardware-conditional package closure" >&2
+    echo "       against the rootfs image. omarchy-apply-system would fail to" >&2
+    echo "       install from the pruned mirror the same way at install time." >&2
+    exit 1
+  fi
+
+  while IFS= read -r filename; do
+    [[ -n $filename ]] || continue
+    if [[ ! -f "$offline_mirror_dir/$filename" ]]; then
+      echo "ERROR: resolved conditional package missing from the mirror: $filename" >&2
+      exit 1
+    fi
+    cp "$offline_mirror_dir/$filename" "$shipped_mirror_dir/"
+    if [[ -f "$offline_mirror_dir/$filename.sig" ]]; then
+      cp "$offline_mirror_dir/$filename.sig" "$shipped_mirror_dir/"
+    fi
+    copied=$((copied + 1))
+  done < <(printf '%s\n' "$resolved_conditionals" | sort -u)
+  if (( copied == 0 )); then
+    echo "ERROR: pruned mirror selection is empty; refusing to ship a mirror" >&2
+    echo "       with no packages (linux-t2 alone should always resolve)" >&2
+    exit 1
+  fi
+  echo "Pruned shipped mirror carries $copied conditional package files."
+
+  # Fresh db over exactly the shipped files, same as the full-mirror repo-add.
+  repo-add "$shipped_mirror_dir/offline.db.tar.gz" "$shipped_mirror_dir/"*.pkg.tar.zst
+
+  # Free the Docker VM disk before mkarchiso doubles the airootfs into work/.
+  rm -rf "$rootfs_dir" "$rootfs_pacman_conf"
+}
+
+# What ships at the airootfs mirror path is now always a real directory built
+# per-variant: the pruned conditional closure (image builds) or a full copy of
+# the download cache (legacy builds — the cache is no longer mounted at this
+# path, so shipping the full mirror is an explicit ~3GB copy).
+shipped_mirror_dir="$build_cache_dir/airootfs/var/cache/omarchy/mirror/offline"
+mkdir -p "$shipped_mirror_dir"
+
+if [[ $OMARCHY_ROOTFS_IMAGE == "1" ]]; then
+  build_rootfs_image
 else
-  printf '%s\n' "$expected_packages" \
-    >"$build_cache_dir/airootfs/usr/share/omarchy-iso/expected-packages"
-  echo "Target install resolves to $expected_packages packages."
+  echo "OMARCHY_ROOTFS_IMAGE=0: shipping the full offline mirror, no rootfs image."
+  cp -a "$offline_mirror_dir/." "$shipped_mirror_dir/"
+
+  # Worth failing the build over: -S --print only aborts when a target is missing
+  # from the offline repo, which would fail pacstrap the same way. A count that
+  # merely looks wrong is not — the dashboard falls back without the file.
+  if ! expected_packages="$(resolve_expected_packages)"; then
+    echo "ERROR: could not resolve the target package count from the offline mirror." >&2
+    echo "       pacman -S --print aborts the whole transaction if any single target" >&2
+    echo "       is missing, so this almost certainly means pacstrap would fail the" >&2
+    echo "       same way at install time." >&2
+    exit 1
+  fi
+  if (( expected_packages < 600 || expected_packages > 2000 )); then
+    echo "WARNING: resolved target package count $expected_packages is outside the" >&2
+    echo "         expected 600-2000 range; shipping no denominator so the install" >&2
+    echo "         dashboard falls back to its time-based curve." >&2
+  else
+    printf '%s\n' "$expected_packages" \
+      >"$build_cache_dir/airootfs/usr/share/omarchy-iso/expected-packages"
+    echo "Target install resolves to $expected_packages packages."
+  fi
 fi
 
 # Live ISO uses the same offline pacman.conf.

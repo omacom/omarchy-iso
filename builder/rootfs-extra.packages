@@ -1,0 +1,27 @@
+# Packages the legacy install-time flow added on top of archinstall.packages +
+# omarchy-base.packages, baked into the prebuilt rootfs image instead.
+# base-devel, omarchy-keyring, limine and efibootmgr are NOT restated here —
+# archinstall.packages already carries them.
+
+# EARLY_BOOTSTRAP_BASE_PACKAGES (orchestrator/phases_impl.py)
+git
+
+# EARLY_LUAROCKS_PACKAGES: baking both in one transaction is safe — the
+# ordering hazard the legacy split avoided only exists when lua51-lpeg lands
+# before luarocks, and pacman orders by dependency within a transaction.
+lua51
+luarocks
+
+# installer.setup_swap used to install this; omarchy-settings ships the tuning
+# as a vendor drop-in, so no /etc config is needed.
+zram-generator
+
+# archinstall's PipeWire application set (ApplicationHandler). Verify against
+# the archinstall release on the ISO when bumping the archiso submodule.
+pipewire
+pipewire-alsa
+pipewire-pulse
+pipewire-jack
+wireplumber
+gst-plugin-pipewire
+libpulse

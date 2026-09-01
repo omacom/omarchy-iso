@@ -68,7 +68,11 @@ def run(ctx: InstallContext, phases: list[tuple[str, PhaseFn]]) -> None:
     state["current_phase"] = "Installation complete"
     state["finished_at"] = time.time()
     # Expected vs actual for the bar's denominator, so drift is visible in
-    # acceptance runs rather than only by watching a bar creep.
+    # acceptance runs rather than only by watching a bar creep. On rootfs-image
+    # ISOs the expected count is the image's own local-db size (the restore
+    # carries var/lib/pacman/local verbatim) and installed = image count plus
+    # install-time conditionals (tailscale, kernel swap); on legacy ISOs it is
+    # the build-time resolver count as before.
     state["installed_packages"] = _installed_package_count(ctx.target)
     state["expected_packages"] = _expected_package_count()
     _write_state(state_path, state)

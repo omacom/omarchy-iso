@@ -10,10 +10,21 @@ archinstall's import-time CLI parsing from seeing Omarchy-specific flags.
 
 from __future__ import annotations
 
+import signal
 import sys
 from .context import InstallContext
 from .phases import PhaseError, run
 from .ui import error, info
+
+
+def _raise_on_sigterm(signum, frame):
+    # The dashboard stops an install by SIGTERMing this process group and
+    # escalates to SIGKILL only after a grace period. Python's default
+    # disposition would exit without unwinding, skipping main()'s
+    # finally-cleanups and the phases' own except paths (e.g. killing the
+    # detached keyring init, which start_new_session puts outside the group
+    # the dashboard kills); raising turns the stop into a normal unwind.
+    raise SystemExit(128 + signum)
 
 
 def build_phases(ctx: InstallContext):
@@ -66,6 +77,7 @@ def build_phases(ctx: InstallContext):
 
 
 def main() -> int:
+    signal.signal(signal.SIGTERM, _raise_on_sigterm)
     try:
         ctx = InstallContext.from_env()
     except RuntimeError as e:

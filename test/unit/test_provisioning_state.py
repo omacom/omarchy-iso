@@ -279,6 +279,45 @@ class StageProvisioningStateTest(unittest.TestCase):
             phases_impl.stage_provisioning_state(ctx)
 
 
+class InitramfsEncryptionHookTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.target = Path(self.tmp.name)
+        self.hooks = self.target / "etc/mkinitcpio.conf.d/omarchy_hooks.conf"
+        self.hooks.parent.mkdir(parents=True)
+
+    def test_unencrypted_install_removes_encrypt_hook(self):
+        self.hooks.write_text(
+            "HOOKS=(base udev block encrypt filesystems fsck)\n"
+        )
+        phases_impl._configure_initramfs_encryption_hook(make_ctx(self.target))
+        self.assertEqual(
+            self.hooks.read_text(),
+            "HOOKS=(base udev block filesystems fsck)\n",
+        )
+
+    def test_encrypted_install_keeps_encrypt_hook(self):
+        self.hooks.write_text(
+            "HOOKS=(base udev block encrypt filesystems fsck)\n"
+        )
+        ctx = make_ctx(
+            self.target,
+            user_configuration={"disk_config": {"disk_encryption": {
+                "encryption_type": "luks",
+                "encryption_password": "secret",
+            }}},
+        )
+        phases_impl._configure_initramfs_encryption_hook(ctx)
+        self.assertIn(" block encrypt filesystems ", self.hooks.read_text())
+
+    def test_encrypted_install_restores_missing_encrypt_hook(self):
+        self.hooks.write_text("HOOKS=(base udev block filesystems fsck)\n")
+        ctx = make_ctx(self.target, encrypt=True)
+        phases_impl._configure_initramfs_encryption_hook(ctx)
+        self.assertIn(" block encrypt filesystems ", self.hooks.read_text())
+
+
 class ConfigureLoginDeferProvisioningTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

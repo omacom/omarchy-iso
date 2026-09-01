@@ -23,5 +23,134 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Patch archinstall's Luks2.encrypt before Python imports it.
+#
+# Full-disk encrypted installs still go through archinstall's cryptsetup
+# luksFormat. Without --pbkdf-memory, argon2id defaults to ~1 GiB and the
+# kernel OOM-kills cryptsetup on constrained live/PXE boots (SIGKILL: 9).
+# Locate luks.py via sys.path (do not importlib.util.find_spec: that imports
+# archinstall as a side effect). Fail closed on the encrypted path: a missed
+# patch would reintroduce the SIGKILL.
+# Ask disk_config.disk_encryption, the same field archinstall_adapter.is_encrypted
+# reads to decide whether luksFormat runs at all. The flag file is only a
+# fallback: README calls it the autologin signal, not the encryption one.
+install_is_encrypted() {
+  local encryption_type=no_encryption encrypt=true
+
+  if [[ -n ${OMARCHY_INSTALL_CONFIG:-} && -r $OMARCHY_INSTALL_CONFIG ]]; then
+    encryption_type=$(jq -r '
+      .disk_config.disk_encryption
+      | if . == null then "no_encryption" else (.encryption_type // "luks") end
+    ' "$OMARCHY_INSTALL_CONFIG" 2>/dev/null) || encryption_type=luks
+  fi
+  if [[ $encryption_type != no_encryption ]]; then
+    return 0
+  fi
+
+  if [[ -n ${OMARCHY_INSTALL_ENCRYPT_FILE:-} && -r $OMARCHY_INSTALL_ENCRYPT_FILE ]]; then
+    encrypt=$(tr -d '[:space:]' <"$OMARCHY_INSTALL_ENCRYPT_FILE")
+  fi
+  # The same values context.py accepts for the same file.
+  [[ ${encrypt,,} == true || ${encrypt,,} == yes || ${encrypt,,} == 1 ]]
+}
+
+read_pbkdf_memory() {
+  local out
+  if ! out=$(omarchy-luks-pbkdf-memory); then
+    echo "omarchy-iso-install: omarchy-luks-pbkdf-memory failed" >&2
+    return 1
+  fi
+  if ! [[ $out =~ ^[0-9]+$ ]]; then
+    echo "omarchy-iso-install: omarchy-luks-pbkdf-memory produced non-numeric output: ${out}" >&2
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
+patch_archinstall_luks_pbkdf_memory() {
+  local luks_py pbkdf_memory
+
+  if ! install_is_encrypted; then
+    return 0
+  fi
+
+  # 4.x moved Luks2 to lib/disk/luks.py; 3.x kept it at lib/luks.py. Prefer
+  # 4.x (what the ISO ships) then 3.x so a locator miss does not abort an
+  # encrypted install on an older tree. Fail closed either way.
+  luks_py=$(python - <<'PY'
+import sys
+from pathlib import Path
+
+relatives = (
+    Path("archinstall") / "lib" / "disk" / "luks.py",  # 4.x
+    Path("archinstall") / "lib" / "luks.py",           # 3.x
+)
+for entry in sys.path:
+    for rel in relatives:
+        candidate = Path(entry) / rel
+        if candidate.is_file():
+            print(candidate)
+            sys.exit(0)
+sys.exit(1)
+PY
+  ) || {
+    echo "omarchy-iso-install: could not locate archinstall luks.py on sys.path (tried lib/disk/luks.py and lib/luks.py)" >&2
+    exit 1
+  }
+
+  if [[ ! -f $luks_py ]]; then
+    echo "omarchy-iso-install: archinstall luks.py is not a file: ${luks_py}" >&2
+    exit 1
+  fi
+  if [[ ! -w $luks_py ]]; then
+    echo "omarchy-iso-install: archinstall luks.py is not writable: ${luks_py}" >&2
+    exit 1
+  fi
+
+  pbkdf_memory=$(read_pbkdf_memory) || exit 1
+
+  echo "omarchy-iso-install: capping archinstall LUKS Argon2id memory to ${pbkdf_memory} KiB" >&2
+
+  # Insert --pbkdf-memory after the --iter-time value in the cmd list.
+  # Same encrypt argv in 3.x (lib/luks.py) and 4.x (lib/disk/luks.py):
+  #   '--iter-time', str(iter_time), *key_file_arg, '--use-urandom',
+  python - "$luks_py" "$pbkdf_memory" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+memory = sys.argv[2]
+text = path.read_text()
+
+# Already patched: refresh the value rather than keep the first run's. A retry
+# in the same live session re-reads MemAvailable and can land on the other side
+# of the floor, and the log would name a cost archinstall never used.
+already = re.compile(
+    r"(['\"]--iter-time['\"],\s*str\(iter_time\),\s*['\"]--pbkdf-memory['\"],\s*)['\"][^'\"]*['\"]",
+)
+refreshed, n = already.subn(rf"\g<1>'{memory}'", text, count=1)
+if n == 1:
+    path.write_text(refreshed)
+    sys.exit(0)
+
+pattern = re.compile(
+    r"(['\"]--iter-time['\"],\s*str\(iter_time\),)",
+    re.MULTILINE,
+)
+replacement = rf"\1\n\t\t\t'--pbkdf-memory',\n\t\t\t'{memory}',"
+new_text, n = pattern.subn(replacement, text, count=1)
+if n != 1:
+    sys.stderr.write(
+        f"omarchy-iso-install: could not patch {path} for --pbkdf-memory "
+        f"(matches={n})\n"
+    )
+    sys.exit(1)
+path.write_text(new_text)
+PY
+}
+
+patch_archinstall_luks_pbkdf_memory
+
 cd /usr/share/omarchy-iso
 exec python -m orchestrator.main

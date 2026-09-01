@@ -142,6 +142,65 @@ if grep -qF "no longer matches the checksum" <<<"$output"; then
 fi
 pass "a deleted package names the medium without claiming which way it failed"
 
+# Every retry in the same boot fails on the open rather than the checksum, and
+# pacman names the mirror it read from, not the cache it writes to.
+write_retry_log() {
+  local log="$1" path="${2:-$mirror/$PACKAGE}"
+
+  {
+    echo "[dashboard] :: Retrieving packages..."
+    echo "[dashboard] error: failed retrieving file '${path##*/}' from disk : Could not open file $path"
+    echo "[dashboard] error: failed to commit transaction (download library error)"
+    echo "[dashboard] ==> ERROR: Failed to install packages to new root"
+  } >"$log"
+}
+
+write_retry_log "$work/retry.log"
+
+set +e
+output=$(diagnose "$work/retry.log")
+status=$?
+set -e
+
+(( status == 0 )) || fail "a retry after the deletion is diagnosed" "exit status $status"
+[[ $(head -n 1 <<<"$output") == "An earlier attempt deleted this package" ]] ||
+  fail "a retry is diagnosed as a retry" "$output"
+grep -qF "$PACKAGE" <<<"$output" || fail "a retry names the package" "$output"
+grep -qF "Reboot before retrying" <<<"$output" ||
+  fail "a retry says how to get the package back" "$output"
+pass "a retry after the deletion says so instead of going undiagnosed"
+
+# A log holding both attempts must answer with the one that names the cause.
+# The retries come after it and would otherwise win on recency.
+printf 'a package, but damaged\n' >"$mirror/$PACKAGE"
+write_mirror_db "$(printf '0%.0s' {1..64})"
+{
+  cat "$log"
+  cat "$work/retry.log"
+} >"$work/both.log"
+
+set +e
+output=$(diagnose "$work/both.log")
+set -e
+
+[[ $(head -n 1 <<<"$output") == "The install medium is damaged" ]] ||
+  fail "the checksum failure outranks the retries that followed it" "$output"
+pass "the checksum failure outranks the retries that followed it"
+
+# An open failure somewhere other than the mirror was not read off this ISO.
+write_retry_log "$work/retry-elsewhere.log" "/var/tmp/build/$PACKAGE"
+
+set +e
+output=$(diagnose "$work/retry-elsewhere.log")
+status=$?
+set -e
+
+(( status == 1 )) || fail "an open failure outside the mirror is not diagnosed" "exit $status: $output"
+[[ -z $output ]] || fail "an open failure outside the mirror prints nothing" "$output"
+pass "an open failure outside the mirror is not blamed on the medium"
+
+rm "$mirror/$PACKAGE"
+
 # A record with no %SHA256SUM% must not borrow the next record's, which would
 # compare a real file against another package's checksum.
 printf 'a package, but damaged\n' >"$mirror/$PACKAGE"

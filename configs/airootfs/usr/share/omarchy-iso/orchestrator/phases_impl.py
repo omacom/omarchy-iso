@@ -723,10 +723,18 @@ def _unmask_mkinitcpio_pacman_hooks(
             info(f"warning: failed to restore pacman hook mask for {name}: {exc}")
 
 
+# Where build-iso.sh vendors the runtime's package lists and setup form.
+ISO_SHARE = Path("/usr/share/omarchy-iso")
+
+
 def _runtime_package_list(ctx: InstallContext) -> list[str]:
     """Selected Omarchy runtime package + every package in the ISO-bundled
-    base package list that isn't already installed early."""
-    base_pkgs_file = Path("/usr/share/omarchy-iso/omarchy-base.packages")
+    base package list that isn't already installed early. A child install adds
+    the runtime's child list on top; build-iso.sh vendors it beside the base
+    list and carries its packages in the offline mirror."""
+    pkgs_files = [ISO_SHARE / "omarchy-base.packages"]
+    if ctx.profile == "child":
+        pkgs_files.append(ISO_SHARE / "omarchy-child.packages")
     pkgs = [_omarchy_runtime_package()]
     already_installed = set(_early_packages()) | {
         _omarchy_runtime_package(),
@@ -736,13 +744,83 @@ def _runtime_package_list(ctx: InstallContext) -> list[str]:
         "omarchy-settings",
         "omarchy-nvim",
     }
-    for raw in base_pkgs_file.read_text().splitlines():
-        s = raw.strip()
-        if not s or s.startswith("#"):
-            continue
-        if s not in already_installed and s not in pkgs:
-            pkgs.append(s)
+    for pkgs_file in pkgs_files:
+        for raw in pkgs_file.read_text().splitlines():
+            s = raw.strip()
+            if not s or s.startswith("#"):
+                continue
+            if s not in already_installed and s not in pkgs:
+                pkgs.append(s)
     return pkgs
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# add_parent_disk_key: on an encrypted child install, key the LUKS volume to the
+# parent password as well as the kid's. That second slot is what lets a parent
+# boot a machine whose kid has forgotten their password and reset it from
+# inside. The kid's passphrase (the one the disk was formatted with) unlocks
+# the volume for the add; both travel as root-only key files, never argv.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _luks_partition(ctx: InstallContext) -> str:
+    storage = _storage_intent(ctx)
+    if storage.get("luks_uuid"):
+        return f"/dev/disk/by-uuid/{storage['luks_uuid']}"
+
+    # Full-disk installs let archinstall pick the partition; find the one it
+    # formatted on the install disk.
+    modifications = (ctx.user_configuration.get("disk_config") or {}).get("device_modifications") or []
+    disks = [m.get("device") for m in modifications if m.get("device")]
+    res = capture(["blkid", "-t", "TYPE=crypto_LUKS", "-o", "device"])
+    candidates = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+    if disks:
+        candidates = [c for c in candidates if any(c.startswith(d) for d in disks)]
+    if len(candidates) != 1:
+        raise RuntimeError(f"expected one LUKS partition on {disks or 'the install disk'}, found {candidates}")
+    return candidates[0]
+
+
+def _write_key_file(ctx: InstallContext, name: str, passphrase: str) -> Path:
+    path = ctx.state_dir / name
+    path.touch(mode=0o600, exist_ok=True)
+    path.chmod(0o600)
+    # Byte-for-byte the slot passphrase: no trailing newline.
+    path.write_text(passphrase)
+    return path
+
+
+def add_parent_disk_key(ctx: InstallContext) -> None:
+    if ctx.profile != "child" or ctx.defer_provisioning or not _provision_install_encrypted(ctx):
+        return
+
+    kid = _provision_encryption_password(ctx)
+    parent = ctx.user_credentials.get("parent_encryption_password")
+    if not kid or not parent:
+        raise RuntimeError(
+            "child install on an encrypted disk needs both encryption_password and "
+            "parent_encryption_password in user_credentials.json to key the disk to the parent"
+        )
+
+    device = _luks_partition(ctx)
+    kid_file = _write_key_file(ctx, "luks-kid-key", kid)
+    parent_file = _write_key_file(ctx, "luks-parent-key", parent)
+    try:
+        already = subprocess.run(
+            ["cryptsetup", "open", "--test-passphrase", "--key-file", str(parent_file), device],
+            capture_output=True,
+        )
+        if already.returncode == 0:
+            info("› the parent password already unlocks the disk")
+            return
+
+        info("› adding the parent password as a second disk key")
+        subprocess.run(
+            ["cryptsetup", "luksAddKey", "--key-file", str(kid_file), device, str(parent_file)],
+            check=True,
+        )
+    finally:
+        kid_file.unlink(missing_ok=True)
+        parent_file.unlink(missing_ok=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1088,6 +1166,7 @@ def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str 
         "OMARCHY_PATH=/usr/share/omarchy",
         "OMARCHY_INSTALL=/usr/share/omarchy/install",
         f"OMARCHY_INSTALL_USER={ctx.username}",
+        f"OMARCHY_INSTALL_PROFILE={ctx.profile}",
         f"OMARCHY_START_TIME={omarchy_start_time}",
         f"OMARCHY_START_EPOCH={omarchy_start_epoch}",
         f"OMARCHY_USER_NAME={ctx.full_name}",
@@ -1134,6 +1213,7 @@ def run_system_finalizer(ctx: InstallContext) -> None:
         cmd = ["/usr/bin/omarchy-apply-system", "--defer-provisioning", "--first-install"]
     else:
         cmd = ["/usr/bin/omarchy-apply-system", "--install-user", ctx.username, "--first-install"]
+    cmd += ["--profile", ctx.profile]
 
     _mask_mkinitcpio_pacman_hooks(ctx, ctx.target, TARGET_DEFERRED_BOOT_HOOKS)
     try:

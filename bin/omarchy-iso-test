@@ -14,6 +14,8 @@
 # Usage: omarchy-iso-test [release/omarchy.iso] [options]
 #
 #   --encrypt          Drive the encrypted install flow (default: unencrypted)
+#   --child            Answer "Child" at the first question: a kid password and
+#                      a parent password, sudo on the parent one
 #   --provision              Drive the deferred-provisioning install flow: no user during install, the
 #                      first boot runs omarchy-provision-owner and creates it there
 #   --reuse-base       Skip the install phase if a base image already exists
@@ -49,11 +51,15 @@ SYNC_ALL=false
 
 GUEST_USER="omarchy"
 GUEST_PASSWORD="omarchy"
+# A child run types this at the parent prompts; it is then what sudo asks for.
+GUEST_PARENT_PASSWORD="omarchy-parent"
+CHILD=false
 GUEST_HOSTNAME="omarchy-test"
 
 while (($#)); do
   case "$1" in
     --encrypt) ENCRYPT=true ;;
+    --child) CHILD=true ;;
     --provision) PROVISION=true ;;
     --reuse-base) REUSE_BASE=true ;;
     --install-only) INSTALL_ONLY=true ;;
@@ -69,6 +75,21 @@ while (($#)); do
   esac
   shift
 done
+
+# sudo asks for the parent password on a child install and the account's own
+# otherwise; every privileged call the harness makes goes through this one.
+if $CHILD; then
+  GUEST_SUDO_PASSWORD="$GUEST_PARENT_PASSWORD"
+else
+  GUEST_SUDO_PASSWORD="$GUEST_PASSWORD"
+fi
+
+# "Another owner" installs the default profile, so a child run cannot also
+# defer provisioning.
+if $CHILD && $PROVISION; then
+  echo "--child cannot be combined with --provision" >&2
+  exit 2
+fi
 
 if [[ -z $SYNC_DIR && -f ${OMARCHY_PATH:-}/test/acceptance ]]; then
   SYNC_DIR="$OMARCHY_PATH"
@@ -139,7 +160,7 @@ capture_console() {
 stop_vm() {
   vm_running || return 0
 
-  if ! ssh_guest "echo $GUEST_PASSWORD | sudo -S systemctl poweroff" >/dev/null 2>&1; then
+  if ! ssh_guest "echo $GUEST_SUDO_PASSWORD | sudo -S systemctl poweroff" >/dev/null 2>&1; then
     qmp '"system_powerdown"' >/dev/null
   fi
 
@@ -618,16 +639,16 @@ drive_configurator() {
   capture_console "success-installer-00-greeter"
   press ret
 
-  # Keyboard is the first screen. Ctrl+C there is the hidden entry into deferred provisioning
-  # mode; a normal install just selects the layout.
-  wait_for_screen "keyboard layout" 300
-  capture_console "success-installer-01-keyboard-layout"
+  # "Who is this computer for?" is the first screen: Me is preselected, Child
+  # one row down, Another owner two.
+  wait_for_screen "computer for" 300
+  capture_console "success-installer-01-computer-for"
 
   if $PROVISION; then
-    press ctrl-c # arm "prepare for another owner"
-    wait_for_screen "another owner" 30
-    capture_console "success-installer-02-prepare-confirm"
-    press ret # "Yes, prepare for another owner" is the affirmative default
+    press down
+    press down
+    capture_console "success-installer-02-another-owner"
+    press ret
 
     # Jumps straight to disk selection, then the overwrite confirm.
     wait_for_screen "install disk" 60
@@ -651,6 +672,14 @@ drive_configurator() {
     return 0
   fi
 
+  if $CHILD; then
+    press down
+    capture_console "success-installer-01-computer-for-child"
+  fi
+  press ret
+
+  wait_for_screen "keyboard layout" 120
+  capture_console "success-installer-02-keyboard-layout"
   press ret # English (US) is preselected
 
   # Normal flow: user step comes before disk selection.
@@ -668,6 +697,20 @@ drive_configurator() {
   type_text "$GUEST_PASSWORD"
   capture_console "success-installer-04-password-confirmation"
   press ret
+
+  if $CHILD; then
+    # The parent password has its own screen; its confirm names it, which tells
+    # it apart from the kid's confirm that was on screen a moment before.
+    wait_for_screen "Parent password" 60
+    type_text "$GUEST_PARENT_PASSWORD"
+    capture_console "success-installer-04a-parent-password"
+    press ret
+
+    wait_for_screen "Must match the parent" 60
+    type_text "$GUEST_PARENT_PASSWORD"
+    capture_console "success-installer-04b-parent-password-confirmation"
+    press ret
+  fi
 
   wait_for_screen "Full name" 60
   type_text "Omarchy Test"
@@ -753,6 +796,17 @@ drive_provision_owner() {
   wait_for_screen "Conf *irm" 60
   type_text "$GUEST_PASSWORD"
   press ret
+
+  if $CHILD; then
+    wait_for_screen "Parent password" 60
+    type_text "$GUEST_PARENT_PASSWORD"
+    capture_console "success-provision-03a-parent-password"
+    press ret
+
+    wait_for_screen "Must match the parent" 60
+    type_text "$GUEST_PARENT_PASSWORD"
+    press ret
+  fi
 
   wait_for_screen "Full name" 60
   type_text "Omarchy Test"
@@ -883,8 +937,8 @@ bootstrap_ssh() {
 mkdir -p ~/.ssh && chmod 700 ~/.ssh
 echo "$(cat "$SSH_KEY.pub")" >>~/.ssh/authorized_keys
 chmod 600 ~/.ssh/authorized_keys
-echo "$GUEST_PASSWORD" | sudo -S ufw allow from 10.0.2.2 to any port 22 proto tcp
-echo "$GUEST_PASSWORD" | sudo -S systemctl enable --now sshd.service
+echo "$GUEST_SUDO_PASSWORD" | sudo -S ufw allow from 10.0.2.2 to any port 22 proto tcp
+echo "$GUEST_SUDO_PASSWORD" | sudo -S systemctl enable --now sshd.service
 EOF
 
   (cd "$BASE_DIR/www" && exec python3 -m http.server "$HTTP_PORT" --bind 127.0.0.1 >/dev/null 2>&1) &
@@ -1054,9 +1108,9 @@ install_phase() {
     capture_console "success-provision-09-handoff"
   fi
 
-  ssh_guest "echo $GUEST_PASSWORD | sudo -S cat /var/log/omarchy-install-timing.json 2>/dev/null" \
+  ssh_guest "echo $GUEST_SUDO_PASSWORD | sudo -S cat /var/log/omarchy-install-timing.json 2>/dev/null" \
     >"$RUN_DIR/omarchy-install-timing.json" 2>/dev/null || true
-  ssh_guest "echo $GUEST_PASSWORD | sudo -S cat /var/log/pacman.log 2>/dev/null" \
+  ssh_guest "echo $GUEST_SUDO_PASSWORD | sudo -S cat /var/log/pacman.log 2>/dev/null" \
     >"$RUN_DIR/pacman.log" 2>/dev/null || true
 
   log "Installed system is up. Saving base image."
@@ -1101,11 +1155,12 @@ acceptance_phase() {
   # finished product, never a dev-linked checkout.
   log "Running acceptance suite"
   ssh_guest "OMARCHY_PATH=/usr/share/omarchy OMARCHY_ACCEPTANCE_DIR=/tmp/omarchy-acceptance \
-    OMARCHY_ACCEPTANCE_SUDO_PASSWORD=$GUEST_PASSWORD bash .local/share/omarchy/test/acceptance" || status=$?
+    OMARCHY_ACCEPTANCE_SUDO_PASSWORD=$GUEST_SUDO_PASSWORD OMARCHY_ACCEPTANCE_USER_PASSWORD=$GUEST_PASSWORD \
+    bash .local/share/omarchy/test/acceptance" || status=$?
 
   log "Collecting artifacts into $RUN_DIR"
   ssh_guest "tar -C /tmp -cf - omarchy-acceptance 2>/dev/null" | tar -C "$RUN_DIR" -xf - || true
-  ssh_guest "echo $GUEST_PASSWORD | sudo -S cat /var/log/omarchy-install.log 2>/dev/null" >"$RUN_DIR/omarchy-install.log" 2>/dev/null || true
+  ssh_guest "echo $GUEST_SUDO_PASSWORD | sudo -S cat /var/log/omarchy-install.log 2>/dev/null" >"$RUN_DIR/omarchy-install.log" 2>/dev/null || true
   if ((status == 0)); then
     capture_console "success-acceptance-final"
   else

@@ -295,7 +295,15 @@ user_form() {
     password_hash=$(printf '%s' "$password" | openssl passwd -6 -stdin)
   fi
 
-  omarchy_prompt_identity || return $?
+  # Full name and email only feed git identity and the compose shortcuts, and
+  # it is a parent at the keyboard on a child install, so an answer would be
+  # theirs: a child install asks for neither.
+  if $child_install; then
+    full_name=""
+    email_address=""
+  else
+    omarchy_prompt_identity || return $?
+  fi
   omarchy_prompt_hostname || return $?
   omarchy_prompt_timezone || return $?
 }
@@ -322,13 +330,17 @@ user_step() {
       continue
     fi
 
+    # The name and email rows, unless the form never asked (a child install).
+    local identity_rows=""
+    if ! $child_install; then
+      identity_rows="Full name,${full_name:-[Skipped]}"$'\n'"Email address,${email_address:-[Skipped]}"$'\n'
+    fi
+
     # Add manual padding since gum table -p doesn't respect padding
     echo -e "Field,Value
 Username,$username
 $password_label,$mask
-${parent_row}Full name,${full_name:-[Skipped]}
-Email address,${email_address:-[Skipped]}
-Hostname,$hostname
+${parent_row}${identity_rows}Hostname,$hostname
 Timezone,$timezone
 Keyboard,$keyboard" |
       gum table -s "," -p | sed "s/^/${PADDING_LEFT_SPACES}/"

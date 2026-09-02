@@ -726,15 +726,18 @@ drive_configurator() {
     press ret
   fi
 
-  wait_for_screen "Full name" 60
-  type_text "Omarchy Test"
-  capture_console "success-installer-05-full-name"
-  press ret
+  # A child install asks for neither name nor email.
+  if ! $CHILD; then
+    wait_for_screen "Full name" 60
+    type_text "Omarchy Test"
+    capture_console "success-installer-05-full-name"
+    press ret
 
-  wait_for_screen "Email address" 60
-  type_text "test@omarchy.org"
-  capture_console "success-installer-06-email"
-  press ret
+    wait_for_screen "Email address" 60
+    type_text "test@omarchy.org"
+    capture_console "success-installer-06-email"
+    press ret
+  fi
 
   wait_for_screen "Hostname" 60
   type_text "$GUEST_HOSTNAME"
@@ -822,19 +825,23 @@ drive_provision_owner() {
     press ret
   fi
 
-  wait_for_screen "Full name" 60
-  type_text "Omarchy Test"
-  press ret
+  # A child install asks for neither name nor email, so a child run goes
+  # without the '@' keymap proof below.
+  if ! $CHILD; then
+    wait_for_screen "Full name" 60
+    type_text "Omarchy Test"
+    press ret
 
-  wait_for_screen "Email address" 60
-  # The keyboard step above applied English (UK), where '@' is Shift+' (not
-  # Shift+2 as on US); send that keycode so the typed email is correct under
-  # the new layout — itself further proof the deferred keymap took effect.
-  type_text "test"
-  press shift-apostrophe
-  type_text "omarchy.org"
-  capture_console "success-provision-04-email"
-  press ret
+    wait_for_screen "Email address" 60
+    # The keyboard step above applied English (UK), where '@' is Shift+' (not
+    # Shift+2 as on US); send that keycode so the typed email is correct under
+    # the new layout — itself further proof the deferred keymap took effect.
+    type_text "test"
+    press shift-apostrophe
+    type_text "omarchy.org"
+    capture_console "success-provision-04-email"
+    press ret
+  fi
 
   # Hostname is deferred to first boot too.
   wait_for_screen "Hostname" 60

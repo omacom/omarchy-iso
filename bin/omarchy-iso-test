@@ -15,7 +15,11 @@
 #
 #   --encrypt          Drive the encrypted install flow (default: unencrypted)
 #   --child            Answer "Child" at the first question: a kid password and
-#                      a parent password, sudo on the parent one
+#                      a parent password, sudo on the parent one. The run then
+#                      proves the parent password opens the disk and the login
+#                      screen into the kid's session, and bootstraps SSH from
+#                      the desktop's terminal, since child installs close the
+#                      text consoles.
 #   --provision              Drive the deferred-provisioning install flow: no user during install, the
 #                      first boot runs omarchy-provision-owner and creates it there
 #   --reuse-base       Skip the install phase if a base image already exists
@@ -75,6 +79,16 @@ while (($#)); do
   esac
   shift
 done
+
+# A child run logs in with the parent password, at the disk and at SDDM: it
+# must land in the kid's session (the in-guest suite then checks whose it is),
+# and the kid's own password is exercised at the installer and by sudo's
+# refusal of it. A "Me" run logs in with the one password there is.
+if $CHILD; then
+  GUEST_LOGIN_PASSWORD="$GUEST_PARENT_PASSWORD"
+else
+  GUEST_LOGIN_PASSWORD="$GUEST_PASSWORD"
+fi
 
 # sudo asks for the parent password on a child install and the account's own
 # otherwise; every privileged call the harness makes goes through this one.
@@ -905,13 +919,22 @@ unlock_luks() {
   capture_console "success-first-boot-01-luks-prompt"
 
   while true; do
-    type_text "$GUEST_PASSWORD"
+    type_text "$GUEST_LOGIN_PASSWORD"
     if ((waited == 0)); then
       capture_console "success-first-boot-02-luks-passphrase"
     fi
     press ret
     sleep 20
     ((waited += 30))
+
+    if $CHILD; then
+      # Child installs close the text consoles, so the sign that the disk
+      # opened is the passphrase prompt leaving the screen.
+      if ! ocr_screen | grep -qi "passphrase"; then
+        return 0
+      fi
+      continue
+    fi
 
     press ctrl-alt-f3
     sleep 3
@@ -930,6 +953,11 @@ unlock_luks() {
 # Log into a spare console TTY as the user and authorize the harness SSH key —
 # the same thing a person would do to give themselves remote access.
 bootstrap_ssh() {
+  if $CHILD; then
+    bootstrap_ssh_desktop
+    return
+  fi
+
   log "Authorizing SSH access via console login"
 
   mkdir -p "$BASE_DIR/www"
@@ -979,6 +1007,63 @@ EOF
   return 1
 }
 
+# A child install closes the text consoles, so the harness does what a parent
+# would: log in at SDDM with the parent password (an encrypted install has
+# autologged in after the disk), open the terminal with Super+Return, and run
+# the bootstrap there. SSH coming up as the kid is the proof that the parent
+# password opened the kid's session.
+bootstrap_ssh_desktop() {
+  log "Authorizing SSH access from the desktop (the parent password at the login screen)"
+
+  mkdir -p "$BASE_DIR/www"
+  cat >"$BASE_DIR/www/bootstrap" <<EOF
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+echo "$(cat "$SSH_KEY.pub")" >>~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+echo "$GUEST_SUDO_PASSWORD" | sudo -S ufw allow from 10.0.2.2 to any port 22 proto tcp
+echo "$GUEST_SUDO_PASSWORD" | sudo -S systemctl enable --now sshd.service
+EOF
+
+  (cd "$BASE_DIR/www" && exec python3 -m http.server "$HTTP_PORT" --bind 127.0.0.1 >/dev/null 2>&1) &
+  HTTP_PID=$!
+
+  sleep 30 # first boot reaches SDDM, or the desktop on an encrypted install
+  local attempt
+  for attempt in 1 2 3; do
+    if ! $ENCRYPT; then
+      capture_console "success-first-boot-03-login-screen"
+      type_text "$GUEST_LOGIN_PASSWORD"
+      press ret
+      sleep 25
+    fi
+    capture_console "success-first-boot-04-desktop"
+    press meta_l-ret # the terminal
+    sleep 8
+    type_text "curl -fsS http://10.0.2.2:$HTTP_PORT/bootstrap -o /tmp/bs && bash /tmp/bs && exit"
+    capture_console "success-first-boot-05-bootstrap-command"
+    press ret
+
+    if wait_for_ssh 120 "failure-first-boot-ssh-timeout-$attempt"; then
+      capture_console "success-first-boot-06-bootstrap-complete"
+      kill "$HTTP_PID" 2>/dev/null || true
+      HTTP_PID=""
+      local who
+      who=$(ssh_guest whoami 2>/dev/null | tr -d '\r\n') || who=""
+      if [[ $who != "$GUEST_USER" ]]; then
+        echo "The parent password opened a session for '${who:-<none>}', expected the kid account '$GUEST_USER'" >&2
+        return 1
+      fi
+      log "the parent password opened the kid's session ($who)"
+      return 0
+    fi
+    press escape
+    sleep 5
+  done
+
+  echo "Desktop bootstrap did not produce SSH access after 3 attempts" >&2
+  return 1
+}
+
 # Get a freshly booted system to a running Hyprland session, typing at the
 # LUKS prompt and/or SDDM greeter exactly like a user would.
 establish_session() {
@@ -987,7 +1072,7 @@ establish_session() {
     sleep 10
     capture_console "success-session-01-luks-prompt"
     until ssh_guest true 2>/dev/null; do
-      type_text "$GUEST_PASSWORD"
+      type_text "$GUEST_LOGIN_PASSWORD"
       if ((waited == 0)); then
         capture_console "success-session-02-luks-passphrase"
       fi
@@ -1014,7 +1099,7 @@ establish_session() {
       if ((waited == 0)); then
         capture_console "success-session-01-login"
       fi
-      type_text "$GUEST_PASSWORD"
+      type_text "$GUEST_LOGIN_PASSWORD"
       if ((waited == 0)); then
         capture_console "success-session-02-password"
       fi

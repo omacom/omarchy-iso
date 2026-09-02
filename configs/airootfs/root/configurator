@@ -285,6 +285,9 @@ user_form() {
     echo
     omarchy_prompt_parent_password || return $?
     parent_password_hash=$(printf '%s' "$parent_password" | openssl passwd -6 -stdin)
+    # The parent-password header would otherwise sit over the screens that
+    # follow, which are about the account again.
+    step "Let's finish your user account..."
   else
     omarchy_prompt_password || return $?
 

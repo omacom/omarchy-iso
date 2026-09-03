@@ -1,0 +1,28 @@
+[Unit]
+Description=Partition, format and mount the install target
+# archinstall-bash performs the filesystem operations the configurator JSON
+# describes and mounts the layout at the target. On a pre-mounted
+# (protected) install the hosted function is a no-op: the layout already
+# exists and the pre-flight gate checked it.
+PartOf=omarchy-install.target
+After=omarchy-install-prepare-target.service
+Requires=omarchy-install-prepare-target.service
+
+[Service]
+Type=oneshot
+# Latched: the dashboard reads the graph itself as install state -- active
+# means done, inactive means pending, and the timestamps survive for the
+# timing record. NotifyAccess lets any process in the phase publish
+# sd_notify STATUS= progress.
+RemainAfterExit=yes
+NotifyAccess=all
+EnvironmentFile=/usr/share/omarchy-iso/orchestrator/context.env
+EnvironmentFile=-/run/omarchy-install/context.env
+EnvironmentFile=-/run/omarchy-install/install.env
+# This phase is what CREATES the mounted target every other hosted phase
+# runs against, so it opts out of run-phase's mounted-target guard.
+Environment=RUN_PHASE_NO_TARGET=1
+ExecStart=/usr/share/omarchy-iso/orchestrator/run-phase install_disk_layout "Preparing disk layout"
+# Seconds of mkfs plus a LUKS format's key derivation on a slow CPU;
+# fifteen minutes is a stuck-tool guard, not a budget.
+TimeoutStartSec=900

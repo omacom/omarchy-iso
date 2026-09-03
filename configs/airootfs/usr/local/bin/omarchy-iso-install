@@ -6,9 +6,7 @@
 
 set -eEo pipefail
 
-# Parse our args; convert to env vars before exec'ing Python so archinstall's
-# own argparse (which runs at module import time inside the orchestrator)
-# doesn't choke on flags it doesn't recognize.
+# Parse our args into env vars for the orchestrator.
 while [[ $# -gt 0 ]]; do
   case $1 in
     --config)               export OMARCHY_INSTALL_CONFIG="$2"; shift 2 ;;
@@ -23,5 +21,4 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-cd /usr/share/omarchy-iso
-exec python -m orchestrator.main
+exec bash /usr/share/omarchy-iso/orchestrator/main.sh

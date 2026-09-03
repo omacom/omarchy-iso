@@ -1,9 +1,15 @@
 release/**
 vm-saves/**
 
-# Python bytecode (orchestrator)
+# Python bytecode (test tooling)
 __pycache__/
 *.pyc
 
 # Acceptance test harness artifacts
 test-runs/**
+/build-*.log
+/integration-*.log
+
+# The live root SSH key baked into local test ISOs (bin/omarchy-iso-remote):
+# never part of the tree, or every ISO built from it answers root SSH to it.
+/configs/airootfs/root/.ssh/

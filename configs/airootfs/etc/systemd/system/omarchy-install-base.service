@@ -1,0 +1,23 @@
+[Unit]
+Description=Finalize the base system on the install target
+# The standard arch finishers: timezone, time synchronization, the root
+# password, fstab (generated, or written from the pre-mounted layout), and
+# the library's finish.
+PartOf=omarchy-install.target
+After=omarchy-install-strap.service
+Requires=omarchy-install-strap.service
+
+[Service]
+Type=oneshot
+# Latched: the dashboard reads the graph itself as install state -- active
+# means done, inactive means pending, and the timestamps survive for the
+# timing record. NotifyAccess lets any process in the phase publish
+# sd_notify STATUS= progress.
+RemainAfterExit=yes
+NotifyAccess=all
+EnvironmentFile=/usr/share/omarchy-iso/orchestrator/context.env
+EnvironmentFile=-/run/omarchy-install/context.env
+EnvironmentFile=-/run/omarchy-install/install.env
+ExecStart=/usr/share/omarchy-iso/orchestrator/run-phase finalize_base_system "Finalizing base system"
+# Seconds of chroot work; fifteen minutes is a stuck-chroot guard.
+TimeoutStartSec=900

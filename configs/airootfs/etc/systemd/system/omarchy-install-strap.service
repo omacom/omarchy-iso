@@ -1,0 +1,42 @@
+[Unit]
+Description=Install the package payload onto the target
+# Everything that needs the offline cache bound onto the target and the
+# live boot hooks masked: the per-machine pacstrap (kernel, microcode),
+# swap, the Limine boot config, users, the application selections and the
+# staged Tailscale package -- in exactly the order the one-function phase
+# ran them. The hook masks are restored by the orchestrator's exit trap
+# whatever happens to this process.
+PartOf=omarchy-install.target
+After=omarchy-install-image.service
+Requires=omarchy-install-image.service
+# The offline mirror bound onto the target's pacman cache, as a declared
+# data dependency: systemd starts mnt-var-cache-pacman-pkg.mount before
+# this phase and fails the phase if the bind cannot come up. The pre-flight
+# gate proved the mirror long before this point, so a failure here is
+# infrastructure, not medium. The bind is released by the base phase before
+# genfstab, with umount(8) rather than a stop job: a stop on any unit in
+# the terminal phase's Requires= closure conflicts with the chain's
+# in-flight transaction and cancels the remaining phases.
+RequiresMountsFor=/mnt/var/cache/pacman/pkg
+
+[Service]
+Type=oneshot
+# Latched: the dashboard reads the graph itself as install state -- active
+# means done, inactive means pending, and the timestamps survive for the
+# timing record. NotifyAccess lets any process in the phase publish
+# sd_notify STATUS= progress.
+RemainAfterExit=yes
+NotifyAccess=all
+EnvironmentFile=/usr/share/omarchy-iso/orchestrator/context.env
+EnvironmentFile=-/run/omarchy-install/context.env
+EnvironmentFile=-/run/omarchy-install/install.env
+# The live system's boot-image pacman hooks are masked around the pacstraps
+# by this unit's own Pre/Post pair, so systemd guarantees the unmask on every
+# exit path (the target-side masks live on the system unit the same way).
+ExecStartPre=/usr/share/omarchy-iso/orchestrator/run-phase mask_live_boot_hooks "masking live boot hooks"
+ExecStart=/usr/share/omarchy-iso/orchestrator/run-phase install_system_payload "Installing Arch + Omarchy"
+ExecStopPost=/usr/share/omarchy-iso/orchestrator/run-phase unmask_live_boot_hooks "restoring live boot hooks"
+# A few hundred MB of pacstraps off the medium; half an hour is a
+# dead-medium guard, not a budget (the boot verifies already proved the
+# mirror readable at full speed).
+TimeoutStartSec=1800

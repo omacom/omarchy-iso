@@ -1,0 +1,53 @@
+[Unit]
+Description=Verify the Omarchy install payload on the install medium
+# Hashes the one thing on the medium nothing else checks: the root image
+# stream, which btrfs receive has no per-object checksum to fall back on.
+#
+# The file lists that stream and nothing else, so there is nothing to filter.
+# The mirror's packages carry their checksums in the repo database -- pacman
+# validates each against %%SHA256SUM%% as it installs it, and the handful this
+# machine will install are checked against the same records at the pre-flight
+# gate, by omarchy-verify-package, before the disk is touched. The databases
+# are gzip and fail their own CRC if damaged.
+#
+# It is a plain file on the ISO, which the archiso initramfs mounts before
+# pivoting, so they are there from the first unit on. Starting the hash here,
+# rather than when the install begins, hides the read of several GB behind the
+# time the user spends in the configurator.
+# This is the only verifier: the orchestrator's prepare_install_target phase
+# collects the verdict, waits for the unit if it is still running, and fails
+# the install if it could not run.
+# Last of the boot readers -- one reader at a time on one USB stick, and the
+# receive consumes this stream the moment the install starts, so it is read
+# last to be freshest in the page cache (After= is ordering only: a failed
+# mirror verify or sync does not block this hash, the pre-flight gate is
+# what judges them).
+After=omarchy-mirror-verify.service omarchy-pacman-sync.service
+# Order after the boot medium's mount: the conditions below are evaluated at
+# start, and without this a not-yet-mounted medium would skip the unit
+# silently instead of waiting -- the gate would then say "will not run".
+RequiresMountsFor=/run/archiso/bootmnt
+ConditionPathExists=/run/archiso/bootmnt/arch/x86_64/omarchy-root.btrfs.zst
+ConditionPathExists=/run/archiso/bootmnt/arch/x86_64/omarchy-root.btrfs.zst.sha256
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# TimeoutStartSec comes from a build-time drop-in sized to what this unit
+# hashes (build-iso.sh writes 50-size-timeout.conf): oneshot units
+# have no default start timeout, and a medium that stalls reads instead of
+# erroring would otherwise hang the hash, and the install waiting on it,
+# forever. On timeout Result=timeout tells the wait helper to report a slow
+# medium rather than a corrupt one.
+WorkingDirectory=/run/archiso/bootmnt/arch/x86_64
+# The stall watchdog is the fast path beside the size timeout above: a
+# medium that stops answering outright is named in ~30 s (the wrapper kills
+# the hash and exits 75, which the wait helper reads as the slow-medium
+# verdict), where the size timeout still owns the slow-but-alive case.
+ExecStart=/usr/local/bin/omarchy-stall-watchdog /usr/bin/sha256sum --check --strict omarchy-root.btrfs.zst.sha256
+# Background work: never compete with the console or anything interactive.
+Nice=15
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=OpenSSH Per-Connection Server Socket
+# The live environment answers on 22 without keeping a daemon resident:
+# systemd owns the listener and each connection spawns its own sshd@
+# instance (openssh ships the template), which also pulls sshdgenkeys —
+# host keys are generated on the first connection, not at boot. Replaces
+# the releng seed's always-on sshd.service (build-iso.sh removes that
+# enablement); releng's sshd_config drop-in stays, so who may log in and
+# how is unchanged — only the start mechanism moved.
+
+[Socket]
+ListenStream=22
+Accept=yes
+
+[Install]
+WantedBy=sockets.target

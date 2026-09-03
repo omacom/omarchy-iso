@@ -38,8 +38,21 @@ cat >"$stub_dir/mount" <<'STUB'
 #!/bin/bash
 printf 'mount %s\n' "$*" >>"$TEST_LOG"
 [[ ${MOUNT_FAIL:-} == 1 ]] && exit 32
+# MOUNT_FAIL_DIRECT fakes a whole-disk boot medium holding the partition:
+# only the direct device mount fails; the loop mount of the copy works.
+[[ ${MOUNT_FAIL_DIRECT:-} == 1 && $* != *loop* ]] && exit 32
 device=$3 mountpoint=$4
-cp -a "$(readlink -f "$device")"/. "$mountpoint"/
+if [[ $device == *.img ]]; then
+  cp -a "$FAKE_DEVICE_DIR"/. "$mountpoint"/
+else
+  cp -a "$(readlink -f "$device")"/. "$mountpoint"/
+fi
+STUB
+
+cat >"$stub_dir/dd" <<'STUB'
+#!/bin/bash
+printf 'dd %s\n' "$*" >>"$TEST_LOG"
+for a in "$@"; do case $a in of=*) : >"${a#of=}" ;; esac; done
 STUB
 
 cat >"$stub_dir/umount" <<'STUB'
@@ -51,7 +64,7 @@ chmod +x "$stub_dir"/*
 
 new_sandbox() {
   sandbox=$(mktemp -d "$work/sandbox.XXXXXX")
-  mkdir -p "$sandbox/dev/disk/by-label" "$sandbox/root" "$sandbox/media"
+  mkdir -p "$sandbox/dev/disk/by-label" "$sandbox/root" "$sandbox/media" "$sandbox/run"
   export TEST_LOG="$sandbox/calls.log"
   : >"$TEST_LOG"
 }
@@ -199,6 +212,19 @@ write_required_pair
 ! MOUNT_FAIL=1 run_load || fail "mount failure exits non-zero"
 ! grep -q '^umount ' "$TEST_LOG" || fail "mount failure has nothing to unmount"
 pass "mount failure falls back to the wizard"
+
+# A whole-disk boot medium holds every partition exclusively: the direct
+# mount fails, but plain reads still work, so the loader copies the device
+# into /run and loop-mounts the copy.
+new_sandbox
+attach_drive cidata
+write_required_pair
+MOUNT_FAIL_DIRECT=1 FAKE_DEVICE_DIR="$sandbox/media" run_load || fail "held partition still loads"
+grep -q '^dd ' "$TEST_LOG" || fail "held partition is copied with dd"
+grep -q 'loop' "$TEST_LOG" || fail "the copy is loop-mounted"
+[[ -f $sandbox/root/user_configuration.json ]] || fail "the copy delivers the files"
+[[ ! -e $sandbox/run/cidata.img ]] || fail "the image copy is cleaned up"
+pass "a held partition falls back to a copied image"
 
 # A copy failure must not report a loaded drive: the install would start with
 # missing inputs. Fall back and let the wizard produce them instead.

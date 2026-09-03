@@ -1,0 +1,42 @@
+#!/bin/bash
+#
+# Run the live CPUs flat out for the install, and put them back afterwards.
+# Package extraction and the UKI build are CPU-bound, and archiso boots on
+# whatever governor the kernel defaults to. The previous governors are saved
+# to the install state dir — boost and restore run in different processes
+# (ExecStart and ExecStop of omarchy-install-cpu-boost.service), so the
+# state cannot live in one shell's memory. Hosts without cpufreq (most VMs)
+# have no paths and both verbs are no-ops; writing an unsupported governor
+# just fails and that CPU is skipped.
+
+set -uo pipefail
+
+CPU_SYSFS=${CPU_SYSFS:-/sys/devices/system/cpu}
+STATE="${OMARCHY_INSTALL_STATE_DIR:-/run/omarchy-install}/cpu-governors"
+
+case ${1:?usage: omarchy-cpu-governor boost|restore} in
+  boost)
+    mkdir -p "${STATE%/*}"
+    : >"$STATE"
+    count=0
+    for path in "$CPU_SYSFS"/cpu*/cpufreq/scaling_governor; do
+      [[ -f $path ]] || continue
+      current=$(<"$path") || continue
+      printf 'performance\n' >"$path" 2>/dev/null || continue
+      printf '%s %s\n' "$path" "$current" >>"$STATE"
+      count=$((count + 1))
+    done
+    ((count == 0)) || echo "CPU governor set to performance ($count CPUs)"
+    ;;
+  restore)
+    [[ -f $STATE ]] || exit 0
+    while read -r path gov; do
+      printf '%s\n' "$gov" >"$path" 2>/dev/null || true
+    done <"$STATE"
+    rm -f "$STATE"
+    ;;
+  *)
+    echo "unknown verb: $1" >&2
+    exit 2
+    ;;
+esac

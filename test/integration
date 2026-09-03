@@ -10,6 +10,9 @@
 #   scenario       Basename of a test/integration.d/<scenario>-test.sh file;
 #                  all scenarios run when none are named
 #   --reuse-base   Skip the install if a saved base image exists
+#   --bios         Boot the VMs on legacy BIOS (SeaBIOS) instead of UEFI; the
+#                  install then exercises the Limine MBR path. Base images are
+#                  cached separately per firmware.
 #   --port PORT    Host port forwarded to guest SSH (default 2322)
 #   --memory MB    VM memory (default 8192)
 #   --timeout SECS Install timeout (default 2400)
@@ -27,10 +30,13 @@ export OMARCHY_INTEGRATION_SSH_PORT=2322
 export OMARCHY_INTEGRATION_MEMORY=8192
 export OMARCHY_INTEGRATION_INSTALL_TIMEOUT=2400
 export OMARCHY_INTEGRATION_NO_PREVIEW=false
+export OMARCHY_INTEGRATION_FIRMWARE="${OMARCHY_INTEGRATION_FIRMWARE:-uefi}"
 
 while (($#)); do
   case "$1" in
     --reuse-base) REUSE_BASE=true ;;
+    --bios) OMARCHY_INTEGRATION_FIRMWARE=bios ;;
+    --uefi) OMARCHY_INTEGRATION_FIRMWARE=uefi ;;
     --no-preview) OMARCHY_INTEGRATION_NO_PREVIEW=true ;;
     --port) OMARCHY_INTEGRATION_SSH_PORT="$2"; shift ;;
     --memory) OMARCHY_INTEGRATION_MEMORY="$2"; shift ;;
@@ -67,7 +73,7 @@ else
   done
 fi
 
-omarchy-pkg-add qemu-full edk2-ovmf socat imagemagick tesseract tesseract-data-eng mtools
+omarchy-pkg-add qemu-full edk2-ovmf socat imagemagick tesseract tesseract-data-eng mtools libisoburn
 
 export OMARCHY_INTEGRATION_ISO
 OMARCHY_INTEGRATION_ISO=$(realpath "$ISO")

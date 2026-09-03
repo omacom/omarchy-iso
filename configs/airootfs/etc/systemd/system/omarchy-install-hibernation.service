@@ -1,0 +1,24 @@
+[Unit]
+Description=Configure hibernation on the install target
+# omarchy-hibernation-setup in the target's chroot, hosted by run-phase.
+# System boot configuration, so it follows the base finishers and precedes
+# the system finalizer in the chain.
+PartOf=omarchy-install.target
+After=omarchy-install-base.service
+Requires=omarchy-install-base.service
+
+[Service]
+Type=oneshot
+# Latched: the dashboard reads the graph itself as install state -- active
+# means done, inactive means pending, and the timestamps survive for the
+# timing record. NotifyAccess lets any process in the phase publish
+# sd_notify STATUS= progress.
+RemainAfterExit=yes
+NotifyAccess=all
+EnvironmentFile=/usr/share/omarchy-iso/orchestrator/context.env
+EnvironmentFile=-/run/omarchy-install/context.env
+EnvironmentFile=-/run/omarchy-install/install.env
+ExecStart=/usr/share/omarchy-iso/orchestrator/run-phase configure_hibernation "Configuring hibernation"
+# Swapfile creation on btrfs is fallocate-fast (0.8 s on a Core2); five
+# minutes is a stuck-chroot guard, not a budget.
+TimeoutStartSec=300

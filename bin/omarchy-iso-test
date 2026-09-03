@@ -16,6 +16,9 @@
 #   --encrypt          Drive the encrypted install flow (default: unencrypted)
 #   --provision              Drive the deferred-provisioning install flow: no user during install, the
 #                      first boot runs omarchy-provision-owner and creates it there
+#   --free-space       Install into the free space of a synthetic Windows-style
+#                      disk (existing ESP + data partition kept) and verify the
+#                      existing partitions survive
 #   --reuse-base       Skip the install phase if a base image already exists
 #   --install-only     Stop after producing the installed base image
 #   --sync-omarchy DIR Push DIR's test suite into the guest before running
@@ -40,6 +43,7 @@ INSTALL_TIMEOUT=2400
 BOOT_TIMEOUT=600
 ENCRYPT=false
 PROVISION=false
+FREE_SPACE=false
 REUSE_BASE=false
 INSTALL_ONLY=false
 KEEP_RUNNING=false
@@ -55,6 +59,7 @@ while (($#)); do
   case "$1" in
     --encrypt) ENCRYPT=true ;;
     --provision) PROVISION=true ;;
+    --free-space) FREE_SPACE=true ;;
     --reuse-base) REUSE_BASE=true ;;
     --install-only) INSTALL_ONLY=true ;;
     --keep-running) KEEP_RUNNING=true ;;
@@ -92,6 +97,7 @@ OVMF_VARS_TEMPLATE="/usr/share/edk2/x64/OVMF_VARS.4m.fd"
 BASE_NAME="$(basename "$ISO" .iso)"
 $ENCRYPT && BASE_NAME+="-encrypted"
 $PROVISION && BASE_NAME+="-provision"
+$FREE_SPACE && BASE_NAME+="-free-space"
 BASE_DIR="$REPO_DIR/test-runs/$BASE_NAME"
 RUN_DIR="$BASE_DIR/runs/$(date +%Y%m%d-%H%M%S)"
 BASE_DISK="$BASE_DIR/base.qcow2"
@@ -696,6 +702,25 @@ drive_configurator() {
   capture_console "success-installer-10-install-disk"
   press ret # the single virtio disk
 
+  if $FREE_SPACE; then
+    # The picker only appears when the disk has usable free space on UEFI.
+    wait_for_screen "installation mode" 60
+    capture_console "success-installer-11-install-mode"
+    press down # "Free space install (alongside existing data)"
+    press ret
+    # BitLocker/ESP checks and the free-space analysis run, then the confirm.
+    wait_for_screen "of free space" 120
+    capture_console "success-installer-12-free-space-confirm-encrypted"
+    if ! $ENCRYPT; then
+      press ctrl-c # toggles the confirm to the unencrypted flow
+      wait_for_screen "without encryption" 30
+      capture_console "success-installer-13-free-space-confirm-unencrypted"
+    fi
+    press ret
+    sleep 2
+    capture_console "success-installer-14-install-started"
+    return 0
+  fi
   wait_for_screen "installation mode\|recovery possible" 60
   if ocr_screen | grep -qi "installation mode"; then
     capture_console "success-installer-11-install-mode"
@@ -981,13 +1006,71 @@ establish_session() {
 
 # -------------------------------------------------------------------- phases
 
+# A synthetic Windows-style disk for the free-space install: a FAT32 ESP and
+# an ext4 data partition carrying a marker file, followed by ~76GiB of
+# unallocated space. Built without root: parted partitions the raw file, the
+# filesystems are made straight into it at their offsets. Unlike
+# omarchy-iso-test-windows-disk it has no EFI/Microsoft directory (that needs
+# mtools or a mount), so the configurator reports no Windows ESP; the
+# free-space mechanics it exercises are the same either way.
+create_free_space_disk() {
+  local disk="$1" raw="$1.raw" populate="$RUN_DIR/.preserve"
+  local esp_start_mib=1 esp_size_mib=512 data_end_mib=$((20 * 1024))
+
+  rm -f "$disk" "$raw"
+  truncate -s 96G "$raw"
+  parted --script "$raw" \
+    mklabel gpt \
+    mkpart WINDOWS_ESP fat32 "${esp_start_mib}MiB" "$((esp_start_mib + esp_size_mib))MiB" \
+    set 1 esp on \
+    mkpart WINDOWS_DATA ext4 "$((esp_start_mib + esp_size_mib))MiB" "${data_end_mib}MiB"
+
+  mkfs.fat -F32 -n WINDOWS_ESP -C "$RUN_DIR/.esp.img" $((esp_size_mib * 1024)) >/dev/null
+  dd if="$RUN_DIR/.esp.img" of="$raw" bs=1M seek="$esp_start_mib" conv=notrunc,sparse status=none
+  rm -f "$RUN_DIR/.esp.img"
+
+  rm -rf "$populate"
+  mkdir -p "$populate"
+  echo "This file must survive the Omarchy install." >"$populate/OMARCHY-MUST-NOT-TOUCH.txt"
+  mkfs.ext4 -q -F -L WINDOWS_DATA -d "$populate" \
+    -E offset=$(( (esp_start_mib + esp_size_mib) * 1024 * 1024 )) \
+    "$raw" "$(( (data_end_mib - esp_start_mib - esp_size_mib) * 1024 ))k"
+  rm -rf "$populate"
+
+  qemu-img convert -f raw -O qcow2 "$raw" "$disk"
+  rm -f "$raw"
+}
+
+# The partitions the free-space install had to leave alone, checked from
+# inside the installed system.
+verify_preserved_partitions() {
+  log "Verifying the pre-existing partitions survived"
+  local report="$RUN_DIR/preserved-partitions.txt"
+
+  ssh_guest "lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINTS" >"$report" 2>&1 || true
+  if ! ssh_guest "echo $GUEST_PASSWORD | sudo -S -p '' sh -c '
+      blkid -L WINDOWS_ESP >/dev/null &&
+      mkdir -p /run/preserve && mount -o ro LABEL=WINDOWS_DATA /run/preserve &&
+      test -f /run/preserve/OMARCHY-MUST-NOT-TOUCH.txt; rc=\$?; umount /run/preserve 2>/dev/null; exit \$rc'"; then
+    capture_console "failure-free-space-partitions-lost"
+    echo "Pre-existing partitions were not preserved; see $report" >&2
+    return 1
+  fi
+  log "WINDOWS_ESP and WINDOWS_DATA (with its marker file) are intact"
+}
+
 install_phase() {
   log "Installing $(basename "$ISO") into a fresh VM (headless, driven via console)"
 
   [[ -f $SSH_KEY ]] || ssh-keygen -t ed25519 -N "" -q -C "omarchy-iso-test" -f "$SSH_KEY"
 
-  rm -f "$BASE_DISK"
-  qemu-img create -f qcow2 "$BASE_DISK" 40G >/dev/null
+  if $FREE_SPACE; then
+    log "Building the synthetic Windows-style disk"
+    create_free_space_disk "$BASE_DISK"
+  else
+    rm -f "$BASE_DISK"
+    qemu-img create -f qcow2 "$BASE_DISK" 40G >/dev/null
+  fi
   cp "$OVMF_VARS_TEMPLATE" "$BASE_OVMF"
 
   start_vm "$BASE_DISK" "$RUN_DIR/install-serial.log" \
@@ -1003,6 +1086,7 @@ install_phase() {
     unlock_luks
   fi
   bootstrap_ssh
+  $FREE_SPACE && verify_preserved_partitions
 
   # SSH can come up (console bootstrap logs in on a spare TTY) while
   # omarchy-provision-owner is still finalizing the user and re-keying LUKS. Saving

@@ -1,0 +1,84 @@
+#!/bin/bash
+#
+# Check every package this medium carries against the checksum the repo
+# database holds for it -- %SHA256SUM% in each desc record, the same number
+# pacman validates against as it installs.
+#
+# All of them, not just the ones this machine will install, because of what
+# comes next: the installer's pre-flight gate waits for this, and the phase
+# after the gate partitions and formats the disk. Past that point the old
+# system is gone, and a package that turns out to be unreadable leaves someone
+# with no working install at all -- the one outcome worth spending a minute of
+# hashing to avoid. Verifying only the delta would still leave a dependency
+# resolved later, or a hardware package chosen after the image lands, to fail
+# with the disk already wiped.
+#
+# Signatures are not checked: [offline] is SigLevel = Never (see
+# configs/pacman-offline.conf for why that is required).
+#
+# Run from the mirror directory: omarchy-mirror-verify.service sets
+# WorkingDirectory to it, the way omarchy-root-image-verify does for the
+# payload directory.
+#
+# Usage: cd /var/cache/omarchy/mirror/offline && omarchy-verify-mirror
+
+set -uo pipefail
+
+# Everything is relative to the working directory, which is the mirror: the
+# unit sets WorkingDirectory, and the checksums the database carries are bare
+# filenames, so sha256sum resolves them without a path being stitched on.
+DB=offline.db.tar.gz
+# What the build decided this medium would carry: the packages the root image
+# does not already provide. The database describes the whole repo, all ~1200,
+# because pacman has to resolve every name; this is the ~261 that are here.
+SHIPPED="${OMARCHY_SHIPPED_LIST:-/usr/share/omarchy-iso/offline-mirror.shipped}"
+
+fail() {
+  echo "$1" >&2
+  exit 1
+}
+
+command -v bsdtar >/dev/null 2>&1 ||
+  fail "bsdtar is missing from the live system; the offline repo database cannot be read"
+[[ -f $DB ]] || fail "no offline repo database in $PWD: this must run in the mirror directory"
+[[ -f $SHIPPED ]] ||
+  fail "install medium is corrupt: re-flash it (the mirror's shipped-package list is missing)"
+
+# repo-add writes %FILENAME% before %SHA256SUM% in every desc record, so one
+# pass can pair them. Everything is read here, once, rather than per package:
+# the database is 772 KB uncompressed and gzip cannot be seeked into anyway.
+if ! sums=$(bsdtar -xOf "$DB" 2>/dev/null | awk '
+  $0 == "%FILENAME%" { getline file; next }
+  $0 == "%SHA256SUM%" { getline sum; if (file != "") { print sum "  " file; file = "" } }
+'); then
+  fail "install medium is corrupt: re-flash it (the offline repo database could not be read)"
+fi
+
+# Restricted to what this medium carries, in the order the build recorded, and
+# every one of those must have a record: a package on the medium that the
+# database cannot describe is as unusable as a missing one.
+selected=""
+missing_record=()
+while IFS= read -r file; do
+  [[ -n $file ]] || continue
+  line=$(grep -m1 -F "  $file" <<<"$sums") || true
+  if [[ -z $line ]]; then
+    missing_record+=("$file")
+    continue
+  fi
+  [[ -f $file ]] ||
+    fail "install medium is corrupt: re-flash it (missing from the mirror: $file)"
+  selected+="$line"$'\n'
+done <"$SHIPPED"
+
+((${#missing_record[@]} == 0)) ||
+  fail "install medium is corrupt: re-flash it (no checksum in the repo database for: ${missing_record[*]})"
+
+count=$(grep -c . <<<"$selected")
+((count > 0)) || fail "the shipped-package list is empty; nothing could be verified"
+
+# --quiet: only what failed is worth a line in the journal, and there are
+# hundreds of files.
+sha256sum --check --strict --quiet - <<<"$selected" ||
+  fail "install medium is corrupt: re-flash it (sha256 mismatch in the offline mirror)"
+echo "verified $count packages against the repo database"

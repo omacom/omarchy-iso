@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # Preview the shipped Omarchy installer dashboard without building an ISO.
+#
+# The dashboard reads the systemd phase-unit graph as the install's state,
+# so the preview stands a fixture of it up: fake unit files for the roster,
+# a stub systemctl that answers `show` from a playback directory, and a
+# simulator that advances the playback the way the real graph latches.
 set -euo pipefail
 
 # The dashboard drives the package phase from the target's pacman database, so
@@ -7,29 +12,24 @@ set -euo pipefail
 # barely moves, which reads as a bug.
 PREVIEW_PACKAGES="${PREVIEW_PACKAGES:-925}"
 
-write_simulation_state() {
-  local state_file="$1" started_at="$2" phase_started_at="$3" current_phase="$4"
-  local target="$5" index="$6" total="$7"
-  local finished_at="${8:-null}" temporary="${state_file}.tmp"
+# Display name, duration. The unpack publishes stream progress the way the
+# real phase does (sd_notify STATUS=, here the playback's status file).
+PHASES=(
+  "Preparing live environment" 0.8
+  "Preparing install target" 0.3
+  "Unpacking root image" 3.0
+  "Installing Arch + Omarchy" 5.0
+  "Configuring hibernation" 0.4
+  "Configuring system" 1.2
+  "Finalizing Limine boot" 1.0
+  "Finalizing user" 1.0
+  "Configuring login" 0.6
+  "Configuring DNS resolver" 0.3
+  "Validating boot setup" 0.8
+)
 
-  jq -n \
-    --argjson started_at "$started_at" \
-    --argjson phase_started_at "$phase_started_at" \
-    --arg current_phase "$current_phase" \
-    --arg target "$target" \
-    --argjson current_index "$index" \
-    --argjson total_phases "$total" \
-    --argjson finished_at "$finished_at" \
-    '{
-      started_at: $started_at,
-      phase_started_at: $phase_started_at,
-      current_phase: $current_phase,
-      target: $target,
-      current_index: $current_index,
-      total_phases: $total_phases
-    } + if $finished_at == null then {} else {finished_at: $finished_at} end' \
-    >"$temporary"
-  mv -f -- "$temporary" "$state_file"
+slugify() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z' '-' | tr -s '-'
 }
 
 # Fill the fake database over the phase's duration, so the bar is driven by the
@@ -45,46 +45,33 @@ simulate_packages() {
   done
 }
 
-simulate_install() {
-  local state_file="$1"
-  local started_at="$EPOCHREALTIME"
-  local phase phase_started_at finished_at duration i index total
-  local target db
-  target="$(dirname -- "$state_file")/target"
-  db="$target/var/lib/pacman/local"
-  mkdir -p "$db"
-  local -a phases=(
-    "Starting installation" 0.5
-    "Preparing live environment" 0.8
-    "Preparing install target" 0.3
-    "Installing Arch + Omarchy" 5.0
-    "Configuring hibernation" 0.4
-    "Configuring system" 1.2
-    "Finalizing Limine boot" 1.0
-    "Finalizing user" 1.0
-    "Configuring login" 0.6
-    "Configuring DNS resolver" 0.3
-    "Validating boot setup" 0.8
-  )
-  total=$(( ${#phases[@]} / 2 ))
-
-  for ((i = 0; i < ${#phases[@]}; i += 2)); do
-    phase="${phases[i]}"
-    duration="${phases[i + 1]}"
-    index=$(( i / 2 ))
-    phase_started_at="$EPOCHREALTIME"
-    write_simulation_state "$state_file" "$started_at" "$phase_started_at" \
-      "$phase" "$target" "$index" "$total"
-    if [[ $phase == "Installing Arch + Omarchy" ]]; then
-      simulate_packages "$db" "$duration" "$PREVIEW_PACKAGES"
-    else
-      sleep "$duration"
-    fi
+simulate_stream_progress() {
+  local dir="$1" duration="$2" steps=20 i
+  for ((i = 1; i <= steps; i++)); do
+    awk -v i="$i" -v s="$steps" 'BEGIN { printf "progress=%.4f", i / s }' >"$dir/status"
+    sleep "$(awk -v d="$duration" -v s="$steps" 'BEGIN { printf "%.3f", d / s }')"
   done
+}
 
-  finished_at="$EPOCHREALTIME"
-  write_simulation_state "$state_file" "$started_at" "$finished_at" \
-    "Installation complete" "$target" "$(( total - 1 ))" "$total" "$finished_at"
+simulate_install() {
+  local dir="$1" i n phase duration
+  local db="$dir/target/var/lib/pacman/local"
+  mkdir -p "$db"
+  # Before any unit runs the dashboard names the pre-graph work itself.
+  sleep 0.5
+  n=$(( ${#PHASES[@]} / 2 ))
+  for ((i = 0; i < n; i++)); do
+    phase="${PHASES[i * 2]}"
+    duration="${PHASES[i * 2 + 1]}"
+    printf '%s\n' "$i" >"$dir/current"
+    : >"$dir/status"
+    case "$phase" in
+      "Installing Arch + Omarchy") simulate_packages "$db" "$duration" "$PREVIEW_PACKAGES" ;;
+      "Unpacking root image") simulate_stream_progress "$dir" "$duration" ;;
+      *) sleep "$duration" ;;
+    esac
+  done
+  printf '%s\n' "$n" >"$dir/current"
   sleep 0.3
 }
 
@@ -128,8 +115,52 @@ cleanup() {
 trap cleanup EXIT
 
 log_file="$preview_dir/install.log"
-state_file="$preview_dir/state.json"
 touch "$log_file"
+
+# The unit-graph fixture: one fake unit file per phase, chained by Requires=
+# the way the real graph is, listed in order for the stub's index lookup.
+units_dir="$preview_dir/units"
+mkdir -p "$units_dir" "$preview_dir/bin"
+: >"$preview_dir/order"
+prev=""
+for ((i = 0; i < ${#PHASES[@]}; i += 2)); do
+  phase="${PHASES[i]}"
+  unit="omarchy-install-$(slugify "$phase").service"
+  {
+    echo "[Service]"
+    [[ -n $prev ]] && printf 'Requires=%s\n' "$prev"
+    printf 'ExecStart=/usr/bin/env run-phase sim_phase "%s"\n' "$phase"
+  } >"$units_dir/$unit"
+  printf '%s\n' "$unit" >>"$preview_dir/order"
+  prev=$unit
+done
+printf '%s\n' "-1" >"$preview_dir/current"
+
+# The stub systemctl: answers `show <units...> -p ActiveState,StatusText`
+# from the playback directory, in real systemctl's block format.
+cat >"$preview_dir/bin/systemctl" <<EOF
+#!/bin/bash
+dir="$preview_dir"
+[[ \${1:-} == show ]] || exit 0
+cur=\$(cat "\$dir/current" 2>/dev/null || echo -1)
+status=\$(cat "\$dir/status" 2>/dev/null || echo "")
+first=1
+for u in "\$@"; do
+  [[ \$u == omarchy-install-*.service ]] || continue
+  n=\$(grep -nxF "\$u" "\$dir/order" | cut -d: -f1) || continue
+  n=\$((n - 1))
+  (( first )) || echo
+  first=0
+  if (( n < cur )); then
+    echo "ActiveState=active"; echo "StatusText="
+  elif (( n == cur )); then
+    echo "ActiveState=activating"; echo "StatusText=\$status"
+  else
+    echo "ActiveState=inactive"; echo "StatusText="
+  fi
+done
+EOF
+chmod +x "$preview_dir/bin/systemctl"
 
 # Match what the simulated database will reach, so the preview shows the
 # package-driven bar rather than the missing-signal fallback.
@@ -137,6 +168,10 @@ printf '%s\n' "$PREVIEW_PACKAGES" >"$preview_dir/expected-packages"
 
 OMARCHY_UI_AUTO_REBOOT=no \
   OMARCHY_EXPECTED_PACKAGES_FILE="$preview_dir/expected-packages" \
+  OMARCHY_INSTALL_UNITS_DIR="$units_dir" \
+  OMARCHY_INSTALL_TARGET="$preview_dir/target" \
+  OMARCHY_INSTALL_STATE_DIR="$preview_dir" \
+  PATH="$preview_dir/bin:$PATH" \
   PREVIEW_PACKAGES="$PREVIEW_PACKAGES" \
-  "$dashboard" "$log_file" "$state_file" -- \
-  "$0" --simulate-install "$state_file"
+  "$dashboard" "$log_file" -- \
+  "$0" --simulate-install "$preview_dir"

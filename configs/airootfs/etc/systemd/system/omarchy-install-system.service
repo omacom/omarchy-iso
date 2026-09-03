@@ -1,0 +1,31 @@
+[Unit]
+Description=Apply the Omarchy system configuration to the install target
+# omarchy-apply-system in the target's chroot, with the boot-image pacman
+# hooks masked around it. The mask/unmask pair is this unit's own
+# ExecStartPre=/ExecStopPost=: systemd runs the unmask on every exit path
+# -- failure, group abort, SIGKILL of the phase included -- so the failure
+# contract is the unit's, not a bash trap's.
+PartOf=omarchy-install.target
+After=omarchy-install-hibernation.service
+Requires=omarchy-install-hibernation.service
+# The chroot's pacman needs the live tree bound into the target; declared
+# here so systemd holds the phase for the mounts and PartOf= tears them
+# down with the group.
+RequiresMountsFor=/mnt/var/cache/omarchy/mirror/offline /mnt/opt/packages
+
+[Service]
+Type=oneshot
+# Latched: the dashboard reads the graph itself as install state -- active
+# means done, inactive means pending, and the timestamps survive for the
+# timing record. NotifyAccess lets any process in the phase publish
+# sd_notify STATUS= progress.
+RemainAfterExit=yes
+NotifyAccess=all
+EnvironmentFile=/usr/share/omarchy-iso/orchestrator/context.env
+EnvironmentFile=-/run/omarchy-install/context.env
+EnvironmentFile=-/run/omarchy-install/install.env
+ExecStartPre=/usr/share/omarchy-iso/orchestrator/run-phase mask_target_boot_hooks "masking deferred boot hooks"
+ExecStart=/usr/share/omarchy-iso/orchestrator/run-phase run_system_finalizer "Configuring system"
+ExecStopPost=/usr/share/omarchy-iso/orchestrator/run-phase unmask_target_boot_hooks "restoring deferred boot hooks"
+# 12.5 s on a Core2; fifteen minutes is a stuck-chroot guard, not a budget.
+TimeoutStartSec=900

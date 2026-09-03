@@ -1,0 +1,27 @@
+[Unit]
+Description=Unpack the Omarchy root image onto the install target
+# btrfs receive of the root image stream and the subvolume swap, hosted by
+# run-phase in its own process. Reached through the graph: the disk phase
+# it Requires= has formatted and mounted the layout, and the pre-flight
+# gate two edges earlier verified the stream.
+PartOf=omarchy-install.target
+After=omarchy-install-disk.service
+Requires=omarchy-install-disk.service
+
+[Service]
+Type=oneshot
+# Latched: the dashboard reads the graph itself as install state -- active
+# means done, inactive means pending, and the timestamps survive for the
+# timing record. NotifyAccess lets any process in the phase publish
+# sd_notify STATUS= progress.
+RemainAfterExit=yes
+NotifyAccess=all
+# The install context: path defaults, this run's resolved values, and the
+# raw inputs ctx_from_env rebuilds the rest from (later files win).
+EnvironmentFile=/usr/share/omarchy-iso/orchestrator/context.env
+EnvironmentFile=-/run/omarchy-install/context.env
+EnvironmentFile=-/run/omarchy-install/install.env
+ExecStart=/usr/share/omarchy-iso/orchestrator/run-phase install_root_image "Unpacking root image"
+# TimeoutStartSec comes from a build-time drop-in sized to the stream
+# (build-iso.sh writes 50-size-timeout.conf): oneshot units have no default
+# start timeout, and the receive reads the whole stream off the medium.

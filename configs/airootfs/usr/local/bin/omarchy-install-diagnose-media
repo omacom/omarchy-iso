@@ -4,7 +4,7 @@
 # that name the fix.
 #
 # The ISO's offline mirror is bind-mounted onto the target's package cache for
-# the duration of pacstrap (see _mount_offline_package_cache), so a package
+# the duration of pacstrap (mnt-var-cache-pacman-pkg.mount), so a package
 # pacman calls corrupt under that path is a byte that came off the medium --
 # nothing else ever writes there. That much is certain, and it is the part
 # worth saying out loud, because the failure screen otherwise ends at "get help
@@ -12,11 +12,15 @@
 #
 # What is not certain is which way the medium failed. Bytes written wrong and
 # bytes read wrong produce the same checksum mismatch, and pacstrap runs with
-# --noconfirm, which answers yes to pacman's "delete it?" and unlinks the
-# package through the bind mount before anything here can weigh it. So the
-# usual verdict names the medium and gives both remedies in the order worth
-# trying. When the package does survive, its checksum in the mirror's database
-# tells the two apart, and then this says which.
+# --noconfirm, which answers yes to pacman's "delete it?". That unlink used to
+# succeed, leaving nothing to weigh; the mirror is now a read-only mount of the
+# image on the medium, so the package survives its own rejection and the
+# checksum in the mirror's database tells the two apart. The verdict that
+# claims neither is still here for when it does not.
+#
+# Damage may also surface one layer earlier: a stick far enough gone returns an
+# I/O error instead of bytes, and pacman never gets to hash anything. That names
+# the medium just as certainly, and is diagnosed the same way.
 #
 # Prints the diagnosis on stdout, one line per line, headline first. Exits 1
 # with no output when there is nothing here to diagnose, so the caller can ask
@@ -41,6 +45,21 @@ corrupt_package() {
   for log in "$@"; do
     [[ -f $log ]] || continue
     match=$(sed -n "s|.*${TARGET_PACKAGE_CACHE}/\([^ ]*\) is corrupted.*|\1|p" "$log" | tail -n 1)
+    [[ -n $match ]] && package="$match"
+  done
+
+  printf '%s' "$package"
+}
+
+# A read that fails outright -- the medium erroring rather than returning wrong
+# bytes -- reaches pacman as EIO, reported against the path it was reading:
+# under the target cache, like any other package it rejects.
+unreadable_package() {
+  local log match package=""
+
+  for log in "$@"; do
+    [[ -f $log ]] || continue
+    match=$(sed -n "s|.*${TARGET_PACKAGE_CACHE}/\([^ ]*\.pkg\.tar[^ :]*\).*[Ii]nput/output error.*|\1|p" "$log" | tail -n 1)
     [[ -n $match ]] && package="$match"
   done
 
@@ -78,6 +97,11 @@ actual_checksum() {
 }
 
 package=$(corrupt_package "$@")
+unreadable=""
+if [[ -z $package ]]; then
+  unreadable=$(unreadable_package "$@")
+  package="$unreadable"
+fi
 if [[ -z $package ]]; then
   exit 1
 fi
@@ -86,6 +110,18 @@ fi
 # backslash that the renderer would read as an escape. Strip anything a package
 # filename has no business containing before printing it.
 display_package="${package//[^A-Za-z0-9._+:@%-]/}"
+
+if [[ -n $unreadable ]]; then
+  # No checksum comparison to make: the bytes never arrived. Both remedies, in
+  # the order worth trying, same as the case where the package is gone.
+  echo "The install medium is damaged or misread"
+  echo "The medium returned a read error for this package:"
+  echo "$display_package"
+  echo
+  echo "Verify your download with sha256sum, then write the USB again"
+  echo "If the download verifies, the stick or this machine's memory is at fault"
+  exit 0
+fi
 
 expected=$(expected_checksum "$package")
 actual=$(actual_checksum "$package")

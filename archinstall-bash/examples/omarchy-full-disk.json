@@ -1,0 +1,79 @@
+{
+    "app_config": null,
+    "archinstall-language": "English",
+    "auth_config": {},
+    "audio_config": { "audio": "pipewire" },
+    "bootloader_config": { "bootloader": "Limine", "uki": false, "removable": false },
+    "custom_commands": [],
+    "disk_config": {
+        "config_type": "default_layout",
+        "device_modifications": [
+            {
+                "device": "/dev/loop0",
+                "partitions": [
+                    {
+                        "btrfs": [],
+                        "dev_path": null,
+                        "flags": [ "boot", "esp" ],
+                        "fs_type": "fat32",
+                        "mount_options": [],
+                        "mountpoint": "/boot",
+                        "obj_id": "ea21d3f2-82bb-49cc-ab5d-6f81ae94e18d",
+                        "size": { "sector_size": { "unit": "B", "value": 512 }, "unit": "B", "value": 2147483648 },
+                        "start": { "sector_size": { "unit": "B", "value": 512 }, "unit": "B", "value": 1048576 },
+                        "status": "create",
+                        "type": "primary"
+                    },
+                    {
+                        "btrfs": [
+                            { "mountpoint": "/", "name": "@" },
+                            { "mountpoint": "/home", "name": "@home" },
+                            { "mountpoint": "/var/log", "name": "@log" },
+                            { "mountpoint": "/var/cache/pacman/pkg", "name": "@pkg" }
+                        ],
+                        "dev_path": null,
+                        "flags": [],
+                        "fs_type": "btrfs",
+                        "mount_options": [ "compress=zstd" ],
+                        "mountpoint": null,
+                        "obj_id": "8c2c2b92-1070-455d-b76a-56263bab24aa",
+                        "size": { "sector_size": { "unit": "B", "value": 512 }, "unit": "B", "value": 6441402368 },
+                        "start": { "sector_size": { "unit": "B", "value": 512 }, "unit": "B", "value": 2148532224 },
+                        "status": "create",
+                        "type": "primary"
+                    }
+                ],
+                "wipe": true
+            }
+        ],
+        "disk_encryption": {
+            "encryption_type": "luks",
+            "lvm_volumes": [],
+            "iter_time": 2000,
+            "partitions": [ "8c2c2b92-1070-455d-b76a-56263bab24aa" ]
+        }
+    },
+    "hostname": "omarchy",
+    "kernels": [ "linux" ],
+    "network_config": { "type": "iso" },
+    "ntp": true,
+    "parallel_downloads": 8,
+    "script": null,
+    "services": [],
+    "swap": true,
+    "timezone": "Europe/Oslo",
+    "locale_config": { "kb_layout": "no", "sys_enc": "UTF-8", "sys_lang": "en_US.UTF-8" },
+    "mirror_config": {
+        "custom_repositories": [],
+        "custom_servers": [
+            {"url": "https://mirror.omarchy.org/$repo/os/$arch"},
+            {"url": "https://mirror.rackspace.com/archlinux/$repo/os/$arch"},
+            {"url": "https://geo.mirror.pkgbuild.com/$repo/os/$arch"}
+        ],
+        "mirror_regions": {},
+        "optional_repositories": []
+    },
+    "packages": [ "base-devel", "git", "omarchy-keyring", "omarchy-settings", "omarchy" ],
+    "profile_config": { "gfx_driver": null, "greeter": null, "profile": {} },
+    "version": "3.0.9"
+}

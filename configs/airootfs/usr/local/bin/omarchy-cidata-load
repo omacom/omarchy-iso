@@ -36,7 +36,16 @@ done
 [[ -n $device ]] || exit 1
 
 mkdir -p "$mnt"
-mount -o ro "$device" "$mnt" || exit 1
+if ! mount -o ro "$device" "$mnt"; then
+  # On some boots archiso mounts the whole stick as the boot medium rather
+  # than its first partition (the ISO signature is on both, and whichever
+  # by-label node udev settled last wins) -- a mounted whole disk holds
+  # every partition exclusively, so the cidata partition cannot be mounted
+  # directly. Plain reads still work: copy it and loop-mount the copy.
+  img=$root/run/cidata.img
+  dd if="$device" of="$img" bs=4M 2>/dev/null || exit 1
+  mount -o ro,loop "$img" "$mnt" || exit 1
+fi
 
 # Clear any inputs a previous load in this live session left in /root before
 # copying the current drive: a stale `defer-provisioning` marker or credentials file would
@@ -67,4 +76,5 @@ if [[ -f $mnt/user_configuration.json ]] && [[ -f $mnt/user_credentials.json || 
 fi
 
 umount "$mnt"
+rm -f "$root/run/cidata.img"
 exit $loaded

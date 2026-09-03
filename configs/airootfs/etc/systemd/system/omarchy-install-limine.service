@@ -1,0 +1,26 @@
+[Unit]
+Description=Finalize the Limine boot setup on the install target
+# The final limine-update (UKI build) in the target's
+# chroot plus the boot-config validations around it. Everything it reads is
+# the target's own disk state — the PART_*-derived cmdline was written into
+# /etc/default/limine by configure_limine_boot inside the strap phase,
+# which is where the partition arrays live and stay.
+PartOf=omarchy-install.target
+After=omarchy-install-provisioning.service
+Requires=omarchy-install-provisioning.service
+
+[Service]
+Type=oneshot
+# Latched: the dashboard reads the graph itself as install state -- active
+# means done, inactive means pending, and the timestamps survive for the
+# timing record. NotifyAccess lets any process in the phase publish
+# sd_notify STATUS= progress.
+RemainAfterExit=yes
+NotifyAccess=all
+EnvironmentFile=/usr/share/omarchy-iso/orchestrator/context.env
+EnvironmentFile=-/run/omarchy-install/context.env
+EnvironmentFile=-/run/omarchy-install/install.env
+ExecStart=/usr/share/omarchy-iso/orchestrator/run-phase finalize_limine_boot "Finalizing Limine boot"
+# The UKI build dominates: 16 s on a Core2. Thirty minutes is the guard for a
+# wedged mkinitcpio on the slowest media, not a budget.
+TimeoutStartSec=1800

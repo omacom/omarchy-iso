@@ -1,0 +1,25 @@
+[Unit]
+Description=Validate the boot setup on the install target
+# The pre-snapshot boot audit: limine.conf, the UKI cmdline, the ESP — all
+# reads of the target's own disk state, hosted by run-phase.
+PartOf=omarchy-install.target
+# The join of the fan: the Limine branch (the UKI build) and the user
+# branch (user -> login -> ssh -> tailscale -> dns) must both have latched
+# before the boot setup can be judged.
+After=omarchy-install-dns.service omarchy-install-limine.service
+Requires=omarchy-install-dns.service omarchy-install-limine.service
+
+[Service]
+Type=oneshot
+# Latched: the dashboard reads the graph itself as install state -- active
+# means done, inactive means pending, and the timestamps survive for the
+# timing record. NotifyAccess lets any process in the phase publish
+# sd_notify STATUS= progress.
+RemainAfterExit=yes
+NotifyAccess=all
+EnvironmentFile=/usr/share/omarchy-iso/orchestrator/context.env
+EnvironmentFile=-/run/omarchy-install/context.env
+EnvironmentFile=-/run/omarchy-install/install.env
+ExecStart=/usr/share/omarchy-iso/orchestrator/run-phase validate_boot "Validating boot setup"
+# Read-only checks; five minutes is a stuck guard, not a budget.
+TimeoutStartSec=300

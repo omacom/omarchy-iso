@@ -1,0 +1,25 @@
+[Unit]
+Description=Live package staging directory on the install target
+# The target-setup chroots read /opt/packages the way the live system does
+# (local-source builds stage packages there); this shows it inside the
+# target. Started by prepare_target_setup -- systemctl start is idempotent,
+# so the many phase units that share that helper cannot stack a second bind
+# the way repeated mount --bind calls could.
+#
+# A group abort stops omarchy-install.target (the orchestrator's exit trap),
+# and PartOf= takes this mount down with it.
+# After= the disk phase, load-bearing: Requires= from a phase unit pulls
+# this mount's start job in at transaction dispatch, and unordered it binds
+# onto the live /mnt minutes before the disk phase mounts the target there
+# -- and the image phase then unmounts the whole target tree for the subvol
+# swap, taking the bind with it: the chroots see an empty
+# directory (measured: the user phase's bundled-Node lookup failed exactly
+# this way, twice). Only after the image phase is /mnt its final tree.
+After=omarchy-install-image.service
+PartOf=omarchy-install.target
+
+[Mount]
+What=/opt/packages
+Where=/mnt/opt/packages
+Type=none
+Options=bind

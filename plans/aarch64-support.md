@@ -176,3 +176,35 @@ No new files unless we go the dual-list route on archinstall.packages or efiboot
 1. **mkarchiso on aarch64 is less-trodden ground.** It accepts `arch="aarch64"`, but the upstream Arch project doesn't dogfood it. Expect to file/patch around small bugs in archiso's helper scripts. Keep the archiso submodule pin tight so a regression doesn't surprise nightly.
 2. **Limine + LUKS + Btrfs + Snapper on aarch64** — every one of these works individually on ARM, but the combination is what omarchy ships. Worth one manual end-to-end pass before declaring done.
 3. **Apple T2 / linux-t2 / `arch-mact2` repo** are silently dropped on aarch64; users mistakenly trying to install the aarch64 ISO on a T2 Mac will get an obviously-wrong result. The configurator could refuse to install when arch mismatch is detected, but that's outside this plan.
+
+---
+
+## Implementation status
+
+The `--arch aarch64` build path from this plan is implemented as far as
+omarchy-iso alone can take it; the hard prerequisites above still gate a
+bootable image. What landed, by section:
+
+| Section | State | Where |
+| --- | --- | --- |
+| 1. Build entrypoint | Done. `--arch x86_64\|aarch64` (default `x86_64`), `OMARCHY_ARCH` passed into the container, `menci/archlinuxarm:latest` with `--platform linux/arm64` for aarch64, arch-scoped offline-mirror cache directory, arch-suffixed ISO glob at rename time. | `bin/omarchy-iso-make` |
+| 2. Profile | Done, the second option: `profiledef.sh` reads `OMARCHY_ARCH`; `bootmodes=('uefi.grub')` and an xz squashfs on aarch64 (ALARM's generic kernel has no SquashFS zstd). | `configs/profiledef.sh` |
+| 3. Build script | Done. Arch selection lives in `builder/architecture.sh` + `builder/package-architecture.sh` (keyring, Node tarball, `packages.$ARCH`, build-host and live package sets, online pacman config, live kernel names); `build-iso.sh` stays one linear script reading those. The releng `packages.x86_64` → `packages.aarch64` rename-and-prune is `prepare_package_profile`. | `builder/build-iso.sh`, `builder/architecture.sh`, `builder/package-architecture.sh` |
+| 4. archinstall package list | Done, the filter-step option: `filter_target_packages` drops microcode (and `tzupdate`, unpackaged on ALARM) and maps `linux` → `linux-aarch64` for the shipped `omarchy-*.packages` copies and `archinstall.packages`. `archlinuxarm-keyring` is added to the shipped base list. | `builder/package-architecture.sh` |
+| 5. Bootloader configs | Done for GRUB: `bootmodes` drops syslinux on aarch64, and `prepare_media_profile` points `grub.cfg`/`loopback.cfg` at ALARM's `Image`/`initramfs-linux.img`; the `grub_cpu` guards already hide the memtest/shell entries. `efiboot/loader` (systemd-boot) is not in `bootmodes` and was left alone. | `builder/architecture.sh` |
+| 6. mkinitcpio preset | Done: on aarch64 both `linux.preset` and `linux-t2.preset` are replaced by a generated `linux-aarch64.preset` (pkgbase-named, archiso preset only), and the `microcode`/`memdisk` hooks are dropped from `archiso.conf`. | `builder/architecture.sh` |
+| 7. Configurator | Done: `LIMINE_EFI_BINARY` from `uname -m` (`limine_aa64.efi` on ARM), `detect_kernel` returns `linux-aarch64` there, and the `ttfx` logo animation is skipped when the binary is absent (no ALARM package). The orchestrator derives the Limine binary names per machine instead of hard-coding `limine_x64.efi`/`BOOTX64.EFI`. Keyboard layouts are validated against the target's kbd catalog rather than `localectl` (needs PID 1). | `configs/airootfs/root/configurator`, `orchestrator/phases_impl.py`, `orchestrator/context.py`, `orchestrator/keyboard.py` |
+| 8. pacman configs | Done: `configs/pacman-online-arm.conf` (ALARM core/extra/alarm/aur, no `arch-mact2`). Its `[omarchy]` section points at `pkgs.omarchy.org/stable/aarch64`, which does not exist yet — see prerequisite 2 (omacom/omarchy-pkgs#277, issue #199). | `configs/pacman-online-arm.conf` |
+| mkarchiso | archiso v87 assumes `vmlinuz-*`, an edk2-shell binary, and the full x86 GRUB module list. `builder/archiso-aarch64.patch` is applied to a copy of the submodule's `mkarchiso` for aarch64 builds only. | `builder/archiso-aarch64.patch`, `builder/architecture.sh` |
+| 9. Smoke-test scripts | `bin/omarchy-iso-test` boots aarch64 ISOs (`qemu-system-aarch64 -machine virt`, `edk2-armvirt` on Linux, HVF + Homebrew qemu on Apple Silicon macOS). `bin/omarchy-iso-boot` and `bin/omarchy-vm` are still x86_64-only. | `bin/omarchy-iso-test` |
+| 10. Release script | Not done: `bin/omarchy-iso-release` still globs `x86_64`. | — |
+| 11. CI | Not done: no aarch64 matrix leg yet. | — |
+
+Unit coverage: `test/unit/architecture-selector-test.sh` (flag → container/platform/naming),
+`test/unit/arm-profile-test.sh` (selection, profile rewrite, patch, profiledef, pacman conf,
+and that x86_64 is byte-for-byte untouched), `test/unit/test_arm_limine.py` (installer
+architecture detection), `test/unit/test_keyboard.py`.
+
+Still open before the first green aarch64 build, beyond the prerequisites: nobody has
+run `--arch aarch64` end to end against a published aarch64 `[omarchy]` tree, so the
+package closure (Hyprland and friends on ALARM's `extra`/`alarm`) is unverified.

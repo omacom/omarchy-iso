@@ -18,6 +18,8 @@ Corruption anywhere in the ISO is worth catching before the write, and corruptio
 
 Run `./bin/omarchy-iso-make`; output goes into `./release`. By default the ISO uses the Omarchy packages and tracks the `quattro` branch, from the stable mirror. Pass `--edge` to use `omarchy-dev` and `omarchy-settings-dev` from the edge mirror.
 
+The build defaults to `x86_64`. Pass `--arch aarch64` for the generic UEFI ARM64 ISO (Ampere, Graviton, Snapdragon X, dev kits — anything with vanilla UEFI + ACPI; Apple Silicon is not a target). It builds in an Arch Linux ARM container, so an arm64 host is strongly preferred; on x86_64 it runs under QEMU binfmt emulation and takes several times longer. The aarch64 ISO is named `omarchy-<date>-aarch64-<ref>.iso` and can share `release/` with the x86_64 one. See `plans/aarch64-support.md` for what is covered and what still blocks a bootable image.
+
 For local development, build the ISO from sibling checkouts:
 
 ```bash

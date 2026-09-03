@@ -24,9 +24,14 @@
 #                      and also run the CLI and shell suites there
 #   --port PORT        Host port forwarded to guest SSH (default 2222)
 #   --memory MB        VM memory (default 8192)
+#   --cpus COUNT       Virtual CPUs (default: all host CPUs)
 #   --timeout SECS     Install timeout (default 2400)
 #   --keep-running     Leave the acceptance VM running after the suite finishes
 #   --no-preview       Do not open the collected screenshots in imv
+#
+# The guest architecture follows the ISO name (omarchy-*-aarch64-*.iso boots
+# qemu-system-aarch64 with the ARM virt machine). Hosts: Linux with KVM, or
+# macOS on Apple Silicon (Homebrew qemu, HVF) for aarch64 ISOs only.
 
 set -euo pipefail
 
@@ -36,6 +41,11 @@ REPO_DIR="$(dirname "$SCRIPT_DIR")"
 ISO=""
 SSH_PORT=2222
 MEMORY=8192
+if command -v nproc >/dev/null 2>&1; then
+  CPUS=$(nproc)
+else
+  CPUS=$(sysctl -n hw.logicalcpu)
+fi
 INSTALL_TIMEOUT=2400
 BOOT_TIMEOUT=600
 ENCRYPT=false
@@ -63,6 +73,7 @@ while (($#)); do
     --sync-all) SYNC_DIR="$2"; SYNC_ALL=true; shift ;;
     --port) SSH_PORT="$2"; shift ;;
     --memory) MEMORY="$2"; shift ;;
+    --cpus) CPUS="$2"; shift ;;
     --timeout) INSTALL_TIMEOUT="$2"; shift ;;
     -*) echo "Unknown option: $1" >&2; exit 1 ;;
     *) ISO="$1" ;;
@@ -84,10 +95,56 @@ if [[ ! -f ${ISO:-} ]]; then
   exit 1
 fi
 
-omarchy-pkg-add qemu-full edk2-ovmf socat imagemagick tesseract tesseract-data-eng
+case "$CPUS" in
+  ''|*[!0-9]*) echo "CPU count must be a positive integer" >&2; exit 1 ;;
+esac
+(( CPUS > 0 )) || { echo "CPU count must be a positive integer" >&2; exit 1; }
 
-OVMF_CODE="/usr/share/edk2/x64/OVMF_CODE.4m.fd"
-OVMF_VARS_TEMPLATE="/usr/share/edk2/x64/OVMF_VARS.4m.fd"
+HOST_OS=$(uname -s)
+GUEST_ARCH=x86_64
+[[ $(basename "$ISO") == *-aarch64*.iso ]] && GUEST_ARCH=aarch64
+
+# Firmware and tooling per host. Linux gets the Arch packages; macOS relies
+# on Homebrew's qemu (which bundles edk2 for aarch64) and coreutils' gtimeout,
+# and can only run aarch64 guests natively under HVF.
+if [[ $HOST_OS == "Darwin" ]]; then
+  if [[ $GUEST_ARCH != "aarch64" || $(uname -m) != "arm64" ]]; then
+    echo "macOS acceptance currently supports native aarch64 ISOs on Apple Silicon only" >&2
+    exit 1
+  fi
+
+  export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
+  for command in qemu-system-aarch64 qemu-img socat magick tesseract ssh ssh-keygen python3; do
+    command -v "$command" >/dev/null 2>&1 || {
+      echo "Missing macOS acceptance dependency: $command" >&2
+      exit 1
+    }
+  done
+
+  QEMU_SHARE="$(brew --prefix qemu)/share/qemu"
+  OVMF_CODE="$QEMU_SHARE/edk2-aarch64-code.fd"
+  OVMF_VARS_TEMPLATE="$QEMU_SHARE/edk2-arm-vars.fd"
+  ACCEL=hvf
+  TIMEOUT_COMMAND=()
+  command -v gtimeout >/dev/null 2>&1 && TIMEOUT_COMMAND=(gtimeout 5)
+else
+  omarchy-pkg-add qemu-full edk2-ovmf socat imagemagick tesseract tesseract-data-eng
+  if [[ $GUEST_ARCH == "aarch64" ]]; then
+    omarchy-pkg-add edk2-armvirt
+    OVMF_CODE="/usr/share/edk2/aarch64/QEMU_CODE.fd"
+    OVMF_VARS_TEMPLATE="/usr/share/edk2/aarch64/QEMU_VARS.fd"
+  else
+    OVMF_CODE="/usr/share/edk2/x64/OVMF_CODE.4m.fd"
+    OVMF_VARS_TEMPLATE="/usr/share/edk2/x64/OVMF_VARS.4m.fd"
+  fi
+  ACCEL=kvm
+  TIMEOUT_COMMAND=(timeout 5)
+fi
+
+[[ -f $OVMF_CODE && -f $OVMF_VARS_TEMPLATE ]] || {
+  echo "Missing UEFI firmware for $GUEST_ARCH: $OVMF_CODE" >&2
+  exit 1
+}
 
 BASE_NAME="$(basename "$ISO" .iso)"
 $ENCRYPT && BASE_NAME+="-encrypted"
@@ -95,7 +152,7 @@ $PROVISION && BASE_NAME+="-provision"
 BASE_DIR="$REPO_DIR/test-runs/$BASE_NAME"
 RUN_DIR="$BASE_DIR/runs/$(date +%Y%m%d-%H%M%S)"
 BASE_DISK="$BASE_DIR/base.qcow2"
-BASE_OVMF="$BASE_DIR/OVMF_VARS.4m.fd"
+BASE_OVMF="$BASE_DIR/OVMF_VARS.fd"
 SSH_KEY="$BASE_DIR/id_ed25519"
 HTTP_PORT=$((SSH_PORT + 1))
 HTTP_PID=""
@@ -104,7 +161,9 @@ mkdir -p "$BASE_DIR" "$RUN_DIR"
 
 # Unix socket paths are capped at ~108 bytes, which a run directory nested in
 # test-runs/<iso-name>/runs/<timestamp> can exceed. Keep the socket in /tmp.
-QMP_SOCK=$(mktemp -u "${TMPDIR:-/tmp}/omarchy-iso-test-qmp.XXXXXX.sock")
+# macOS mktemp only substitutes a trailing run of X's, so the suffix is
+# appended after the template.
+QMP_SOCK="$(mktemp -u "${TMPDIR:-/tmp}/omarchy-iso-test-qmp.XXXXXX").sock"
 PIDFILE="$RUN_DIR/qemu.pid"
 
 log() {
@@ -119,7 +178,7 @@ vm_running() {
 
 qmp() {
   printf '{"execute":"qmp_capabilities"}\n{"execute":%s}\n' "$1" |
-    timeout 5 socat -t 2 - "UNIX-CONNECT:$QMP_SOCK" 2>/dev/null || true
+    "${TIMEOUT_COMMAND[@]}" socat -t 2 - "UNIX-CONNECT:$QMP_SOCK" 2>/dev/null || true
 }
 
 screendump() {
@@ -164,11 +223,18 @@ open_screenshots() {
   local entry
   local -a screenshots=()
 
+  # Ordered by capture time. BSD find has no -printf; stat -f gives the same
+  # "<mtime> <path>" pairs there.
   while IFS= read -r -d '' entry; do
     screenshots+=("${entry#* }")
   done < <(
-    find "$RUN_DIR" -type f \( -name "success-*.png" -o -name "failure-*.png" \) -printf '%T@ %p\0' |
-      sort -zn
+    if [[ $HOST_OS == "Darwin" ]]; then
+      find "$RUN_DIR" -type f \( -name "success-*.png" -o -name "failure-*.png" \) -exec stat -f '%m %N' {} + |
+        sort -n | tr '\n' '\0'
+    else
+      find "$RUN_DIR" -type f \( -name "success-*.png" -o -name "failure-*.png" \) -printf '%T@ %p\0' |
+        sort -zn
+    fi
   )
 
   (( ${#screenshots[@]} > 0 )) || return 0
@@ -191,7 +257,7 @@ cleanup() {
     stop_vm
   fi
 
-  rm -f "$RUN_DIR/.screen.ppm" "$RUN_DIR/.screen.png"
+  rm -f "$RUN_DIR/.screen.ppm" "$RUN_DIR/.screen.png" "$QMP_SOCK"
   open_screenshots
 
   return $status
@@ -207,18 +273,36 @@ start_vm() {
   # virtio-gpu before the system comes up.
   log "Watch (do not resize): vncviewer -RemoteResize=0 127.0.0.1:5905"
 
-  qemu-system-x86_64 \
-    -cpu host -enable-kvm -machine q35,accel=kvm \
-    -smp "$(nproc)" \
+  # The two machines differ in what they can emulate, not in how the harness
+  # drives them: the ARM virt machine has no q35 legacy USB or VGA, so it gets
+  # virtio-gpu and an xHCI controller with a USB keyboard for send-key.
+  local -a machine_args
+  if [[ $GUEST_ARCH == "aarch64" ]]; then
+    machine_args=(
+      qemu-system-aarch64
+      -cpu host -machine "virt,accel=$ACCEL"
+      -device virtio-gpu-pci
+      -device qemu-xhci,id=xhci
+      -device usb-kbd,bus=xhci.0 -device usb-tablet,bus=xhci.0
+    )
+  else
+    machine_args=(
+      qemu-system-x86_64
+      -cpu host -enable-kvm -machine "q35,accel=$ACCEL"
+      -device virtio-vga
+      -usb -device usb-tablet
+    )
+  fi
+
+  "${machine_args[@]}" \
+    -smp "$CPUS" \
     -m "$MEMORY" \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -drive if=pflash,format=raw,file="$BASE_OVMF" \
     -drive file="$disk",format=qcow2,if=none,id=drive0 \
     -device virtio-blk-pci,drive=drive0,bootindex=1 \
-    -device virtio-vga \
     -display none \
     -vnc 127.0.0.1:5 \
-    -usb -device usb-tablet \
     -netdev user,id=net0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22 \
     -device virtio-net-pci,netdev=net0 \
     -qmp "unix:$QMP_SOCK,server,nowait" \
@@ -255,7 +339,7 @@ wait_for_screen() {
     fi
 
     if ((waited >= timeout)); then
-      slug=${text,,}
+      slug=$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]') # macOS bash 3 has no ${var,,}
       slug=${slug// /-}
       slug=${slug//[^a-z0-9-]/}
       capture_console "failure-installer-waiting-for-$slug"
@@ -290,7 +374,7 @@ type_text() {
     ch=${text:i:1}
     case "$ch" in
       [a-z0-9]) press "$ch" ;;
-      [A-Z]) press "shift-${ch,,}" ;;
+      [A-Z]) press "shift-$(printf '%s' "$ch" | tr '[:upper:]' '[:lower:]')" ;;
       " ") press spc ;;
       .) press dot ;;
       ,) press comma ;;
@@ -990,9 +1074,20 @@ install_phase() {
   qemu-img create -f qcow2 "$BASE_DISK" 40G >/dev/null
   cp "$OVMF_VARS_TEMPLATE" "$BASE_OVMF"
 
-  start_vm "$BASE_DISK" "$RUN_DIR/install-serial.log" \
-    -drive "file=$ISO,media=cdrom,if=none,format=raw,id=cdrom0" \
-    -device ide-cd,drive=cdrom0,bootindex=2
+  # The ARM virt machine has no IDE; the ISO rides a virtio-scsi CD there.
+  local -a iso_boot_args=(
+    -drive "file=$ISO,media=cdrom,if=none,format=raw,id=cdrom0"
+  )
+  if [[ $GUEST_ARCH == "aarch64" ]]; then
+    iso_boot_args+=(
+      -device virtio-scsi-pci,id=scsi0
+      -device scsi-cd,drive=cdrom0,bus=scsi0.0,bootindex=2
+    )
+  else
+    iso_boot_args+=(-device ide-cd,drive=cdrom0,bootindex=2)
+  fi
+
+  start_vm "$BASE_DISK" "$RUN_DIR/install-serial.log" "${iso_boot_args[@]}"
 
   drive_configurator
   wait_for_install

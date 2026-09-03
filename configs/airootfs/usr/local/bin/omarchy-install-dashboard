@@ -515,7 +515,9 @@ render_finish() {
     blank_line
   } >"$TTY_PATH"
 
-  if [[ -f $LOGO_PATH ]]; then
+  # ttfx is not packaged for every architecture (no ALARM build); the static
+  # logo drawn above stands in for the effect there.
+  if [[ -f $LOGO_PATH ]] && command -v ttfx >/dev/null; then
     # Reuse mode restores a saved cursor before moving up over its input. Save
     # this anchor so the effect redraws the same logo rows shown above.
     printf '%s%d;1H\0337' "$CSI" "$((FINISH_TOP_ROW + LOGO_HEIGHT))" >"$TTY_PATH"

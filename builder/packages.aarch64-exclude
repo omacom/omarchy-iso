@@ -1,0 +1,50 @@
+# Packages in the shared lists that cannot be resolved for aarch64, dropped by
+# filter_target_packages (builder/package-architecture.sh) when building
+# aarch64 media. Two kinds live here; keep them apart so the second shrinks.
+#
+# x86-only hardware support. There is no ARM machine these apply to, so they
+# stay out for good.
+amd-ucode
+intel-ucode
+apple-bcm-firmware
+apple-t2-audio-config
+asdcontrol
+asusctl
+broadcom-wl
+dell-xps-touchpad-haptics
+intel-ipu7-camera
+intel-lpmd
+intel-media-driver
+lib32-nvidia-580xx-utils
+lib32-nvidia-utils
+libva-intel-driver
+linux-ptl
+linux-ptl-headers
+linux-t2
+linux-t2-headers
+macbook12-spi-driver-dkms
+nvidia-580xx-dkms
+nvidia-580xx-utils
+qemu-user-static-binfmt
+t2fanrd
+thermald
+tuxedo-drivers-nocompatcheck-dkms
+vpl-gpu-rt
+yt6801-dkms
+#
+# Not built for aarch64 yet. Omarchy's own packages here need an aarch64 build
+# in omarchy-pkgs; the rest are absent from Arch Linux ARM's repositories.
+# Remove an entry once the package resolves on aarch64.
+dotnet-runtime
+herdr
+hyprland-preview-share-picker
+mise-bin
+obsidian
+obs-studio
+omacalc
+pinta
+qmk-hid
+tensaku
+ttfx
+tzupdate
+yay-debug

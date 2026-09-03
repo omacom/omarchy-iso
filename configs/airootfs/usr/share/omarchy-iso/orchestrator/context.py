@@ -184,7 +184,8 @@ def _default_omarchy_install(user_configuration: dict) -> dict[str, Any]:
         "boot": {
             "esp_mount": "/boot",
             "esp_path": "/EFI/limine",
-            "efi_binary": "limine_x64.efi",
+            # No efi_binary: phases_impl derives the per-architecture Limine
+            # name (limine_x64.efi / limine_aa64.efi) from the running machine.
             "enable_fallback": mode == "full_disk",
         },
         "storage": {},

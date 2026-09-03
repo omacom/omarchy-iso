@@ -6,8 +6,17 @@ NO_CACHE=""
 KEEP_PKG_CACHE=""
 LOCAL_OMARCHY_PATH=""
 LOCAL_PKGS_PATH=""
+OMARCHY_ARCH="x86_64"
 while [[ $# -gt 0 ]]; do
   case $1 in
+  --arch)
+    OMARCHY_ARCH="${2:-}"
+    shift 2
+    ;;
+  --arch=*)
+    OMARCHY_ARCH="${1#*=}"
+    shift
+    ;;
   --no-cache)
     NO_CACHE=1
     shift
@@ -57,11 +66,33 @@ while [[ $# -gt 0 ]]; do
     ;;
   *)
     echo "Unknown option: $1"
-    echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
+    echo "Usage: $0 [--arch x86_64|aarch64] [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
     exit 1
     ;;
   esac
 done
+
+# The build container must match the ISO's architecture: pacman resolves
+# $arch from the running system and mkarchiso pacstraps with the host's
+# pacman, so an aarch64 ISO needs an arm64 container. On an x86_64 host that
+# means QEMU binfmt emulation (slow, 30-60 min); a native arm64 host is
+# preferred. archlinux/archlinux publishes no arm64 image, and Arch Linux ARM
+# is the aarch64 base distribution anyway, so use an ALARM image there.
+case "$OMARCHY_ARCH" in
+  x86_64)
+    BUILD_IMAGE="archlinux/archlinux:latest"
+    BUILD_PLATFORM_ARGS=()
+    ;;
+  aarch64)
+    BUILD_IMAGE="menci/archlinuxarm:latest"
+    BUILD_PLATFORM_ARGS=(--platform linux/arm64)
+    ;;
+  *)
+    echo "Unsupported architecture: $OMARCHY_ARCH" >&2
+    echo "Supported architectures: x86_64, aarch64" >&2
+    exit 1
+    ;;
+esac
 
 if [[ -n $LOCAL_OMARCHY_PATH ]]; then
   [[ -d $LOCAL_OMARCHY_PATH ]] || { echo "Error: Omarchy checkout not found at $LOCAL_OMARCHY_PATH" >&2; exit 1; }
@@ -125,6 +156,7 @@ DOCKER_ARGS=(
   --privileged
   -e "OMARCHY_ISO_REF=$OMARCHY_ISO_REF"
   -e "OMARCHY_MIRROR=$OMARCHY_MIRROR"
+  -e "OMARCHY_ARCH=$OMARCHY_ARCH"
   -e "OMARCHY_INSTALL_DEBUG=${OMARCHY_INSTALL_DEBUG:-}"
   -e "HOST_UID=$(id -u)"
   -e "HOST_GID=$(id -g)"
@@ -147,9 +179,13 @@ if [[ -d /var/cache/pacman/pkg ]]; then
 fi
 
 # Mount the build cache directory where packages are downloaded. Channels use
-# different package snapshots and must never share an offline mirror cache.
+# different package snapshots and must never share an offline mirror cache,
+# and neither can architectures: the offline repo db and every package in it
+# are per-arch. x86_64 keeps its existing directory name.
 if [[ -z "$NO_CACHE" ]]; then
-  OFFLINE_REPO_BUILD_CACHE_DIR="$HOME/.cache/omarchy/iso_${OMARCHY_MIRROR}/airootfs/var/cache/omarchy"
+  cache_scope="iso_${OMARCHY_MIRROR}"
+  [[ $OMARCHY_ARCH == "x86_64" ]] || cache_scope+="_${OMARCHY_ARCH}"
+  OFFLINE_REPO_BUILD_CACHE_DIR="$HOME/.cache/omarchy/$cache_scope/airootfs/var/cache/omarchy"
   mkdir -p "$OFFLINE_REPO_BUILD_CACHE_DIR"
   DOCKER_ARGS+=(-v "$OFFLINE_REPO_BUILD_CACHE_DIR:/var/cache/airootfs/var/cache/omarchy")
 else
@@ -166,9 +202,11 @@ if ! docker version &>/dev/null; then
   DOCKER=(sudo docker)
 fi
 
-"${DOCKER[@]}" run "${DOCKER_ARGS[@]}" archlinux/archlinux:latest /$BUILD_SCRIPT
+"${DOCKER[@]}" run "${BUILD_PLATFORM_ARGS[@]}" "${DOCKER_ARGS[@]}" "$BUILD_IMAGE" /$BUILD_SCRIPT
 
-latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*.iso | head -n1)
+# mkarchiso names the ISO after profiledef's arch, so two architectures can
+# share release/ and each build picks up only its own output.
+latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*-"$OMARCHY_ARCH".iso | head -n1)
 iso_ref="${latest_iso%.*}-$OMARCHY_ISO_REF.iso"
 mv -f "$latest_iso" "$iso_ref"
 

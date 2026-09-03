@@ -7,6 +7,14 @@ OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
 OMARCHY_RUNTIME_PACKAGE="${OMARCHY_RUNTIME_PACKAGE:-omarchy}"
 OMARCHY_SETTINGS_PACKAGE="${OMARCHY_SETTINGS_PACKAGE:-omarchy-settings}"
 
+# Limine ships one EFI binary per architecture; the archinstall JSON below
+# names the one to install on the ESP, so read the running machine's.
+case "$(uname -m)" in
+  aarch64|arm64) LIMINE_EFI_BINARY=limine_aa64.efi ;;
+  x86_64) LIMINE_EFI_BINARY=limine_x64.efi ;;
+  *) echo "ERROR: unsupported Limine EFI architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+
 LOGO_PATH="$OMARCHY_PATH/logo.txt"
 
 # The setup form — keyboard, account, hostname, and timezone questions, plus the
@@ -149,24 +157,32 @@ greeter() {
   # Two columns narrower than the console: ttfx centers its text two columns
   # right of plain centering, so a full-width canvas would sit the animated
   # logo a column off the gum-drawn one underneath it.
-  ttfx -i "$LOGO_PATH" \
-    --canvas-width "$((cols > 2 ? cols - 2 : cols))" \
-    --anchor-text c \
-    --frame-rate 60 \
-    --reuse-canvas \
-    --xterm-colors \
-    colorshift \
-    --gradient-stops 2 10 6 10 \
-    --gradient-frames 3 \
-    --cycles 1000 \
-    --final-gradient-stops 2 \
-    </dev/null >/dev/tty 2>/dev/null &
-  anim=$!
+  #
+  # ttfx is not packaged for every architecture the ISO builds for (no ALARM
+  # build), so without it the static logo above simply stays put.
+  anim=""
+  if command -v ttfx >/dev/null; then
+    ttfx -i "$LOGO_PATH" \
+      --canvas-width "$((cols > 2 ? cols - 2 : cols))" \
+      --anchor-text c \
+      --frame-rate 60 \
+      --reuse-canvas \
+      --xterm-colors \
+      colorshift \
+      --gradient-stops 2 10 6 10 \
+      --gradient-frames 3 \
+      --cycles 1000 \
+      --final-gradient-stops 2 \
+      </dev/null >/dev/tty 2>/dev/null &
+    anim=$!
+  fi
 
   IFS= read -r _ </dev/tty || true
   # Tolerate ttfx's kill signal in `wait` so a future `set -e` here can't abort.
-  kill "$anim" 2>/dev/null
-  wait "$anim" 2>/dev/null || true
+  if [[ -n $anim ]]; then
+    kill "$anim" 2>/dev/null
+    wait "$anim" 2>/dev/null || true
+  fi
   # ttfx leaves the tty in raw/no-echo mode when killed; restore it or the gum
   # prompts in the keyboard step that follows silently die.
   stty sane </dev/tty 2>/dev/null || true
@@ -412,7 +428,10 @@ to_gb() {
 
 # T2 Macs need their own kernel for keyboard/wifi drivers.
 detect_kernel() {
-  if lspci -nn 2>/dev/null | grep -q "106b:180[12]"; then
+  # ALARM's generic kernel package is linux-aarch64; there is no plain linux.
+  if [[ $(uname -m) == "aarch64" ]]; then
+    echo "linux-aarch64"
+  elif lspci -nn 2>/dev/null | grep -q "106b:180[12]"; then
     echo "linux-t2"
   else
     echo "linux"
@@ -805,7 +824,7 @@ run_partition_execute() {
         "boot": {
             "esp_mount": "$esp_mount_in_target",
             "esp_path": "/EFI/limine",
-            "efi_binary": "limine_x64.efi",
+            "efi_binary": "$LIMINE_EFI_BINARY",
             "enable_fallback": false
         },
         "storage": {
@@ -1144,7 +1163,7 @@ cat <<-_EOF_ >user_configuration.json
         "boot": {
             "esp_mount": "/boot",
             "esp_path": "/EFI/limine",
-            "efi_binary": "limine_x64.efi",
+            "efi_binary": "$LIMINE_EFI_BINARY",
             "enable_fallback": true
         },
         "storage": {

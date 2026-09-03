@@ -1,0 +1,56 @@
+--- mkarchiso.orig
++++ mkarchiso
+@@ -430,10 +430,16 @@
+ # Copy kernel and initramfs to ISO 9660
+ _make_boot_on_iso9660() {
+     local ucode_image
++    local -a kernel_images
+     _msg_info "Preparing kernel and initramfs for the ISO 9660 file system..."
+     install -d -m 0755 -- "${isofs_dir}/${install_dir}/boot/${arch}"
+     install -m 0644 -- "${pacstrap_dir}/boot/initramfs-"*".img" "${isofs_dir}/${install_dir}/boot/${arch}/"
+-    install -m 0644 -- "${pacstrap_dir}/boot/vmlinuz-"* "${isofs_dir}/${install_dir}/boot/${arch}/"
++    if [[ "$arch" == 'aarch64' && -e "${pacstrap_dir}/boot/Image" ]]; then
++        kernel_images=("${pacstrap_dir}/boot/Image")
++    else
++        kernel_images=("${pacstrap_dir}"/boot/vmlinuz-*)
++    fi
++    install -m 0644 -- "${kernel_images[@]}" "${isofs_dir}/${install_dir}/boot/${arch}/"
+ 
+     if (( need_external_ucodes )); then
+         for ucode_image in "${ucodes[@]}"; do
+@@ -692,6 +698,22 @@
+                  minicmd normal ntfs ntfscomp part_apple part_gpt part_msdos png read reboot regexp search \
+                  search_fs_file search_fs_uuid search_label serial sleep tpm udf usb usbserial_common usbserial_ftdi \
+                  usbserial_pl2303 usbserial_usbdebug video xfs zstd)
++    if [[ "$arch" == 'aarch64' ]]; then
++        local module
++        local -a available_grubmodules=()
++        local -a required_grubmodules=(configfile iso9660 linux normal search search_fs_uuid)
++        for module in "${required_grubmodules[@]}"; do
++            if [[ ! -e "/usr/lib/grub/${grub_target}/${module}.mod" ]]; then
++                _msg_error "Required ${grub_target} GRUB module is missing: ${module}" 1
++            fi
++        done
++        for module in "${grubmodules[@]}"; do
++            if [[ -e "/usr/lib/grub/${grub_target}/${module}.mod" ]]; then
++                available_grubmodules+=("${module}")
++            fi
++        done
++        grubmodules=("${available_grubmodules[@]}")
++    fi
+     grub-mkstandalone -O "$grub_target" \
+         --modules="${grubmodules[*]}" \
+         --locales="en@quot" \
+@@ -699,8 +721,10 @@
+         --disable-shim-lock \
+         -o "${work_dir}/BOOT${uefi_arch[$arch]}.EFI" "boot/grub/grub.cfg=${work_dir}/grub-embed.cfg"
+     # Add GRUB to the list of files used to calculate the required FAT image size.
+-    efiboot_files+=("${work_dir}/BOOT${uefi_arch[$arch]}.EFI"
+-                    "${pacstrap_dir}/usr/share/edk2-shell/${uefi_arch[$arch],,}/Shell_Full.efi")
++    efiboot_files+=("${work_dir}/BOOT${uefi_arch[$arch]}.EFI")
++    if [[ -e "${pacstrap_dir}/usr/share/edk2-shell/${uefi_arch[$arch],,}/Shell_Full.efi" ]]; then
++        efiboot_files+=("${pacstrap_dir}/usr/share/edk2-shell/${uefi_arch[$arch],,}/Shell_Full.efi")
++    fi
+ 
+     # Create IA32 EFI binary for mixed-mode booting on x86_64 systems with IA32 UEFI
+     if [[ "$arch" == 'x86_64' ]]; then

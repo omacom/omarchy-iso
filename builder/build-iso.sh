@@ -23,14 +23,37 @@ esac
 : "${OMARCHY_NVIM_PACKAGE:=omarchy-nvim}"
 export OMARCHY_RUNTIME_PACKAGE OMARCHY_SETTINGS_PACKAGE OMARCHY_NVIM_PACKAGE
 
+# Everything that differs between x86_64 and aarch64 (keyring, package lists,
+# online pacman config, live kernel, mkarchiso) is selected there; this script
+# stays one linear x86_64 build with the arch read from those variables.
+OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
+source /builder/architecture.sh
+
+# pacman 7 runs its downloads behind a Landlock sandbox and refuses to sync
+# at all when the kernel has no Landlock. Docker Desktop's kernel is one such
+# kernel, so a build on a macOS host died at the first -Sy. Detect it once and
+# disable the sandbox for this build container only: the online config is
+# copied with the option added, and the offline config gets it only after the
+# ISO's own copy has been taken, so nothing shipped on the media changes.
+PACMAN_SANDBOX_DISABLED=""
+if ! grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then
+  echo "Kernel has no Landlock; disabling pacman's download sandbox for the build container" >&2
+  PACMAN_SANDBOX_DISABLED=1
+  sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
+  sandboxless_online_config="/tmp/$(basename "$PACMAN_ONLINE_CONFIG")"
+  sed '/^\[options\]/a DisableSandbox' "$PACMAN_ONLINE_CONFIG" >"$sandboxless_online_config"
+  PACMAN_ONLINE_CONFIG="$sandboxless_online_config"
+fi
+
 # Packages installed into the Arch container used to build the ISO.
 pacman-key --init
-pacman --noconfirm -Sy archlinux-keyring
+pacman --noconfirm -Sy "$DISTRO_KEYRING_PACKAGE"
+pacman-key --populate "$DISTRO_KEYRING_NAME"
 # Full upgrade, not just -Sy: docker never re-pulls :latest once it's cached,
 # so this container can be months behind the mirror it installs from. A plain
 # -Sy install is then a partial upgrade — new packages linked against a glibc
 # the container doesn't have yet.
-pacman --noconfirm -Syu archiso git sudo base-devel jq grub imagemagick neovim nodejs npm tree-sitter-cli
+pacman --noconfirm -Syu "${BUILD_HOST_PACKAGES[@]}"
 
 # Pre-import the omarchy signing key (so pacman trusts our [omarchy] repo
 # during the build without keyserver lookups).
@@ -38,20 +61,24 @@ pacman-key --add /builder/omarchy.gpg
 pacman-key --lsign-key 40DFB630FF42BCFFB047046CF0134EE680CAC571
 
 # omarchy-keyring is needed inside the offline mirror too.
-pacman --config /configs/pacman-online-${OMARCHY_MIRROR}.conf --noconfirm -Sy omarchy-keyring
+pacman --config "$PACMAN_ONLINE_CONFIG" --noconfirm -Sy omarchy-keyring
 pacman-key --populate omarchy
 
 # Append the [omarchy] repo to the container's /etc/pacman.conf so subsequent
 # tools (notably makepkg in build-omarchy-packages.sh) can resolve omarchy-
 # only build deps like limine-snapper-sync and limine-mkinitcpio-hook.
 if ! grep -q '^\[omarchy\]' /etc/pacman.conf; then
-  awk '/^\[omarchy\]/,/^$/' /configs/pacman-online-${OMARCHY_MIRROR}.conf >> /etc/pacman.conf
+  awk '/^\[omarchy\]/,/^$/' "$PACMAN_ONLINE_CONFIG" >> /etc/pacman.conf
 fi
 
 # Build locations
 build_cache_dir=/var/cache
 offline_mirror_dir="$build_cache_dir/airootfs/var/cache/omarchy/mirror/offline"
 mkdir -p "$build_cache_dir" "$offline_mirror_dir"
+
+# aarch64 runs the submodule's mkarchiso with builder/archiso-aarch64.patch
+# applied; x86_64 keeps the packaged one. No-op on x86_64.
+prepare_mkarchiso
 
 # Seed from the official Arch releng profile.
 cp -r /archiso/configs/releng/* "$build_cache_dir/"
@@ -64,6 +91,17 @@ rm -rf "$build_cache_dir/airootfs/etc/xdg/reflector"
 
 # Bring in our archiso profile additions.
 cp -r /configs/* "$build_cache_dir/"
+# The profile copy of the offline config is what this build resolves and
+# pacstraps with; see the Landlock note above. The ISO's own copy is taken
+# from it below with the option stripped again.
+if [[ -n $PACMAN_SANDBOX_DISABLED ]]; then
+  sed -i '/^\[options\]/a DisableSandbox' "$build_cache_dir/pacman-offline.conf"
+fi
+
+# releng and configs/ are written for x86_64; on aarch64 rename the package
+# list, swap the live kernel preset, and point GRUB at ALARM's kernel names.
+# No-op on x86_64.
+prepare_media_profile "$build_cache_dir"
 mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
 echo "$OMARCHY_MIRROR" > "$build_cache_dir/airootfs/root/omarchy_mirror"
 echo "$OMARCHY_ISO_REF" > "$build_cache_dir/airootfs/root/omarchy_iso_ref"
@@ -80,6 +118,8 @@ if [[ ${OMARCHY_INSTALL_DEBUG:-} == "1" ]]; then
     echo "built_at=$(date -Is)"
     echo "ref=$OMARCHY_ISO_REF"
     echo "mirror=$OMARCHY_MIRROR"
+    echo "arch=$OMARCHY_ARCH"
+    echo "media_target=$OMARCHY_MEDIA_TARGET"
     echo "runtime_package=$OMARCHY_RUNTIME_PACKAGE"
     echo "settings_package=$OMARCHY_SETTINGS_PACKAGE"
     echo "nvim_package=$OMARCHY_NVIM_PACKAGE"
@@ -107,21 +147,20 @@ fi
 # Node.js binary for offline mise install.
 NODE_DIST_URL="https://nodejs.org/dist/latest"
 NODE_SHASUMS=$(curl -fsSL "$NODE_DIST_URL/SHASUMS256.txt")
-NODE_FILENAME=$(echo "$NODE_SHASUMS" | grep "linux-x64.tar.gz" | awk '{print $2}')
-NODE_SHA=$(echo "$NODE_SHASUMS" | grep "linux-x64.tar.gz" | awk '{print $1}')
+NODE_FILENAME=$(echo "$NODE_SHASUMS" | grep "linux-$NODE_DIST_ARCH.tar.gz" | awk '{print $2}')
+NODE_SHA=$(echo "$NODE_SHASUMS" | grep "linux-$NODE_DIST_ARCH.tar.gz" | awk '{print $1}')
 curl -fsSL "$NODE_DIST_URL/$NODE_FILENAME" -o "/tmp/$NODE_FILENAME"
 echo "$NODE_SHA /tmp/$NODE_FILENAME" | sha256sum -c -
 mkdir -p "$build_cache_dir/airootfs/opt/packages/"
 cp "/tmp/$NODE_FILENAME" "$build_cache_dir/airootfs/opt/packages/"
 
 # Packages installed into the live ISO environment itself (NOT the target system).
-# The selected omarchy-settings package is needed here so its post_install hook
-# drops Omarchy's plymouthd.conf into /etc/plymouth before mkarchiso builds the
-# live initramfs.
-arch_packages=(linux-t2 git gum jq openssl plymouth ttfx tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
-printf '%s\n' "${arch_packages[@]}" >> "$build_cache_dir/packages.x86_64"
+# LIVE_PACKAGES is per-arch (builder/package-architecture.sh); the selected
+# omarchy-settings package is in it so its post_install hook drops Omarchy's
+# plymouthd.conf into /etc/plymouth before mkarchiso builds the live initramfs.
+printf '%s\n' "${LIVE_PACKAGES[@]}" >> "$build_cache_dir/$PROFILE_PACKAGES"
 
-# The live ISO boots linux-t2 (see airootfs/etc/mkinitcpio.d/linux-t2.preset), so
+# The x86_64 live ISO boots linux-t2 (see airootfs/etc/mkinitcpio.d/linux-t2.preset), so
 # stock linux is a second kernel nobody boots: ~147MB of ISO, plus its own archiso
 # initramfs, copied into both the ISO tree and the size-constrained FAT EFI image.
 #
@@ -131,8 +170,11 @@ printf '%s\n' "${arch_packages[@]}" >> "$build_cache_dir/packages.x86_64"
 # kernel we boot, so it has done nothing since we started booting T2 anyway. The
 # install is entirely offline and the live environment needs no Wi-Fi driver.
 #
-# Anchored so linux-t2 and linux-firmware are untouched.
-sed -i -E '/^(linux|broadcom-wl)$/d' "$build_cache_dir/packages.x86_64"
+# Anchored so linux-t2 and linux-firmware are untouched. On aarch64 both
+# entries were already pruned with the rest of releng's x86-only list.
+if [[ $OMARCHY_ARCH == x86_64 ]]; then
+  sed -i -E '/^(linux|broadcom-wl)$/d' "$build_cache_dir/packages.x86_64"
+fi
 
 # Build the offline mirror: everything pacstrap might want during the target
 # install. With --local-source, the omarchy* packages we just built are
@@ -147,7 +189,7 @@ else
   bootstrap_cache_dir=/tmp/omarchy-pkg-bootstrap
   rm -rf "$bootstrap_cache_dir" /tmp/offlinedb-bootstrap /tmp/omarchy-pkglists
   mkdir -p "$bootstrap_cache_dir" /tmp/offlinedb-bootstrap
-  pacman --config /configs/pacman-online-${OMARCHY_MIRROR}.conf --noconfirm -Syw "$OMARCHY_RUNTIME_PACKAGE" --cachedir "$bootstrap_cache_dir" --dbpath /tmp/offlinedb-bootstrap >/dev/null
+  pacman --config "$PACMAN_ONLINE_CONFIG" --noconfirm -Syw "$OMARCHY_RUNTIME_PACKAGE" --cachedir "$bootstrap_cache_dir" --dbpath /tmp/offlinedb-bootstrap >/dev/null
   omarchy_pkg=$(find "$bootstrap_cache_dir" -maxdepth 1 -type f -name "$OMARCHY_RUNTIME_PACKAGE-*.pkg.tar.zst" | sort | head -1)
   if [[ -z $omarchy_pkg ]]; then
     echo "ERROR: downloaded package for $OMARCHY_RUNTIME_PACKAGE not found in $bootstrap_cache_dir" >&2
@@ -164,9 +206,29 @@ else
   setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
 fi
 
+# The shipped copies are what the installer reads at install time. They are
+# filtered for the architecture (identity on x86_64; on aarch64 no microcode,
+# linux -> linux-aarch64), and from here on they are also the lists this
+# build resolves against, so the mirror and the installer cannot disagree.
 mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
-cp "${base_pkg_lists[0]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
-cp "${base_pkg_lists[1]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-other.packages"
+shipped_base_packages="$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
+shipped_other_packages="$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-other.packages"
+filter_target_packages <"${base_pkg_lists[0]}" >"$shipped_base_packages"
+filter_target_packages <"${base_pkg_lists[1]}" >"$shipped_other_packages"
+# The installed system needs ALARM's keyring to keep trusting its mirrors,
+# the same way archlinux-keyring rides along in the x86_64 base list.
+if [[ $OMARCHY_ARCH == aarch64 ]] && ! grep -Fxq archlinuxarm-keyring "$shipped_base_packages"; then
+  printf '%s\n' archlinuxarm-keyring >>"$shipped_base_packages"
+fi
+base_pkg_lists=("$shipped_base_packages" "$shipped_other_packages")
+
+# archinstall.packages lists both microcode packages so the mirror carries
+# either; neither exists for ARM, and the kernel name differs there.
+archinstall_package_list=/builder/archinstall.packages
+if [[ $OMARCHY_ARCH == aarch64 ]]; then
+  archinstall_package_list=/tmp/archinstall.packages.aarch64
+  filter_target_packages </builder/archinstall.packages >"$archinstall_package_list"
+fi
 
 # The configurator's setup form comes from the runtime this ISO bundles, so the
 # installer and the first-boot setup that finishes a deferred install can never
@@ -191,9 +253,9 @@ cp "$setup_form" "$build_cache_dir/airootfs/usr/share/omarchy-iso/setup-form.sh"
 declare -a all_packages
 mapfile -t all_packages < <(
   {
-    cat "$build_cache_dir/packages.x86_64"
+    cat "$build_cache_dir/$PROFILE_PACKAGES"
     grep -hv '^#\|^$' "${base_pkg_lists[@]}"
-    grep -hv '^#\|^$' /builder/archinstall.packages
+    grep -hv '^#\|^$' "$archinstall_package_list"
     # Always include the selected Omarchy packages so the target install can
     # find the runtime and companion packages in the offline mirror.
     printf '%s\n' "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"
@@ -215,7 +277,7 @@ fi
 
 mkdir -p /tmp/offlinedb
 download_offline_packages() {
-  pacman --config /configs/pacman-online-${OMARCHY_MIRROR}.conf --noconfirm -Syw \
+  pacman --config "$PACMAN_ONLINE_CONFIG" --noconfirm -Syw \
     "${all_packages[@]}" --cachedir "$offline_mirror_dir/" --dbpath /tmp/offlinedb --needed
 }
 
@@ -233,7 +295,7 @@ fi
 # newest version of every cached package name) removes packages that have left
 # the lists or dependency closure, such as an old Electron major version.
 if ! resolved_package_files="$(
-  pacman --config "/configs/pacman-online-${OMARCHY_MIRROR}.conf" --noconfirm \
+  pacman --config "$PACMAN_ONLINE_CONFIG" --noconfirm \
     --dbpath /tmp/offlinedb -S --print --print-format '%f' "${all_packages[@]}"
 )"; then
   echo "ERROR: could not resolve the package files required by the offline mirror" >&2
@@ -272,7 +334,12 @@ printf '%s\n' "${required_package_files[@]}" |
 # Rebuild the offline repo db from scratch so size/checksum/depends entries
 # always reflect only the package files selected for this build.
 rm -f "$offline_mirror_dir"/offline.db* "$offline_mirror_dir"/offline.files*
-repo-add "$offline_mirror_dir/offline.db.tar.gz" "$offline_mirror_dir/"*.pkg.tar.zst
+# Arch packages are .pkg.tar.zst, Arch Linux ARM's are .pkg.tar.xz; match on
+# the archive, not the compressor, and keep detached signatures out.
+mapfile -t offline_package_files < <(
+  find "$offline_mirror_dir" -maxdepth 1 -type f -name '*.pkg.tar.*' ! -name '*.sig' | sort
+)
+repo-add "$offline_mirror_dir/offline.db.tar.gz" "${offline_package_files[@]}"
 
 # mkarchiso expects the mirror at /var/cache/omarchy/mirror/offline inside the
 # container (the airootfs path); symlink rather than duplicate.
@@ -299,7 +366,7 @@ resolve_expected_packages() {
 
   mapfile -t targets < <(
     {
-      grep -hv '^#\|^$' /builder/archinstall.packages
+      grep -hv '^#\|^$' "$archinstall_package_list"
       # Read the shipped copy, which is what _runtime_package_list reads at
       # install time, not the build-time source it came from.
       grep -hv '^#\|^$' \
@@ -344,10 +411,11 @@ else
 fi
 
 # Live ISO uses the same offline pacman.conf.
-cp "$build_cache_dir/pacman-offline.conf" "$build_cache_dir/airootfs/etc/pacman.conf"
+# Minus the build-only sandbox opt-out (Landlock note above).
+sed '/^DisableSandbox$/d' "$build_cache_dir/pacman-offline.conf" >"$build_cache_dir/airootfs/etc/pacman.conf"
 
 # Build the ISO.
-mkarchiso -v -w "$build_cache_dir/work/" -o /out/ "$build_cache_dir/"
+"${MKARCHISO[@]}" -v -w "$build_cache_dir/work/" -o /out/ "$build_cache_dir/"
 
 # Match host UID/GID on output.
 if [[ -n $HOST_UID && -n $HOST_GID ]]; then

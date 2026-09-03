@@ -10,8 +10,13 @@
 #   scenario       Basename of a test/integration.d/<scenario>-test.sh file;
 #                  all scenarios run when none are named
 #   --reuse-base   Skip the install if a saved base image exists
+#   --install-only Stop after producing and validating a fresh installed base
+#   --bios         Boot the VMs on legacy BIOS (SeaBIOS) instead of UEFI; the
+#                  install then exercises the Limine MBR path. Base images are
+#                  cached separately per firmware.
 #   --port PORT    Host port forwarded to guest SSH (default 2322)
 #   --memory MB    VM memory (default 8192)
+#   --disk-format  Fresh target image format: qcow2 or raw (default qcow2)
 #   --timeout SECS Install timeout (default 2400)
 #   --no-preview   Do not open the collected screenshots in imv
 
@@ -21,19 +26,26 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 
 ISO=""
 REUSE_BASE=false
+INSTALL_ONLY=false
 SCENARIOS=()
 
 export OMARCHY_INTEGRATION_SSH_PORT=2322
 export OMARCHY_INTEGRATION_MEMORY=8192
+export OMARCHY_INTEGRATION_DISK_FORMAT=qcow2
 export OMARCHY_INTEGRATION_INSTALL_TIMEOUT=2400
 export OMARCHY_INTEGRATION_NO_PREVIEW=false
+export OMARCHY_INTEGRATION_FIRMWARE="${OMARCHY_INTEGRATION_FIRMWARE:-uefi}"
 
 while (($#)); do
   case "$1" in
     --reuse-base) REUSE_BASE=true ;;
+    --install-only) INSTALL_ONLY=true ;;
+    --bios) OMARCHY_INTEGRATION_FIRMWARE=bios ;;
+    --uefi) OMARCHY_INTEGRATION_FIRMWARE=uefi ;;
     --no-preview) OMARCHY_INTEGRATION_NO_PREVIEW=true ;;
     --port) OMARCHY_INTEGRATION_SSH_PORT="$2"; shift ;;
     --memory) OMARCHY_INTEGRATION_MEMORY="$2"; shift ;;
+    --disk-format) OMARCHY_INTEGRATION_DISK_FORMAT="$2"; shift ;;
     --timeout) OMARCHY_INTEGRATION_INSTALL_TIMEOUT="$2"; shift ;;
     -*) echo "Unknown option: $1" >&2; exit 1 ;;
     *)
@@ -46,6 +58,11 @@ while (($#)); do
   esac
   shift
 done
+
+case "$OMARCHY_INTEGRATION_DISK_FORMAT" in
+  qcow2|raw) ;;
+  *) echo "Unsupported disk format: $OMARCHY_INTEGRATION_DISK_FORMAT" >&2; exit 1 ;;
+esac
 
 if [[ -z $ISO && -t 0 ]]; then
   ISO=$(ls -t "$ROOT"/release/*.iso 2>/dev/null | gum choose --header "Select ISO to test")
@@ -67,7 +84,7 @@ else
   done
 fi
 
-omarchy-pkg-add qemu-full edk2-ovmf socat imagemagick tesseract tesseract-data-eng mtools
+omarchy-pkg-add qemu-full edk2-ovmf socat imagemagick tesseract tesseract-data-eng mtools libisoburn
 
 export OMARCHY_INTEGRATION_ISO
 OMARCHY_INTEGRATION_ISO=$(realpath "$ISO")
@@ -82,6 +99,8 @@ if $REUSE_BASE && base_image_ready; then
 else
   install_phase
 fi
+
+$INSTALL_ONLY && exit 0
 
 status=0
 for scenario in "${SCENARIOS[@]}"; do

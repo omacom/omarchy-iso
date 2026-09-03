@@ -13,6 +13,7 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 ISO="$OMARCHY_INTEGRATION_ISO"
 SSH_PORT="${OMARCHY_INTEGRATION_SSH_PORT:-2322}"
 MEMORY="${OMARCHY_INTEGRATION_MEMORY:-8192}"
+DISK_FORMAT="${OMARCHY_INTEGRATION_DISK_FORMAT:-qcow2}"
 INSTALL_TIMEOUT="${OMARCHY_INTEGRATION_INSTALL_TIMEOUT:-2400}"
 NO_PREVIEW="${OMARCHY_INTEGRATION_NO_PREVIEW:-false}"
 BOOT_TIMEOUT=600
@@ -23,18 +24,32 @@ GUEST_HOSTNAME="omarchy-test"
 
 SCENARIO="${SCENARIO:-$(basename "${0%-test.sh}")}"
 
+# Firmware the VMs boot: uefi (OVMF, the default) or bios (SeaBIOS, legacy).
+# BIOS exercises the Limine MBR boot path that only real hardware covered; set
+# it with OMARCHY_INTEGRATION_FIRMWARE=bios or the runner's --bios flag. The
+# base image and its caches are kept per-firmware so the two never collide.
+FIRMWARE="${OMARCHY_INTEGRATION_FIRMWARE:-uefi}"
 OVMF_CODE="/usr/share/edk2/x64/OVMF_CODE.4m.fd"
 OVMF_VARS_TEMPLATE="/usr/share/edk2/x64/OVMF_VARS.4m.fd"
 
 BASE_DIR="$ROOT/test-runs/$(basename "$ISO" .iso)-integration"
+if [[ $FIRMWARE == bios ]]; then
+  BASE_DIR+="-bios"
+fi
 RUN_DIR="$BASE_DIR/runs/$(date +%Y%m%d-%H%M%S)-$SCENARIO"
-BASE_DISK="$BASE_DIR/base.qcow2"
+BASE_DISK="$BASE_DIR/base.$DISK_FORMAT"
 BASE_OVMF="$BASE_DIR/OVMF_VARS.4m.fd"
 ACTIVE_OVMF="$BASE_OVMF"
 SSH_KEY="$BASE_DIR/id_ed25519"
 CIDATA_IMG="$BASE_DIR/cidata.img"
 HTTP_PORT=$((SSH_PORT + 1))
 HTTP_PID=""
+
+# Scenario extensions to the network stack, appended verbatim (leading comma
+# included) to the user netdev and the NIC device: the PXE scenario adds the
+# built-in TFTP server to the former and a boot order to the latter.
+NETDEV_EXTRA=""
+NIC_EXTRA=""
 
 mkdir -p "$BASE_DIR" "$RUN_DIR"
 
@@ -69,7 +84,9 @@ finish() {
 }
 
 base_image_ready() {
-  [[ -f $BASE_DISK && -f $BASE_OVMF && -f $SSH_KEY ]]
+  [[ -f $BASE_DISK && -f $SSH_KEY ]] || return 1
+  # UEFI keeps its NVRAM vars alongside the disk; BIOS has none.
+  [[ $FIRMWARE != uefi || -f $BASE_OVMF ]]
 }
 
 # ---------------------------------------------------------------- vm control
@@ -158,21 +175,31 @@ trap cleanup EXIT
 
 start_vm() {
   local disk="$1" serial="$2"
+  local disk_format="${OMARCHY_ACTIVE_DISK_FORMAT:-$DISK_FORMAT}"
   shift 2
+
+  # UEFI needs the OVMF firmware pair; BIOS boots QEMU's built-in SeaBIOS with
+  # no pflash at all.
+  local firmware_args=()
+  if [[ $FIRMWARE == uefi ]]; then
+    firmware_args=(
+      -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE"
+      -drive if=pflash,format=raw,file="$ACTIVE_OVMF"
+    )
+  fi
 
   qemu-system-x86_64 \
     -cpu host -enable-kvm -machine q35,accel=kvm \
     -smp "$(nproc)" \
     -m "$MEMORY" \
-    -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
-    -drive if=pflash,format=raw,file="$ACTIVE_OVMF" \
-    -drive file="$disk",format=qcow2,if=none,id=drive0 \
+    "${firmware_args[@]}" \
+    -drive file="$disk",format="$disk_format",cache=none,if=none,id=drive0 \
     -device virtio-blk-pci,drive=drive0,bootindex=1 \
     -device virtio-vga \
     -display none \
     -usb -device usb-tablet \
-    -netdev user,id=net0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22 \
-    -device virtio-net-pci,netdev=net0 \
+    -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22$NETDEV_EXTRA" \
+    -device "virtio-net-pci,netdev=net0$NIC_EXTRA" \
     -qmp "unix:$QMP_SOCK,server,nowait" \
     -serial "file:$serial" \
     -pidfile "$PIDFILE" \
@@ -180,14 +207,31 @@ start_vm() {
     "$@"
 }
 
+# Model a physical target on Btrfs hosts. A sparse raw file with normal COW
+# can stall on host block-group allocation after several rapid full-disk test
+# rewrites, even though the guest I/O is identical. NOCOW removes that
+# host-only variance without adding a cache or changing the disk contents.
+set_raw_disk_physical_semantics() {
+  local disk="$1"
+  [[ $(stat -f -c %T -- "$disk") == btrfs ]] || return 0
+  chattr +C -- "$disk"
+  lsattr -d -- "$disk" | awk '{print $1}' | grep -q C || {
+    echo "Could not give raw Btrfs fixture NOCOW semantics: $disk" >&2
+    return 1
+  }
+}
+
 # Boot a throwaway overlay of the installed base. The disk gets a per-run
 # overlay; the firmware vars need the same isolation or NVRAM state would
 # leak between runs.
 start_vm_from_base() {
-  qemu-img create -f qcow2 -b "$BASE_DISK" -F qcow2 "$RUN_DIR/run.qcow2" >/dev/null
-  cp "$BASE_OVMF" "$RUN_DIR/OVMF_VARS.4m.fd"
-  ACTIVE_OVMF="$RUN_DIR/OVMF_VARS.4m.fd"
-  start_vm "$RUN_DIR/run.qcow2" "$RUN_DIR/serial.log"
+  qemu-img create -f qcow2 -b "$BASE_DISK" -F "$DISK_FORMAT" "$RUN_DIR/run.qcow2" >/dev/null
+  if [[ $FIRMWARE == uefi ]]; then
+    cp "$BASE_OVMF" "$RUN_DIR/OVMF_VARS.4m.fd"
+    ACTIVE_OVMF="$RUN_DIR/OVMF_VARS.4m.fd"
+  fi
+  OMARCHY_ACTIVE_DISK_FORMAT=qcow2 \
+    start_vm "$RUN_DIR/run.qcow2" "$RUN_DIR/serial.log"
 }
 
 # ------------------------------------------------------------ console driver
@@ -268,7 +312,7 @@ type_text() {
 # --------------------------------------------------------------------- guest
 
 ssh_guest() {
-  ssh -i "$SSH_KEY" -p "$SSH_PORT" \
+  ssh -n -i "$SSH_KEY" -p "$SSH_PORT" \
     -o BatchMode=yes \
     -o IdentitiesOnly=yes \
     -o StrictHostKeyChecking=no \
@@ -347,6 +391,89 @@ EOF
 
   wait_for_ssh 360 "failure-bootstrap-ssh-timeout"
   capture_console "success-bootstrap-ssh"
+
+  kill "$HTTP_PID" 2>/dev/null || true
+  HTTP_PID=""
+  press ctrl-alt-f1
+}
+
+# Root SSH into the live ISO itself (not the installed system). The live root
+# runs sshd and autologs in on tty1 with an empty password, but sshd refuses
+# empty passwords, so authorize our key the same console-login way as above,
+# on tty3 (tty1 is the installer's).
+ssh_live_root() {
+  ssh -i "$SSH_KEY" -p "$SSH_PORT" \
+    -o BatchMode=yes \
+    -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=5 \
+    -o LogLevel=ERROR \
+    "root@127.0.0.1" "$@"
+}
+
+bootstrap_live_root_ssh() {
+  log "Authorizing root SSH on the live ISO via console login"
+
+  mkdir -p "$BASE_DIR/www"
+  cat >"$BASE_DIR/www/bootstrap-live" <<EOF
+mkdir -p /root/.ssh && chmod 700 /root/.ssh
+echo "$(cat "$SSH_KEY.pub")" >>/root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+EOF
+
+  (cd "$BASE_DIR/www" && exec python3 -m http.server "$HTTP_PORT" --bind 127.0.0.1 >/dev/null 2>&1) &
+  HTTP_PID=$!
+
+  if [[ $FIRMWARE == bios ]]; then
+    # ISOLINUX cancels its auto-boot countdown on any keystroke, so the
+    # ctrl-alt-f3 below would strand the VM at the boot menu. Commit the
+    # highlighted default (the install medium) with Enter first; a few presses
+    # catch the menu whenever it renders, and once booted they are harmless
+    # newlines (still well before the installer dashboard comes up).
+    local i
+    for i in 1 2 3; do press ret; sleep 2; done
+  fi
+
+  local waited=0
+  while true; do
+    press ctrl-alt-f3
+    sleep 4
+    ocr_screen | grep -qi "login:" && break
+    ((waited += 8))
+
+    if ((waited >= 300)); then
+      capture_console "failure-live-console-timeout"
+      echo "Timed out waiting for a live console login prompt" >&2
+      return 1
+    fi
+    sleep 4
+  done
+
+  type_text root
+  press ret
+  sleep 2
+  # The password is empty; login still prompts for it.
+  ocr_screen | grep -qi "password" && { press ret; sleep 2; }
+
+  type_text "curl -fsS http://10.0.2.2:$HTTP_PORT/bootstrap-live -o /tmp/bs && bash /tmp/bs"
+  press ret
+
+  waited=0
+  until ssh_live_root true 2>/dev/null; do
+    if ! vm_running; then
+      echo "VM exited while waiting for live root SSH" >&2
+      return 1
+    fi
+    if ((waited >= 180)); then
+      capture_console "failure-live-ssh-timeout"
+      echo "Timed out waiting for root SSH on the live ISO" >&2
+      return 1
+    fi
+    sleep 2
+    ((waited += 2))
+  done
+  capture_console "success-live-root-ssh"
 
   kill "$HTTP_PID" 2>/dev/null || true
   HTTP_PID=""
@@ -500,6 +627,83 @@ detect_packages() {
   fi
 }
 
+# Wait out an unattended cidata install to its reboot into the installed
+# system: SSH answering as the guest user is the success signal (cidata's
+# authorized_keys enables sshd there, and the live environment has no such
+# user, so there is no false positive from the installer phase). Presses the
+# Reboot Now prompt if one appears. Screenshot names take the given prefix so
+# each caller's artifacts stay apart; on a stopped install the live system's
+# log and state are saved best-effort (root SSH may not be authorized yet).
+wait_for_unattended_install() {
+  local prefix="$1"
+  local waited=0 text progress_name
+
+  log "Waiting for the unattended install to finish (timeout ${INSTALL_TIMEOUT}s)"
+  while true; do
+    if ssh_guest true 2>/dev/null; then
+      log "Install finished and rebooted into the installed system."
+      capture_console "success-$prefix-first-boot"
+      return 0
+    fi
+
+    text=$(ocr_screen)
+
+    if grep -qi "Reboot Now" <<<"$text"; then
+      log "Install finished. Confirming the reboot prompt."
+      capture_console "success-$prefix-reboot"
+      press ret
+    fi
+
+    if grep -qi "installation stopped" <<<"$text"; then
+      capture_console "failure-$prefix-stopped"
+      ssh_live_root "cat /var/log/omarchy-install.log" >"$RUN_DIR/omarchy-install.log" 2>/dev/null || true
+      ssh_live_root "cat /run/omarchy-install/state.json" >"$RUN_DIR/state.json" 2>/dev/null || true
+      echo "Install failed — artifacts saved to $RUN_DIR" >&2
+      return 1
+    fi
+
+    if ! vm_running; then
+      echo "VM exited during install" >&2
+      return 1
+    fi
+
+    if ((waited >= INSTALL_TIMEOUT)); then
+      capture_console "failure-$prefix-timeout"
+      echo "Timed out after ${INSTALL_TIMEOUT}s waiting for install" >&2
+      return 1
+    fi
+
+    if ((waited % 120 == 0)); then
+      printf -v progress_name 'success-%s-progress-%04ds' "$prefix" "$waited"
+      capture_console "$progress_name"
+      echo "    ... installing (${waited}s)"
+    fi
+
+    sleep 10
+    ((waited += 10))
+  done
+}
+
+collect_install_artifacts() {
+  local artifact remote
+
+  while read -r artifact remote; do
+    if ! ssh_sudo "cat $remote" >"$RUN_DIR/$artifact"; then
+      echo "Installed system is missing required artifact: $remote" >&2
+      return 1
+    fi
+  done <<'EOF'
+omarchy-install-timing.json /var/log/omarchy-install-timing.json
+omarchy-install.log /var/log/omarchy-install.log
+pacman.log /var/log/pacman.log
+EOF
+
+  if ! ssh_guest "pacman -Q" >"$RUN_DIR/installed-packages.txt"; then
+    echo "Could not capture the installed package manifest" >&2
+    return 1
+  fi
+}
+
 install_phase() {
   log "Installing $(basename "$ISO") unattended via cidata (headless)"
 
@@ -510,61 +714,31 @@ install_phase() {
   # Build under a staging name: the finished base is promoted only after a
   # clean shutdown, so a failed install can never pass for a reusable base.
   rm -f "$BASE_DISK" "$BASE_DISK.building"
-  qemu-img create -f qcow2 "$BASE_DISK.building" 40G >/dev/null
-  cp "$OVMF_VARS_TEMPLATE" "$BASE_OVMF"
-  ACTIVE_OVMF="$BASE_OVMF"
+  if [[ $DISK_FORMAT == raw ]]; then
+    truncate -s 0 "$BASE_DISK.building"
+    set_raw_disk_physical_semantics "$BASE_DISK.building"
+    truncate -s 40G "$BASE_DISK.building"
+  else
+    qemu-img create -f "$DISK_FORMAT" "$BASE_DISK.building" 40G >/dev/null
+  fi
+  if [[ $FIRMWARE == uefi ]]; then
+    cp "$OVMF_VARS_TEMPLATE" "$BASE_OVMF"
+    ACTIVE_OVMF="$BASE_OVMF"
+  fi
 
+  # Boot the ISO from an optical drive under both firmwares: OVMF and SeaBIOS
+  # both boot an ide-cd reliably, and the boot-medium type has no bearing on
+  # what the BIOS run exercises (Limine's MBR install and boot). SeaBIOS will
+  # not boot the isohybrid image off a fallback USB device here, so USB is not
+  # worth the flakiness. The copytoram-off / USB path is covered by unit tests.
   start_vm "$BASE_DISK.building" "$RUN_DIR/install-serial.log" \
-    -drive "file=$ISO,media=cdrom,if=none,format=raw,id=cdrom0" \
+    -drive "file=$ISO,media=cdrom,cache=none,if=none,format=raw,id=cdrom0" \
     -device ide-cd,drive=cdrom0,bootindex=2 \
     -drive "file=$CIDATA_IMG,format=raw,if=none,id=cidata" \
     -device usb-storage,drive=cidata
 
-  log "Waiting for the unattended install to finish (timeout ${INSTALL_TIMEOUT}s)"
-  local waited=0 text progress_name
-  while true; do
-    # An unattended install reboots on its own; SSH answering means the
-    # installed system is up (cidata's authorized_keys enables sshd).
-    if ssh_guest true 2>/dev/null; then
-      log "Install finished and rebooted into the installed system."
-      capture_console "success-install-first-boot"
-      break
-    fi
-
-    text=$(ocr_screen)
-
-    if grep -qi "Reboot Now" <<<"$text"; then
-      log "Install finished. Confirming the reboot prompt."
-      capture_console "success-install-reboot"
-      press ret
-    fi
-
-    if grep -qi "installation stopped" <<<"$text"; then
-      capture_console "failure-install-stopped"
-      echo "Install failed — screenshot saved to $RUN_DIR" >&2
-      return 1
-    fi
-
-    if ! vm_running; then
-      echo "VM exited during install" >&2
-      return 1
-    fi
-
-    if ((waited >= INSTALL_TIMEOUT)); then
-      capture_console "failure-install-timeout"
-      echo "Timed out after ${INSTALL_TIMEOUT}s waiting for install" >&2
-      return 1
-    fi
-
-    if ((waited % 120 == 0)); then
-      printf -v progress_name 'success-install-progress-%04ds' "$waited"
-      capture_console "$progress_name"
-      echo "    ... installing (${waited}s)"
-    fi
-
-    sleep 10
-    ((waited += 10))
-  done
+  wait_for_unattended_install install || return 1
+  collect_install_artifacts || return 1
 
   log "Installed system is up. Saving base image."
   stop_vm

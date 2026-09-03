@@ -1,0 +1,29 @@
+[Unit]
+Description=Verify the Omarchy root image on the install medium
+# The root image and its checksum are plain files on the ISO, which the archiso
+# initramfs mounts before pivoting, so they are there from the first unit on.
+# Starting the hash here, rather than when the install begins, hides the read
+# of a multi-GB stream behind the time the user spends in the configurator.
+# This is the only verifier: the orchestrator's prepare_install_target phase
+# collects the verdict, waits for the unit if it is still running, and fails
+# the install if it could not run.
+ConditionPathExists=/run/archiso/bootmnt/arch/x86_64/omarchy-root.btrfs.qcow2
+ConditionPathExists=/run/archiso/bootmnt/arch/x86_64/omarchy-root.btrfs.qcow2.sha256
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# TimeoutStartSec comes from a build-time drop-in sized to the image
+# (build-iso.sh writes 50-size-timeout.conf next to this unit): oneshot units
+# have no default start timeout, and a medium that stalls reads instead of
+# erroring would otherwise hang the hash, and the install waiting on it,
+# forever. On timeout Result=timeout tells the wait helper to report a slow
+# medium rather than a corrupt one.
+WorkingDirectory=/run/archiso/bootmnt/arch/x86_64
+ExecStart=/usr/bin/sha256sum --check --strict omarchy-root.btrfs.qcow2.sha256
+# Background work: never compete with the console or anything interactive.
+Nice=19
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

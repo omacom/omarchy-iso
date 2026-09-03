@@ -24,6 +24,7 @@ class PhaseError(Exception):
 def run(ctx: InstallContext, phases: list[tuple[str, PhaseFn]]) -> None:
     ctx.state_dir.mkdir(parents=True, exist_ok=True)
     state_path = ctx.state_dir / "state.json"
+    install_started = time.monotonic()
     state = {
         "started_at": time.time(),
         # The dashboard counts packages under <target>/var/lib/pacman/local;
@@ -34,48 +35,65 @@ def run(ctx: InstallContext, phases: list[tuple[str, PhaseFn]]) -> None:
         "current_phase": "Starting installation",
         "phases": [],
     }
-    _write_state(state_path, state)
+    write_state(state_path, state)
 
     for index, (name, fn) in enumerate(phases):
         state["current_index"] = index
         state["current_phase"] = name
         state["phase_started_at"] = time.time()
-        _write_state(state_path, state)
+        # Phases that can measure themselves (the root image unpack) publish
+        # phase_progress for the dashboard; it means nothing across phases.
+        state.pop("phase_progress", None)
+        # Concrete phases can publish finer-grained monotonic timings through
+        # ctx.state. Start every phase with an empty list so an interrupted
+        # phase can never inherit measurements from the previous one.
+        ctx.state.pop("phase_substeps", None)
+        write_state(state_path, state)
 
         info(f"› {name}")
-        started = time.time()
+        started = time.monotonic()
         try:
             fn(ctx)
         except Exception as exc:  # noqa: BLE001
-            elapsed = time.time() - started
-            state["phases"].append({
+            elapsed = time.monotonic() - started
+            entry = {
                 "name": name,
                 "status": "failed",
                 "elapsed": elapsed,
                 "error": str(exc),
-            })
-            _write_state(state_path, state)
+            }
+            if substeps := ctx.state.pop("phase_substeps", []):
+                entry["substeps"] = substeps
+            state["phases"].append(entry)
+            write_state(state_path, state)
 
             error(f"Phase '{name}' failed after {elapsed:.1f}s: {exc}")
             traceback.print_exc()
             raise PhaseError(f"phase {name} failed: {exc}") from exc
 
-        elapsed = time.time() - started
-        state["phases"].append({"name": name, "status": "ok", "elapsed": elapsed})
-        _write_state(state_path, state)
+        elapsed = time.monotonic() - started
+        entry = {"name": name, "status": "ok", "elapsed": elapsed}
+        if substeps := ctx.state.pop("phase_substeps", []):
+            entry["substeps"] = substeps
+        state["phases"].append(entry)
+        write_state(state_path, state)
 
     state["current_index"] = max(len(phases) - 1, 0)
     state["current_phase"] = "Installation complete"
     state["finished_at"] = time.time()
+    # Wall time is useful when correlating the install with other logs, but it
+    # can jump when firmware time is wrong or a live-system clock is corrected.
+    # The monotonic duration is the authoritative performance measurement.
+    state["duration_seconds"] = time.monotonic() - install_started
     # Expected vs actual for the bar's denominator, so drift is visible in
     # acceptance runs rather than only by watching a bar creep.
     state["installed_packages"] = _installed_package_count(ctx.target)
     state["expected_packages"] = _expected_package_count()
-    _write_state(state_path, state)
+    write_state(state_path, state)
 
     timing_path = ctx.target / "var" / "log" / "omarchy-install-timing.json"
     timing_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_state(timing_path, state)
+    write_state(timing_path, state)
 
 
 def _installed_package_count(target: Path) -> int:
@@ -97,7 +115,7 @@ def _expected_package_count() -> int:
         return 0
 
 
-def _write_state(path: Path, state: dict) -> None:
+def write_state(path: Path, state: dict) -> None:
     # Dashboard polls this file while phases update it. Write atomically so the
     # reader never observes a truncated/partial JSON document and resets UI.
     tmp = path.with_name(f".{path.name}.tmp")

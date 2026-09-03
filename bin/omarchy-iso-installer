@@ -60,11 +60,10 @@ simulate_install() {
     "Installing Arch + Omarchy" 5.0
     "Configuring hibernation" 0.4
     "Configuring system" 1.2
-    "Finalizing Limine boot" 1.0
-    "Finalizing user" 1.0
-    "Configuring login" 0.6
-    "Configuring DNS resolver" 0.3
+    "Staging provisioning" 0.2
+    "Finalizing boot and user setup" 2.0
     "Validating boot setup" 0.8
+    "Creating factory snapshot" 0.3
   )
   total=$(( ${#phases[@]} / 2 ))
 

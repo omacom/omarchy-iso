@@ -296,6 +296,23 @@ fi
 mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
 cp "${base_pkg_lists[0]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
 cp "${base_pkg_lists[1]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-other.packages"
+# The installer reads the shipped copies to pacstrap the target, so on aarch64
+# they must carry the same substitutions the offline mirror was built with.
+if [[ $OMARCHY_ARCH == aarch64 ]]; then
+  source /builder/aarch64-package-filter.sh
+  for shipped_list in omarchy-base.packages omarchy-other.packages; do
+    shipped_path="$build_cache_dir/airootfs/usr/share/omarchy-iso/$shipped_list"
+    mapfile -t shipped_packages < <(grep -hv '^#\|^$' "$shipped_path")
+    filter_aarch64_packages "$OMARCHY_KERNEL" "${shipped_packages[@]}" > "$shipped_path"
+  done
+  # archinstall's list is only read at build time; keep a filtered copy for the
+  # resolution below.
+  mapfile -t archinstall_packages < <(grep -hv '^#\|^$' /builder/archinstall.packages)
+  filter_aarch64_packages "$OMARCHY_KERNEL" "${archinstall_packages[@]}" > /tmp/archinstall.packages
+  archinstall_packages_file=/tmp/archinstall.packages
+else
+  archinstall_packages_file=/builder/archinstall.packages
+fi
 
 # The configurator's setup form comes from the runtime this ISO bundles, so the
 # installer and the first-boot setup that finishes a deferred install can never
@@ -459,7 +476,7 @@ resolve_expected_packages() {
 
   mapfile -t targets < <(
     {
-      grep -hv '^#\|^$' /builder/archinstall.packages
+      grep -hv '^#\|^$' "$archinstall_packages_file"
       # Read the shipped copy, which is what _runtime_package_list reads at
       # install time, not the build-time source it came from.
       grep -hv '^#\|^$' \

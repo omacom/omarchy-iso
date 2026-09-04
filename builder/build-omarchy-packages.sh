@@ -70,7 +70,17 @@ for pkg in "${packages[@]}"; do
 done
 
 mkdir -p "$offline_mirror_dir"
-for package_file in "$work_dir"/*.pkg.tar.zst; do
+# Arch Linux ARM's makepkg.conf still produces .pkg.tar.xz, so match every
+# archive extension rather than assuming zstd.
+shopt -s nullglob
+package_files=("$work_dir"/*.pkg.tar.*)
+shopt -u nullglob
+if (( ${#package_files[@]} == 0 )); then
+  echo "ERROR: makepkg produced no package archives in $work_dir" >&2
+  exit 1
+fi
+for package_file in "${package_files[@]}"; do
+  [[ $package_file == *.sig ]] && continue
   destination="$offline_mirror_dir/$(basename "$package_file")"
 
   # A cached signature belongs to the previously downloaded or locally built
@@ -82,4 +92,4 @@ done
 
 echo
 echo "Built Omarchy packages, placed in $offline_mirror_dir:"
-ls "$offline_mirror_dir"/omarchy*.pkg.tar.zst | sed 's|^|  |'
+ls "$offline_mirror_dir"/omarchy*.pkg.tar.* | grep -v '\.sig$' | sed 's|^|  |'

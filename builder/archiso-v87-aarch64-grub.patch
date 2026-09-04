@@ -1,0 +1,21 @@
+--- mkarchiso
++++ mkarchiso
+@@ -687,14 +687,18 @@
+     # Create EFI binary
+     # Module list from https://bugs.archlinux.org/task/71382#comment202911
+     grubmodules=(all_video at_keyboard boot btrfs cat chain configfile echo efifwsetup efinet exfat ext2 f2fs fat font \
+                  gfxmenu gfxterm gzio halt hfsplus iso9660 jpeg keylayouts linux loadenv loopback lsefi lsefimmap \
+                  minicmd normal ntfs ntfscomp part_apple part_gpt part_msdos png read reboot regexp search \
+                  search_fs_file search_fs_uuid search_label serial sleep tpm udf usb usbserial_common usbserial_ftdi \
+                  usbserial_pl2303 usbserial_usbdebug video xfs zstd)
++    if [[ "$arch" == 'aarch64' ]]; then
++        source /builder/archiso-aarch64-grub-modules.sh
++        filter_archiso_aarch64_grub_modules grubmodules
++    fi
+     grub-mkstandalone -O "$grub_target" \
+         --modules="${grubmodules[*]}" \
+         --locales="en@quot" \
+         --themes="" \
+         --sbat=/usr/share/grub/sbat.csv \
+         --disable-shim-lock \
+         -o "${work_dir}/BOOT${uefi_arch[$arch]}.EFI" "boot/grub/grub.cfg=${work_dir}/grub-embed.cfg"

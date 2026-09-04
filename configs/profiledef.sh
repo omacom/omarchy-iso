@@ -8,8 +8,14 @@ iso_application="Omarchy Installer"
 iso_version="$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y.%m.%d)"
 install_dir="arch"
 buildmodes=('iso')
-bootmodes=('bios.syslinux' 'uefi.grub')
-arch="x86_64"
+# build-iso.sh exports OMARCHY_ARCH into the mkarchiso environment. aarch64
+# firmware is UEFI-only, so the BIOS syslinux boot mode is dropped there.
+arch="${OMARCHY_ARCH:-x86_64}"
+if [[ $arch == aarch64 ]]; then
+  bootmodes=('uefi.grub')
+else
+  bootmodes=('bios.syslinux' 'uefi.grub')
+fi
 pacman_conf="pacman-offline.conf"
 airootfs_image_type="squashfs"
 # Package archives in the offline mirror are already zstd-compressed. Storing
@@ -42,5 +48,6 @@ file_permissions=(
   ["/usr/local/bin/omarchy-install-diagnose-media"]="0:0:755"
   ["/usr/local/bin/omarchy-iso-install"]="0:0:755"
   ["/usr/local/bin/omarchy-upload-log"]="0:0:755"
+  ["/usr/local/sbin/omarchy-n1x-live-probe"]="0:0:755"
   ["/var/cache/omarchy/mirror/offline/"]="0:0:775"
 )

@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+
+set -u
+
+log=/var/log/omarchy-n1x-live-probe.log
+
+section() {
+  echo
+  echo "===== $* ====="
+}
+
+{
+  echo "Omarchy N1x live recovery probe"
+  date --iso-8601=seconds
+
+  section kernel
+  uname -a
+  cat /proc/cmdline
+
+  section consoles
+  cat /sys/class/tty/console/active 2>/dev/null || true
+  cat /proc/fb 2>/dev/null || true
+  for name in /sys/class/graphics/fb*/name; do
+    [[ -r $name ]] || continue
+    printf '%s: ' "$name"
+    cat "$name"
+  done
+
+  section "NVIDIA PCI identity"
+  lspci -Dnnk -d 10de: || true
+
+  section DRM
+  find /sys/class/drm -maxdepth 2 -type f \
+    \( -name status -o -name enabled -o -name modes -o -name modalias \) \
+    -print -exec cat {} \; 2>/dev/null || true
+
+  section modules
+  lsmod
+
+  section network
+  ip -brief link || true
+  ip -brief address || true
+
+  section "kernel display and platform log"
+  journalctl -b -k --no-pager | \
+    grep -Ei 'efi|framebuffer|fbcon|simpledrm|drm|nvidia|nouveau|acpi|i2c|hid|r8127|mt79|mlx5' || true
+
+  section SSH
+  echo "Ethernet DHCP and sshd are enabled."
+  echo "Connect with: ssh root@omarchy-n1x-rescue.local"
+  echo "If .local discovery is unavailable, use the DHCP lease for hostname omarchy-n1x-rescue."
+} > >(tee "$log") 2>&1

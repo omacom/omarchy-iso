@@ -6,8 +6,47 @@ NO_CACHE=""
 KEEP_PKG_CACHE=""
 LOCAL_OMARCHY_PATH=""
 LOCAL_PKGS_PATH=""
+OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
+OMARCHY_ARM_PLATFORM=""
+PACKAGE_DIR=""
 while [[ $# -gt 0 ]]; do
   case $1 in
+  --arch)
+    OMARCHY_ARCH="${2:-}"
+    case "$OMARCHY_ARCH" in
+    x86_64|aarch64) ;;
+    *)
+      echo "Error: --arch must be x86_64 or aarch64" >&2
+      exit 1
+      ;;
+    esac
+    shift 2
+    ;;
+  --platform)
+    # Board-specific overlay on top of the generic architecture build. Only
+    # the NVIDIA N1x laptop is known today; it selects the linux-n1x kernel
+    # and the console/SSH recovery entry that bring-up depends on.
+    OMARCHY_ARM_PLATFORM="${2:-}"
+    case "$OMARCHY_ARM_PLATFORM" in
+    n1x) ;;
+    *)
+      echo "Error: --platform must be n1x" >&2
+      exit 1
+      ;;
+    esac
+    shift 2
+    ;;
+  --package-dir)
+    # Prebuilt aarch64 packages that pkgs.omarchy.org does not publish yet:
+    # the platform kernel and headers plus the [omarchy] repo packages. The
+    # directory must carry a SHA256SUMS covering every archive in it.
+    PACKAGE_DIR="${2:-}"
+    if [[ -z $PACKAGE_DIR ]]; then
+      echo "Error: --package-dir requires a directory" >&2
+      exit 1
+    fi
+    shift 2
+    ;;
   --no-cache)
     NO_CACHE=1
     shift
@@ -58,6 +97,7 @@ while [[ $# -gt 0 ]]; do
   *)
     echo "Unknown option: $1"
     echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
+    echo "       $0 --arch aarch64 --platform n1x --package-dir DIR --local-source <omarchy-checkout> <pkgs-checkout> [...]"
     exit 1
     ;;
   esac
@@ -68,6 +108,46 @@ if [[ -n $LOCAL_OMARCHY_PATH ]]; then
   [[ -d $LOCAL_PKGS_PATH ]]    || { echo "Error: pkgs checkout not found at $LOCAL_PKGS_PATH" >&2; exit 1; }
   LOCAL_OMARCHY_PATH=$(realpath "$LOCAL_OMARCHY_PATH")
   LOCAL_PKGS_PATH=$(realpath "$LOCAL_PKGS_PATH")
+fi
+
+# Architecture selection. x86_64 is unchanged. aarch64 builds run in a pinned
+# Arch Linux ARM container, need the prebuilt package bundle because
+# pkgs.omarchy.org serves no aarch64 repo, and build the omarchy* packages
+# from --local-source for the same reason.
+CONTAINER_IMAGE=archlinux/archlinux:latest
+CONTAINER_PLATFORM_ARGS=()
+OMARCHY_KERNEL=linux-t2
+if [[ $OMARCHY_ARCH == aarch64 ]]; then
+  if [[ -z $OMARCHY_ARM_PLATFORM ]]; then
+    echo "Error: --arch aarch64 currently requires --platform n1x" >&2
+    exit 1
+  fi
+  if [[ -z $PACKAGE_DIR ]]; then
+    echo "Error: --arch aarch64 requires --package-dir DIR" >&2
+    exit 1
+  fi
+  if [[ -z $LOCAL_OMARCHY_PATH ]]; then
+    echo "Error: --arch aarch64 requires --local-source; no published aarch64 omarchy packages exist" >&2
+    exit 1
+  fi
+  [[ -d $PACKAGE_DIR ]] || { echo "Error: package directory not found at $PACKAGE_DIR" >&2; exit 1; }
+  PACKAGE_DIR=$(realpath "$PACKAGE_DIR")
+  if [[ ! -f $PACKAGE_DIR/SHA256SUMS ]]; then
+    echo "Error: $PACKAGE_DIR must contain SHA256SUMS" >&2
+    exit 1
+  fi
+  if ! (cd "$PACKAGE_DIR" && sha256sum --check --strict --quiet SHA256SUMS); then
+    echo "Error: package bundle checksum verification failed in $PACKAGE_DIR" >&2
+    exit 1
+  fi
+  OMARCHY_KERNEL="linux-$OMARCHY_ARM_PLATFORM"
+  # Pinned by digest: this container runs with the privileges archiso needs,
+  # so a mutable third-party tag is not acceptable.
+  CONTAINER_IMAGE=menci/archlinuxarm@sha256:3e1074c407fc1a57c2a2117af6920c96a7cc906fa6f1f2da8a4a7fd3aa2c2f4e
+  CONTAINER_PLATFORM_ARGS=(--platform linux/arm64)
+elif [[ -n $OMARCHY_ARM_PLATFORM || -n $PACKAGE_DIR ]]; then
+  echo "Error: --platform and --package-dir are only valid with --arch aarch64" >&2
+  exit 1
 fi
 
 lint_file_permissions() {
@@ -107,7 +187,8 @@ lint_file_permissions
 
 # Purging the host package cache needs interactive sudo; --keep-pkg-cache
 # skips it so unattended builds (test rigs, agents) can run without a prompt.
-if [[ -z $KEEP_PKG_CACHE ]]; then
+# aarch64 builds never touch the host cache (see below), so nothing to purge.
+if [[ -z $KEEP_PKG_CACHE && $OMARCHY_ARCH == x86_64 ]]; then
   sudo rm -rf /var/cache/pacman/pkg/*
 fi
 git submodule update --init --recursive --jobs=8
@@ -126,6 +207,9 @@ DOCKER_ARGS=(
   -e "OMARCHY_ISO_REF=$OMARCHY_ISO_REF"
   -e "OMARCHY_MIRROR=$OMARCHY_MIRROR"
   -e "OMARCHY_INSTALL_DEBUG=${OMARCHY_INSTALL_DEBUG:-}"
+  -e "OMARCHY_ARCH=$OMARCHY_ARCH"
+  -e "OMARCHY_ARM_PLATFORM=$OMARCHY_ARM_PLATFORM"
+  -e "OMARCHY_KERNEL=$OMARCHY_KERNEL"
   -e "HOST_UID=$(id -u)"
   -e "HOST_GID=$(id -g)"
   -v "$BUILD_RELEASE_PATH/:/out/"
@@ -142,14 +226,25 @@ if [[ -n $LOCAL_OMARCHY_PATH ]]; then
   )
 fi
 
-if [[ -d /var/cache/pacman/pkg ]]; then
+if [[ $OMARCHY_ARCH == aarch64 ]]; then
+  DOCKER_ARGS+=(-v "$PACKAGE_DIR:/packages:ro")
+fi
+
+# The host pacman cache belongs to the host architecture; sharing it with an
+# aarch64 container would leak foreign packages into the offline mirror.
+if [[ $OMARCHY_ARCH == x86_64 && -d /var/cache/pacman/pkg ]]; then
   DOCKER_ARGS+=(-v "/var/cache/pacman/pkg:/var/cache/pacman/pkg")
 fi
 
-# Mount the build cache directory where packages are downloaded. Channels use
-# different package snapshots and must never share an offline mirror cache.
+# Mount the build cache directory where packages are downloaded. Channels and
+# architectures use different package snapshots and must never share an
+# offline mirror cache.
 if [[ -z "$NO_CACHE" ]]; then
-  OFFLINE_REPO_BUILD_CACHE_DIR="$HOME/.cache/omarchy/iso_${OMARCHY_MIRROR}/airootfs/var/cache/omarchy"
+  OFFLINE_REPO_BUILD_CACHE_DIR="$HOME/.cache/omarchy/iso_${OMARCHY_MIRROR}_${OMARCHY_ARCH}/airootfs/var/cache/omarchy"
+  if [[ $OMARCHY_ARCH == x86_64 ]]; then
+    # Keep the historical cache path for x86_64 builds.
+    OFFLINE_REPO_BUILD_CACHE_DIR="$HOME/.cache/omarchy/iso_${OMARCHY_MIRROR}/airootfs/var/cache/omarchy"
+  fi
   mkdir -p "$OFFLINE_REPO_BUILD_CACHE_DIR"
   DOCKER_ARGS+=(-v "$OFFLINE_REPO_BUILD_CACHE_DIR:/var/cache/airootfs/var/cache/omarchy")
 else
@@ -166,13 +261,20 @@ if ! docker version &>/dev/null; then
   DOCKER=(sudo docker)
 fi
 
-"${DOCKER[@]}" run "${DOCKER_ARGS[@]}" archlinux/archlinux:latest /$BUILD_SCRIPT
+"${DOCKER[@]}" run "${CONTAINER_PLATFORM_ARGS[@]}" "${DOCKER_ARGS[@]}" "$CONTAINER_IMAGE" /$BUILD_SCRIPT
 
 latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*.iso | head -n1)
-iso_ref="${latest_iso%.*}-$OMARCHY_ISO_REF.iso"
+if [[ $OMARCHY_ARCH == aarch64 ]]; then
+  iso_ref="${latest_iso%.*}-$OMARCHY_ARM_PLATFORM-$OMARCHY_ISO_REF.iso"
+else
+  iso_ref="${latest_iso%.*}-$OMARCHY_ISO_REF.iso"
+fi
 mv -f "$latest_iso" "$iso_ref"
 
-if [[ -z "${NO_BOOT_OFFER:-}" ]]; then
+if [[ $OMARCHY_ARCH == aarch64 ]]; then
+  echo
+  echo "$OMARCHY_ARM_PLATFORM ISO built at $iso_ref (boot offer skipped: omarchy-iso-boot is x86_64-only)"
+elif [[ -z "${NO_BOOT_OFFER:-}" ]]; then
   echo
   gum confirm "Boot $iso_ref?" && "$BUILD_ROOT/bin/omarchy-iso-boot" "$iso_ref"
 fi

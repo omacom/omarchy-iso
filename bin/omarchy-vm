@@ -126,7 +126,7 @@ boot_vm() {
 
   gum style --foreground 212 "✓ VM ready. Booting..."
 
-  exec omarchy-iso-boot "${boot_args[@]}" /dev/null reuse
+  exec "$SCRIPT_DIR/omarchy-iso-boot" "${boot_args[@]}" /dev/null reuse
 }
 
 command="${1:-}"

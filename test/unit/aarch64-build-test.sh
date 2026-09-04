@@ -80,6 +80,6 @@ cp "$ROOT/configs/airootfs/etc/mkinitcpio.conf.d/archiso.conf" "$fixture/archiso
 configure_archiso_aarch64_mkinitcpio "$fixture/archiso.conf"
 grep -Eq '^HOOKS=\(' "$fixture/archiso.conf" || fail "live HOOKS line lost"
 grep -Eq 'plymouth|microcode|memdisk' "$fixture/archiso.conf" && fail "x86-only or Plymouth hooks remain in the aarch64 live initramfs"
-grep -Fq 'MODULES=(i2c_tegra i2c_hid i2c_hid_acpi hid_generic hid_multitouch)' "$fixture/archiso.conf" || fail "early keyboard modules missing"
+grep -Fq 'MODULES=(i2c_mt65xx i2c_tegra i2c_hid i2c_hid_acpi hid_generic hid_multitouch)' "$fixture/archiso.conf" || fail "early keyboard modules missing"
 
 echo "aarch64 build overlay tests passed"

@@ -5,6 +5,7 @@ configure_archiso_aarch64_mkinitcpio() {
   local hook hook_body hook_line modules_line replacement
   local -a filtered_hooks=() hook_lines=() hooks=() module_lines=()
   local -a early_input_modules=(
+    i2c_mt65xx
     i2c_tegra
     i2c_hid
     i2c_hid_acpi
@@ -51,8 +52,10 @@ configure_archiso_aarch64_mkinitcpio() {
   sed -i "s|^HOOKS=.*$|$replacement|" "$config"
 
   # N1x firmware exposes the built-in keyboard to Limine, but Linux needs the
-  # Tegra I2C controller and I2C-HID transport before the live root is mounted.
-  # The generic keyboard hook does not include drivers under hid/i2c-hid.
+  # I2C controller (MediaTek MT8901 IP on the N1x, ACPI NVDA0200; Tegra on
+  # other NVIDIA boards) and the I2C-HID transport before the live root is
+  # mounted. The generic keyboard hook does not include drivers under
+  # hid/i2c-hid.
   printf -v modules_line 'MODULES=(%s)' "${early_input_modules[*]}"
   printf '%s\n' "$modules_line" >>"$config"
 

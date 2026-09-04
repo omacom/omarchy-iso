@@ -3,6 +3,7 @@ mutable `state` dict for objects that live across phases (e.g., the
 archinstall config handler and mirror list handler)."""
 
 from __future__ import annotations
+import platform
 
 import json
 import os
@@ -207,7 +208,7 @@ def _default_omarchy_install(user_configuration: dict) -> dict[str, Any]:
         "boot": {
             "esp_mount": "/boot",
             "esp_path": "/EFI/limine",
-            "efi_binary": "limine_x64.efi",
+            "efi_binary": "limine_aa64.efi" if platform.machine() == "aarch64" else "limine_x64.efi",
             "enable_fallback": mode == "full_disk",
         },
         "storage": {},

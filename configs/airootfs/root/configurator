@@ -410,14 +410,34 @@ to_gb() {
   awk -v bytes="$1" 'BEGIN {printf "%.1fGB", bytes/1024/1024/1024}'
 }
 
-# T2 Macs need their own kernel for keyboard/wifi drivers.
+# The ISO build records its architecture and, on aarch64, the board platform
+# the image was built for (see build-iso.sh). x86_64 images carry an empty
+# platform.
+iso_arch=$(cat /root/omarchy_arch 2>/dev/null || uname -m)
+iso_platform=$(cat /root/omarchy_arm_platform 2>/dev/null || true)
+
+# T2 Macs need their own kernel for keyboard/wifi drivers. aarch64 images are
+# built for one platform kernel (linux-n1x today) and nothing else boots.
 detect_kernel() {
-  if lspci -nn 2>/dev/null | grep -q "106b:180[12]"; then
+  if [[ $iso_arch == aarch64 ]]; then
+    echo "linux-${iso_platform:?aarch64 ISO without a platform}"
+  elif lspci -nn 2>/dev/null | grep -q "106b:180[12]"; then
     echo "linux-t2"
   else
     echo "linux-omarchy"
   fi
 }
+
+# Limine's UEFI binary and the package mirrors follow the architecture.
+if [[ $iso_arch == aarch64 ]]; then
+  limine_efi_binary="limine_aa64.efi"
+  archinstall_custom_servers='            {"url": "http://mirror.archlinuxarm.org/\$arch/\$repo"}'
+else
+  limine_efi_binary="limine_x64.efi"
+  archinstall_custom_servers='            {"url": "https://mirror.omarchy.org/\$repo/os/\$arch"},
+            {"url": "https://mirror.rackspace.com/archlinux/\$repo/os/\$arch"},
+            {"url": "https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"}'
+fi
 
 # wait_for_device lives in disk-partitioning.sh: it now reports failure, and
 # every caller here aborts on it.
@@ -807,7 +827,7 @@ run_partition_execute() {
         "boot": {
             "esp_mount": "$esp_mount_in_target",
             "esp_path": "/EFI/limine",
-            "efi_binary": "limine_x64.efi",
+            "efi_binary": "$limine_efi_binary",
             "enable_fallback": false
         },
         "storage": {
@@ -839,9 +859,7 @@ run_partition_execute() {
     "mirror_config": {
         "custom_repositories": [],
         "custom_servers": [
-            {"url": "https://mirror.omarchy.org/\$repo/os/\$arch"},
-            {"url": "https://mirror.rackspace.com/archlinux/\$repo/os/\$arch"},
-            {"url": "https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"}
+$archinstall_custom_servers
         ],
         "mirror_regions": {},
         "optional_repositories": []
@@ -1150,7 +1168,7 @@ cat <<-_EOF_ >user_configuration.json
         "boot": {
             "esp_mount": "/boot",
             "esp_path": "/EFI/limine",
-            "efi_binary": "limine_x64.efi",
+            "efi_binary": "$limine_efi_binary",
             "enable_fallback": true
         },
         "storage": {
@@ -1232,9 +1250,7 @@ cat <<-_EOF_ >user_configuration.json
     "mirror_config": {
         "custom_repositories": [],
         "custom_servers": [
-            {"url": "https://mirror.omarchy.org/\$repo/os/\$arch"},
-            {"url": "https://mirror.rackspace.com/archlinux/\$repo/os/\$arch"},
-            {"url": "https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"}
+$archinstall_custom_servers
         ],
         "mirror_regions": {},
         "optional_repositories": []

@@ -1,0 +1,49 @@
+# Filter archiso's hardcoded GRUB module list to what the target platform
+# provides. at_keyboard (PS/2), keylayouts, usb and the usbserial_* drivers
+# are not built for arm64-efi, so grub-mkstandalone aborts without this.
+#
+# Generated against the vendored archiso (v87). Belongs upstream in archiso;
+# carried here until it lands there. build-iso.sh applies it with --forward,
+# so it becomes a no-op once the submodule is bumped past the fix.
+--- a/archiso/mkarchiso
++++ b/archiso/mkarchiso
+@@ -669,6 +669,31 @@
+     fi
+ }
+ 
++# Filter a GRUB module list down to what a platform actually provides.
++# Not every module archiso asks for is built everywhere: at_keyboard is PS/2 and
++# the usbserial_* drivers are x86-oriented, so none of them exist for arm64-efi
++# and grub-mkstandalone aborts on the first one it cannot find.
++# $1: GRUB target (e.g. arm64-efi)
++# $@: module names
++# Prints the available modules, one per line.
++_filter_grubmodules() {
++    local _target="${1}"
++    shift
++    local _module _available=() _missing=()
++    for _module in "$@"; do
++        if [[ -e "/usr/lib/grub/${_target}/${_module}.mod" ]]; then
++            _available+=("${_module}")
++        else
++            _missing+=("${_module}")
++        fi
++    done
++    if (( ${#_missing[@]} )); then
++        # stdout carries the module list, so this has to go to stderr.
++        _msg_info "Skipping GRUB module(s) not built for ${_target}: ${_missing[*]}" >&2
++    fi
++    printf '%s\n' "${_available[@]}"
++}
++
+ # Prepare GRUB
+ _make_bootmode_uefi.grub() {
+     local grub_target grubmodules=() files_to_copy=()
+@@ -691,6 +716,7 @@
+                  minicmd normal ntfs ntfscomp part_apple part_gpt part_msdos png read reboot regexp search \
+                  search_fs_file search_fs_uuid search_label serial sleep tpm udf usb usbserial_common usbserial_ftdi \
+                  usbserial_pl2303 usbserial_usbdebug video xfs zstd)
++    mapfile -t grubmodules < <(_filter_grubmodules "$grub_target" "${grubmodules[@]}")
+     grub-mkstandalone -O "$grub_target" \
+         --modules="${grubmodules[*]}" \
+         --locales="en@quot" \

@@ -6,8 +6,17 @@ NO_CACHE=""
 KEEP_PKG_CACHE=""
 LOCAL_OMARCHY_PATH=""
 LOCAL_PKGS_PATH=""
+LOCAL_REPO_PATH=""
 while [[ $# -gt 0 ]]; do
   case $1 in
+  --local-repo)
+    LOCAL_REPO_PATH="${2:-}"
+    if [[ -z $LOCAL_REPO_PATH ]]; then
+      echo "Error: --local-repo requires a directory holding a built [omarchy] repo (omarchy.db + packages)" >&2
+      exit 1
+    fi
+    shift 2
+    ;;
   --no-cache)
     NO_CACHE=1
     shift
@@ -57,7 +66,7 @@ while [[ $# -gt 0 ]]; do
     ;;
   *)
     echo "Unknown option: $1"
-    echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
+    echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>] [--local-repo <repo-dir>]"
     exit 1
     ;;
   esac
@@ -68,6 +77,11 @@ if [[ -n $LOCAL_OMARCHY_PATH ]]; then
   [[ -d $LOCAL_PKGS_PATH ]]    || { echo "Error: pkgs checkout not found at $LOCAL_PKGS_PATH" >&2; exit 1; }
   LOCAL_OMARCHY_PATH=$(realpath "$LOCAL_OMARCHY_PATH")
   LOCAL_PKGS_PATH=$(realpath "$LOCAL_PKGS_PATH")
+fi
+
+if [[ -n $LOCAL_REPO_PATH ]]; then
+  [[ -f $LOCAL_REPO_PATH/omarchy.db ]] || { echo "Error: no omarchy.db in $LOCAL_REPO_PATH (build one with omarchy-pkgs: bin/repo build + bin/repo update)" >&2; exit 1; }
+  LOCAL_REPO_PATH=$(realpath "$LOCAL_REPO_PATH")
 fi
 
 lint_file_permissions() {
@@ -142,6 +156,11 @@ if [[ -n $LOCAL_OMARCHY_PATH ]]; then
   )
 fi
 
+# Mount a locally built Omarchy package repository when requested.
+if [[ -n $LOCAL_REPO_PATH ]]; then
+  DOCKER_ARGS+=(-v "$LOCAL_REPO_PATH:/omarchy-repo:ro")
+fi
+
 if [[ -d /var/cache/pacman/pkg ]]; then
   DOCKER_ARGS+=(-v "/var/cache/pacman/pkg:/var/cache/pacman/pkg")
 fi
@@ -166,7 +185,13 @@ if ! docker version &>/dev/null; then
   DOCKER=(sudo docker)
 fi
 
-"${DOCKER[@]}" run "${DOCKER_ARGS[@]}" archlinux/archlinux:latest /$BUILD_SCRIPT
+# Select a build image for the host architecture.
+case "$(uname -m)" in
+  aarch64) BUILD_IMAGE=menci/archlinuxarm:base-devel ;;
+  *) BUILD_IMAGE=archlinux/archlinux:latest ;;
+esac
+
+"${DOCKER[@]}" run "${DOCKER_ARGS[@]}" "$BUILD_IMAGE" /$BUILD_SCRIPT
 
 latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*.iso | head -n1)
 iso_ref="${latest_iso%.*}-$OMARCHY_ISO_REF.iso"

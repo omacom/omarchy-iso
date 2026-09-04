@@ -6,10 +6,22 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+# Select Limine EFI filenames for the target architecture.
+_LIMINE_EFI_ARCH = {
+    "x86_64": "X64",
+    "i686": "IA32",
+    "aarch64": "AA64",
+    "riscv64": "RISCV64",
+    "loongarch64": "LOONGARCH64",
+}.get(platform.machine(), "X64")
+_LIMINE_SOURCE_EFI = f"BOOT{_LIMINE_EFI_ARCH}.EFI"
+_LIMINE_EFI_BINARY = f"limine_{_LIMINE_EFI_ARCH.lower()}.efi"
 
 
 @dataclass
@@ -184,7 +196,7 @@ def _default_omarchy_install(user_configuration: dict) -> dict[str, Any]:
         "boot": {
             "esp_mount": "/boot",
             "esp_path": "/EFI/limine",
-            "efi_binary": "limine_x64.efi",
+            "efi_binary": _LIMINE_EFI_BINARY,
             "enable_fallback": mode == "full_disk",
         },
         "storage": {},

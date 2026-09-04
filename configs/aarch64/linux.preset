@@ -1,0 +1,2 @@
+# Disable the stock preset, whose kernel image is absent on Arch Linux ARM.
+PRESETS=()

@@ -70,7 +70,8 @@ for pkg in "${packages[@]}"; do
 done
 
 mkdir -p "$offline_mirror_dir"
-for package_file in "$work_dir"/*.pkg.tar.zst; do
+for package_file in "$work_dir"/*.pkg.tar.zst "$work_dir"/*.pkg.tar.xz; do
+  [[ -e $package_file ]] || continue
   destination="$offline_mirror_dir/$(basename "$package_file")"
 
   # A cached signature belongs to the previously downloaded or locally built
@@ -82,4 +83,4 @@ done
 
 echo
 echo "Built Omarchy packages, placed in $offline_mirror_dir:"
-ls "$offline_mirror_dir"/omarchy*.pkg.tar.zst | sed 's|^|  |'
+ls "$offline_mirror_dir"/omarchy*.pkg.tar.{zst,xz} 2>/dev/null | sed 's|^|  |'

@@ -1,0 +1,24 @@
+archiso v87 copies only /boot/vmlinuz-* and /boot/initramfs-*.img from the
+airootfs into the ISO (_make_boot_on_iso9660), then empties /boot. A unified
+kernel image built by the profile's customize_airootfs.sh -- here the arm64
+live UKI carrying the Windows-on-ARM device trees, configs/aarch64/live-uki.sh
+-- never reaches the ISO. Copy /boot/*.efi next to the kernel so a GRUB entry
+can chainload it. ISO 9660 only: the El Torito FAT image keeps the plain
+kernel and initramfs, which the fallback entry boots. Applied by
+builder/build-iso.sh to the vendored submodule copy on aarch64 builds only.
+
+Retire when: archiso ships UKIs from /boot itself (no upstream MR as of
+2026-08-25; see JimmayVV/omarchy-iso#12 and #21).
+
+--- a/archiso/mkarchiso
++++ b/archiso/mkarchiso
+@@ -433 +433 @@ _make_boot_on_iso9660() {
+-    local ucode_image
++    local ucode_image _uki
+@@ -437,0 +438,6 @@ _make_boot_on_iso9660() {
++    # Unified kernel images built into /boot by the profile travel with the
++    # kernel they wrap, where a GRUB entry can chainload them.
++    for _uki in "${pacstrap_dir}/boot/"*.efi; do
++        [[ -e "${_uki}" ]] || continue
++        install -m 0644 -- "${_uki}" "${isofs_dir}/${install_dir}/boot/${arch}/"
++    done

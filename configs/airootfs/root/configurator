@@ -9,6 +9,26 @@ OMARCHY_SETTINGS_PACKAGE="${OMARCHY_SETTINGS_PACKAGE:-omarchy-settings}"
 
 LOGO_PATH="$OMARCHY_PATH/logo.txt"
 
+# Select the Limine EFI binary for the target architecture.
+case "$(uname -m)" in
+  x86_64)      limine_efi_binary="limine_x64.efi"         ;;
+  i?86)        limine_efi_binary="limine_ia32.efi"        ;;
+  aarch64)     limine_efi_binary="limine_aa64.efi"        ;;
+  riscv64)     limine_efi_binary="limine_riscv64.efi"     ;;
+  loongarch64) limine_efi_binary="limine_loongarch64.efi" ;;
+  *)           limine_efi_binary="limine_x64.efi"         ;;
+esac
+
+# Arch Linux ARM uses its own mirror list and repository layout.
+case "$(uname -m)" in
+  aarch64) mirror_custom_servers='[]' ;;
+  *) mirror_custom_servers='[
+            {"url": "https://mirror.omarchy.org/$repo/os/$arch"},
+            {"url": "https://mirror.rackspace.com/archlinux/$repo/os/$arch"},
+            {"url": "https://geo.mirror.pkgbuild.com/$repo/os/$arch"}
+        ]' ;;
+esac
+
 # The setup form — keyboard, account, hostname, and timezone questions, plus the
 # rules their answers are checked against — shared verbatim with the first-boot
 # owner setup that finishes a deferred install. build-iso.sh vendors it out of
@@ -387,6 +407,35 @@ detect_bitlocker() {
   return 1
 }
 
+# Save vendor-signed Qualcomm firmware before a full-disk install removes Windows.
+# Missing firmware does not abort installation.
+stage_qualcomm_firmware() {
+  command -v qcom-firmware-extract >/dev/null 2>&1 || return 0
+  [[ -d /sys/firmware/devicetree/base ]] || return 0
+
+  local stage=/run/omarchy/firmware
+  local missing saved
+  missing=$(qcom-firmware-extract --list-missing 2>/dev/null | grep -c . || true)
+  ((missing > 0)) || return 0
+
+  step "Saving Qualcomm firmware from Windows"
+  qcom-firmware-extract --stage "$stage" >/run/omarchy/firmware-stage.log 2>&1 || true
+  saved=$(grep -c . "$stage/manifest" 2>/dev/null || true)
+  if ((saved >= missing)); then
+    say "Saved $saved firmware files from Windows for the install."
+  elif ((saved > 0)); then
+    say "Saved $saved of $missing firmware files from Windows; the rest were not in the driver store."
+  else
+    say --foreground 1 "No Windows firmware found on this machine."
+    if grep -q BitLocker /run/omarchy/firmware-stage.log 2>/dev/null; then
+      say "The Windows partition is BitLocker-encrypted. Turn BitLocker off in Windows to let the firmware be read."
+    fi
+    say "Omarchy will install and boot, but GPU acceleration, audio and battery reporting need"
+    say "\`sudo qcom-firmware-extract\` afterwards with a Windows driver store of this laptop model."
+  fi
+  echo
+}
+
 # Look for an existing Windows ESP (FAT partition containing EFI/Microsoft) on $disk.
 detect_windows_esp() {
   local p tmp_mp
@@ -412,6 +461,10 @@ to_gb() {
 
 # T2 Macs need their own kernel for keyboard/wifi drivers.
 detect_kernel() {
+  # Arch Linux ARM names its generic kernel linux-aarch64.
+  case "$(uname -m)" in
+    aarch64) echo "linux-aarch64"; return ;;
+  esac
   if lspci -nn 2>/dev/null | grep -q "106b:180[12]"; then
     echo "linux-t2"
   else
@@ -805,7 +858,7 @@ run_partition_execute() {
         "boot": {
             "esp_mount": "$esp_mount_in_target",
             "esp_path": "/EFI/limine",
-            "efi_binary": "limine_x64.efi",
+            "efi_binary": "$limine_efi_binary",
             "enable_fallback": false
         },
         "storage": {
@@ -836,11 +889,7 @@ run_partition_execute() {
     },
     "mirror_config": {
         "custom_repositories": [],
-        "custom_servers": [
-            {"url": "https://mirror.omarchy.org/\$repo/os/\$arch"},
-            {"url": "https://mirror.rackspace.com/archlinux/\$repo/os/\$arch"},
-            {"url": "https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"}
-        ],
+        "custom_servers": $mirror_custom_servers,
         "mirror_regions": {},
         "optional_repositories": []
     },
@@ -1069,12 +1118,14 @@ if $defer_provisioning; then
   # Jump straight to disk selection + overwrite confirmation (encrypted by
   # default, Ctrl+C toggles unencrypted). deferred provisioning is always a full-disk install.
   disk_form
+  stage_qualcomm_firmware
   until confirm_disk_overwrite; do
     disk_form
   done
   install_target="full_disk"
 else
   disk_form
+  stage_qualcomm_firmware
   select_installation
 fi
 
@@ -1144,7 +1195,7 @@ cat <<-_EOF_ >user_configuration.json
         "boot": {
             "esp_mount": "/boot",
             "esp_path": "/EFI/limine",
-            "efi_binary": "limine_x64.efi",
+            "efi_binary": "$limine_efi_binary",
             "enable_fallback": true
         },
         "storage": {
@@ -1225,11 +1276,7 @@ cat <<-_EOF_ >user_configuration.json
     },
     "mirror_config": {
         "custom_repositories": [],
-        "custom_servers": [
-            {"url": "https://mirror.omarchy.org/\$repo/os/\$arch"},
-            {"url": "https://mirror.rackspace.com/archlinux/\$repo/os/\$arch"},
-            {"url": "https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"}
-        ],
+        "custom_servers": $mirror_custom_servers,
         "mirror_regions": {},
         "optional_repositories": []
     },

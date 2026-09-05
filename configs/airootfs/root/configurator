@@ -8,6 +8,8 @@ OMARCHY_RUNTIME_PACKAGE="${OMARCHY_RUNTIME_PACKAGE:-omarchy}"
 OMARCHY_SETTINGS_PACKAGE="${OMARCHY_SETTINGS_PACKAGE:-omarchy-settings}"
 
 LOGO_PATH="$OMARCHY_PATH/logo.txt"
+BLUETOOTH_KEYBOARD_MARKER="${OMARCHY_BLUETOOTH_KEYBOARD_MARKER:-/root/bluetooth-keyboard.json}"
+BLUETOOTH_UNLOCK_MARKER="${OMARCHY_BLUETOOTH_UNLOCK_MARKER:-/root/bluetooth-unlock.json}"
 
 # The setup form — keyboard, account, hostname, and timezone questions, plus the
 # rules their answers are checked against — shared verbatim with the first-boot
@@ -102,20 +104,21 @@ clear_logo() {
 greeter() {
   measure_terminal
 
-  local rows logo_h content_h top cols logo_row tagline_row hint_row
-  local tagline hint tpad hpad anim
+  local rows logo_h content_h top cols logo_row tagline_row hint_row bluetooth_hint_row
+  local tagline hint bluetooth_hint tpad hpad anim
   cols=$TERM_WIDTH
   rows=$(stty size 2>/dev/null </dev/tty | awk '{print $1}')
   [[ $rows =~ ^[0-9]+$ ]] || rows=${LINES:-24}
   logo_h=$(wc -l <"$LOGO_PATH")
 
-  # logo + blank + tagline + blank + hint
-  content_h=$((logo_h + 4))
+  # logo + blank + tagline + blank + two hints
+  content_h=$((logo_h + 5))
   top=$(((rows - content_h) / 2))
   (( top < 0 )) && top=0
   logo_row=$((top + 1))
   tagline_row=$((top + logo_h + 2))
   hint_row=$((top + logo_h + 4))
+  bluetooth_hint_row=$((hint_row + 1))
 
   printf '\033[?25l\033[H\033[2J'
 
@@ -129,6 +132,10 @@ greeter() {
   hint="Press Return to Start Install"
   hpad=$(((cols - ${#hint}) / 2)); (( hpad < 0 )) && hpad=0
   printf '\033[%d;%dH\033[2m%s\033[0m' "$hint_row" "$((hpad + 1))" "$hint"
+
+  bluetooth_hint="Bluetooth keyboard? Put it in pairing mode now"
+  hpad=$(((cols - ${#bluetooth_hint}) / 2)); (( hpad < 0 )) && hpad=0
+  printf '\033[%d;%dH\033[2m%s\033[0m' "$bluetooth_hint_row" "$((hpad + 1))" "$bluetooth_hint"
 
   # ColorShift the logo: a green base (indexed color 2) with a cyan accent (6)
   # drifting through, settling on green. Indexed ANSI colors, not hex — the
@@ -144,8 +151,7 @@ greeter() {
   printf '\033[%d;1H\0337' "$((logo_row + logo_h))"
   # Run ttfx directly (not inside a `while` subshell) so $anim is ttfx's own
   # PID: killing a wrapping subshell would orphan ttfx, which then keeps
-  # painting the logo over the keyboard step. --cycles is high enough that it
-  # never ends on its own before Return.
+  # painting over pairing passkeys. Stop the intro before pairing starts.
   # Two columns narrower than the console: ttfx centers its text two columns
   # right of plain centering, so a full-width canvas would sit the animated
   # logo a column off the gum-drawn one underneath it.
@@ -163,16 +169,36 @@ greeter() {
     </dev/null >/dev/tty 2>/dev/null &
   anim=$!
 
-  IFS= read -r _ </dev/tty || true
+  sleep 1
   # Tolerate ttfx's kill signal in `wait` so a future `set -e` here can't abort.
   kill "$anim" 2>/dev/null
   wait "$anim" 2>/dev/null || true
   # ttfx leaves the tty in raw/no-echo mode when killed; restore it or the gum
   # prompts in the keyboard step that follows silently die.
   stty sane </dev/tty 2>/dev/null || true
+  # Pairing owns the terminal while the welcome screen waits for Return.
+  start_bluetooth_keyboard_pairing
+  IFS= read -r _ </dev/tty || true
   # Reset the screen so the leftover animation frame doesn't linger under the
   # keyboard step that follows.
   printf '\033[0m\033[H\033[2J\033[?25h'
+}
+
+start_bluetooth_keyboard_pairing() {
+  local helper=/usr/local/bin/omarchy-bluetooth-keyboard-pair
+  bluetooth_pair_pid=""
+  rm -f "$BLUETOOTH_KEYBOARD_MARKER" "$BLUETOOTH_UNLOCK_MARKER"
+  [[ -x $helper ]] || return 0
+
+  "$helper" "$BLUETOOTH_KEYBOARD_MARKER" /dev/tty &
+  bluetooth_pair_pid=$!
+}
+
+stop_bluetooth_keyboard_pairing() {
+  [[ -n ${bluetooth_pair_pid:-} ]] || return 0
+  kill "$bluetooth_pair_pid" 2>/dev/null || true
+  wait "$bluetooth_pair_pid" 2>/dev/null || true
+  bluetooth_pair_pid=""
 }
 
 abort() {
@@ -1030,6 +1056,35 @@ select_installation() {
   done
 }
 
+offer_bluetooth_disk_unlock() {
+  rm -f "$BLUETOOTH_UNLOCK_MARKER"
+  [[ $encrypt_installation == true && $defer_provisioning == false && -s $BLUETOOTH_KEYBOARD_MARKER ]] || return 0
+
+  if [[ ! -f /usr/share/omarchy-iso/bluetooth-unlock-supported ]]; then
+    clear_logo
+    echo
+    say "This ISO's bundled runtime cannot enable Bluetooth disk unlock."
+    say "After reboot, use a wired or 2.4 GHz keyboard to unlock the encrypted disk."
+    echo
+    gum confirm --affirmative "I have another keyboard" --negative "Abort installation" \
+      "Continue with a recovery keyboard available?" || abort
+    return 0
+  fi
+
+  clear_logo
+  echo
+  say "Use the paired Bluetooth keyboard for encrypted disk unlock?"
+  say --foreground 8 "Its Bluetooth bond key will be copied to the unencrypted boot image."
+  say --foreground 8 "Radio, firmware, or battery trouble can still prevent it connecting."
+  say --foreground 8 "Keep a wired or 2.4ghz keyboard available for recovery."
+  echo
+
+  if gum confirm --affirmative "Yes, enable Bluetooth unlock" --negative "No, installer only" \
+    "Enable Bluetooth keyboard disk unlock?"; then
+    install -m 0600 "$BLUETOOTH_KEYBOARD_MARKER" "$BLUETOOTH_UNLOCK_MARKER"
+  fi
+}
+
 # STEP 1: KEYBOARD (Ctrl+C here arms deferred provisioning and jumps to disk selection)
 
 defer_provisioning=false
@@ -1039,7 +1094,9 @@ install_target="full_disk"
 # isn't measured against the transient 80-column boot console.
 wait_for_stable_terminal
 
+trap stop_bluetooth_keyboard_pairing EXIT
 greeter
+stop_bluetooth_keyboard_pairing
 
 keyboard_form
 
@@ -1077,6 +1134,8 @@ else
   disk_form
   select_installation
 fi
+
+offer_bluetooth_disk_unlock
 
 clear
 

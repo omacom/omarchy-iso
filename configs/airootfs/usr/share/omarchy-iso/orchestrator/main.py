@@ -35,6 +35,7 @@ def build_phases(ctx: InstallContext):
         configure_hibernation,
         run_system_finalizer,
         stage_provisioning_state,
+        configure_bluetooth_unlock,
         finalize_limine_boot,
         run_chroot_finalizer,
         configure_dns_resolver,
@@ -52,8 +53,9 @@ def build_phases(ctx: InstallContext):
         ("Configuring hibernation",    configure_hibernation),
         ("Configuring system",         run_system_finalizer),
         # Before finalize_limine_boot: the deferred-provisioning cryptkey drop-in and keyfile
-        # must be in place for the final UKI build.
+        # and optional Bluetooth-unlock hook must be in place for the final UKI build.
         ("Staging provisioning",          stage_provisioning_state),
+        ("Configuring Bluetooth unlock",  configure_bluetooth_unlock),
         ("Finalizing Limine boot",     finalize_limine_boot),
         ("Finalizing user",            run_chroot_finalizer),
         ("Configuring login",          configure_login),

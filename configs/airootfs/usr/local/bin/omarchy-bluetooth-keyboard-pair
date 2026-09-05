@@ -1,0 +1,110 @@
+#!/bin/bash
+
+# Pair one nearby keyboard while the live ISO welcome screen is waiting. The
+# remote keyboard's pairing mode is the physical-presence signal; if more than
+# one candidate is visible, pair none rather than guessing.
+
+set -u
+umask 077
+export LC_ALL=C
+
+marker=${1:-/root/bluetooth-keyboard.json}
+output=${2:-/dev/tty}
+scan_seconds=${OMARCHY_BLUETOOTH_SCAN_SECONDS:-900}
+poll_seconds=${OMARCHY_BLUETOOTH_POLL_SECONDS:-1}
+
+valid_address() {
+  [[ $1 =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]
+}
+
+device_info() {
+  timeout 3s bluetoothctl info "$1" 2>/dev/null || true
+}
+
+is_keyboard() {
+  local info=$1
+  # HID service UUIDs also identify mice and gamepads. Require keyboard evidence.
+  [[ $info == *"Icon: input-keyboard"* ]] ||
+    grep -Eq '^[[:space:]]*Appearance: 0x0*3c1([[:space:]]|$)' <<<"$info"
+}
+
+cleanup() {
+  local pid
+  for pid in "${pair_pid:-}" "${scanner_pid:-}"; do
+    [[ -n $pid ]] || continue
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+}
+trap cleanup EXIT
+trap 'exit 0' INT TERM
+
+systemctl start bluetooth.service >/dev/null 2>&1 || exit 0
+rfkill unblock bluetooth >/dev/null 2>&1 || true
+timeout 5s bluetoothctl power on >/dev/null 2>&1 || exit 0
+
+bluetoothctl --timeout "$scan_seconds" scan on >/dev/null 2>&1 &
+scanner_pid=$!
+deadline=$((SECONDS + scan_seconds))
+declare -A tried=()
+
+while (( SECONDS < deadline )); do
+  candidates=()
+  while read -r address; do
+    valid_address "$address" || continue
+    info=$(device_info "$address")
+    [[ $info == *"Paired: yes"* && -z ${tried[$address]:-} ]] && continue
+    is_keyboard "$info" || continue
+    candidates+=("$address")
+  done < <(bluetoothctl devices 2>/dev/null | awk '{print $2}' | sort -u)
+
+  if (( ${#candidates[@]} == 1 )); then
+    address=${candidates[0]}
+    if (( SECONDS < ${tried[$address]:-0} )); then
+      sleep "$poll_seconds"
+      continue
+    fi
+    tried[$address]=$((SECONDS + 10))
+    info=$(device_info "$address")
+    name=$(sed -n 's/^[[:space:]]*Name: //p' <<<"$info" | head -1 | LC_ALL=C tr -d '[:cntrl:]' | sed 's/[[:space:]]*$//')
+    name=${name:-Bluetooth keyboard}
+
+    printf '\r\nBluetooth keyboard found: %s\r\n' "$name" >"$output"
+    printf 'If a pairing code appears, type it on that keyboard and press Return.\r\n\r\n' >"$output"
+
+    paired=false
+    if [[ $info == *"Paired: yes"* ]]; then
+      paired=true
+    else
+      bluetoothctl --agent DisplayOnly --timeout 60 pair "$address" </dev/null >"$output" 2>&1 &
+      pair_pid=$!
+      if wait "$pair_pid"; then
+        paired=true
+      fi
+      pair_pid=""
+    fi
+    if [[ $paired == true ]]; then
+      timeout 5s bluetoothctl trust "$address" >/dev/null 2>&1 || true
+      timeout 10s bluetoothctl connect "$address" >/dev/null 2>&1 || true
+      info=$(device_info "$address")
+      if [[ $info == *"Paired: yes"* && $info == *"Trusted: yes"* && $info == *"Connected: yes"* ]]; then
+        controller=$(timeout 3s bluetoothctl show 2>/dev/null | awk '/^Controller / {print $2; exit}')
+        if valid_address "$controller"; then
+          temporary_marker=$(mktemp "${marker}.XXXXXX") || exit 1
+          jq -n \
+            --arg controller "${controller^^}" \
+            --arg device "${address^^}" \
+            --arg name "$name" \
+            '{controller: $controller, device: $device, name: $name}' >"$temporary_marker" && mv -f "$temporary_marker" "$marker" || { rm -f "$temporary_marker"; exit 1; }
+          printf '\r\nBluetooth keyboard connected. Press Return to start the install.\r\n' >"$output"
+          exit 0
+        fi
+      fi
+    fi
+
+    pair_pid=""
+    printf '\r\nCould not pair that keyboard. Put it in pairing mode to try again.\r\n' >"$output"
+  fi
+
+  sleep "$poll_seconds"
+done

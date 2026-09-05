@@ -1,173 +1,822 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VM_DIR="$(dirname "$SCRIPT_DIR")/vm-saves"
-TMP_DISK="${OMARCHY_VM_DISK:-/tmp/omarchy-iso-boot.qcow2}"
-TMP_OVMF="${OMARCHY_VM_OVMF_VARS:-/tmp/OVMF_VARS.4m.fd}"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
+VM_DIR="${OMARCHY_VM_DIR:-$REPO_DIR/vm-saves}"
+ISO_BOOT="$SCRIPT_DIR/omarchy-iso-boot"
+
+DEFAULT_DISK="${OMARCHY_VM_DISK:-/tmp/omarchy-iso-boot.qcow2}"
+DEFAULT_OVMF="${OMARCHY_VM_OVMF_VARS:-/tmp/OVMF_VARS.4m.fd}"
+DEFAULT_SSH_HOST="${OMARCHY_VM_SSH_HOST:-127.0.0.1}"
+DEFAULT_SSH_PORT="${OMARCHY_VM_SSH_PORT:-2222}"
+DEFAULT_SSH_IDENTITY="${OMARCHY_VM_SSH_IDENTITY:-$HOME/.ssh/omarchy-vm}"
+SSH_WAIT_TIMEOUT="${OMARCHY_VM_SSH_TIMEOUT:-2700}"
+TTY_DEVICE="${OMARCHY_VM_TTY:-/dev/tty}"
+
+DEV_MOUNT_TAG="dev-link"
+DEV_MOUNT_POINT="/mnt/dev-link"
+DEV_OMARCHY_PATH="$DEV_MOUNT_POINT/omarchy"
+METADATA_FILE="vm.json"
+
+ACTIVE_DISK="$DEFAULT_DISK"
+ACTIVE_OVMF="$DEFAULT_OVMF"
+SSH_HOST="$DEFAULT_SSH_HOST"
+SSH_PORT="$DEFAULT_SSH_PORT"
+SSH_IDENTITY="$DEFAULT_SSH_IDENTITY"
+SSH_USER=""
+CIDATA_DIR=""
+NETWORK=1
+
+CLI_DEV_LINK=""
+DEV_LINK_PATH=""
+DEV_LINK_UID=""
+DEV_LINK_GID=""
+NEEDS_DEV_ACTIVATION=0
+METADATA_PRESENT=0
+
+CURRENT_STATE_FILE=""
+QEMU_PID_FILE=""
+ACTIVATION_PID=""
+
+FORWARDED_ARGS=()
+RAW_QEMU_ARGS=()
+SHARE_QEMU_ARGS=()
 
 mkdir -p "$VM_DIR"
 
-save_vm() {
-  local name="$1"
+fail() {
+  echo "omarchy-vm: $*" >&2
+  exit 1
+}
 
-  if [[ -z "$name" ]]; then
-    name=$(gum input --placeholder "Enter VM snapshot name")
-    [[ -z "$name" ]] && exit 1
+metadata_path_for_disk() {
+  printf '%s.omarchy-vm.json\n' "$1"
+}
+
+state_path_for_disk() {
+  printf '%s.omarchy-vm.pid\n' "$1"
+}
+
+qemu_pid_path_for_disk() {
+  printf '%s.qemu.pid\n' "$1"
+}
+
+validate_vm_name() {
+  [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && $1 != "." && $1 != ".." ]] ||
+    fail "VM snapshot names may contain only letters, numbers, dots, underscores, and dashes"
+}
+
+validate_ssh_user() {
+  [[ $1 =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ ]] || fail "invalid SSH username: $1"
+}
+
+require_option_value() {
+  local option="$1" value="${2:-}"
+  [[ -n $value && $value != --* ]] || fail "$option requires a value"
+}
+
+parse_launch_args() {
+  FORWARDED_ARGS=()
+  RAW_QEMU_ARGS=()
+
+  while (( $# > 0 )); do
+    case "$1" in
+      --dev-link)
+        require_option_value "$1" "${2:-}"
+        CLI_DEV_LINK="$2"
+        shift 2
+        ;;
+      --dev-link=*)
+        CLI_DEV_LINK="${1#*=}"
+        [[ -n $CLI_DEV_LINK ]] || fail "--dev-link requires a value"
+        shift
+        ;;
+      --ssh-user)
+        require_option_value "$1" "${2:-}"
+        SSH_USER="$2"
+        shift 2
+        ;;
+      --ssh-user=*)
+        SSH_USER="${1#*=}"
+        [[ -n $SSH_USER ]] || fail "--ssh-user requires a value"
+        shift
+        ;;
+      --disk)
+        require_option_value "$1" "${2:-}"
+        ACTIVE_DISK="$2"
+        FORWARDED_ARGS+=("$1" "$2")
+        shift 2
+        ;;
+      --disk=*)
+        ACTIVE_DISK="${1#*=}"
+        [[ -n $ACTIVE_DISK ]] || fail "--disk requires a value"
+        FORWARDED_ARGS+=("$1")
+        shift
+        ;;
+      --ovmf-vars)
+        require_option_value "$1" "${2:-}"
+        ACTIVE_OVMF="$2"
+        FORWARDED_ARGS+=("$1" "$2")
+        shift 2
+        ;;
+      --ovmf-vars=*)
+        ACTIVE_OVMF="${1#*=}"
+        [[ -n $ACTIVE_OVMF ]] || fail "--ovmf-vars requires a value"
+        FORWARDED_ARGS+=("$1")
+        shift
+        ;;
+      --ssh-port)
+        require_option_value "$1" "${2:-}"
+        SSH_PORT="$2"
+        FORWARDED_ARGS+=("$1" "$2")
+        shift 2
+        ;;
+      --ssh-port=*)
+        SSH_PORT="${1#*=}"
+        [[ -n $SSH_PORT ]] || fail "--ssh-port requires a value"
+        FORWARDED_ARGS+=("$1")
+        shift
+        ;;
+      --ssh-host)
+        require_option_value "$1" "${2:-}"
+        SSH_HOST="$2"
+        FORWARDED_ARGS+=("$1" "$2")
+        shift 2
+        ;;
+      --ssh-host=*)
+        SSH_HOST="${1#*=}"
+        [[ -n $SSH_HOST ]] || fail "--ssh-host requires a value"
+        FORWARDED_ARGS+=("$1")
+        shift
+        ;;
+      --ssh-identity)
+        require_option_value "$1" "${2:-}"
+        SSH_IDENTITY="$2"
+        FORWARDED_ARGS+=("$1" "$2")
+        shift 2
+        ;;
+      --ssh-identity=*)
+        SSH_IDENTITY="${1#*=}"
+        [[ -n $SSH_IDENTITY ]] || fail "--ssh-identity requires a value"
+        FORWARDED_ARGS+=("$1")
+        shift
+        ;;
+      --cidata-dir)
+        require_option_value "$1" "${2:-}"
+        CIDATA_DIR="$2"
+        FORWARDED_ARGS+=("$1" "$2")
+        shift 2
+        ;;
+      --cidata-dir=*)
+        CIDATA_DIR="${1#*=}"
+        [[ -n $CIDATA_DIR ]] || fail "--cidata-dir requires a value"
+        FORWARDED_ARGS+=("$1")
+        shift
+        ;;
+      --no-network|--no-net)
+        NETWORK=0
+        FORWARDED_ARGS+=("$1")
+        shift
+        ;;
+      --)
+        shift
+        RAW_QEMU_ARGS+=("$@")
+        break
+        ;;
+      *)
+        FORWARDED_ARGS+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -n $SSH_USER ]]; then
+    validate_ssh_user "$SSH_USER"
+  fi
+}
+
+derive_cidata_username() {
+  [[ -f $CIDATA_DIR/user_credentials.json ]] || return 1
+  jq -r '.users[0].username // empty' "$CIDATA_DIR/user_credentials.json" 2>/dev/null
+}
+
+validate_dev_link_path() {
+  local requested="$1" canonical owner_uid owner_gid required path
+
+  canonical=$(realpath -e -- "$requested" 2>/dev/null) || fail "dev-link path does not exist: $requested"
+  [[ -d $canonical ]] || fail "dev-link path is not a directory: $requested"
+
+  for required in omarchy/bin omarchy/default omarchy/shell omarchy-pkgs/bin omarchy-pkgs/pkgbuilds; do
+    [[ -d $canonical/$required ]] || fail "$canonical is not an Omarchy development workspace (missing $required/)"
+  done
+
+  for path in "$canonical" "$canonical/omarchy" "$canonical/omarchy-pkgs"; do
+    owner_uid=$(stat -Lc '%u' -- "$path") || fail "could not inspect dev-link ownership: $path"
+    owner_gid=$(stat -Lc '%g' -- "$path") || fail "could not inspect dev-link ownership: $path"
+    [[ $owner_uid == "$(id -u)" && $owner_gid == "$(id -g)" ]] ||
+      fail "read-write dev-link workspace and repositories must be owned by the current host UID:GID ($(id -u):$(id -g)): $path"
+  done
+
+  DEV_LINK_PATH="$canonical"
+  DEV_LINK_UID=$(id -u)
+  DEV_LINK_GID=$(id -g)
+}
+
+load_metadata() {
+  local path="$1"
+
+  jq -e '
+    type == "object" and
+    .version == 1 and
+    (.dev_link | type == "object") and
+    (.dev_link.host_path | type == "string" and length > 0) and
+    (.dev_link.ssh_user | type == "string" and length > 0) and
+    (.dev_link.host_uid | type == "number" and floor == .) and
+    (.dev_link.host_gid | type == "number" and floor == .)
+  ' "$path" >/dev/null 2>&1 || fail "invalid or unsupported VM metadata: $path"
+
+  DEV_LINK_PATH=$(jq -r '.dev_link.host_path' "$path")
+  SSH_USER=$(jq -r '.dev_link.ssh_user' "$path")
+  DEV_LINK_UID=$(jq -r '.dev_link.host_uid' "$path")
+  DEV_LINK_GID=$(jq -r '.dev_link.host_gid' "$path")
+  validate_ssh_user "$SSH_USER"
+  [[ $DEV_LINK_PATH != *$'\n'* && $DEV_LINK_PATH != *$'\r'* ]] || fail "invalid dev-link path in $path"
+  METADATA_PRESENT=1
+}
+
+write_metadata() {
+  local destination="$1" directory tmp
+  directory=$(dirname "$destination")
+  mkdir -p "$directory"
+  tmp=$(mktemp "$directory/.omarchy-vm-metadata.XXXXXX")
+  jq -n \
+    --arg host_path "$DEV_LINK_PATH" \
+    --arg ssh_user "$SSH_USER" \
+    --argjson host_uid "$DEV_LINK_UID" \
+    --argjson host_gid "$DEV_LINK_GID" \
+    '{version: 1, dev_link: {host_path: $host_path, ssh_user: $ssh_user, host_uid: $host_uid, host_gid: $host_gid}}' >"$tmp"
+  mv -f -- "$tmp" "$destination"
+}
+
+validate_saved_dev_link() {
+  local requested_path="$1" canonical current_uid current_gid owner_uid owner_gid required path
+
+  canonical=$(realpath -e -- "$requested_path" 2>/dev/null) ||
+    fail "saved dev-link path is missing: $requested_path (override it with --dev-link NEW_PATH)"
+  [[ -d $canonical ]] || fail "saved dev-link path is not a directory: $requested_path"
+  for required in omarchy/bin omarchy/default omarchy/shell omarchy-pkgs/bin omarchy-pkgs/pkgbuilds; do
+    [[ -d $canonical/$required ]] || fail "$canonical is not an Omarchy development workspace (missing $required/)"
+  done
+
+  current_uid=$(id -u)
+  current_gid=$(id -g)
+  [[ $current_uid == "$DEV_LINK_UID" && $current_gid == "$DEV_LINK_GID" ]] ||
+    fail "saved dev-link ownership no longer matches UID:GID $DEV_LINK_UID:$DEV_LINK_GID: $canonical"
+  for path in "$canonical" "$canonical/omarchy" "$canonical/omarchy-pkgs"; do
+    owner_uid=$(stat -Lc '%u' -- "$path")
+    owner_gid=$(stat -Lc '%g' -- "$path")
+    [[ $owner_uid == "$DEV_LINK_UID" && $owner_gid == "$DEV_LINK_GID" ]] ||
+      fail "saved dev-link ownership no longer matches UID:GID $DEV_LINK_UID:$DEV_LINK_GID: $path"
+  done
+
+  DEV_LINK_PATH="$canonical"
+}
+
+prepare_share_args() {
+  local escaped_path
+  escaped_path=${DEV_LINK_PATH//,/,,}
+  SHARE_QEMU_ARGS=(
+    -fsdev "local,id=omarchy_dev_link,path=$escaped_path,security_model=none,multidevs=remap"
+    -device "virtio-9p-pci,fsdev=omarchy_dev_link,mount_tag=$DEV_MOUNT_TAG"
+  )
+}
+
+active_vm_running() {
+  local disk="$1" state_file qemu_pid_file pid
+  state_file=$(state_path_for_disk "$disk")
+  qemu_pid_file=$(qemu_pid_path_for_disk "$disk")
+
+  if [[ -f $state_file ]]; then
+    pid=$(<"$state_file")
+    if [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      return 0
+    fi
+    rm -f -- "$state_file"
   fi
 
-  if [[ ! -f "$TMP_DISK" || ! -f "$TMP_OVMF" ]]; then
-    echo "Error: No active VM found at $TMP_DISK / $TMP_OVMF"
-    echo "Boot a VM first with: omarchy-iso-boot [iso]"
+  if [[ -f $qemu_pid_file ]]; then
+    pid=$(<"$qemu_pid_file")
+    if [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      return 0
+    fi
+    rm -f -- "$qemu_pid_file"
+  fi
+
+  return 1
+}
+
+ensure_active_vm_stopped() {
+  active_vm_running "$ACTIVE_DISK" &&
+    fail "active VM is already running for disk $ACTIVE_DISK"
+  if [[ -f $ACTIVE_DISK ]] && command -v qemu-img >/dev/null && ! qemu-img info "$ACTIVE_DISK" >/dev/null 2>&1; then
+    fail "active disk is locked; stop its VM before continuing: $ACTIVE_DISK"
+  fi
+}
+
+mark_active_vm() {
+  local state_dir tmp
+  CURRENT_STATE_FILE=$(state_path_for_disk "$ACTIVE_DISK")
+  state_dir=$(dirname "$CURRENT_STATE_FILE")
+  mkdir -p "$state_dir"
+  tmp=$(mktemp "$state_dir/.omarchy-vm-state.XXXXXX")
+  printf '%s\n' "$$" >"$tmp"
+  mv -f -- "$tmp" "$CURRENT_STATE_FILE"
+}
+
+cleanup_launcher() {
+  if [[ -n $ACTIVATION_PID ]] && kill -0 "$ACTIVATION_PID" 2>/dev/null; then
+    kill "$ACTIVATION_PID" 2>/dev/null || true
+    wait "$ACTIVATION_PID" 2>/dev/null || true
+  fi
+
+  if [[ -n $CURRENT_STATE_FILE && -f $CURRENT_STATE_FILE && $(<"$CURRENT_STATE_FILE") == "$$" ]]; then
+    rm -f -- "$CURRENT_STATE_FILE"
+  fi
+
+  if [[ -n $QEMU_PID_FILE && -f $QEMU_PID_FILE ]]; then
+    local qemu_pid
+    qemu_pid=$(<"$QEMU_PID_FILE")
+    if [[ ! $qemu_pid =~ ^[0-9]+$ ]] || ! kill -0 "$qemu_pid" 2>/dev/null; then
+      rm -f -- "$QEMU_PID_FILE"
+    fi
+  fi
+}
+trap cleanup_launcher EXIT
+
+ssh_connect_host() {
+  case "$SSH_HOST" in
+    0.0.0.0) printf '127.0.0.1\n' ;;
+    ::|\[::\]) printf '::1\n' ;;
+    *) printf '%s\n' "$SSH_HOST" ;;
+  esac
+}
+
+ssh_guest() {
+  local connect_host
+  connect_host=$(ssh_connect_host)
+  ssh -i "$SSH_IDENTITY" -p "$SSH_PORT" \
+    -o BatchMode=yes \
+    -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=5 \
+    -o LogLevel=ERROR \
+    "$SSH_USER@$connect_host" "$@"
+}
+
+ssh_guest_tty() {
+  local connect_host
+  connect_host=$(ssh_connect_host)
+  ssh -tt -i "$SSH_IDENTITY" -p "$SSH_PORT" \
+    -o BatchMode=yes \
+    -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=5 \
+    -o LogLevel=ERROR \
+    "$SSH_USER@$connect_host" "$@"
+}
+
+wait_for_ssh() {
+  local timeout="$1" description="$2" waited=0
+  echo "Waiting for $description over SSH..."
+  until [[ -f $SSH_IDENTITY ]] && ssh_guest true >/dev/null 2>&1; do
+    if (( waited >= timeout )); then
+      echo "Timed out after ${timeout}s waiting for $description" >&2
+      return 1
+    fi
+    sleep 2
+    ((waited += 2))
+  done
+}
+
+wait_for_qemu() {
+  local waited=0 qemu_pid
+  echo "Waiting for QEMU to start..."
+  until [[ -f $QEMU_PID_FILE ]]; do
+    if (( waited >= SSH_WAIT_TIMEOUT )); then
+      echo "Timed out after ${SSH_WAIT_TIMEOUT}s waiting for QEMU" >&2
+      return 1
+    fi
+    sleep 1
+    ((waited += 1))
+  done
+
+  qemu_pid=$(<"$QEMU_PID_FILE")
+  if [[ ! $qemu_pid =~ ^[0-9]+$ ]] || ! kill -0 "$qemu_pid" 2>/dev/null; then
+    echo "QEMU exited before dev-link activation could start" >&2
+    return 1
+  fi
+}
+
+wait_for_ssh_disconnect() {
+  local waited=0
+  while ssh_guest true >/dev/null 2>&1; do
+    if (( waited >= 120 )); then
+      echo "Timed out waiting for the linked VM to reboot" >&2
+      return 1
+    fi
+    sleep 1
+    ((waited += 1))
+  done
+}
+
+activate_dev_link() {
+  local active_metadata remote_script remote_command
+  active_metadata=$(metadata_path_for_disk "$ACTIVE_DISK")
+
+  gum style --border rounded --padding "0 1" --border-foreground 212 \
+    "$(gum style --bold 'Guest sudo authentication required')" \
+    "Once the installed VM is reachable, this terminal will ask for" \
+    "the sudo password for '$SSH_USER' to activate the development link." \
+    "Keep this terminal open until the VM has rebooted."
+  echo
+
+  wait_for_qemu || return 1
+  wait_for_ssh "$SSH_WAIT_TIMEOUT" "the installed VM" || return 1
+
+  remote_script=$(cat <<'REMOTE_SCRIPT'
+set -euo pipefail
+
+mount_tag=dev-link
+mount_point=/mnt/dev-link
+omarchy_path="$mount_point/omarchy"
+packages_path="$mount_point/omarchy-pkgs"
+fstab=/etc/fstab
+begin_marker="# omarchy-vm dev-link begin"
+end_marker="# omarchy-vm dev-link end"
+entry="dev-link /mnt/dev-link 9p trans=virtio,version=9p2000.L,msize=104857600,cache=none,nofail,x-systemd.automount 0 0"
+mounted_here=0
+fstab_added=0
+
+rollback() {
+  local status=$?
+  trap - ERR
+  omarchy dev unlink --no-reboot >/dev/null 2>&1 || true
+  if (( fstab_added )); then
+    sudo sed -i "/^# omarchy-vm dev-link begin$/,/^# omarchy-vm dev-link end$/d" "$fstab" || true
+    sudo systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+  if (( mounted_here )); then
+    sudo umount "$mount_point" >/dev/null 2>&1 || true
+  fi
+  exit "$status"
+}
+trap rollback ERR
+
+guest_uid=$(id -u)
+guest_gid=$(id -g)
+if [[ $guest_uid != "$OMARCHY_VM_HOST_UID" || $guest_gid != "$OMARCHY_VM_HOST_GID" ]]; then
+  echo "Guest UID:GID $guest_uid:$guest_gid does not match host UID:GID $OMARCHY_VM_HOST_UID:$OMARCHY_VM_HOST_GID" >&2
+  exit 1
+fi
+
+sudo -v
+sudo install -d -m 0755 "$mount_point"
+if mountpoint -q "$mount_point"; then
+  [[ $(findmnt -n -o SOURCE --target "$mount_point") == "$mount_tag" ]]
+  [[ $(findmnt -n -o FSTYPE --target "$mount_point") == "9p" ]]
+else
+  sudo mount -t 9p -o trans=virtio,version=9p2000.L,msize=104857600,cache=none "$mount_tag" "$mount_point"
+  mounted_here=1
+fi
+
+for required in bin default shell; do
+  [[ -d $omarchy_path/$required ]] || {
+    echo "$omarchy_path is missing $required/" >&2
+    exit 1
+  }
+done
+for required in bin pkgbuilds; do
+  [[ -d $packages_path/$required ]] || {
+    echo "$packages_path is missing $required/" >&2
+    exit 1
+  }
+done
+
+if ! grep -Fxq "$begin_marker" "$fstab"; then
+  printf '\n%s\n%s\n%s\n' "$begin_marker" "$entry" "$end_marker" | sudo tee -a "$fstab" >/dev/null
+  fstab_added=1
+  sudo systemctl daemon-reload
+fi
+
+omarchy dev link "$omarchy_path" --no-reboot
+sudo systemd-run --quiet --collect --on-active=2s \
+  --unit="omarchy-vm-dev-link-reboot-$(date +%s)" /usr/bin/systemctl reboot
+trap - ERR
+REMOTE_SCRIPT
+  )
+
+  remote_command=$(printf 'OMARCHY_VM_HOST_UID=%q OMARCHY_VM_HOST_GID=%q bash -lc %q' \
+    "$DEV_LINK_UID" "$DEV_LINK_GID" "$remote_script")
+
+  echo "Configuring $DEV_MOUNT_POINT in the VM..."
+  ssh_guest_tty "$remote_command" <"$TTY_DEVICE" || return 1
+  # The guest's link and persistent mount are now committed. Record their host
+  # half before waiting through the reboot so an interrupted reconnect cannot
+  # leave a link-bearing disk without its matching snapshot metadata.
+  write_metadata "$active_metadata"
+  wait_for_ssh_disconnect || return 1
+  wait_for_ssh 600 "the linked VM after reboot" || return 1
+
+  ssh_guest "grep -Fx 'export OMARCHY_PATH=\"$DEV_OMARCHY_PATH\"' /etc/omarchy.conf >/dev/null && test -d '$DEV_OMARCHY_PATH/bin' && test -d '$DEV_MOUNT_POINT/omarchy-pkgs/pkgbuilds'" || {
+    echo "VM rebooted, but the Omarchy development link is not active" >&2
+    return 1
+  }
+
+  echo "Omarchy development link active at $DEV_OMARCHY_PATH"
+}
+
+run_iso_boot() {
+  local mode="$1" vm_status activation_status=0
+  local -a command_args=("${FORWARDED_ARGS[@]}")
+
+  if [[ $mode == "boot" ]]; then
+    command_args+=(/dev/null reuse)
+  fi
+  QEMU_PID_FILE=$(qemu_pid_path_for_disk "$ACTIVE_DISK")
+  rm -f -- "$QEMU_PID_FILE"
+  command_args+=(-- "${RAW_QEMU_ARGS[@]}" "${SHARE_QEMU_ARGS[@]}" -pidfile "$QEMU_PID_FILE")
+
+  if [[ -z $CURRENT_STATE_FILE ]]; then
+    mark_active_vm
+  fi
+  if (( NEEDS_DEV_ACTIVATION )); then
+    activate_dev_link &
+    ACTIVATION_PID=$!
+  fi
+
+  set +e
+  "$ISO_BOOT" "${command_args[@]}"
+  vm_status=$?
+  set -e
+
+  if [[ -n $ACTIVATION_PID ]]; then
+    if kill -0 "$ACTIVATION_PID" 2>/dev/null; then
+      kill "$ACTIVATION_PID" 2>/dev/null || true
+    fi
+    set +e
+    wait "$ACTIVATION_PID"
+    activation_status=$?
+    set -e
+    ACTIVATION_PID=""
+  fi
+
+  (( vm_status == 0 )) || return "$vm_status"
+  return "$activation_status"
+}
+
+prepare_new_dev_link() {
+  local derived_user=""
+
+  validate_dev_link_path "$CLI_DEV_LINK"
+  [[ -n $CIDATA_DIR ]] || fail "create --dev-link requires --cidata-dir so SSH is provisioned"
+  if [[ -z $SSH_USER ]]; then
+    derived_user=$(derive_cidata_username || true)
+    [[ -n $derived_user ]] || fail "could not derive the SSH user from $CIDATA_DIR/user_credentials.json; pass --ssh-user"
+    SSH_USER="$derived_user"
+    validate_ssh_user "$SSH_USER"
+  fi
+  (( NETWORK )) || fail "--dev-link cannot be activated with --no-network"
+  [[ $SSH_PORT != "0" ]] || fail "--dev-link activation requires SSH port forwarding"
+  NEEDS_DEV_ACTIVATION=1
+  prepare_share_args
+}
+
+create_vm() {
+  parse_launch_args "$@"
+  [[ -n $ACTIVE_DISK && -n $ACTIVE_OVMF ]] || fail "active disk and OVMF vars paths must not be empty"
+  ensure_active_vm_stopped
+
+  rm -f -- "$(metadata_path_for_disk "$ACTIVE_DISK")"
+  if [[ -n $CLI_DEV_LINK ]]; then
+    prepare_new_dev_link
+  elif [[ -n $SSH_USER ]]; then
+    fail "--ssh-user is only used with --dev-link"
+  fi
+
+  run_iso_boot create
+}
+
+save_vm() {
+  local name="$1" vm_path active_metadata stage
+
+  if [[ -z $name ]]; then
+    name=$(gum input --placeholder "Enter VM snapshot name")
+    [[ -z $name ]] && exit 1
+  fi
+  validate_vm_name "$name"
+
+  if [[ ! -f $DEFAULT_DISK || ! -f $DEFAULT_OVMF ]]; then
+    echo "Error: No active VM found at $DEFAULT_DISK / $DEFAULT_OVMF"
+    echo "Boot a VM first with: omarchy-vm create [iso]"
     exit 1
   fi
 
-  local vm_path="$VM_DIR/$name"
+  active_vm_running "$DEFAULT_DISK" && fail "cannot save while the active VM is running; shut it down first"
+  qemu-img info "$DEFAULT_DISK" >/dev/null 2>&1 ||
+    fail "cannot safely open the active disk; make sure its VM is stopped"
 
-  if [[ -d "$vm_path" ]]; then
-    if ! gum confirm "VM '$name' exists. Overwrite?"; then
-      exit 0
-    fi
+  vm_path="$VM_DIR/$name"
+  if [[ -d $vm_path ]] && ! gum confirm "VM '$name' exists. Overwrite?"; then
+    exit 0
   fi
 
-  mkdir -p "$vm_path"
+  stage=$(mktemp -d "$VM_DIR/.${name}.XXXXXX")
+  active_metadata=$(metadata_path_for_disk "$DEFAULT_DISK")
 
   echo "Saving VM snapshot '$name'..."
-  cp "$TMP_DISK" "$vm_path/omarchy-iso-boot.qcow2"
-  cp "$TMP_OVMF" "$vm_path/OVMF_VARS.4m.fd"
+  if ! cp --sparse=always "$DEFAULT_DISK" "$stage/omarchy-iso-boot.qcow2" ||
+    ! cp "$DEFAULT_OVMF" "$stage/OVMF_VARS.4m.fd" ||
+    { [[ -f $active_metadata ]] && ! cp "$active_metadata" "$stage/$METADATA_FILE"; }; then
+    rm -rf -- "$stage"
+    fail "could not save VM snapshot '$name'"
+  fi
 
+  if [[ -d $vm_path ]]; then
+    rm -rf -- "$vm_path"
+  fi
+  mv -- "$stage" "$vm_path"
   gum style --foreground 212 "✓ Saved to $vm_path"
 }
 
 list_vms() {
-  if [[ ! -d "$VM_DIR" ]] || [[ -z "$(ls -A "$VM_DIR")" ]]; then
+  local vm
+  if [[ ! -d $VM_DIR ]] || [[ -z $(ls -A "$VM_DIR") ]]; then
     echo "No VM snapshots found"
     return 1
   fi
 
   echo "Available VM snapshots:"
   for vm in "$VM_DIR"/*; do
-    [[ -d "$vm" ]] && echo "  • $(basename "$vm")"
+    [[ -d $vm ]] && echo "  • $(basename "$vm")"
   done
 }
 
-create_vm() {
-  exec "$SCRIPT_DIR/omarchy-iso-boot" "$@"
+prepare_boot_dev_link() {
+  local metadata_path="$1" saved_uid saved_gid
+
+  if [[ -f $metadata_path ]]; then
+    load_metadata "$metadata_path"
+    saved_uid="$DEV_LINK_UID"
+    saved_gid="$DEV_LINK_GID"
+    [[ -n $CLI_DEV_LINK ]] && DEV_LINK_PATH="$CLI_DEV_LINK"
+    validate_saved_dev_link "$DEV_LINK_PATH"
+    DEV_LINK_UID="$saved_uid"
+    DEV_LINK_GID="$saved_gid"
+    prepare_share_args
+  elif [[ -n $CLI_DEV_LINK ]]; then
+    validate_dev_link_path "$CLI_DEV_LINK"
+    [[ -n $SSH_USER ]] || fail "--ssh-user is required when adding --dev-link to an existing VM"
+    (( NETWORK )) || fail "--dev-link cannot be activated with --no-network"
+    [[ $SSH_PORT != "0" ]] || fail "--dev-link activation requires SSH port forwarding"
+    NEEDS_DEV_ACTIVATION=1
+    prepare_share_args
+  elif [[ -n $SSH_USER ]]; then
+    fail "--ssh-user is only used with --dev-link or a linked VM"
+  fi
+}
+
+boot_current_vm() {
+  local active_metadata
+
+  ensure_active_vm_stopped
+  mark_active_vm
+  active_metadata=$(metadata_path_for_disk "$ACTIVE_DISK")
+  prepare_boot_dev_link "$active_metadata"
+  if (( METADATA_PRESENT )); then
+    write_metadata "$active_metadata"
+  fi
+
+  gum style --foreground 212 "✓ Booting current VM..."
+  run_iso_boot boot
 }
 
 boot_vm() {
-  local name=""
-  local boot_args=()
-  local active_disk="$TMP_DISK"
-  local active_ovmf="$TMP_OVMF"
+  local name="" vm_path snapshot_metadata active_metadata
 
-  if [[ $# -gt 0 && ${1:-} != --* ]]; then
+  if (( $# > 0 )) && [[ ${1:-} != --* ]]; then
     name="$1"
     shift
   fi
+  parse_launch_args "$@"
 
-  while (( $# > 0 )); do
-    case "$1" in
-      --disk)
-        active_disk="${2:-}"
-        boot_args+=("$1" "${2:-}")
-        shift 2
-        ;;
-      --disk=*)
-        active_disk="${1#*=}"
-        boot_args+=("$1")
-        shift
-        ;;
-      --ovmf-vars)
-        active_ovmf="${2:-}"
-        boot_args+=("$1" "${2:-}")
-        shift 2
-        ;;
-      --ovmf-vars=*)
-        active_ovmf="${1#*=}"
-        boot_args+=("$1")
-        shift
-        ;;
-      *)
-        boot_args+=("$1")
-        shift
-        ;;
-    esac
-  done
+  [[ -n $ACTIVE_DISK && -n $ACTIVE_OVMF ]] || fail "active disk and OVMF vars paths must not be empty"
+  if [[ -z $name && ( -e $ACTIVE_DISK || -e $ACTIVE_OVMF ) ]]; then
+    [[ -f $ACTIVE_DISK && -f $ACTIVE_OVMF ]] ||
+      fail "current VM is incomplete; expected both $ACTIVE_DISK and $ACTIVE_OVMF"
+    boot_current_vm
+    return
+  fi
 
-  if [[ -z "$(ls -A "$VM_DIR" 2>/dev/null)" ]]; then
-    echo "No VM snapshots available"
+  if [[ -z $(ls -A "$VM_DIR" 2>/dev/null) ]]; then
+    fail "no VM snapshots available"
+  fi
+  if [[ -z $name ]]; then
+    name=$(find "$VM_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | gum choose --header "Select VM to boot:")
+    [[ -z $name ]] && exit 0
+  fi
+  validate_vm_name "$name"
+
+  vm_path="$VM_DIR/$name"
+  [[ -d $vm_path ]] || {
+    echo "Error: VM '$name' not found" >&2
+    list_vms >&2 || true
     exit 1
-  fi
+  }
+  [[ -f $vm_path/omarchy-iso-boot.qcow2 && -f $vm_path/OVMF_VARS.4m.fd ]] ||
+    fail "snapshot '$name' is missing its disk or OVMF vars"
+  ensure_active_vm_stopped
 
-  if [[ -z "$name" ]]; then
-    name=$(ls -1 "$VM_DIR" | gum choose --header "Select VM to boot:")
-    [[ -z "$name" ]] && exit 0
-  fi
+  snapshot_metadata="$vm_path/$METADATA_FILE"
+  prepare_boot_dev_link "$snapshot_metadata"
 
-  local vm_path="$VM_DIR/$name"
-
-  if [[ ! -d "$vm_path" ]]; then
-    echo "Error: VM '$name' not found"
-    list_vms
-    exit 1
-  fi
-
-  if [[ -z $active_disk || -z $active_ovmf ]]; then
-    echo "Error: active disk and OVMF vars paths must not be empty"
-    exit 1
-  fi
-
-  if [[ -f $active_disk ]] && ! gum confirm "Override existing active VM disk at $active_disk?"; then
+  if [[ -e $ACTIVE_DISK || -e $ACTIVE_OVMF ]] &&
+    ! gum confirm "Override existing active VM files at $ACTIVE_DISK / $ACTIVE_OVMF?"; then
     exit 0
   fi
 
-  echo "Copying VM '$name' to $active_disk..."
-  mkdir -p "$(dirname "$active_disk")" "$(dirname "$active_ovmf")"
-  cp "$vm_path/omarchy-iso-boot.qcow2" "$active_disk"
-  cp "$vm_path/OVMF_VARS.4m.fd" "$active_ovmf"
+  [[ $(realpath -m -- "$ACTIVE_DISK") != "$(realpath -m -- "$vm_path/omarchy-iso-boot.qcow2")" ]] ||
+    fail "active disk must not overwrite the saved snapshot disk"
+  [[ $(realpath -m -- "$ACTIVE_OVMF") != "$(realpath -m -- "$vm_path/OVMF_VARS.4m.fd")" ]] ||
+    fail "active OVMF vars must not overwrite the saved snapshot"
+
+  mark_active_vm
+  echo "Copying VM '$name' to $ACTIVE_DISK..."
+  mkdir -p "$(dirname "$ACTIVE_DISK")" "$(dirname "$ACTIVE_OVMF")"
+  cp --sparse=always "$vm_path/omarchy-iso-boot.qcow2" "$ACTIVE_DISK"
+  cp "$vm_path/OVMF_VARS.4m.fd" "$ACTIVE_OVMF"
+
+  active_metadata=$(metadata_path_for_disk "$ACTIVE_DISK")
+  if (( METADATA_PRESENT )); then
+    write_metadata "$active_metadata"
+  else
+    rm -f -- "$active_metadata"
+  fi
 
   gum style --foreground 212 "✓ VM ready. Booting..."
+  run_iso_boot boot
+}
 
-  exec "$SCRIPT_DIR/omarchy-iso-boot" "${boot_args[@]}" /dev/null reuse
+usage() {
+  gum style --border rounded --padding "0 1" --border-foreground 212 \
+    "$(gum style --bold 'omarchy-vm') - VM snapshot manager" \
+    "" \
+    "$(gum style --foreground 245 'Commands:')" \
+    "  create [options] [iso]      Create and boot a new VM" \
+    "  save [name]                 Save the stopped active VM" \
+    "  boot [name] [options]       Boot the current VM, or restore and boot a named snapshot" \
+    "  list                        List available VMs" \
+    "" \
+    "$(gum style --foreground 245 'Create/boot options:')" \
+    "  --dev-link PATH     Mount a workspace containing omarchy/ and omarchy-pkgs/ at $DEV_MOUNT_POINT" \
+    "  --ssh-user USER     Guest user for first-time dev-link activation" \
+    "  --ssh-port PORT     Forward host PORT to guest SSH (default: $DEFAULT_SSH_PORT)" \
+    "  --ssh-host HOST     Host address for SSH forwarding (default: $DEFAULT_SSH_HOST)" \
+    "  --ssh-identity PATH Private key for guest SSH (default: $DEFAULT_SSH_IDENTITY)" \
+    "  --cidata-dir DIR    Autoinstall config directory for unattended installs" \
+    "  --disk PATH         Active disk path, useful for parallel VMs" \
+    "  --ovmf-vars PATH    Active OVMF vars path, useful for parallel VMs" \
+    "  --no-network        Boot without a virtual NIC" \
+    "" \
+    "$(gum style --foreground 245 'Current VMs:')"
+  list_vms 2>/dev/null || echo "  None"
 }
 
 command="${1:-}"
-[[ $# -gt 0 ]] && shift
+(( $# > 0 )) && shift
 
 case "$command" in
   create)
     create_vm "$@"
     ;;
   save)
+    (( $# <= 1 )) || fail "Usage: omarchy-vm save [name]"
     save_vm "${1:-}"
     ;;
   boot)
     boot_vm "$@"
     ;;
   list)
+    (( $# == 0 )) || fail "Usage: omarchy-vm list"
     list_vms
     ;;
+  -h|--help|"")
+    usage
+    ;;
   *)
-    gum style --border rounded --padding "0 1" --border-foreground 212 \
-      "$(gum style --bold 'omarchy-vm') - VM snapshot manager" \
-      "" \
-      "$(gum style --foreground 245 'Commands:')" \
-      "  create [options] [iso]      Create and boot a new VM" \
-      "  save [name]                 Save current active VM" \
-      "  boot [name] [boot-options]  Boot saved VM (interactive if no name)" \
-      "  list                        List available VMs" \
-      "" \
-      "$(gum style --foreground 245 'Create/boot options:')" \
-      "  --ssh-port PORT   Forward host PORT to guest SSH (default: 2222)" \
-      "  --ssh-host HOST   Host address for SSH forwarding (default: 127.0.0.1)" \
-      "  --cidata-dir DIR  Autoinstall config directory for unattended installs" \
-      "  --disk PATH       Active disk path, useful for parallel VMs" \
-      "  --ovmf-vars PATH  Active OVMF vars path, useful for parallel VMs" \
-      "  --no-network      Boot without a virtual NIC" \
-      "" \
-      "$(gum style --foreground 245 'Current VMs:')"
-    list_vms 2>/dev/null || echo "  None"
+    fail "unknown command: $command"
     ;;
 esac

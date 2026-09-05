@@ -131,13 +131,15 @@ workspace/
 
 **Voila! You have a working development VM ready to use! 🎉***
 
+You can edit the `omarchy` repository on the host, and the changes are applied to the VM.
+
+### Snapshots
+
 After shutting down, boot the VM again to where you left off:
 
 ```bash
 ./bin/omarchy-vm boot
 ```
-
-### Snapshots
 
 `boot` can be supplied with a snapshot name to boot from a previous state.
 

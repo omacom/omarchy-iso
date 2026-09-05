@@ -201,34 +201,56 @@ notice() {
   echo
 }
 
-# STEP 1: KEYBOARD LAYOUT
+# STEP 0: WHO IS THIS COMPUTER FOR
 
-keyboard_form() {
-  # Ctrl+C is the hidden entry into deferred provisioning, offered on every
-  # visit: the user step unwinds back here and nothing is on disk yet. Callers
-  # re-check defer_provisioning after this returns.
+# The first question. Me and Child pick the install profile; Another owner
+# defers every personal question to the machine's first boot (what Ctrl+C on
+# the keyboard screen used to arm). Arrow keys work under any layout, so it
+# can come before the keyboard is chosen.
+computer_for_form() {
   local status
 
   while true; do
     clear_logo
     echo
     say "Let's setup your machine..."
-    say --foreground 8 "Press Ctrl+C to prepare this machine for another owner."
+    echo
+
+    omarchy_prompt_computer_for && status=0 || status=$?
+    ((status == 0)) && break
+
+    # Esc means "back", and nothing precedes the first screen, so re-ask.
+    ((status == OMARCHY_FORM_BACK)) && continue
+    abort
+  done
+
+  case $computer_for in
+    child)
+      profile="child"
+      child_install=true
+      ;;
+    other)
+      defer_provisioning=true
+      ;;
+  esac
+}
+
+# STEP 1: KEYBOARD LAYOUT
+
+keyboard_form() {
+  local status
+
+  while true; do
+    clear_logo
+    echo
+    say "Let's setup your keyboard..."
     echo
 
     omarchy_prompt_keyboard && status=0 || status=$?
     ((status == 0)) && break
 
-    # Esc means "back", and nothing precedes the first screen, so re-ask.
+    # Esc means "back", and the first question is a one-time choice, so re-ask.
     ((status == OMARCHY_FORM_BACK)) && continue
-
-    if ((status == OMARCHY_FORM_SIGNAL)); then
-      if confirm_prepare_for_another_owner; then
-        defer_provisioning=true
-        return 0
-      fi
-      continue # declined: back to the keyboard picker
-    fi
     abort
   done
 
@@ -237,19 +259,6 @@ keyboard_form() {
   if [[ $(tty 2>/dev/null) == "/dev/tty"* ]]; then
     loadkeys "$keyboard" 2>/dev/null
   fi
-}
-
-# Ctrl+C on the first screen offers to prepare the machine for another owner.
-# Confirm it before committing, so an accidental Ctrl+C doesn't silently switch
-# the whole install.
-confirm_prepare_for_another_owner() {
-  clear_logo
-  echo
-  say "This prepares the machine for another owner."
-  say --foreground 8 "The system installs now, but setup is delayed until first boot."
-  echo
-  gum confirm --affirmative "Yes, prepare for another owner" --negative "No, keep setting up" \
-    "Prepare this machine for another owner?"
 }
 
 # The user step. Deferred-provisioning installs skip it entirely — the machine's first owner
@@ -263,40 +272,75 @@ user_form() {
   # (Ctrl+C). Both non-zero cases unwind to user_step, which decides what they
   # mean here; the form itself never aborts.
   omarchy_prompt_username || return $?
-  omarchy_prompt_password || return $?
 
-  # Hash the password with SHA-512 crypt ($6$), which is what openssl passwd offers
-  password_hash=$(printf '%s' "$password" | openssl passwd -6 -stdin)
+  if $child_install; then
+    # A child install: the kid password logs in, unlocks, and opens the disk;
+    # the parent password is root's, what sudo and system prompts ask for, and
+    # opens the disk too so a parent can always get in.
+    omarchy_prompt_password kid || return $?
+    password_hash=$(printf '%s' "$password" | openssl passwd -6 -stdin)
 
-  omarchy_prompt_identity || return $?
+    step "Let's set the parent password..."
+    say "sudo, updates, installs, and system prompts ask for this one; keep it from the kid."
+    echo
+    omarchy_prompt_parent_password || return $?
+    parent_password_hash=$(printf '%s' "$parent_password" | openssl passwd -6 -stdin)
+    # The parent-password header would otherwise sit over the screens that
+    # follow, which are about the account again.
+    step "Let's finish your user account..."
+  else
+    omarchy_prompt_password || return $?
+
+    # Hash the password with SHA-512 crypt ($6$), which is what openssl passwd offers
+    password_hash=$(printf '%s' "$password" | openssl passwd -6 -stdin)
+  fi
+
+  # Full name and email only feed git identity and the compose shortcuts, and
+  # it is a parent at the keyboard on a child install, so an answer would be
+  # theirs: a child install asks for neither.
+  if $child_install; then
+    full_name=""
+    email_address=""
+  else
+    omarchy_prompt_identity || return $?
+  fi
   omarchy_prompt_hostname || return $?
   omarchy_prompt_timezone || return $?
 }
 
-# Returns 0 on confirmed account details, or as soon as the keyboard screen
-# arms deferred provisioning.
+# Returns 0 on confirmed account details.
 user_step() {
   local status
+  # Fixed-width masks: one asterisk per character would put the passwords'
+  # lengths on the screen.
+  local mask="********" password_label="Password" parent_row=""
+  if $child_install; then
+    password_label="Kid password"
+    parent_row="Parent password,$mask"$'\n'
+  fi
 
   while true; do
     user_form && status=0 || status=$?
     if ((status != 0)); then
       # Esc unwinds to the start of the form. Ctrl+C has no side channel in the
-      # user step (only the keyboard and disk screens give it a meaning), so it
-      # keeps its long-standing behaviour of ending the install.
+      # user step (only the disk screen gives it a meaning), so it keeps its
+      # long-standing behaviour of ending the install.
       ((status == OMARCHY_FORM_BACK)) || abort
       keyboard_form
-      $defer_provisioning && return 0
       continue
+    fi
+
+    # The name and email rows, unless the form never asked (a child install).
+    local identity_rows=""
+    if ! $child_install; then
+      identity_rows="Full name,${full_name:-[Skipped]}"$'\n'"Email address,${email_address:-[Skipped]}"$'\n'
     fi
 
     # Add manual padding since gum table -p doesn't respect padding
     echo -e "Field,Value
 Username,$username
-Password,$(printf "%${#password}s" | tr ' ' '*')
-Full name,${full_name:-[Skipped]}
-Email address,${email_address:-[Skipped]}
-Hostname,$hostname
+$password_label,$mask
+${parent_row}${identity_rows}Hostname,$hostname
 Timezone,$timezone
 Keyboard,$keyboard" |
       gum table -s "," -p | sed "s/^/${PADDING_LEFT_SPACES}/"
@@ -306,7 +350,6 @@ Keyboard,$keyboard" |
       break
     else
       keyboard_form
-      $defer_provisioning && return 0
     fi
   done
 }
@@ -458,6 +501,19 @@ _EOF_
   password_hash_escaped=$(echo -n "$password_hash" | jq -Rsa)
   username_escaped=$(echo -n "$username" | jq -Rsa)
 
+  # On a child install root takes the parent hash, the kid account is created
+  # without sudo (so archinstall leaves wheel alone; omarchy-parent apply
+  # grants it sudo explicitly in the chroot), and the parent passphrase rides
+  # along so the orchestrator can add it as a second LUKS key.
+  local root_hash_escaped="$password_hash_escaped" sudo_flag="true" parent_encryption_line=""
+  if $child_install; then
+    root_hash_escaped=$(echo -n "$parent_password_hash" | jq -Rsa)
+    sudo_flag="false"
+    if [[ $encrypt_installation == true ]]; then
+      parent_encryption_line="    \"parent_encryption_password\": $(echo -n "$parent_password" | jq -Rsa),"
+    fi
+  fi
+
   local credentials_encryption_line=""
   if [[ $encrypt_installation == true ]]; then
     credentials_encryption_line="    \"encryption_password\": $password_escaped,"
@@ -466,12 +522,13 @@ _EOF_
   cat <<-_EOF_ >user_credentials.json
 {
 $credentials_encryption_line
-    "root_enc_password": $password_hash_escaped,
+$parent_encryption_line
+    "root_enc_password": $root_hash_escaped,
     "users": [
         {
             "enc_password": $password_hash_escaped,
             "groups": [],
-            "sudo": true,
+            "sudo": $sudo_flag,
             "username": $username_escaped
         }
     ]
@@ -801,6 +858,7 @@ run_partition_execute() {
     "custom_commands": [],
     "omarchy_install": {
         "mode": "protected",
+        "profile": "$profile",
         "target_mount": "/mnt",
         "boot": {
             "esp_mount": "$esp_mount_in_target",
@@ -987,8 +1045,8 @@ confirm_disk_overwrite() {
 # Decide what and how to install: sets install_target (full_disk|free_space),
 # install_target and encrypt_installation. Nothing is written to disk yet —
 # the user step runs between this and the execution below. (deferred provisioning never
-# reaches here; it's armed by Ctrl+C on the keyboard screen and goes straight to
-# disk selection.)
+# reaches here; "Another owner" at the first question goes straight to disk
+# selection.)
 select_installation() {
   local full_disk_only
 
@@ -1030,9 +1088,13 @@ select_installation() {
   done
 }
 
-# STEP 1: KEYBOARD (Ctrl+C here arms deferred provisioning and jumps to disk selection)
+# STEP 0: WHO IS THIS COMPUTER FOR ("Another owner" jumps to disk selection)
 
 defer_provisioning=false
+profile="default"
+child_install=false
+parent_password=""
+parent_password_hash=""
 install_target="full_disk"
 
 # Let the live VT reach its settled width before the first screen so the logo
@@ -1041,12 +1103,13 @@ wait_for_stable_terminal
 
 greeter
 
-keyboard_form
+computer_for_form
 
-# Normal install: keyboard (loaded above, so the LUKS passphrase is typed under
-# the right layout) → user → disk → install mode. The user step can unwind to
-# the keyboard screen and arm deferral there, hence the second check.
+# Normal install: keyboard (loaded first, so the LUKS passphrase is typed under
+# the right layout) → user → disk → install mode. "Another owner" skips both
+# personal steps.
 if ! $defer_provisioning; then
+  keyboard_form
   user_step
 fi
 
@@ -1139,6 +1202,7 @@ cat <<-_EOF_ >user_configuration.json
     "custom_commands": [],
     "omarchy_install": {
         "mode": "full_disk",
+        "profile": "$profile",
         "defer_provisioning": $defer_provisioning,
         "target_mount": "/mnt",
         "boot": {

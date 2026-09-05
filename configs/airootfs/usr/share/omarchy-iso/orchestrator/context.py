@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Any
 
 
+PROFILES = frozenset({"default", "child"})
+
+
 @dataclass
 class InstallContext:
     config_path: Path
@@ -27,6 +30,10 @@ class InstallContext:
     arch_config_path: Path
     omarchy_install: dict[str, Any]
     defer_provisioning: bool = False
+    # The install profile: "default", or "child" for kids mode, which keys
+    # the disk to a kid and a parent password and has the runtime keep root
+    # for the parent. Recorded on the target by omarchy-apply-system --profile.
+    profile: str = "default"
 
     target: Path = Path("/mnt")
     omarchy_path: Path = Path("/usr/share/omarchy")
@@ -57,6 +64,11 @@ class InstallContext:
         defer_provisioning_marker = _optional_path(os.environ.get("OMARCHY_INSTALL_DEFER_PROVISIONING_FILE"))
         defer_provisioning = bool(omarchy_install.get("defer_provisioning")) or defer_provisioning_marker is not None
         omarchy_install["defer_provisioning"] = defer_provisioning
+
+        profile = str(omarchy_install.get("profile") or "default")
+        if profile not in PROFILES:
+            raise RuntimeError(f"omarchy_install.profile must be one of {sorted(PROFILES)}, not {profile!r}")
+        omarchy_install["profile"] = profile
 
         if creds_path.exists():
             user_credentials = json.loads(creds_path.read_text())
@@ -114,6 +126,7 @@ class InstallContext:
             arch_config_path=arch_config_path,
             omarchy_install=omarchy_install,
             defer_provisioning=defer_provisioning,
+            profile=profile,
             state_dir=state_dir,
         )
         disk_config = user_configuration.get("disk_config", {})

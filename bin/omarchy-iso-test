@@ -14,6 +14,12 @@
 # Usage: omarchy-iso-test [release/omarchy.iso] [options]
 #
 #   --encrypt          Drive the encrypted install flow (default: unencrypted)
+#   --child            Answer "Child" at the first question: a kid password and
+#                      a parent password, sudo on the parent one. The run then
+#                      proves the parent password opens the disk and the login
+#                      screen into the kid's session, and bootstraps SSH from
+#                      the desktop's terminal, since child installs close the
+#                      text consoles.
 #   --provision              Drive the deferred-provisioning install flow: no user during install, the
 #                      first boot runs omarchy-provision-owner and creates it there
 #   --reuse-base       Skip the install phase if a base image already exists
@@ -49,11 +55,15 @@ SYNC_ALL=false
 
 GUEST_USER="omarchy"
 GUEST_PASSWORD="omarchy"
+# A child run types this at the parent prompts; it is then what sudo asks for.
+GUEST_PARENT_PASSWORD="omarchy-parent"
+CHILD=false
 GUEST_HOSTNAME="omarchy-test"
 
 while (($#)); do
   case "$1" in
     --encrypt) ENCRYPT=true ;;
+    --child) CHILD=true ;;
     --provision) PROVISION=true ;;
     --reuse-base) REUSE_BASE=true ;;
     --install-only) INSTALL_ONLY=true ;;
@@ -69,6 +79,31 @@ while (($#)); do
   esac
   shift
 done
+
+# A child run logs in with the parent password, at the disk and at SDDM: it
+# must land in the kid's session (the in-guest suite then checks whose it is),
+# and the kid's own password is exercised at the installer and by sudo's
+# refusal of it. A "Me" run logs in with the one password there is.
+if $CHILD; then
+  GUEST_LOGIN_PASSWORD="$GUEST_PARENT_PASSWORD"
+else
+  GUEST_LOGIN_PASSWORD="$GUEST_PASSWORD"
+fi
+
+# sudo asks for the parent password on a child install and the account's own
+# otherwise; every privileged call the harness makes goes through this one.
+if $CHILD; then
+  GUEST_SUDO_PASSWORD="$GUEST_PARENT_PASSWORD"
+else
+  GUEST_SUDO_PASSWORD="$GUEST_PASSWORD"
+fi
+
+# "Another owner" installs the default profile, so a child run cannot also
+# defer provisioning.
+if $CHILD && $PROVISION; then
+  echo "--child cannot be combined with --provision" >&2
+  exit 2
+fi
 
 if [[ -z $SYNC_DIR && -f ${OMARCHY_PATH:-}/test/acceptance ]]; then
   SYNC_DIR="$OMARCHY_PATH"
@@ -139,7 +174,7 @@ capture_console() {
 stop_vm() {
   vm_running || return 0
 
-  if ! ssh_guest "echo $GUEST_PASSWORD | sudo -S systemctl poweroff" >/dev/null 2>&1; then
+  if ! ssh_guest "echo $GUEST_SUDO_PASSWORD | sudo -S systemctl poweroff" >/dev/null 2>&1; then
     qmp '"system_powerdown"' >/dev/null
   fi
 
@@ -618,16 +653,16 @@ drive_configurator() {
   capture_console "success-installer-00-greeter"
   press ret
 
-  # Keyboard is the first screen. Ctrl+C there is the hidden entry into deferred provisioning
-  # mode; a normal install just selects the layout.
-  wait_for_screen "keyboard layout" 300
-  capture_console "success-installer-01-keyboard-layout"
+  # "Who is this computer for?" is the first screen: Me is preselected, Child
+  # one row down, Another owner two.
+  wait_for_screen "computer for" 300
+  capture_console "success-installer-01-computer-for"
 
   if $PROVISION; then
-    press ctrl-c # arm "prepare for another owner"
-    wait_for_screen "another owner" 30
-    capture_console "success-installer-02-prepare-confirm"
-    press ret # "Yes, prepare for another owner" is the affirmative default
+    press down
+    press down
+    capture_console "success-installer-02-another-owner"
+    press ret
 
     # Jumps straight to disk selection, then the overwrite confirm.
     wait_for_screen "install disk" 60
@@ -651,6 +686,14 @@ drive_configurator() {
     return 0
   fi
 
+  if $CHILD; then
+    press down
+    capture_console "success-installer-01-computer-for-child"
+  fi
+  press ret
+
+  wait_for_screen "keyboard layout" 120
+  capture_console "success-installer-02-keyboard-layout"
   press ret # English (US) is preselected
 
   # Normal flow: user step comes before disk selection.
@@ -669,15 +712,32 @@ drive_configurator() {
   capture_console "success-installer-04-password-confirmation"
   press ret
 
-  wait_for_screen "Full name" 60
-  type_text "Omarchy Test"
-  capture_console "success-installer-05-full-name"
-  press ret
+  if $CHILD; then
+    # The parent password has its own screen; its confirm names it, which tells
+    # it apart from the kid's confirm that was on screen a moment before.
+    wait_for_screen "Parent password" 60
+    type_text "$GUEST_PARENT_PASSWORD"
+    capture_console "success-installer-04a-parent-password"
+    press ret
 
-  wait_for_screen "Email address" 60
-  type_text "test@omarchy.org"
-  capture_console "success-installer-06-email"
-  press ret
+    wait_for_screen "Must match the parent" 60
+    type_text "$GUEST_PARENT_PASSWORD"
+    capture_console "success-installer-04b-parent-password-confirmation"
+    press ret
+  fi
+
+  # A child install asks for neither name nor email.
+  if ! $CHILD; then
+    wait_for_screen "Full name" 60
+    type_text "Omarchy Test"
+    capture_console "success-installer-05-full-name"
+    press ret
+
+    wait_for_screen "Email address" 60
+    type_text "test@omarchy.org"
+    capture_console "success-installer-06-email"
+    press ret
+  fi
 
   wait_for_screen "Hostname" 60
   type_text "$GUEST_HOSTNAME"
@@ -754,19 +814,34 @@ drive_provision_owner() {
   type_text "$GUEST_PASSWORD"
   press ret
 
-  wait_for_screen "Full name" 60
-  type_text "Omarchy Test"
-  press ret
+  if $CHILD; then
+    wait_for_screen "Parent password" 60
+    type_text "$GUEST_PARENT_PASSWORD"
+    capture_console "success-provision-03a-parent-password"
+    press ret
 
-  wait_for_screen "Email address" 60
-  # The keyboard step above applied English (UK), where '@' is Shift+' (not
-  # Shift+2 as on US); send that keycode so the typed email is correct under
-  # the new layout — itself further proof the deferred keymap took effect.
-  type_text "test"
-  press shift-apostrophe
-  type_text "omarchy.org"
-  capture_console "success-provision-04-email"
-  press ret
+    wait_for_screen "Must match the parent" 60
+    type_text "$GUEST_PARENT_PASSWORD"
+    press ret
+  fi
+
+  # A child install asks for neither name nor email, so a child run goes
+  # without the '@' keymap proof below.
+  if ! $CHILD; then
+    wait_for_screen "Full name" 60
+    type_text "Omarchy Test"
+    press ret
+
+    wait_for_screen "Email address" 60
+    # The keyboard step above applied English (UK), where '@' is Shift+' (not
+    # Shift+2 as on US); send that keycode so the typed email is correct under
+    # the new layout — itself further proof the deferred keymap took effect.
+    type_text "test"
+    press shift-apostrophe
+    type_text "omarchy.org"
+    capture_console "success-provision-04-email"
+    press ret
+  fi
 
   # Hostname is deferred to first boot too.
   wait_for_screen "Hostname" 60
@@ -846,12 +921,12 @@ wait_for_install() {
 unlock_luks() {
   log "Typing the LUKS passphrase until boot proceeds"
 
-  local waited=0
+  local waited=0 screen
   sleep 10
   capture_console "success-first-boot-01-luks-prompt"
 
   while true; do
-    type_text "$GUEST_PASSWORD"
+    type_text "$GUEST_LOGIN_PASSWORD"
     if ((waited == 0)); then
       capture_console "success-first-boot-02-luks-passphrase"
     fi
@@ -859,10 +934,21 @@ unlock_luks() {
     sleep 20
     ((waited += 30))
 
-    press ctrl-alt-f3
-    sleep 3
-    if ocr_screen | grep -qi "login:"; then
-      return 0
+    if $CHILD; then
+      # Child installs close the text consoles, so the sign that the disk
+      # opened is the passphrase prompt leaving the screen. ocr_screen says
+      # nothing at all when the screendump or the conversion fails, which
+      # would otherwise read as a prompt that has gone.
+      screen=$(ocr_screen)
+      if [[ -n $screen ]] && ! grep -qi "passphrase" <<<"$screen"; then
+        return 0
+      fi
+    else
+      press ctrl-alt-f3
+      sleep 3
+      if ocr_screen | grep -qi "login:"; then
+        return 0
+      fi
     fi
 
     if ((waited >= 300)); then
@@ -876,6 +962,11 @@ unlock_luks() {
 # Log into a spare console TTY as the user and authorize the harness SSH key —
 # the same thing a person would do to give themselves remote access.
 bootstrap_ssh() {
+  if $CHILD; then
+    bootstrap_ssh_desktop
+    return
+  fi
+
   log "Authorizing SSH access via console login"
 
   mkdir -p "$BASE_DIR/www"
@@ -883,8 +974,8 @@ bootstrap_ssh() {
 mkdir -p ~/.ssh && chmod 700 ~/.ssh
 echo "$(cat "$SSH_KEY.pub")" >>~/.ssh/authorized_keys
 chmod 600 ~/.ssh/authorized_keys
-echo "$GUEST_PASSWORD" | sudo -S ufw allow from 10.0.2.2 to any port 22 proto tcp
-echo "$GUEST_PASSWORD" | sudo -S systemctl enable --now sshd.service
+echo "$GUEST_SUDO_PASSWORD" | sudo -S ufw allow from 10.0.2.2 to any port 22 proto tcp
+echo "$GUEST_SUDO_PASSWORD" | sudo -S systemctl enable --now sshd.service
 EOF
 
   (cd "$BASE_DIR/www" && exec python3 -m http.server "$HTTP_PORT" --bind 127.0.0.1 >/dev/null 2>&1) &
@@ -925,6 +1016,63 @@ EOF
   return 1
 }
 
+# A child install closes the text consoles, so the harness does what a parent
+# would: log in at SDDM with the parent password (an encrypted install has
+# autologged in after the disk), open the terminal with Super+Return, and run
+# the bootstrap there. SSH coming up as the kid is the proof that the parent
+# password opened the kid's session.
+bootstrap_ssh_desktop() {
+  log "Authorizing SSH access from the desktop (the parent password at the login screen)"
+
+  mkdir -p "$BASE_DIR/www"
+  cat >"$BASE_DIR/www/bootstrap" <<EOF
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+echo "$(cat "$SSH_KEY.pub")" >>~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+echo "$GUEST_SUDO_PASSWORD" | sudo -S ufw allow from 10.0.2.2 to any port 22 proto tcp
+echo "$GUEST_SUDO_PASSWORD" | sudo -S systemctl enable --now sshd.service
+EOF
+
+  (cd "$BASE_DIR/www" && exec python3 -m http.server "$HTTP_PORT" --bind 127.0.0.1 >/dev/null 2>&1) &
+  HTTP_PID=$!
+
+  sleep 30 # first boot reaches SDDM, or the desktop on an encrypted install
+  local attempt
+  for attempt in 1 2 3; do
+    if ! $ENCRYPT; then
+      capture_console "success-first-boot-03-login-screen"
+      type_text "$GUEST_LOGIN_PASSWORD"
+      press ret
+      sleep 25
+    fi
+    capture_console "success-first-boot-04-desktop"
+    press meta_l-ret # the terminal
+    sleep 8
+    type_text "curl -fsS http://10.0.2.2:$HTTP_PORT/bootstrap -o /tmp/bs && bash /tmp/bs && exit"
+    capture_console "success-first-boot-05-bootstrap-command"
+    press ret
+
+    if wait_for_ssh 120 "failure-first-boot-ssh-timeout-$attempt"; then
+      capture_console "success-first-boot-06-bootstrap-complete"
+      kill "$HTTP_PID" 2>/dev/null || true
+      HTTP_PID=""
+      local who
+      who=$(ssh_guest whoami 2>/dev/null | tr -d '\r\n') || who=""
+      if [[ $who != "$GUEST_USER" ]]; then
+        echo "The parent password opened a session for '${who:-<none>}', expected the kid account '$GUEST_USER'" >&2
+        return 1
+      fi
+      log "the parent password opened the kid's session ($who)"
+      return 0
+    fi
+    press esc
+    sleep 5
+  done
+
+  echo "Desktop bootstrap did not produce SSH access after 3 attempts" >&2
+  return 1
+}
+
 # Get a freshly booted system to a running Hyprland session, typing at the
 # LUKS prompt and/or SDDM greeter exactly like a user would.
 establish_session() {
@@ -933,7 +1081,7 @@ establish_session() {
     sleep 10
     capture_console "success-session-01-luks-prompt"
     until ssh_guest true 2>/dev/null; do
-      type_text "$GUEST_PASSWORD"
+      type_text "$GUEST_LOGIN_PASSWORD"
       if ((waited == 0)); then
         capture_console "success-session-02-luks-passphrase"
       fi
@@ -960,7 +1108,7 @@ establish_session() {
       if ((waited == 0)); then
         capture_console "success-session-01-login"
       fi
-      type_text "$GUEST_PASSWORD"
+      type_text "$GUEST_LOGIN_PASSWORD"
       if ((waited == 0)); then
         capture_console "success-session-02-password"
       fi
@@ -1054,9 +1202,9 @@ install_phase() {
     capture_console "success-provision-09-handoff"
   fi
 
-  ssh_guest "echo $GUEST_PASSWORD | sudo -S cat /var/log/omarchy-install-timing.json 2>/dev/null" \
+  ssh_guest "echo $GUEST_SUDO_PASSWORD | sudo -S cat /var/log/omarchy-install-timing.json 2>/dev/null" \
     >"$RUN_DIR/omarchy-install-timing.json" 2>/dev/null || true
-  ssh_guest "echo $GUEST_PASSWORD | sudo -S cat /var/log/pacman.log 2>/dev/null" \
+  ssh_guest "echo $GUEST_SUDO_PASSWORD | sudo -S cat /var/log/pacman.log 2>/dev/null" \
     >"$RUN_DIR/pacman.log" 2>/dev/null || true
 
   log "Installed system is up. Saving base image."
@@ -1101,11 +1249,12 @@ acceptance_phase() {
   # finished product, never a dev-linked checkout.
   log "Running acceptance suite"
   ssh_guest "OMARCHY_PATH=/usr/share/omarchy OMARCHY_ACCEPTANCE_DIR=/tmp/omarchy-acceptance \
-    OMARCHY_ACCEPTANCE_SUDO_PASSWORD=$GUEST_PASSWORD bash .local/share/omarchy/test/acceptance" || status=$?
+    OMARCHY_ACCEPTANCE_SUDO_PASSWORD=$GUEST_SUDO_PASSWORD OMARCHY_ACCEPTANCE_USER_PASSWORD=$GUEST_PASSWORD \
+    bash .local/share/omarchy/test/acceptance" || status=$?
 
   log "Collecting artifacts into $RUN_DIR"
   ssh_guest "tar -C /tmp -cf - omarchy-acceptance 2>/dev/null" | tar -C "$RUN_DIR" -xf - || true
-  ssh_guest "echo $GUEST_PASSWORD | sudo -S cat /var/log/omarchy-install.log 2>/dev/null" >"$RUN_DIR/omarchy-install.log" 2>/dev/null || true
+  ssh_guest "echo $GUEST_SUDO_PASSWORD | sudo -S cat /var/log/omarchy-install.log 2>/dev/null" >"$RUN_DIR/omarchy-install.log" 2>/dev/null || true
   if ((status == 0)); then
     capture_console "success-acceptance-final"
   else

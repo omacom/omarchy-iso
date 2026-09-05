@@ -921,7 +921,7 @@ wait_for_install() {
 unlock_luks() {
   log "Typing the LUKS passphrase until boot proceeds"
 
-  local waited=0
+  local waited=0 screen
   sleep 10
   capture_console "success-first-boot-01-luks-prompt"
 
@@ -936,17 +936,19 @@ unlock_luks() {
 
     if $CHILD; then
       # Child installs close the text consoles, so the sign that the disk
-      # opened is the passphrase prompt leaving the screen.
-      if ! ocr_screen | grep -qi "passphrase"; then
+      # opened is the passphrase prompt leaving the screen. ocr_screen says
+      # nothing at all when the screendump or the conversion fails, which
+      # would otherwise read as a prompt that has gone.
+      screen=$(ocr_screen)
+      if [[ -n $screen ]] && ! grep -qi "passphrase" <<<"$screen"; then
         return 0
       fi
-      continue
-    fi
-
-    press ctrl-alt-f3
-    sleep 3
-    if ocr_screen | grep -qi "login:"; then
-      return 0
+    else
+      press ctrl-alt-f3
+      sleep 3
+      if ocr_screen | grep -qi "login:"; then
+        return 0
+      fi
     fi
 
     if ((waited >= 300)); then

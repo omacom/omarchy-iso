@@ -52,6 +52,10 @@ list_vms() {
   done
 }
 
+create_vm() {
+  exec "$SCRIPT_DIR/omarchy-iso-boot" "$@"
+}
+
 boot_vm() {
   local name=""
   local boot_args=()
@@ -133,6 +137,9 @@ command="${1:-}"
 [[ $# -gt 0 ]] && shift
 
 case "$command" in
+  create)
+    create_vm "$@"
+    ;;
   save)
     save_vm "${1:-}"
     ;;
@@ -147,13 +154,15 @@ case "$command" in
       "$(gum style --bold 'omarchy-vm') - VM snapshot manager" \
       "" \
       "$(gum style --foreground 245 'Commands:')" \
+      "  create [options] [iso]      Create and boot a new VM" \
       "  save [name]                 Save current active VM" \
       "  boot [name] [boot-options]  Boot saved VM (interactive if no name)" \
       "  list                        List available VMs" \
       "" \
-      "$(gum style --foreground 245 'Boot options:')" \
+      "$(gum style --foreground 245 'Create/boot options:')" \
       "  --ssh-port PORT   Forward host PORT to guest SSH (default: 2222)" \
       "  --ssh-host HOST   Host address for SSH forwarding (default: 127.0.0.1)" \
+      "  --cidata-dir DIR  Autoinstall config directory for unattended installs" \
       "  --disk PATH       Active disk path, useful for parallel VMs" \
       "  --ovmf-vars PATH  Active OVMF vars path, useful for parallel VMs" \
       "  --no-network      Boot without a virtual NIC" \

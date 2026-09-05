@@ -36,7 +36,13 @@ The shipped ISO installs itself with no keyboard when it finds its configuration
 
 ### Configuration files
 
-These are the configurator's own output files, so the way to get a starting set is to run one interactive install and copy what it wrote into `/root`.
+These are the configurator's own output files. Generate them with:
+
+```bash
+./bin/omarchy-iso-configurator --output-dir cidata
+```
+
+The other way to get a starting set is to run one interactive install and copy what it wrote into `/root`.
 
 | File | Required | Purpose |
 |------|----------|---------|
@@ -65,8 +71,6 @@ When `tailscale_authkey` is present (one key, blank lines and `#` comments ignor
 ### Building the drive
 
 ```bash
-mkdir cidata
-cp user_configuration.json user_credentials.json authorized_keys cidata/
 genisoimage -output cidata.iso -volid cidata -joliet -rock cidata/
 ```
 
@@ -92,7 +96,14 @@ Encrypted autoinstalls are not fully unattended — the LUKS passphrase prompt s
 
 ## Testing the ISO
 
-Run `./bin/omarchy-iso-boot [release/omarchy.iso]`.
+Run `./bin/omarchy-iso-boot [release/omarchy.iso]`. To perform an unattended
+installation and provision SSH for the installed user, generate the
+configurator files and attach their directory:
+
+```bash
+./bin/omarchy-iso-configurator --output-dir cidata
+./bin/omarchy-iso-boot --cidata-dir cidata release/omarchy.iso
+```
 
 Run `./test/all` for the fast, VM-free tests under `test/unit/`, which cover cidata autoinstall loading and the orchestrator's phases without needing a built ISO.
 

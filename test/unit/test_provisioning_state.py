@@ -8,6 +8,7 @@ subprocess mocked out.
 
 import json
 import os
+import platform
 import sys
 import tempfile
 import types
@@ -184,10 +185,15 @@ class StageProvisioningStateTest(unittest.TestCase):
         info_patch.start()
         self.addCleanup(info_patch.stop)
 
-        # A fake bundled Node tarball on the "live ISO".
+        # A fake bundled Node tarball on the "live ISO". Named for the running
+        # architecture, because that is what _stage_node_tarball globs for --
+        # an x64 name here would make this suite pass only on x86_64.
         self.packages = Path(self.tmp.name) / "opt-packages"
         self.packages.mkdir()
-        (self.packages / "node-v24.0.0-linux-x64.tar.gz").write_bytes(b"node")
+        self.node_tarball = (
+            f"node-v24.0.0-linux-{phases_impl.NODE_ARCH_TOKENS[platform.machine()]}.tar.gz"
+        )
+        (self.packages / self.node_tarball).write_bytes(b"node")
         node_patch = mock.patch.object(phases_impl, "NODE_PACKAGES_DIR", self.packages)
         node_patch.start()
         self.addCleanup(node_patch.stop)
@@ -207,7 +213,7 @@ class StageProvisioningStateTest(unittest.TestCase):
         ctx = make_ctx(self.target, defer_provisioning=False)
         phases_impl.stage_provisioning_state(ctx)
 
-        self.assertTrue((self.provisioning_dir() / "packages/node-v24.0.0-linux-x64.tar.gz").exists())
+        self.assertTrue((self.provisioning_dir() / "packages" / self.node_tarball).exists())
         self.assertFalse((self.provisioning_dir() / "pending").exists())
         self.assertFalse((self.target / "etc/systemd/system/omarchy-provision-owner.service").exists())
 

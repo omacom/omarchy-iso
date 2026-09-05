@@ -8,6 +8,17 @@ LOCAL_OMARCHY_PATH=""
 LOCAL_PKGS_PATH=""
 while [[ $# -gt 0 ]]; do
   case $1 in
+  --arch)
+    OMARCHY_ARCH="${2:-}"
+    case $OMARCHY_ARCH in
+    x86_64 | aarch64) ;;
+    *)
+      echo "Error: --arch must be x86_64 or aarch64" >&2
+      exit 1
+      ;;
+    esac
+    shift 2
+    ;;
   --no-cache)
     NO_CACHE=1
     shift
@@ -57,7 +68,7 @@ while [[ $# -gt 0 ]]; do
     ;;
   *)
     echo "Unknown option: $1"
-    echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
+    echo "Usage: $0 [--arch x86_64|aarch64] [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
     exit 1
     ;;
   esac
@@ -119,12 +130,33 @@ mkdir -p "$BUILD_RELEASE_PATH"
 
 OMARCHY_ISO_REF="${OMARCHY_ISO_REF:-quattro}"
 OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
+OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
+
+# Vanilla Arch is x86_64-only, so aarch64 builds run against Arch Linux ARM.
+# Building aarch64 on an x86_64 host works through binfmt/QEMU but is slow;
+# a native arm64 host is much faster.
+case $OMARCHY_ARCH in
+aarch64)
+  BUILD_IMAGE="menci/archlinuxarm:base-devel"
+  BUILD_PLATFORM="linux/arm64"
+  ;;
+*)
+  BUILD_IMAGE="archlinux/archlinux:latest"
+  BUILD_PLATFORM="linux/amd64"
+  ;;
+esac
 
 DOCKER_ARGS=(
   --rm
   --privileged
+  --platform "$BUILD_PLATFORM"
   -e "OMARCHY_ISO_REF=$OMARCHY_ISO_REF"
   -e "OMARCHY_MIRROR=$OMARCHY_MIRROR"
+  -e "OMARCHY_ARCH=$OMARCHY_ARCH"
+  -e "OMARCHY_PKGS_MIRROR=${OMARCHY_PKGS_MIRROR:-}"
+  -e "OMARCHY_TARGET_PKGS_MIRROR=${OMARCHY_TARGET_PKGS_MIRROR:-}"
+  -e "OMARCHY_BASE_MIRROR=${OMARCHY_BASE_MIRROR:-}"
+  -e "OMARCHY_EXTRA_PKGBUILDS=${OMARCHY_EXTRA_PKGBUILDS:-}"
   -e "OMARCHY_INSTALL_DEBUG=${OMARCHY_INSTALL_DEBUG:-}"
   -e "HOST_UID=$(id -u)"
   -e "HOST_GID=$(id -g)"
@@ -148,8 +180,10 @@ fi
 
 # Mount the build cache directory where packages are downloaded. Channels use
 # different package snapshots and must never share an offline mirror cache.
+# Architectures must not share one either: the cached packages are arch-specific,
+# so a shared key would let an aarch64 build consume x86_64 packages and vice versa.
 if [[ -z "$NO_CACHE" ]]; then
-  OFFLINE_REPO_BUILD_CACHE_DIR="$HOME/.cache/omarchy/iso_${OMARCHY_MIRROR}/airootfs/var/cache/omarchy"
+  OFFLINE_REPO_BUILD_CACHE_DIR="$HOME/.cache/omarchy/iso_${OMARCHY_MIRROR}_${OMARCHY_ARCH}/airootfs/var/cache/omarchy"
   mkdir -p "$OFFLINE_REPO_BUILD_CACHE_DIR"
   DOCKER_ARGS+=(-v "$OFFLINE_REPO_BUILD_CACHE_DIR:/var/cache/airootfs/var/cache/omarchy")
 else
@@ -166,7 +200,7 @@ if ! docker version &>/dev/null; then
   DOCKER=(sudo docker)
 fi
 
-"${DOCKER[@]}" run "${DOCKER_ARGS[@]}" archlinux/archlinux:latest /$BUILD_SCRIPT
+"${DOCKER[@]}" run "${DOCKER_ARGS[@]}" "$BUILD_IMAGE" /$BUILD_SCRIPT
 
 latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*.iso | head -n1)
 iso_ref="${latest_iso%.*}-$OMARCHY_ISO_REF.iso"

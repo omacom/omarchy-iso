@@ -1,0 +1,159 @@
+#!/bin/bash
+#
+# Boot smoke test: does the ISO actually reach a live environment?
+#
+# Sits between test/unit (fast, VM-free) and test/integration (installs to a
+# disk and drives scenarios over SSH). This boots the ISO headless, reads the
+# serial console, and asserts userspace comes up off the squashfs. Nothing is
+# installed and no disk is touched.
+#
+# It exists because an ISO can build cleanly, pass every structural check, and
+# still fail to boot. Both of these shipped during the aarch64 port:
+#
+#   * an initramfs with no archiso hook, which panics with no root
+#   * a zstd-compressed root that the ISO's own kernel cannot decompress,
+#     because Arch Linux ARM builds without CONFIG_SQUASHFS_ZSTD
+#
+# Neither is visible from outside the image; both are obvious two seconds into
+# a boot.
+#
+# Usage: test/qemu-boot [release/omarchy.iso] [--timeout SECS] [--keep-log]
+#
+# aarch64 needs UEFI firmware that Arch Linux ARM does not package. Stage it
+# from Debian's architecture-independent qemu-efi-aarch64 into
+# ~/.local/share/aavmf (override with OMARCHY_AAVMF_DIR). See docs/alarm-iso.md.
+
+set -uo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+
+ISO=""
+TIMEOUT=300
+KEEP_LOG=false
+
+while (($#)); do
+  case "$1" in
+  --timeout) TIMEOUT="$2"; shift ;;
+  --keep-log) KEEP_LOG=true ;;
+  -*) echo "Unknown option: $1" >&2; exit 1 ;;
+  *) ISO="$1" ;;
+  esac
+  shift
+done
+
+pass() { printf 'ok - %s\n' "$1"; }
+fail() {
+  printf 'not ok - %s\n' "$1" >&2
+  [[ -n ${2:-} ]] && printf '%s\n' "$2" >&2
+  printf '\nserial log: %s\n' "$LOG" >&2
+  exit 1
+}
+
+[[ -n $ISO ]] || ISO=$(\ls -t "$ROOT"/release/*.iso 2>/dev/null | head -n1 || true)
+[[ -n $ISO && -f $ISO ]] || { echo "No ISO found; pass one explicitly." >&2; exit 1; }
+
+case "${ISO##*/}" in
+*aarch64*)
+  QEMU=qemu-system-aarch64
+  FW_DIR="${OMARCHY_AAVMF_DIR:-$HOME/.local/share/aavmf}"
+  CODE="$FW_DIR/AAVMF_CODE.no-secboot.fd"
+  VARS_TEMPLATE="$FW_DIR/AAVMF_VARS.fd"
+  MACHINE=(-machine virt -cpu max)
+  ;;
+*x86_64*)
+  QEMU=qemu-system-x86_64
+  FW_DIR="${OMARCHY_OVMF_DIR:-/usr/share/edk2/x64}"
+  CODE="$FW_DIR/OVMF_CODE.4m.fd"
+  VARS_TEMPLATE="$FW_DIR/OVMF_VARS.4m.fd"
+  MACHINE=(-machine q35 -cpu max)
+  # Same-arch guests can use KVM when the host exposes it.
+  [[ -w /dev/kvm ]] && MACHINE+=(-enable-kvm)
+  ;;
+*) echo "Cannot determine architecture from ${ISO##*/}" >&2; exit 1 ;;
+esac
+
+command -v "$QEMU" >/dev/null || { echo "$QEMU not installed" >&2; exit 1; }
+[[ -f $CODE ]] || { echo "UEFI firmware missing: $CODE" >&2; exit 1; }
+
+# aarch64 on an ARM host still runs under TCG wherever EL2 is taken by another
+# hypervisor (Snapdragon's Gunyah, for one), so the default timeout is generous.
+[[ -w /dev/kvm ]] || echo "note: no KVM; running under emulation, this is slow"
+
+LOG=$(mktemp /tmp/omarchy-qemu-boot-XXXXXX.log)
+VARS=$(mktemp /tmp/omarchy-qemu-vars-XXXXXX.fd)
+cp -f "$VARS_TEMPLATE" "$VARS"
+
+cleanup() {
+  rm -f "$VARS"
+  $KEEP_LOG || rm -f "$LOG"
+}
+trap cleanup EXIT
+
+echo "==> booting ${ISO##*/} (timeout ${TIMEOUT}s)"
+
+timeout "$TIMEOUT" "$QEMU" \
+  "${MACHINE[@]}" \
+  -m 4096 -smp 4 \
+  -drive "if=pflash,format=raw,unit=0,file=$CODE,readonly=on" \
+  -drive "if=pflash,format=raw,unit=1,file=$VARS" \
+  -drive "if=none,id=iso,format=raw,readonly=on,file=$ISO" \
+  -device virtio-blk-pci,drive=iso,bootindex=0 \
+  -device virtio-rng-pci \
+  -nographic </dev/null >"$LOG" 2>&1 &
+qemu_pid=$!
+
+# Watch the log as it fills rather than waiting the full timeout: a failure
+# marker is conclusive the moment it appears.
+FATAL='Kernel panic|Failed to mount|Falling back to interactive prompt|not supported|Attempted to kill init|No working init'
+READY='Reached target|Welcome to|omarchy-iso|configurator|login:'
+
+deadline=$((SECONDS + TIMEOUT))
+outcome=timeout
+while ((SECONDS < deadline)); do
+  kill -0 "$qemu_pid" 2>/dev/null || { outcome=exited; break; }
+  if grep -qE "$FATAL" "$LOG" 2>/dev/null; then outcome=fatal; break; fi
+  if grep -qE "$READY" "$LOG" 2>/dev/null; then outcome=ready; break; fi
+  sleep 2
+done
+
+kill "$qemu_pid" 2>/dev/null
+wait "$qemu_pid" 2>/dev/null
+
+# --- assertions ------------------------------------------------------------
+
+grep -q 'BdsDxe: starting' "$LOG" 2>/dev/null ||
+  fail "firmware started a boot entry" "$(tail -20 "$LOG")"
+pass "firmware started a boot entry"
+
+grep -qiE 'GRUB|grub_|Booting a command list|Loading Linux' "$LOG" 2>/dev/null ||
+  fail "bootloader ran" "$(tail -20 "$LOG")"
+pass "bootloader ran"
+
+# The kernel boots with `quiet splash`, so its own messages never reach the
+# serial console. Output from the initramfs is the evidence that it ran at all.
+grep -qE 'Linux version|Booting Linux|/run/archiso|archiso|Falling back to interactive' "$LOG" 2>/dev/null ||
+  fail "kernel started" "no kernel or initramfs output; the bootloader may not have handed off:
+$(tail -20 "$LOG")"
+pass "kernel started"
+
+# Checked before the generic failure scan: it names the cause exactly, and the
+# generic scan would otherwise report it as an unexplained mount failure.
+if grep -qE 'Filesystem uses "[a-z0-9]+" compression' "$LOG" 2>/dev/null; then
+  comp=$(grep -oE 'Filesystem uses "[a-z0-9]+"' "$LOG" | head -1 | grep -oE '"[a-z0-9]+"')
+  fail "root filesystem is mountable by this ISO's own kernel" \
+    "squashfs is compressed with ${comp:-?}, which this kernel cannot decompress.
+Set airootfs_image_tool_options in configs/profiledef.sh to a supported
+compressor for this architecture (check CONFIG_SQUASHFS_* in the kernel)."
+fi
+
+if [[ $outcome == fatal ]]; then
+  fail "reached a live environment" "$(grep -nE "$FATAL" "$LOG" | head -5)"
+fi
+pass "root filesystem mounted"
+
+[[ $outcome == ready ]] ||
+  fail "reached a live environment" "no readiness marker within ${TIMEOUT}s; last lines:
+$(tail -20 "$LOG")"
+pass "reached a live environment"
+
+echo "==> ok"

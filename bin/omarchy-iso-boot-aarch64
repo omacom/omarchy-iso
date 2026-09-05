@@ -1,0 +1,73 @@
+#!/bin/bash
+#
+# Boot an aarch64 Omarchy ISO in QEMU under UEFI.
+#
+# The x86_64 counterpart is bin/omarchy-iso-boot, which hardcodes
+# qemu-system-x86_64 and OVMF. This is the ARM equivalent, kept separate until
+# plans/aarch64-support.md item 9 folds both into one arch-aware script.
+#
+# Firmware: Arch Linux ARM does not package edk2-armvirt, so AAVMF is staged
+# from Debian's architecture-independent qemu-efi-aarch64 package into
+# ~/.local/share/aavmf. See docs/alarm-iso.md.
+#
+# No KVM here: on Snapdragon X the Gunyah hypervisor owns EL2 and Linux runs at
+# EL1, so this is TCG emulation and boots slowly even on an ARM host.
+#
+# Usage: omarchy-iso-boot-aarch64 [release/omarchy.iso] [--serial] [--memory MB]
+
+set -euo pipefail
+
+FW_DIR="${OMARCHY_AAVMF_DIR:-$HOME/.local/share/aavmf}"
+CODE="$FW_DIR/AAVMF_CODE.no-secboot.fd"
+VARS_TEMPLATE="$FW_DIR/AAVMF_VARS.fd"
+VARS="/tmp/omarchy-aavmf-vars.fd"
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+ISO=""
+MEMORY=4096
+SERIAL=false
+
+while (($#)); do
+  case "$1" in
+  --serial) SERIAL=true ;;
+  --memory) MEMORY="$2"; shift ;;
+  -*) echo "Unknown option: $1" >&2; exit 1 ;;
+  *) ISO="$1" ;;
+  esac
+  shift
+done
+
+[[ -n $ISO ]] || ISO=$(\ls -t "$ROOT"/release/*.iso 2>/dev/null | head -n1 || true)
+[[ -n $ISO && -f $ISO ]] || { echo "No ISO found; pass one explicitly." >&2; exit 1; }
+
+command -v qemu-system-aarch64 >/dev/null ||
+  { echo "qemu-system-aarch64 not installed: sudo pacman -S qemu-system-aarch64 qemu-ui-gtk" >&2; exit 1; }
+[[ -f $CODE ]] ||
+  { echo "UEFI firmware missing at $CODE" >&2; exit 1; }
+
+# The vars store is written to, so never hand QEMU the pristine template.
+cp -f "$VARS_TEMPLATE" "$VARS"
+
+args=(
+  -machine virt
+  -cpu max
+  -m "$MEMORY"
+  -smp 4
+  -drive "if=pflash,format=raw,unit=0,file=$CODE,readonly=on"
+  -drive "if=pflash,format=raw,unit=1,file=$VARS"
+  # The ISO is a hybrid image with its own GPT, so it is attached as a plain
+  # disk rather than a CD -- which is also how the USB stick presents it.
+  -drive "if=none,id=iso,format=raw,readonly=on,file=$ISO"
+  -device virtio-blk-pci,drive=iso,bootindex=0
+  -device virtio-rng-pci
+)
+
+if $SERIAL; then
+  # Headless: GRUB and the kernel both talk to the virt machine's PL011.
+  args+=(-nographic)
+else
+  args+=(-device virtio-gpu-pci -display gtk -serial mon:stdio)
+fi
+
+echo "Booting ${ISO##*/} (TCG, no KVM — expect this to be slow)"
+exec qemu-system-aarch64 "${args[@]}"

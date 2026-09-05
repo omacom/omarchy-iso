@@ -1,0 +1,7 @@
+# HTTPS endpoints verified across core, extra, and alarm. The CDN gives global
+# reach; the remaining mirrors provide independent European and US fallbacks.
+Server = https://cdnmirror.com/archlinuxarm/$arch/$repo
+Server = https://mirrors.dotsrc.org/archlinuxarm/$arch/$repo
+Server = https://de3.mirror.archlinuxarm.org/$arch/$repo
+Server = https://ca.us.mirror.archlinuxarm.org/$arch/$repo
+Server = https://fl.us.mirror.archlinuxarm.org/$arch/$repo

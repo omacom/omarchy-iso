@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "description": "AArch64 UEFI platform boot and kernel requirements. A DTB override is only declared when firmware does not provide Linux with a usable hardware description.",
+  "platforms": [
+    {
+      "id": "lenovo-yoga-slim7x",
+      "name": "Lenovo Yoga Slim 7x",
+      "match": [
+        {
+          "sys_vendor": "LENOVO",
+          "product_name": "83ED"
+        }
+      ],
+      "boot": {
+        "hardware_description": "dtb-override",
+        "dtb": "qcom/x1e80100-lenovo-yoga-slim7x.dtb",
+        "kernel_cmdline": [
+          "rd.udev.event_timeout=5",
+          "clk_ignore_unused",
+          "pd_ignore_unused",
+          "cma=128M",
+          "efi=noruntime",
+          "console=tty0"
+        ]
+      },
+      "kernel": {
+        "package": "linux-aarch64",
+        "availability": "iso"
+      },
+      "initramfs": {
+        "modules": [
+          "sbsa_gwdt",
+          "msm",
+          "dispcc-x1e80100",
+          "gpucc-x1e80100",
+          "phy-qcom-edp",
+          "ps883x",
+          "qrtr",
+          "pmic_glink",
+          "pmic_glink_altmode",
+          "ucsi_glink",
+          "i2c_hid_of",
+          "hid_multitouch",
+          "hid_lenovo",
+          "gpio_keys"
+        ],
+        "files": [
+          "/usr/lib/firmware/qcom/gen70500_sqe.fw",
+          "/usr/lib/firmware/qcom/gen70500_gmu.bin",
+          "/usr/lib/firmware/qcom/x1e80100/LENOVO/83ED/qcdxkmsuc8380.mbn"
+        ]
+      },
+      "packages": [
+        "linux-firmware-qcom"
+      ]
+    },
+    {
+      "id": "nvidia-dgx-spark",
+      "name": "NVIDIA DGX Spark",
+      "match": [
+        {
+          "sys_vendor": "NVIDIA",
+          "product_name": "NVIDIA_DGX_Spark"
+        }
+      ],
+      "boot": {
+        "hardware_description": "firmware",
+        "kernel_cmdline": []
+      },
+      "kernel": {
+        "package": "linux-aarch64",
+        "availability": "iso"
+      },
+      "packages": [
+        "linux-aarch64-headers",
+        "linux-firmware-nvidia",
+        "nvidia-open-dkms",
+        "nvidia-utils",
+        "nvidia-container-toolkit"
+      ]
+    },
+    {
+      "id": "asus-ascent-gx10",
+      "name": "ASUS Ascent GX10",
+      "match": [
+        {
+          "sys_vendor": "ASUSTeK COMPUTER INC.",
+          "product_name": "GX10"
+        }
+      ],
+      "boot": {
+        "hardware_description": "firmware",
+        "kernel_cmdline": []
+      },
+      "kernel": {
+        "package": "linux-aarch64",
+        "availability": "iso"
+      },
+      "packages": [
+        "linux-aarch64-headers",
+        "linux-firmware-nvidia",
+        "nvidia-open-dkms",
+        "nvidia-utils",
+        "nvidia-container-toolkit"
+      ]
+    }
+  ]
+}

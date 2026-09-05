@@ -6,10 +6,46 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+# Limine ships every architecture's EFI binary in one package, so the right one
+# has to be chosen rather than assumed. The live ISO installs to the machine it
+# is running on, so the running architecture is the target's.
+#
+# Getting this wrong does not fail loudly. BOOTX64.EFI exists on aarch64 too,
+# so an x86_64 loader would be copied onto an ARM64 ESP and the install would
+# report success while producing a system the firmware cannot boot.
+#
+# First element is the name limine ships; second is what the copy is called on
+# the ESP.
+_EFI_NAMES = {
+    "x86_64": ("BOOTX64.EFI", "limine_x64.efi"),
+    "aarch64": ("BOOTAA64.EFI", "limine_aa64.efi"),
+}
+
+
+def _efi_names() -> tuple[str, str]:
+    machine = platform.machine()
+    try:
+        return _EFI_NAMES[machine]
+    except KeyError:
+        raise RuntimeError(
+            f"no limine EFI binary is mapped for architecture {machine!r}"
+        ) from None
+
+
+def efi_source_name() -> str:
+    """The limine binary to copy, as shipped in /usr/share/limine."""
+    return _efi_names()[0]
+
+
+def efi_binary_name() -> str:
+    """What that binary is called once copied onto the ESP."""
+    return _efi_names()[1]
 
 
 @dataclass
@@ -184,7 +220,7 @@ def _default_omarchy_install(user_configuration: dict) -> dict[str, Any]:
         "boot": {
             "esp_mount": "/boot",
             "esp_path": "/EFI/limine",
-            "efi_binary": "limine_x64.efi",
+            "efi_binary": efi_binary_name(),
             "enable_fallback": mode == "full_disk",
         },
         "storage": {},

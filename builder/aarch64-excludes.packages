@@ -1,0 +1,83 @@
+# Packages excluded from aarch64 builds.
+#
+# Omarchy's package lists are written for x86_64. Most entries here are hardware
+# or platform support that cannot exist on ARM; a smaller group is software Arch
+# Linux ARM simply does not carry. Anything listed is dropped before the offline
+# mirror is populated, because pacman aborts the whole transaction on the first
+# unresolvable target.
+#
+# NOT excluded, and must be built for aarch64 and published to the package repo:
+#   tzupdate                        (also needed by the live ISO itself)
+#   tensaku
+#   hyprland-preview-share-picker
+
+# --- CPU microcode (x86-only concept) ---
+#
+# archinstall.packages deliberately lists both so the mirror contains whichever
+# the target CPU needs. Neither exists for ARM.
+amd-ucode
+intel-ucode
+
+# --- Apple T2 / Intel Macs (x86-only by definition) ---
+apple-bcm-firmware
+apple-t2-audio-config
+asdcontrol
+linux-t2
+linux-t2-headers
+macbook12-spi-driver-dkms
+t2fanrd
+
+# --- Intel-specific ---
+intel-ipu7-camera
+intel-lpmd
+intel-media-driver
+libva-intel-driver
+linux-ptl
+linux-ptl-headers
+thermald
+vpl-gpu-rt
+
+# --- NVIDIA and 32-bit x86 ---
+lib32-nvidia-580xx-utils
+lib32-nvidia-utils
+nvidia-580xx-dkms
+nvidia-580xx-utils
+
+# --- x86 laptop/vendor hardware ---
+asusctl
+dell-xps-touchpad-haptics
+dell-xps13-sidecar-amps
+qmk-hid
+tuxedo-drivers-nocompatcheck-dkms
+yt6801-dkms
+
+# --- x86 firmware, boot, and VM guest tooling ---
+broadcom-wl
+hyperv
+memtest86+-efi
+open-vm-tools
+qemu-user-static-binfmt
+refind
+virtualbox-guest-utils-nox
+
+# --- Arch releng live-ISO entries with no ARM equivalent ---
+#
+# The live ISO package list is derived from releng's packages.x86_64, which
+# carries x86 rescue and firmware tooling.
+b43-fwcutter
+edk2-shell
+linux-firmware-marvell
+memtest86+
+syslinux
+
+# --- Not packaged for Arch Linux ARM ---
+#
+# These are a genuine reduction in what the installed system offers, not an
+# architecture impossibility. Build them for aarch64 and remove them here if any
+# turn out to matter.
+dotnet-runtime
+obs-studio
+obsidian
+pinta
+reflector
+yay-debug

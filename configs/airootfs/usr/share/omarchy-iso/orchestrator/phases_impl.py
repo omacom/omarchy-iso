@@ -23,8 +23,11 @@ Phase ordering (full-disk and protected/pre-mounted):
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import platform
 import re
+import shlex
 import shutil
 import subprocess
 import textwrap
@@ -34,9 +37,41 @@ from pathlib import Path
 
 from . import archinstall_adapter as arch
 from .command import capture, capture_identifier, require_text
-from .context import InstallContext
+from .context import InstallContext, efi_binary_name, efi_source_name
 from .keyboard import configure_keyboard
 from .ui import error, info
+
+
+AARCH64_PLATFORM_MANIFEST = Path("/usr/share/omarchy-iso/aarch64-platforms.json")
+AARCH64_TARGET_PACMAN_CONF = Path("/usr/share/omarchy-iso/pacman-target.conf")
+AARCH64_TARGET_MIRRORLIST = Path("/usr/share/omarchy-iso/mirrorlist-target")
+LIVE_PACMAN_CONF = Path("/etc/pacman.conf")
+DMI_ID_ROOT = Path("/sys/class/dmi/id")
+
+
+def _current_aarch64_platform() -> dict | None:
+    """Return the manifest entry matching this machine's SMBIOS identity."""
+    if platform.machine() != "aarch64" or not AARCH64_PLATFORM_MANIFEST.exists():
+        return None
+
+    document = json.loads(AARCH64_PLATFORM_MANIFEST.read_text())
+    dmi = {}
+    for field in ("sys_vendor", "product_name", "product_version"):
+        try:
+            dmi[field] = (DMI_ID_ROOT / field).read_text().strip()
+        except OSError:
+            dmi[field] = ""
+
+    for candidate in document.get("platforms", []):
+        for selector in candidate.get("match", []):
+            if selector and all(dmi.get(key) == value for key, value in selector.items()):
+                return candidate
+    return None
+
+
+def _aarch64_platform_packages() -> list[str]:
+    matched = _current_aarch64_platform()
+    return list(matched.get("packages", [])) if matched else []
 
 
 # Package targets are written by builder/build-iso.sh. Stable ISOs use the
@@ -129,6 +164,7 @@ EARLY_BOOTSTRAP_BASE_PACKAGES = [
     "efibootmgr",
     "omarchy-keyring",
 ]
+AARCH64_KEYRING_PACKAGE = "archlinuxarm-keyring"
 
 # Install LuaRocks before omarchy-nvim pulls in lua51-lpeg. Arch's lua-luarocks
 # post_install script tries to rebuild manifests for existing rocks trees before
@@ -142,7 +178,10 @@ EARLY_LUAROCKS_PACKAGES = [
 
 
 def _early_bootstrap_packages() -> list[str]:
-    return [*EARLY_BOOTSTRAP_BASE_PACKAGES, _omarchy_settings_package()]
+    packages = [*EARLY_BOOTSTRAP_BASE_PACKAGES]
+    if platform.machine() == "aarch64":
+        packages.append(AARCH64_KEYRING_PACKAGE)
+    return [*packages, _omarchy_settings_package()]
 
 
 def _early_user_seed_packages() -> list[str]:
@@ -226,7 +265,14 @@ def arch_install_system(ctx: InstallContext) -> None:
     config = handler.config
     pre_mounted = arch.is_pre_mount(config)
 
-    if not pre_mounted:
+    if pre_mounted:
+        # The pre-mounted contract only guarantees the root target.  Reassert
+        # the ESP mount at the last boundary before pacstrap/kernel packages
+        # can write into /boot.  This is intentionally keyed to archinstall's
+        # config, not Omarchy's mode label, so a metadata mismatch cannot turn
+        # the ESP path into an ordinary directory on the root filesystem.
+        verify_protected_mounts(ctx)
+    else:
         info("› partitioning + formatting + encrypting")
         arch.perform_filesystem_operations(config)
 
@@ -332,7 +378,7 @@ def _configure_limine_boot(ctx: InstallContext, installer, config) -> None:
 
     info("› writing Limine config")
     if arch.is_pre_mount(config):
-        _write_pre_mounted_limine_defaults(ctx)
+        _write_pre_mounted_limine_defaults(ctx, config)
     else:
         _write_limine_defaults_from_config(ctx, installer, config)
 
@@ -387,7 +433,7 @@ def _install_pre_mounted_limine(ctx: InstallContext) -> None:
         disk=Path(disk),
         part=part,
         esp_path=boot.get("esp_path", "/EFI/limine"),
-        efi_binary=boot.get("efi_binary", "limine_x64.efi"),
+        efi_binary=boot.get("efi_binary", efi_binary_name()),
         pre_state=pre_state,
     )
 
@@ -405,15 +451,17 @@ def _install_limine_efi(
     part: int,
     removable: bool = False,
     esp_path: str = "/EFI/limine",
-    efi_binary: str = "limine_x64.efi",
+    efi_binary: str | None = None,
     pre_state: dict | None = None,
 ) -> None:
     if removable:
         esp_path = "/EFI/BOOT"
-        efi_binary = "BOOTX64.EFI"
+        efi_binary = efi_source_name()
+    elif efi_binary is None:
+        efi_binary = efi_binary_name()
 
     limine_path = ctx.target / "usr" / "share" / "limine"
-    source_name = "BOOTX64.EFI"
+    source_name = efi_source_name()
     target_dir = Path(esp_mount) / esp_path.lstrip("/")
     target_path = target_dir / efi_binary
     _copy_required(limine_path / source_name, ctx.target / target_path.relative_to("/"))
@@ -529,7 +577,19 @@ def _write_limine_defaults_from_config(ctx: InstallContext, installer, config) -
         raise RuntimeError(f"Could not detect root at mountpoint {ctx.target}")
 
     cmdline = " ".join(installer._get_kernel_params(root))
-    _write_limine_defaults(ctx, cmdline, esp_mount=_installer_esp_mount(installer))
+    _write_limine_defaults(
+        ctx,
+        cmdline,
+        esp_mount=_installer_esp_mount(installer),
+        enable_uki=_configured_uki(config),
+    )
+
+
+def _configured_uki(config) -> bool | None:
+    """Return an explicitly configured UKI choice, preserving "unspecified"."""
+    bootloader = getattr(config, "bootloader_config", None)
+    uki = getattr(bootloader, "uki", None) if bootloader is not None else None
+    return bool(uki) if uki is not None else None
 
 
 def _write_limine_defaults(
@@ -538,6 +598,7 @@ def _write_limine_defaults(
     *,
     esp_mount: str,
     enable_fallback: bool | None = None,
+    enable_uki: bool | None = None,
 ) -> None:
     if not cmdline.strip():
         raise RuntimeError("Could not compute kernel cmdline from install config")
@@ -549,6 +610,11 @@ def _write_limine_defaults(
     default_text = re.sub(r'^ESP_PATH=.*$', f'ESP_PATH="{esp_mount}"', default_text, flags=re.MULTILINE)
     if enable_fallback is not None:
         default_text = default_text.rstrip() + f"\nENABLE_LIMINE_FALLBACK={'yes' if enable_fallback else 'no'}\n"
+    if enable_uki is not None:
+        # /etc/default/limine has higher priority than Omarchy's installed
+        # /etc/limine-entry-tool.d/omarchy-uki.conf. Without this override an
+        # explicit archinstall `uki: false` is silently changed back to yes.
+        default_text = default_text.rstrip() + f"\nENABLE_UKI={'yes' if enable_uki else 'no'}\n"
     if not arch.has_uefi():
         default_text = default_text.rstrip() + "\nENABLE_UKI=no\nENABLE_LIMINE_FALLBACK=no\n"
 
@@ -631,6 +697,29 @@ def _install_early_packages(installer) -> None:
 
     info(f"› installing early Omarchy packages: {', '.join(bootstrap_packages)}")
     installer.add_additional_packages(bootstrap_packages)
+
+    if platform.machine() == "aarch64":
+        # The ISO's offline repository deliberately disables signature checks,
+        # so this package can bootstrap ALARM's trust root without a circular
+        # dependency. Make the post-install result explicit: a missing or
+        # unpopulated keyring must fail the install here, not the user's first
+        # network pacman transaction with an opaque "unknown trust" error.
+        subprocess.run(
+            ["arch-chroot", str(installer.target), "pacman-key", "--init"],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "arch-chroot",
+                str(installer.target),
+                "pacman-key",
+                "--populate",
+                "archlinux",
+                "archlinuxarm",
+                "omarchy",
+            ],
+            check=True,
+        )
 
     info(f"› installing LuaRocks prerequisites: {', '.join(EARLY_LUAROCKS_PACKAGES)}")
     installer.add_additional_packages(EARLY_LUAROCKS_PACKAGES)
@@ -742,6 +831,9 @@ def _runtime_package_list(ctx: InstallContext) -> list[str]:
             continue
         if s not in already_installed and s not in pkgs:
             pkgs.append(s)
+    for package in _aarch64_platform_packages():
+        if package not in already_installed and package not in pkgs:
+            pkgs.append(package)
     return pkgs
 
 
@@ -755,7 +847,7 @@ def _boot_intent(ctx: InstallContext) -> dict:
     boot = dict(ctx.omarchy_install.get("boot") or {})
     boot.setdefault("esp_mount", "/boot")
     boot.setdefault("esp_path", "/EFI/limine")
-    boot.setdefault("efi_binary", "limine_x64.efi")
+    boot.setdefault("efi_binary", efi_binary_name())
     boot.setdefault("enable_fallback", not ctx.is_protected)
     return boot
 
@@ -786,9 +878,13 @@ def verify_protected_mounts(ctx: InstallContext) -> None:
     esp_mp = target / boot["esp_mount"].lstrip("/")
     if not _is_mountpoint(esp_mp):
         esp_dev = storage["esp_device"]
-        info(f"› remounting protected ESP {esp_dev} at {esp_mp}")
+        info(f"› mounting protected ESP {esp_dev} at {esp_mp}")
         esp_mp.mkdir(parents=True, exist_ok=True)
         subprocess.run(["mount", esp_dev, str(esp_mp)], check=True)
+        if not _is_mountpoint(esp_mp):
+            raise RuntimeError(
+                f"protected mode: mount reported success but {esp_mp} is not a mountpoint"
+            )
 
     info(f"› protected target verified: kernel={storage.get('kernel', 'linux')} esp={boot['esp_mount']}")
 
@@ -876,7 +972,7 @@ def _build_pre_mounted_cmdline(ctx: InstallContext, btrfs_uuid: str) -> str:
     )
 
 
-def _write_pre_mounted_limine_defaults(ctx: InstallContext) -> None:
+def _write_pre_mounted_limine_defaults(ctx: InstallContext, config=None) -> None:
     boot = _boot_intent(ctx)
     btrfs_uuid = _blkid_uuid(_btrfs_root_device(ctx))
     cmdline = _build_pre_mounted_cmdline(ctx, btrfs_uuid)
@@ -887,6 +983,7 @@ def _write_pre_mounted_limine_defaults(ctx: InstallContext) -> None:
         cmdline,
         esp_mount=boot["esp_mount"],
         enable_fallback=bool(boot.get("enable_fallback")),
+        enable_uki=_configured_uki(config) if config is not None else None,
     )
 
 
@@ -1007,7 +1104,7 @@ def _prepare_target_setup(ctx: InstallContext) -> None:
     if ctx.state.get("target_setup_prepared"):
         return
 
-    shutil.copy("/etc/pacman.conf", str(ctx.target / "etc" / "pacman.conf"))
+    shutil.copy(LIVE_PACMAN_CONF, ctx.target / "etc" / "pacman.conf")
 
     bind_mounts = [
         ("/var/cache/omarchy/mirror/offline", "/var/cache/omarchy/mirror/offline"),
@@ -1068,6 +1165,11 @@ def _target_user_env(ctx: InstallContext, user: str) -> list[str]:
 
 def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str | None = None) -> None:
     _prepare_target_setup(ctx)
+    # omarchy-apply-system restores the runtime's normal network pacman.conf at
+    # the end of system setup, but user finalization must remain offline too.
+    # Reassert the live ISO config before every target-side setup command. The
+    # final network configuration is installed afterwards.
+    _restore_aarch64_offline_pacman(ctx)
     omarchy_start_time, omarchy_start_epoch = _ensure_finalizer_log_started(ctx)
 
     target_log = ctx.target / "var" / "log" / "omarchy-install.log"
@@ -1129,6 +1231,11 @@ def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str 
                 pass
 
 
+def _restore_aarch64_offline_pacman(ctx: InstallContext) -> None:
+    if platform.machine() == "aarch64" and AARCH64_TARGET_PACMAN_CONF.is_file():
+        shutil.copy(LIVE_PACMAN_CONF, ctx.target / "etc" / "pacman.conf")
+
+
 def run_system_finalizer(ctx: InstallContext) -> None:
     if ctx.defer_provisioning:
         cmd = ["/usr/bin/omarchy-apply-system", "--defer-provisioning", "--first-install"]
@@ -1160,6 +1267,12 @@ def run_system_finalizer(ctx: InstallContext) -> None:
 PROVISION_STATE_DIR = "var/lib/omarchy/provisioning"
 PROVISION_KEYFILE = "etc/omarchy/provisioning.key"
 NODE_PACKAGES_DIR = Path("/opt/packages")
+
+# Node's release tarballs use their own architecture tokens rather than uname's.
+# builder/build-iso.sh picks the matching one at build time (NODE_TARBALL_SUFFIX)
+# and this has to agree with it: a mismatch makes the bundled tarball invisible
+# to the glob below, which hard-errors on every install.
+NODE_ARCH_TOKENS = {"x86_64": "x64", "aarch64": "arm64"}
 
 
 def stage_provisioning_state(ctx: InstallContext) -> None:
@@ -1200,7 +1313,11 @@ def stage_provisioning_state(ctx: InstallContext) -> None:
 
 
 def _stage_node_tarball(ctx: InstallContext, provisioning_dir) -> None:
-    tarballs = sorted(NODE_PACKAGES_DIR.glob("node-v*-linux-x64.tar.gz"))
+    machine = platform.machine()
+    node_arch = NODE_ARCH_TOKENS.get(machine)
+    if node_arch is None:
+        raise RuntimeError(f"no Node tarball architecture is mapped for {machine!r}")
+    tarballs = sorted(NODE_PACKAGES_DIR.glob(f"node-v*-linux-{node_arch}.tar.gz"))
     if not tarballs:
         # Hard error on every install, not just deferred-provisioning installs: the stash is what lets a
         # later factory reset finalize the next owner offline, and an ISO
@@ -1270,6 +1387,21 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     """Finalize Limine after target system setup has written all dynamic
     boot drop-ins (hibernation, hardware quirks, protected-mode ESP settings).
     """
+    if ctx.is_protected:
+        # Reassert this at the write boundary as well as before pacstrap.  It
+        # turns any intervening loss of the ESP mount into an immediate mount
+        # error instead of letting limine-update write into the root volume.
+        verify_protected_mounts(ctx)
+
+    # Arch Linux ARM's linux-aarch64 package uses the conventional /boot/Image
+    # name and, unlike Arch's kernel packages, ships neither of the files that
+    # limine-mkinitcpio-hook enumerates and consumes under usr/lib/modules:
+    # pkgbase and vmlinuz.  Without this bridge limine-update processes zero
+    # kernels, exits successfully, and leaves the branding-only limine.conf in
+    # place.  The later cryptdevice assertion then hides the real failure.
+    _prepare_aarch64_limine_kernel_layout(ctx)
+    matched_platform = _configure_aarch64_platform_boot(ctx)
+
     if not (ctx.target / "usr" / "bin" / "limine-update").exists():
         raise RuntimeError("/usr/bin/limine-update missing in target")
 
@@ -1312,6 +1444,239 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
         raise RuntimeError(f"{limine_conf} has no Omarchy entry")
     if "cryptdevice=" in cmdline and "cryptdevice=" not in limine_conf.read_text():
         raise RuntimeError(f"encrypted install but {limine_conf} has no cryptdevice=")
+    if matched_platform:
+        boot = matched_platform["boot"]
+        if boot["hardware_description"] == "dtb-override":
+            expected = f'dtb_path: boot():/dtbs/{boot["dtb"]}'
+            if expected not in limine_conf.read_text():
+                raise RuntimeError(
+                    f"{limine_conf} has no DTB for {matched_platform['name']}: {expected}"
+                )
+
+
+def _configure_aarch64_platform_boot(ctx: InstallContext) -> dict | None:
+    """Install persistent boot configuration for the matched ARM machine.
+
+    limine-entry-tool regenerates limine.conf on every kernel update, so a DTB
+    added only during installation disappears at the next update. Its post-hook
+    directory is the durable boundary: patch every generated Linux entry before
+    the later config-enrollment hook sees it.
+    """
+    matched = _current_aarch64_platform()
+    if not matched:
+        return None
+
+    info(f"› matched AArch64 platform: {matched['name']}")
+    target_manifest = ctx.target / "usr/share/omarchy-iso/aarch64-platforms.json"
+    target_manifest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(AARCH64_PLATFORM_MANIFEST, target_manifest)
+
+    boot = matched["boot"]
+    arguments = boot.get("kernel_cmdline", [])
+    if arguments:
+        cmdline_dropin = (
+            ctx.target / "etc/limine-entry-tool.d/80-omarchy-aarch64-platform.conf"
+        )
+        cmdline_dropin.parent.mkdir(parents=True, exist_ok=True)
+        cmdline_dropin.write_text(
+            f'KERNEL_CMDLINE[default]+=" {" ".join(arguments)}"\n'
+        )
+
+    # mkinitcpio's autodetect runs while the installer is booted from its own
+    # root and may omit DT-described platform devices needed before the target
+    # root can be unlocked. Keep the board's early-boot set explicit so both
+    # the initial image and every later kernel-update image contain it.
+    initramfs = matched.get("initramfs", {})
+    initramfs_modules = initramfs.get("modules", [])
+    initramfs_files = initramfs.get("files", [])
+    omitted_initramfs_hooks = initramfs.get("omit_hooks", [])
+    if initramfs_modules or initramfs_files or omitted_initramfs_hooks:
+        initramfs_dropin = (
+            ctx.target / "etc/mkinitcpio.conf.d/zz-omarchy-aarch64-platform.conf"
+        )
+        initramfs_dropin.parent.mkdir(parents=True, exist_ok=True)
+        lines = []
+        if omitted_initramfs_hooks:
+            omitted = " ".join(shlex.quote(hook) for hook in omitted_initramfs_hooks)
+            lines.append(
+                textwrap.dedent(
+                    f"""\
+                    for _omarchy_omit_hook in {omitted}; do
+                      _omarchy_platform_hooks=()
+                      for _omarchy_hook in "${{HOOKS[@]}}"; do
+                        if [[ $_omarchy_hook != "$_omarchy_omit_hook" ]]; then
+                          _omarchy_platform_hooks+=("$_omarchy_hook")
+                        fi
+                      done
+                      HOOKS=("${{_omarchy_platform_hooks[@]}}")
+                    done
+                    unset _omarchy_platform_hooks _omarchy_hook _omarchy_omit_hook
+                    """
+                )
+            )
+        if initramfs_modules:
+            modules = " ".join(shlex.quote(module) for module in initramfs_modules)
+            lines.append(f"MODULES+=({modules})\n")
+        if initramfs_files:
+            files = " ".join(shlex.quote(path) for path in initramfs_files)
+            lines.append(f"FILES+=({files})\n")
+        initramfs_dropin.write_text("".join(lines))
+
+    if boot["hardware_description"] != "dtb-override":
+        return matched
+
+    dtb = boot["dtb"]
+    esp_mount = _boot_intent(ctx)["esp_mount"]
+    dtb_file = ctx.target / esp_mount.lstrip("/") / "dtbs" / dtb
+    if not dtb_file.is_file() or dtb_file.stat().st_size == 0:
+        raise RuntimeError(f"device tree for {matched['name']} missing: {dtb_file}")
+
+    hook = ctx.target / "etc/boot/hooks/post.d/80-omarchy-aarch64-platform"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook_text = """\
+#!/bin/bash
+set -euo pipefail
+
+esp=${OMARCHY_LIMINE_ESP:-@@ESP@@}
+config="$esp/limine.conf"
+dtb_file="$esp/dtbs/@@DTB@@"
+limine_dtb="boot():/dtbs/@@DTB@@"
+
+if [[ ! -s $config || ! -s $dtb_file ]]; then
+  echo "omarchy: cannot add platform DTB; missing $config or $dtb_file" >&2
+  exit 100
+fi
+
+temporary=$(mktemp "${config}.omarchy.XXXXXX")
+trap 'rm -f "$temporary"' EXIT
+awk -v dtb="$limine_dtb" '
+  {
+    option = $0
+    sub(/^[[:space:]]*/, "", option)
+    if (option ~ /^dtb_path:/) next
+
+    print
+    if ($0 ~ /^[[:space:]]*protocol:[[:space:]]*linux[[:space:]]*$/) {
+      match($0, /^[[:space:]]*/)
+      print substr($0, 1, RLENGTH) "dtb_path: " dtb
+    }
+  }
+' "$config" >"$temporary"
+
+grep -qF "dtb_path: $limine_dtb" "$temporary" || {
+  echo "omarchy: Limine config contains no Linux entry for platform DTB" >&2
+  exit 100
+}
+mv "$temporary" "$config"
+trap - EXIT
+"""
+    hook.write_text(
+        hook_text.replace("@@ESP@@", shlex.quote(esp_mount)).replace("@@DTB@@", dtb)
+    )
+    hook.chmod(0o755)
+    return matched
+
+
+def _prepare_aarch64_limine_kernel_layout(ctx: InstallContext) -> None:
+    """Bridge Arch Linux ARM's kernel layout to limine-mkinitcpio-hook's.
+
+    linux-aarch64's package-owned preset is the authoritative source for the
+    installed kernel version.  Keep the compatibility files beside that
+    version's modules so the hook can discover the kernel and copy the exact
+    Image that the package installed on the ESP.
+    """
+    if platform.machine() != "aarch64":
+        return
+
+    preset = ctx.target / "etc/mkinitcpio.d/linux-aarch64.preset"
+    if not preset.exists():
+        return
+
+    match = re.search(
+        r"^\s*ALL_kver\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s#]+))",
+        preset.read_text(),
+        flags=re.MULTILINE,
+    )
+    if not match:
+        raise RuntimeError(f"{preset} has no ALL_kver")
+    kver = next(value for value in match.groups() if value is not None)
+
+    modules_dir = ctx.target / "usr/lib/modules" / kver
+    image = ctx.target / "boot/Image"
+    if not modules_dir.is_dir():
+        raise RuntimeError(f"linux-aarch64 modules directory missing: {modules_dir}")
+    if not image.is_file() or image.stat().st_size == 0:
+        raise RuntimeError(f"linux-aarch64 kernel image missing or empty: {image}")
+
+    info(f"› preparing linux-aarch64 {kver} for Limine")
+    (modules_dir / "pkgbase").write_text("linux-aarch64\n")
+    shutil.copy2(image, modules_dir / "vmlinuz")
+
+    _write_aarch64_mkinitcpio_module_compat(ctx)
+
+    # limine-mkinitcpio-hook <= 1.36 rejects generated pkgbase files: its
+    # process_kernel() insists `pacman -Qqo` owns the marker before it calls
+    # set_kernel_context().  linux-aarch64 cannot satisfy that rule because its
+    # package contains no pkgbase at all.  Permit this one generated marker only
+    # when the corresponding kernel package is installed; all other unowned
+    # markers retain the upstream rejection behavior.
+    #
+    # Version 1.38 discovers the package from its owned modules.builtin instead.
+    # That works for linux-aarch64 without modifying the hook, while our vmlinuz
+    # bridge above still supplies the kernel image at the path Limine consumes.
+    hook = ctx.target / "usr/share/libalpm/scripts/limine-mkinitcpio-install"
+    if not hook.exists():
+        raise RuntimeError(f"Limine mkinitcpio hook missing: {hook}")
+
+    marker = 'pacman -Qqo "$pkgbase_file" &>/dev/null || return 0'
+    modules_builtin_marker = (
+        'kernel_name="$(pacman -Qqo "${kernel_dir}/modules.builtin" 2>/dev/null)" '
+        '|| return 0'
+    )
+    replacement = """\
+if ! pacman -Qqo "$pkgbase_file" &>/dev/null; then
+	[[ $(<"$pkgbase_file") == "linux-aarch64" ]] &&
+		pacman -Q linux-aarch64 &>/dev/null || return 0
+fi"""
+    hook_text = hook.read_text()
+    if replacement not in hook_text:
+        if marker in hook_text:
+            hook.write_text(hook_text.replace(marker, replacement, 1))
+        elif modules_builtin_marker not in hook_text:
+            raise RuntimeError(
+                f"cannot add linux-aarch64 support: kernel ownership check not recognized in {hook}"
+            )
+
+
+def _write_aarch64_mkinitcpio_module_compat(ctx: InstallContext) -> None:
+    """Ignore Omarchy's optional Thunderbolt module when a kernel lacks it.
+
+    omarchy-settings currently requests `thunderbolt` unconditionally. The
+    linux-aarch64 kernel used on Snapdragon does not ship that module, and
+    mkinitcpio treats the missing explicit MODULES entry as an error. Test the
+    kernel being built rather than the host architecture so this automatically
+    stops filtering if a future ARM kernel gains Thunderbolt support.
+    """
+    # mkinitcpio orders drop-ins with `sort -V`. Numeric prefixes sort before
+    # alphabetic names, so a 99-* file would run before
+    # thunderbolt_module.conf and have nothing to remove yet.
+    dropin = ctx.target / "etc/mkinitcpio.conf.d/zz-omarchy-module-compat.conf"
+    dropin.parent.mkdir(parents=True, exist_ok=True)
+    dropin.write_text(
+        """\
+# The Omarchy defaults request thunderbolt on every architecture. Keep it
+# when the selected kernel provides it; otherwise prevent a missing optional
+# module from aborting the entire initramfs/boot-entry build.
+if [[ -n ${KERNELVERSION:-} ]] && ! modinfo -k "$KERNELVERSION" thunderbolt &>/dev/null; then
+  _omarchy_modules=()
+  for _omarchy_module in "${MODULES[@]}"; do
+    [[ $_omarchy_module == thunderbolt ]] || _omarchy_modules+=("$_omarchy_module")
+  done
+  MODULES=("${_omarchy_modules[@]}")
+  unset _omarchy_modules _omarchy_module
+fi
+"""
+    )
 
 
 def _strip_shell_quotes(value: str) -> str:
@@ -1368,6 +1733,26 @@ def run_chroot_finalizer(ctx: InstallContext) -> None:
         ["/usr/bin/omarchy-provision-user", "--force", "--first-install"],
         user=ctx.username,
     )
+
+
+def configure_package_repositories(ctx: InstallContext) -> None:
+    """Switch an installed aarch64 system from the ISO mirror to ALARM.
+
+    This build-stamped config can use a temporary package repository such as
+    the Snapdragon bootstrap. Later Omarchy package refreshes deliberately
+    replace that URL from their aarch64 template while retaining ALARM repos.
+    """
+    if platform.machine() != "aarch64":
+        return
+
+    source_conf = AARCH64_TARGET_PACMAN_CONF
+    source_mirrorlist = AARCH64_TARGET_MIRRORLIST
+    if not source_conf.is_file() or not source_mirrorlist.is_file():
+        raise RuntimeError("aarch64 target package repository configuration is missing")
+
+    (ctx.target / "etc" / "pacman.d").mkdir(parents=True, exist_ok=True)
+    shutil.copy(source_conf, ctx.target / "etc" / "pacman.conf")
+    shutil.copy(source_mirrorlist, ctx.target / "etc" / "pacman.d" / "mirrorlist")
 
 
 def configure_dns_resolver(ctx: InstallContext) -> None:
@@ -1669,18 +2054,32 @@ def validate_boot(ctx: InstallContext) -> None:
     kernel = storage.get("kernel") or (ctx.user_configuration.get("kernels") or ["linux"])[0]
 
     if arch.has_uefi():
-        limine_binary = esp_mount / boot.get("esp_path", "/EFI/limine").lstrip("/") / boot.get("efi_binary", "limine_x64.efi")
+        limine_binary = esp_mount / boot.get("esp_path", "/EFI/limine").lstrip("/") / boot.get("efi_binary", efi_binary_name())
         if not limine_binary.exists() or limine_binary.stat().st_size == 0:
             raise RuntimeError(f"{limine_binary} missing or empty")
 
         # Hardware packages (omarchy-hw-intel-ptl, …) can swap the kernel out
         # from under us mid-install, so trust what's on disk over what we asked
         # for and only fall back to the configured name when nothing's there.
-        uki_dir = esp_mount / "EFI" / "Linux"
         candidates = _installed_kernels(ctx) or [kernel]
-        ukis = [uki_dir / f"{uki_prefix}_{name}.efi" for name in candidates]
-        if not any(uki.exists() and uki.stat().st_size for uki in ukis):
-            raise RuntimeError(f"{' / '.join(str(uki) for uki in ukis)} missing or empty")
+        if _limine_setting(config_text, "ENABLE_UKI", "yes") == "yes":
+            uki_dir = esp_mount / "EFI" / "Linux"
+            ukis = [uki_dir / f"{uki_prefix}_{name}.efi" for name in candidates]
+            if not any(uki.exists() and uki.stat().st_size for uki in ukis):
+                raise RuntimeError(f"{' / '.join(str(uki) for uki in ukis)} missing or empty")
+        else:
+            machine_id = (ctx.target / "etc/machine-id").read_text().strip()
+            kernel_dirs = [esp_mount / machine_id / name for name in candidates]
+            if not any(
+                (directory / "vmlinuz").is_file()
+                and (directory / "vmlinuz").stat().st_size
+                and (directory / "initramfs").is_file()
+                and (directory / "initramfs").stat().st_size
+                for directory in kernel_dirs
+            ):
+                raise RuntimeError(
+                    f"no complete Limine kernel/initramfs entry under {esp_mount / machine_id}"
+                )
 
         post = _read_efibootmgr()
         if not _find_label_entries(post["entries"], "Limine"):
@@ -1742,8 +2141,9 @@ def _assert_boot_hooks_restored(ctx: InstallContext) -> None:
             raise RuntimeError(f"{path} is missing — future kernel updates would ship no UKI")
 
 
-# Every kernel package leaves its pkgbase next to its modules, which is also
-# the name limine-mkinitcpio-hook builds the UKI under.
+# Arch kernel packages leave pkgbase next to their modules, which is also the
+# name limine-mkinitcpio-hook builds the boot entry under.  linux-aarch64 is
+# normalized to that layout by _prepare_aarch64_limine_kernel_layout().
 def _installed_kernels(ctx: InstallContext) -> list[str]:
     names = []
     for pkgbase in sorted((ctx.target / "usr" / "lib" / "modules").glob("*/pkgbase")):

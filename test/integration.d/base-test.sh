@@ -23,8 +23,41 @@ GUEST_HOSTNAME="omarchy-test"
 
 SCENARIO="${SCENARIO:-$(basename "${0%-test.sh}")}"
 
-OVMF_CODE="/usr/share/edk2/x64/OVMF_CODE.4m.fd"
-OVMF_VARS_TEMPLATE="/usr/share/edk2/x64/OVMF_VARS.4m.fd"
+case "$(basename "$ISO")" in
+*aarch64*)
+  GUEST_ARCH=aarch64
+  QEMU=qemu-system-aarch64
+  FIRMWARE_DIR="${OMARCHY_AAVMF_DIR:-$HOME/.local/share/aavmf}"
+  OVMF_CODE="$FIRMWARE_DIR/AAVMF_CODE.no-secboot.fd"
+  OVMF_VARS_TEMPLATE="$FIRMWARE_DIR/AAVMF_VARS.fd"
+  GUEST_KERNEL=linux-aarch64
+  GUEST_EFI_BINARY=limine_aa64.efi
+  MIRROR_SERVERS_JSON='            {"url": "https://cdnmirror.com/archlinuxarm/$arch/$repo"},
+            {"url": "https://mirrors.dotsrc.org/archlinuxarm/$arch/$repo"},
+            {"url": "https://de3.mirror.archlinuxarm.org/$arch/$repo"},
+            {"url": "https://ca.us.mirror.archlinuxarm.org/$arch/$repo"},
+            {"url": "https://fl.us.mirror.archlinuxarm.org/$arch/$repo"}'
+  ;;
+*x86_64*)
+  GUEST_ARCH=x86_64
+  QEMU=qemu-system-x86_64
+  OVMF_CODE="/usr/share/edk2/x64/OVMF_CODE.4m.fd"
+  OVMF_VARS_TEMPLATE="/usr/share/edk2/x64/OVMF_VARS.4m.fd"
+  GUEST_KERNEL=linux
+  GUEST_EFI_BINARY=limine_x64.efi
+  MIRROR_SERVERS_JSON='            {"url": "https://mirror.omarchy.org/$repo/os/$arch"},
+            {"url": "https://mirror.rackspace.com/archlinux/$repo/os/$arch"},
+            {"url": "https://geo.mirror.pkgbuild.com/$repo/os/$arch"}'
+  ;;
+*)
+  echo "Cannot determine ISO architecture from $(basename "$ISO")" >&2
+  return 1 2>/dev/null || exit 1
+  ;;
+esac
+
+command -v "$QEMU" >/dev/null || { echo "$QEMU is not installed" >&2; return 1 2>/dev/null || exit 1; }
+[[ -f $OVMF_CODE ]] || { echo "UEFI firmware missing: $OVMF_CODE" >&2; return 1 2>/dev/null || exit 1; }
+[[ -f $OVMF_VARS_TEMPLATE ]] || { echo "UEFI vars template missing: $OVMF_VARS_TEMPLATE" >&2; return 1 2>/dev/null || exit 1; }
 
 BASE_DIR="$ROOT/test-runs/$(basename "$ISO" .iso)-integration"
 RUN_DIR="$BASE_DIR/runs/$(date +%Y%m%d-%H%M%S)-$SCENARIO"
@@ -160,17 +193,29 @@ start_vm() {
   local disk="$1" serial="$2"
   shift 2
 
-  qemu-system-x86_64 \
-    -cpu host -enable-kvm -machine q35,accel=kvm \
-    -smp "$(nproc)" \
+  local -a machine_args display_args
+  if [[ $GUEST_ARCH == aarch64 ]]; then
+    # Snapdragon systems commonly leave Linux at EL1 under Gunyah, so KVM is
+    # unavailable even on an ARM host.  Keep this portable by using TCG.
+    machine_args=(-machine virt -cpu max -smp 4)
+    # This minimal qemu-system-aarch64 build exposes ramfb rather than the
+    # modular virtio GPU devices.  A USB keyboard keeps QMP send-key usable for
+    # the reboot prompt while ramfb supports QMP screendump/OCR.
+    display_args=(-device ramfb -device nec-usb-xhci,id=xhci -device usb-kbd)
+  else
+    machine_args=(-cpu host -enable-kvm -machine q35,accel=kvm -smp "$(nproc)")
+    display_args=(-device virtio-vga -usb -device usb-tablet)
+  fi
+
+  "$QEMU" \
+    "${machine_args[@]}" \
     -m "$MEMORY" \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -drive if=pflash,format=raw,file="$ACTIVE_OVMF" \
     -drive file="$disk",format=qcow2,if=none,id=drive0 \
     -device virtio-blk-pci,drive=drive0,bootindex=1 \
-    -device virtio-vga \
+    "${display_args[@]}" \
     -display none \
-    -usb -device usb-tablet \
     -netdev user,id=net0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22 \
     -device virtio-net-pci,netdev=net0 \
     -qmp "unix:$QMP_SOCK,server,nowait" \
@@ -400,10 +445,10 @@ EOF
         "boot": {
             "esp_mount": "/boot",
             "esp_path": "/EFI/limine",
-            "efi_binary": "limine_x64.efi",
+            "efi_binary": "$GUEST_EFI_BINARY",
             "enable_fallback": true
         },
-        "storage": { "kernel": "linux" }
+        "storage": { "kernel": "$GUEST_KERNEL" }
     },
     "disk_config": {
         "config_type": "default_layout",
@@ -448,7 +493,7 @@ EOF
         ]
     },
     "hostname": "$GUEST_HOSTNAME",
-    "kernels": [ "linux" ],
+    "kernels": [ "$GUEST_KERNEL" ],
     "network_config": { "type": "iso" },
     "ntp": true,
     "parallel_downloads": 8,
@@ -460,9 +505,7 @@ EOF
     "mirror_config": {
         "custom_repositories": [],
         "custom_servers": [
-            {"url": "https://mirror.omarchy.org/\$repo/os/\$arch"},
-            {"url": "https://mirror.rackspace.com/archlinux/\$repo/os/\$arch"},
-            {"url": "https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"}
+$MIRROR_SERVERS_JSON
         ],
         "mirror_regions": {},
         "optional_repositories": []
@@ -514,11 +557,21 @@ install_phase() {
   cp "$OVMF_VARS_TEMPLATE" "$BASE_OVMF"
   ACTIVE_OVMF="$BASE_OVMF"
 
-  start_vm "$BASE_DISK.building" "$RUN_DIR/install-serial.log" \
-    -drive "file=$ISO,media=cdrom,if=none,format=raw,id=cdrom0" \
-    -device ide-cd,drive=cdrom0,bootindex=2 \
-    -drive "file=$CIDATA_IMG,format=raw,if=none,id=cidata" \
-    -device usb-storage,drive=cidata
+  if [[ $GUEST_ARCH == aarch64 ]]; then
+    # The hybrid ARM ISO presents like the USB installer does on hardware.
+    # virt has no IDE controller, so both auxiliary images are virtio disks.
+    start_vm "$BASE_DISK.building" "$RUN_DIR/install-serial.log" \
+      -drive "file=$ISO,if=none,format=raw,readonly=on,id=installiso" \
+      -device virtio-blk-pci,drive=installiso,bootindex=2 \
+      -drive "file=$CIDATA_IMG,format=raw,if=none,id=cidata" \
+      -device virtio-blk-pci,drive=cidata
+  else
+    start_vm "$BASE_DISK.building" "$RUN_DIR/install-serial.log" \
+      -drive "file=$ISO,media=cdrom,if=none,format=raw,id=cdrom0" \
+      -device ide-cd,drive=cdrom0,bootindex=2 \
+      -drive "file=$CIDATA_IMG,format=raw,if=none,id=cidata" \
+      -device usb-storage,drive=cidata
+  fi
 
   log "Waiting for the unattended install to finish (timeout ${INSTALL_TIMEOUT}s)"
   local waited=0 text progress_name

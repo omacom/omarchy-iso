@@ -14,6 +14,7 @@
 #   --memory MB    VM memory (default 8192)
 #   --timeout SECS Install timeout (default 2400)
 #   --no-preview   Do not open the collected screenshots in imv
+#   --install-only  Install, reboot, and save the verified base; skip scenarios
 
 set -euo pipefail
 
@@ -21,6 +22,7 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 
 ISO=""
 REUSE_BASE=false
+INSTALL_ONLY=false
 SCENARIOS=()
 
 export OMARCHY_INTEGRATION_SSH_PORT=2322
@@ -31,6 +33,7 @@ export OMARCHY_INTEGRATION_NO_PREVIEW=false
 while (($#)); do
   case "$1" in
     --reuse-base) REUSE_BASE=true ;;
+    --install-only) INSTALL_ONLY=true ;;
     --no-preview) OMARCHY_INTEGRATION_NO_PREVIEW=true ;;
     --port) OMARCHY_INTEGRATION_SSH_PORT="$2"; shift ;;
     --memory) OMARCHY_INTEGRATION_MEMORY="$2"; shift ;;
@@ -56,7 +59,7 @@ if [[ ! -f ${ISO:-} ]]; then
   exit 1
 fi
 
-if (( ${#SCENARIOS[@]} == 0 )); then
+if ! $INSTALL_ONLY && (( ${#SCENARIOS[@]} == 0 )); then
   SCENARIOS=("$ROOT"/test/integration.d/*-test.sh)
 else
   for scenario in "${SCENARIOS[@]}"; do
@@ -67,7 +70,18 @@ else
   done
 fi
 
-omarchy-pkg-add qemu-full edk2-ovmf socat imagemagick tesseract tesseract-data-eng mtools
+case "$(basename "$ISO")" in
+  *aarch64*)
+    omarchy-pkg-add qemu-system-aarch64 socat imagemagick tesseract tesseract-data-eng mtools dosfstools
+    ;;
+  *x86_64*)
+    omarchy-pkg-add qemu-full edk2-ovmf socat imagemagick tesseract tesseract-data-eng mtools dosfstools
+    ;;
+  *)
+    echo "Cannot determine ISO architecture from $(basename "$ISO")" >&2
+    exit 1
+    ;;
+esac
 
 export OMARCHY_INTEGRATION_ISO
 OMARCHY_INTEGRATION_ISO=$(realpath "$ISO")
@@ -82,6 +96,8 @@ if $REUSE_BASE && base_image_ready; then
 else
   install_phase
 fi
+
+$INSTALL_ONLY && exit 0
 
 status=0
 for scenario in "${SCENARIOS[@]}"; do

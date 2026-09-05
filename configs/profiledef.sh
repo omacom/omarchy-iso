@@ -8,8 +8,15 @@ iso_application="Omarchy Installer"
 iso_version="$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y.%m.%d)"
 install_dir="arch"
 buildmodes=('iso')
-bootmodes=('bios.syslinux' 'uefi.grub')
-arch="x86_64"
+arch="${OMARCHY_ARCH:-x86_64}"
+# aarch64 has no BIOS, so syslinux has nothing to boot there; UEFI is the only
+# path on ARM. mkarchiso sources this file with bash, so OMARCHY_ARCH arrives
+# through the environment the builder exports.
+if [[ $arch == "aarch64" ]]; then
+  bootmodes=('uefi.grub')
+else
+  bootmodes=('bios.syslinux' 'uefi.grub')
+fi
 pacman_conf="pacman-offline.conf"
 airootfs_image_type="squashfs"
 # Package archives in the offline mirror are already zstd-compressed. Storing
@@ -22,12 +29,27 @@ airootfs_image_type="squashfs"
 # cold on every boot: kernel, plymouth, systemd, python, archinstall, gum. The
 # whole ISO grows well under a percent for it, and dropping the x86 BCJ filter
 # also removes one of the blockers listed in plans/aarch64-support.md.
-airootfs_image_tool_options=(
-  '-comp' 'zstd'
-  '-Xcompression-level' '19'
-  '-b' '1M'
-  '-action' 'uncompressed@subpathname(var/cache/omarchy/mirror/offline)'
-)
+#
+# aarch64 is the exception: Arch Linux ARM builds its kernel without
+# CONFIG_SQUASHFS_ZSTD (xz, zlib, lz4 and lzo are all present), so a zstd root
+# produces an ISO whose own kernel cannot mount it -- the archiso hook fails
+# with `Filesystem uses "zstd" compression. This is not supported.` and drops to
+# a recovery shell. xz costs decompression speed but is what that kernel reads.
+if [[ $arch == "aarch64" ]]; then
+  airootfs_image_tool_options=(
+    '-comp' 'xz'
+    '-Xdict-size' '1M'
+    '-b' '1M'
+    '-action' 'uncompressed@subpathname(var/cache/omarchy/mirror/offline)'
+  )
+else
+  airootfs_image_tool_options=(
+    '-comp' 'zstd'
+    '-Xcompression-level' '19'
+    '-b' '1M'
+    '-action' 'uncompressed@subpathname(var/cache/omarchy/mirror/offline)'
+  )
+fi
 bootstrap_tarball_compression=('zstd' '-c' '-T0' '--auto-threads=logical' '--long' '-19')
 file_permissions=(
   ["/etc/shadow"]="0:0:400"

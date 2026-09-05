@@ -29,6 +29,9 @@ class BluetoothUnlockTest(unittest.TestCase):
         self.live_state = self.root / "live-bluetooth"
         self.target = self.root / "mnt"
         self.target.mkdir()
+        runtime = self.target / "usr/bin/omarchy-setup-security-bluetooth-unlock"
+        runtime.parent.mkdir(parents=True)
+        runtime.touch()
         self.marker = self.root / "bluetooth-unlock.json"
         self.marker.write_text(json.dumps({"controller": CONTROLLER, "device": KEYBOARD}))
 
@@ -82,6 +85,45 @@ class BluetoothUnlockTest(unittest.TestCase):
             "--yes",
             "--no-rebuild",
         ])
+
+    def test_rejects_non_object_marker(self):
+        self.marker.write_text("[]")
+        with self.assertRaisesRegex(RuntimeError, "JSON object"):
+            phases_impl.configure_bluetooth_unlock(self.ctx())
+
+    def test_requires_runtime_before_copying_secrets(self):
+        (self.target / "usr/bin/omarchy-setup-security-bluetooth-unlock").unlink()
+        with self.assertRaisesRegex(RuntimeError, "does not support"):
+            phases_impl.configure_bluetooth_unlock(self.ctx())
+        self.assertFalse((self.target / "var/lib/bluetooth").exists())
+
+    def test_rejects_target_and_cache_symlinks_before_copy(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        for relative in ("var", "var/lib", "var/lib/bluetooth",
+                         f"var/lib/bluetooth/{CONTROLLER}/settings",
+                         f"var/lib/bluetooth/{CONTROLLER}/cache"):
+            with self.subTest(relative=relative):
+                path = self.target / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.symlink_to(outside)
+                with self.assertRaisesRegex(RuntimeError, "symlink"):
+                    phases_impl.configure_bluetooth_unlock(self.ctx())
+                self.assertEqual(list(outside.iterdir()), [])
+                path.unlink()
+        cache = self.live_state / CONTROLLER / "cache"
+        import shutil
+        shutil.rmtree(cache)
+        cache.symlink_to(outside)
+        with self.assertRaisesRegex(RuntimeError, "cache symlink"):
+            phases_impl.configure_bluetooth_unlock(self.ctx())
+
+    def test_secret_permissions_are_restricted(self):
+        with mock.patch.object(phases_impl, "_run_target_setup_command"):
+            phases_impl.configure_bluetooth_unlock(self.ctx())
+        controller = self.target / "var/lib/bluetooth" / CONTROLLER
+        for path in (controller / KEYBOARD / "info", controller / "settings", controller / "cache" / KEYBOARD):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_rejects_unencrypted_and_deferred_installs(self):
         with self.assertRaisesRegex(RuntimeError, "unencrypted"):

@@ -151,8 +151,7 @@ greeter() {
   printf '\033[%d;1H\0337' "$((logo_row + logo_h))"
   # Run ttfx directly (not inside a `while` subshell) so $anim is ttfx's own
   # PID: killing a wrapping subshell would orphan ttfx, which then keeps
-  # painting the logo over the keyboard step. --cycles is high enough that it
-  # never ends on its own before Return.
+  # painting over pairing passkeys. Stop the intro before pairing starts.
   # Two columns narrower than the console: ttfx centers its text two columns
   # right of plain centering, so a full-width canvas would sit the animated
   # logo a column off the gum-drawn one underneath it.
@@ -170,13 +169,16 @@ greeter() {
     </dev/null >/dev/tty 2>/dev/null &
   anim=$!
 
-  IFS= read -r _ </dev/tty || true
+  sleep 1
   # Tolerate ttfx's kill signal in `wait` so a future `set -e` here can't abort.
   kill "$anim" 2>/dev/null
   wait "$anim" 2>/dev/null || true
   # ttfx leaves the tty in raw/no-echo mode when killed; restore it or the gum
   # prompts in the keyboard step that follows silently die.
   stty sane </dev/tty 2>/dev/null || true
+  # Pairing owns the terminal while the welcome screen waits for Return.
+  start_bluetooth_keyboard_pairing
+  IFS= read -r _ </dev/tty || true
   # Reset the screen so the leftover animation frame doesn't linger under the
   # keyboard step that follows.
   printf '\033[0m\033[H\033[2J\033[?25h'
@@ -1058,6 +1060,17 @@ offer_bluetooth_disk_unlock() {
   rm -f "$BLUETOOTH_UNLOCK_MARKER"
   [[ $encrypt_installation == true && $defer_provisioning == false && -s $BLUETOOTH_KEYBOARD_MARKER ]] || return 0
 
+  if [[ ! -f /usr/share/omarchy-iso/bluetooth-unlock-supported ]]; then
+    clear_logo
+    echo
+    say "This ISO's bundled runtime cannot enable Bluetooth disk unlock."
+    say "After reboot, use a wired or 2.4 GHz keyboard to unlock the encrypted disk."
+    echo
+    gum confirm --affirmative "I have another keyboard" --negative "Abort installation" \
+      "Continue with a recovery keyboard available?" || abort
+    return 0
+  fi
+
   clear_logo
   echo
   say "Use the paired Bluetooth keyboard for encrypted disk unlock?"
@@ -1081,7 +1094,7 @@ install_target="full_disk"
 # isn't measured against the transient 80-column boot console.
 wait_for_stable_terminal
 
-start_bluetooth_keyboard_pairing
+trap stop_bluetooth_keyboard_pairing EXIT
 greeter
 stop_bluetooth_keyboard_pairing
 

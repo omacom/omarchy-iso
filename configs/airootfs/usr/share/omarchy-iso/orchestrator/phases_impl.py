@@ -1287,14 +1287,21 @@ def configure_bluetooth_unlock(ctx: InstallContext) -> None:
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"invalid Bluetooth unlock marker {marker}: {exc}") from exc
 
+    if not isinstance(selection, dict):
+        raise RuntimeError("Bluetooth unlock marker must contain a JSON object")
+
     controller = str(selection.get("controller", "")).upper()
     device = str(selection.get("device", "")).upper()
     if not BLUETOOTH_ADDRESS_RE.fullmatch(controller) or not BLUETOOTH_ADDRESS_RE.fullmatch(device):
         raise RuntimeError("Bluetooth unlock marker contains an invalid controller or device address")
 
+    runtime = ctx.target / "usr/bin/omarchy-setup-security-bluetooth-unlock"
+    if not runtime.is_file():
+        raise RuntimeError("Installed Omarchy runtime does not support Bluetooth disk unlock")
+
     source_controller = BLUETOOTH_STATE_DIR / controller
     source_device = source_controller / device
-    if source_controller.is_symlink() or source_device.is_symlink() or not source_device.is_dir():
+    if BLUETOOTH_STATE_DIR.is_symlink() or source_controller.is_symlink() or source_device.is_symlink() or not source_device.is_dir():
         raise RuntimeError(f"selected Bluetooth bond is missing or unsafe: {source_device}")
     if any(path.is_symlink() for path in source_device.rglob("*")):
         raise RuntimeError(f"selected Bluetooth bond contains a symlink: {source_device}")
@@ -1302,12 +1309,22 @@ def configure_bluetooth_unlock(ctx: InstallContext) -> None:
     target_root = ctx.target / "var/lib/bluetooth"
     target_controller = target_root / controller
     target_device = target_controller / device
-    for path in (target_root, target_controller, target_device):
+    for path in (ctx.target / "var", ctx.target / "var/lib", target_root, target_controller, target_device,
+                 target_controller / "settings", target_controller / "identity",
+                 target_controller / "cache", target_controller / "cache" / device):
         if path.is_symlink():
             raise RuntimeError(f"refusing Bluetooth state symlink in target: {path}")
 
+    source_cache = source_controller / "cache" / device
+    if (source_controller / "cache").is_symlink() or source_cache.is_symlink():
+        raise RuntimeError(f"refusing Bluetooth cache symlink: {source_cache}")
+    for name in ("settings", "identity"):
+        if (source_controller / name).is_symlink():
+            raise RuntimeError(f"refusing Bluetooth state symlink: {source_controller / name}")
+
     info("› staging selected Bluetooth keyboard bond for disk unlock")
     target_controller.mkdir(parents=True, exist_ok=True)
+    target_root.chmod(0o700)
     target_controller.chmod(0o700)
     for name in ("settings", "identity"):
         source = source_controller / name
@@ -1315,11 +1332,14 @@ def configure_bluetooth_unlock(ctx: InstallContext) -> None:
             raise RuntimeError(f"refusing Bluetooth state symlink: {source}")
         if source.is_file():
             shutil.copy2(source, target_controller / name)
+            (target_controller / name).chmod(0o600)
 
     if target_device.exists():
         shutil.rmtree(target_device)
     shutil.copytree(source_device, target_device, symlinks=False)
     target_device.chmod(0o700)
+    for path in target_device.rglob("*"):
+        path.chmod(0o700 if path.is_dir() else 0o600)
 
     source_cache = source_controller / "cache" / device
     if source_cache.is_symlink():
@@ -1327,7 +1347,9 @@ def configure_bluetooth_unlock(ctx: InstallContext) -> None:
     if source_cache.is_file():
         target_cache = target_controller / "cache"
         target_cache.mkdir(mode=0o700, exist_ok=True)
+        target_cache.chmod(0o700)
         shutil.copy2(source_cache, target_cache / device)
+        (target_cache / device).chmod(0o600)
 
     _run_target_setup_command(ctx, [
         "/usr/bin/omarchy-setup-security-bluetooth-unlock",

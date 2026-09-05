@@ -1065,7 +1065,7 @@ EOF
       log "the parent password opened the kid's session ($who)"
       return 0
     fi
-    press escape
+    press esc
     sleep 5
   done
 

@@ -19,9 +19,10 @@ from .ui import error, info
 def build_phases(ctx: InstallContext):
     """Phase order. Each entry is (display name, callable taking InstallContext).
 
-    The ordering is the whole point of this orchestrator: package-install
-    hooks (limine-mkinitcpio-hook, in particular) and useradd happen at
-    points where their prerequisites are guaranteed to be in place.
+    The ordering is the whole point of this orchestrator: the root image
+    unpack, package-install hooks (limine-mkinitcpio-hook, in particular) and
+    useradd happen at points where their prerequisites are guaranteed to be
+    in place.
 
     Full-disk and protected installs use the same phase sequence. The
     configurator only changes the JSON input: full-disk asks archinstall to
@@ -81,6 +82,7 @@ def main() -> int:
         cleanup_protected_state,
         cleanup_target_hook_masks,
         restore_cpu_governors,
+        stop_target_keyring_init,
     )
 
     governors = boost_cpu_governor()
@@ -101,6 +103,9 @@ def main() -> int:
         return 0
     finally:
         restore_cpu_governors(governors)
+        # No-op after a completed install (create_factory_snapshot joined it);
+        # on a failure it ends the unit before the target is torn down.
+        stop_target_keyring_init(ctx)
         cleanup_bind_mounts(ctx)
         cleanup_target_hook_masks(ctx)
         if not success:

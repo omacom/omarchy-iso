@@ -57,12 +57,13 @@ if [[ ${OMARCHY_INSTALL_DEBUG:-} == "1" ]]; then
   echo "================================"
 fi
 
-# Warm the page cache for the bundled packages while the user works through the
-# wizard. The install reads ~3GB out of the offline mirror, and pacman consumes
-# it at only ~33MB/s, so on media slower than that the install is read-bound and
-# every byte cached here is a byte it never waits for. On faster media this costs
-# nothing but otherwise-idle bandwidth: the medium is untouched while the user
-# types, and the target disk it writes to later is a different device.
+# Warm the page cache for the root image and bundled packages while the user
+# works through the wizard. The install streams a multi-GB root image into
+# btrfs receive and then pacstraps a few packages out of the offline mirror; on media
+# slower than the unpack the install is read-bound and every byte cached here
+# is a byte it never waits for. On faster media this costs nothing but
+# otherwise-idle bandwidth: the medium is untouched while the user types, and
+# the target disk it writes to later is a different device.
 #
 # Clean page cache only, so the kernel reclaims it under pressure instead of
 # OOMing, and a budget so small machines never evict what was just warmed.
@@ -70,15 +71,36 @@ fi
 warm_offline_mirror() {
   local mirror=/var/cache/omarchy/mirror/offline
   local budget_kb spent_kb=0 size_kb path
+  # The orchestrator's ROOT_IMAGE_STREAM.
+  local image=/run/archiso/bootmnt/arch/x86_64/omarchy-root.btrfs.zst
 
   [[ ${OMARCHY_NO_PREFETCH:-} == 1 ]] && return 0
-  [[ -d $mirror ]] || return 0
 
   budget_kb=$(($(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo) / 2))
   ((budget_kb > 262144)) || return 0
 
-  # Largest first: the install reads most of the mirror, so when the budget
-  # cannot cover all of it this still front-loads the bytes that dominate.
+  # omarchy-root-image-verify.service (started at boot) reads the whole image
+  # front to back as it hashes it, and two readers on one USB stick seek
+  # against each other: let it finish first. Its pass is the warm-up for the
+  # image too; the head read below is then a cache hit where the image fit,
+  # and re-warms the front where a small budget made the kernel drop it.
+  while [[ $(systemctl is-active omarchy-root-image-verify.service 2>/dev/null) == activating ]]; do
+    sleep 1
+  done
+
+  # The image first, and only as much of it as fits: btrfs receive reads it
+  # front to back, so the leading bytes are the ones worth having cached.
+  if [[ -f $image ]]; then
+    size_kb=$(du -k -- "$image" | cut -f1)
+    ((size_kb > budget_kb)) && size_kb=$budget_kb
+    head -c "$((size_kb * 1024))" -- "$image" >/dev/null 2>&1 || true
+    spent_kb=$size_kb
+  fi
+
+  [[ -d $mirror ]] || return 0
+
+  # Then the mirror, largest first: when the budget cannot cover all of it
+  # this still front-loads the bytes that dominate.
   while read -r size_kb path; do
     ((spent_kb + size_kb > budget_kb)) && continue
     cat -- "$path" >/dev/null 2>&1 || true

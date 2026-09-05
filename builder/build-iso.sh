@@ -30,7 +30,7 @@ pacman --noconfirm -Sy archlinux-keyring
 # so this container can be months behind the mirror it installs from. A plain
 # -Sy install is then a partial upgrade — new packages linked against a glibc
 # the container doesn't have yet.
-pacman --noconfirm -Syu archiso git sudo base-devel jq grub imagemagick neovim nodejs npm tree-sitter-cli
+pacman --noconfirm -Syu archiso git sudo base-devel jq grub imagemagick neovim nodejs npm tree-sitter-cli btrfs-progs
 
 # Pre-import the omarchy signing key (so pacman trusts our [omarchy] repo
 # during the build without keyserver lookups).
@@ -102,6 +102,14 @@ fi
 if [[ -d /omarchy-source && -d /omarchy-pkgs ]]; then
   bash /builder/build-omarchy-packages.sh "$offline_mirror_dir"
   LOCAL_OMARCHY_BUILD=1
+  # A rebuild of the same revision produces the same filename with different
+  # bytes. pacman consults /var/cache/pacman/pkg (the host's cache, kept across
+  # --keep-pkg-cache builds) before the mirror, and a stale copy from an
+  # earlier build fails the checksum against the mirror's fresh db.
+  for local_package_name in \
+    "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"; do
+    rm -f /var/cache/pacman/pkg/"$local_package_name"-*.pkg.tar.zst{,.sig}
+  done
 fi
 
 # Node.js binary for offline mise install.
@@ -194,6 +202,9 @@ mapfile -t all_packages < <(
     cat "$build_cache_dir/packages.x86_64"
     grep -hv '^#\|^$' "${base_pkg_lists[@]}"
     grep -hv '^#\|^$' /builder/archinstall.packages
+    # The root image is pacstrapped from the pruned mirror, so its packages
+    # must be in the keep-set even when nothing in the lists depends on them.
+    grep -hv '^#\|^$' /builder/image.packages
     # Always include the selected Omarchy packages so the target install can
     # find the runtime and companion packages in the offline mirror.
     printf '%s\n' "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"
@@ -228,10 +239,23 @@ if ! download_offline_packages; then
   download_offline_packages
 fi
 
+# mkarchiso expects the mirror at /var/cache/omarchy/mirror/offline inside the
+# container (the airootfs path), and the root image is pacstrapped through the
+# same path; symlink rather than duplicate.
+mkdir -p /var/cache/omarchy/mirror
+ln -sfn "$offline_mirror_dir" /var/cache/omarchy/mirror/offline
+
+rebuild_offline_repo_db() {
+  rm -f "$offline_mirror_dir"/offline.db* "$offline_mirror_dir"/offline.files*
+  repo-add -q "$offline_mirror_dir/offline.db.tar.gz" "$offline_mirror_dir/"*.pkg.tar.zst
+}
+
 # Resolve the exact filenames chosen by the same synced package databases used
 # for the download. Pruning by this transaction (rather than merely keeping the
 # newest version of every cached package name) removes packages that have left
-# the lists or dependency closure, such as an old Electron major version.
+# the lists or dependency closure, such as an old Electron major version. This
+# is the build cache: it keeps the whole closure so the next build downloads
+# nothing; what the ISO ships is decided below.
 if ! resolved_package_files="$(
   pacman --config "/configs/pacman-online-${OMARCHY_MIRROR}.conf" --noconfirm \
     --dbpath /tmp/offlinedb -S --print --print-format '%f' "${all_packages[@]}"
@@ -244,6 +268,9 @@ mapfile -t required_package_files <<< "$resolved_package_files"
 # The online transaction intentionally excludes packages built from the local
 # checkouts. Add those exact artifacts back to the keep-set after verifying
 # that the local build left exactly one file for each selected package name.
+# The settings package is a live ISO package; the runtime and nvim packages
+# are only in the image now, but keeping all three in the mirror leaves
+# omarchy-apply-system able to resolve them like any published build.
 if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
   for local_package_name in \
     "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"; do
@@ -269,45 +296,135 @@ fi
 printf '%s\n' "${required_package_files[@]}" |
   bash /builder/prune-offline-mirror.sh "$offline_mirror_dir"
 
-# Rebuild the offline repo db from scratch so size/checksum/depends entries
-# always reflect only the package files selected for this build.
-rm -f "$offline_mirror_dir"/offline.db* "$offline_mirror_dir"/offline.files*
-repo-add "$offline_mirror_dir/offline.db.tar.gz" "$offline_mirror_dir/"*.pkg.tar.zst
+# Index the mirror only now, from scratch, so size/checksum/depends entries
+# reflect only the package files selected for this build. The cache persists
+# across builds and can hold several versions of a package; repo-add keeps
+# whichever it processes last (a warning on downgrade, hidden by -q), and the
+# glob orders by name, not version. Indexing the unpruned cache could build the
+# root image from an older package than the mirror beside it advertises.
+rebuild_offline_repo_db
 
-# mkarchiso expects the mirror at /var/cache/omarchy/mirror/offline inside the
-# container (the airootfs path); symlink rather than duplicate.
-mkdir -p /var/cache/omarchy/mirror
-ln -sf "$offline_mirror_dir" /var/cache/omarchy/mirror/offline
+# Packages that differ per machine and therefore stay out of the root image:
+# the installer pacstraps them on the target after unpacking the image, and
+# omarchy-apply-system installs more from omarchy-other.packages as the
+# hardware dictates. Everything else the target gets is in the image.
+hardware_packages=(linux linux-t2 amd-ucode intel-ucode sof-firmware alsa-firmware tailscale)
 
-# Denominator for the install dashboard's progress bar. Resolving the mirror's
-# own package lists against the mirror we just indexed, with an empty local db,
-# is the question pacstrap asks at install time — same resolver, same repo, same
-# lists — so no hand-kept constant can drift.
+mapfile -t image_packages < <(
+  {
+    grep -hv '^#\|^$' /builder/archinstall.packages
+    grep -hv '^#\|^$' /builder/image.packages
+    # The shipped copy, which is what the install reads too.
+    grep -hv '^#\|^$' "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
+    printf '%s\n' "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"
+  } | sort -u | grep -Fxv "${hardware_packages[@]/#/-e}"
+)
+
+# pacstrap resolves the image against the offline repo and, with CacheDir on
+# the mirror itself, extracts the package files in place instead of copying
+# several GiB into a cache first (the same trick the installer's bind mount
+# plays on the target).
+image_pacman_conf="$build_cache_dir/pacman-root-image.conf"
+sed "/^\[options\]/a CacheDir = /var/cache/omarchy/mirror/offline/" \
+  "$build_cache_dir/pacman-offline.conf" >"$image_pacman_conf"
+
+# The stream ships as a plain file in the ISO9660 tree next to airootfs.sfs,
+# not inside the squashfs: mkarchiso packs its work/iso directory as is, so a
+# file seeded there ends up on the ISO with the boot records intact. Read
+# straight off the boot medium it skips squashfs's per-block copy (~10% off
+# the unpack), mkarchiso no longer copies 3GB into the squashfs, and the
+# image can be pulled out of the ISO with any ISO9660 tool. The live system
+# finds it at /run/archiso/bootmnt/<install_dir>/<arch>/.
 #
-# It over-counts by ~1 in 925: archinstall.packages lists both amd-ucode and
-# intel-ucode because the mirror must contain either. phases.py records expected
-# and actual in the timing JSON, so growing drift shows up in acceptance runs.
-# The early-bootstrap set is already inside this closure, so restating it would
-# only add a second list to drift.
+# profiledef.sh cannot be sourced standalone (its file_permissions needs
+# mkarchiso's declare -A first); read the two values it sets instead.
+iso_subdir="$(sed -n 's/^install_dir="\(.*\)"$/\1/p' "$build_cache_dir/profiledef.sh")/$(sed -n 's/^arch="\(.*\)"$/\1/p' "$build_cache_dir/profiledef.sh")"
+[[ $iso_subdir == */x86_64 ]] || { echo "ERROR: could not read install_dir/arch from profiledef.sh: '$iso_subdir'" >&2; exit 1; }
+root_image_dir="$build_cache_dir/work/iso/$iso_subdir"
+root_image_stream="$root_image_dir/omarchy-root.btrfs.zst"
+mkdir -p "$root_image_dir"
+# Builds before the move left the stream (and, briefly, its checksum) in the
+# persistent build cache, where they would ship inside the squashfs alongside
+# the new one.
+rm -f "$build_cache_dir/airootfs/var/cache/omarchy/rootfs/omarchy-root.btrfs"*
+
+image_localdb=/tmp/omarchy-root-image-localdb
+echo "[timing] root image start $(date +%s)"
+OMARCHY_IMAGE_LOCALDB_COPY="$image_localdb" \
+  bash /builder/build-root-image.sh "$image_pacman_conf" "$root_image_stream" "${image_packages[@]}"
+echo "[timing] root image end $(date +%s)"
+
+# The installer verifies the stream against this before it touches the disk
+# (orchestrator prepare_install_target), so a truncated copy on a badly
+# flashed USB fails the install while it is still free to fail. Next to the
+# stream, so it ships on the ISO beside it.
+(cd "$root_image_dir" && sha256sum "${root_image_stream##*/}" >"$root_image_stream.sha256")
+
+# Bound the boot-time hash: Type=oneshot units are exempt from systemd's
+# default start timeout, so a stick that stalls reads instead of returning an
+# error would hang omarchy-root-image-verify.service -- and with it the
+# install -- forever. Budget a floor of 2 MiB/s over the image size (a USB 2.0
+# port sustains ~30 MB/s; the margin covers the idle-class hash yielding to
+# the live system's page-ins) plus ten minutes of slack for boot. On timeout
+# systemd sets Result=timeout and omarchy-wait-root-image-verify turns that
+# into a "medium too slow" message instead of the corrupt-medium one.
+root_image_bytes=$(stat -c %s "$root_image_stream")
+verify_dropin_dir="$build_cache_dir/airootfs/etc/systemd/system/omarchy-root-image-verify.service.d"
+mkdir -p "$verify_dropin_dir"
+cat >"$verify_dropin_dir/50-size-timeout.conf" <<EOF
+# Generated by build-iso.sh: 2 MiB/s floor over the $root_image_bytes-byte root image.
+[Service]
+TimeoutStartSec=$((root_image_bytes / (2 * 1024 * 1024) + 600))
+EOF
+
+# What the ISO ships out of this mirror. mkarchiso pacstraps the live root from
+# the complete mirror at build time, but at install time only packages the
+# root image does not already hold can ever be downloaded from it: the
+# per-machine packages, and whatever omarchy-apply-system adds from
+# omarchy-other.packages. So the live root's customize_airootfs.sh removes
+# every package file the image already provides, at the same version, from
+# its copy of the mirror. The repo db stays complete on purpose: the hardware
+# scripts run `pacman -S --needed` over lists that mix packages the image has
+# with ones it lacks, and pacman must still resolve every name, even the ones
+# it then skips as up to date.
+mirror_package_index() {
+  bsdtar -xOf "$offline_mirror_dir/offline.db.tar.gz" --include='*/desc' |
+    awk '/^%FILENAME%$/ { getline f } /^%NAME%$/ { getline n } /^%VERSION%$/ { getline v; print n "\t" v "\t" f }'
+}
+image_package_index() {
+  local desc
+  for desc in "$image_localdb"/local/*/desc; do
+    awk '/^%NAME%$/ { getline n } /^%VERSION%$/ { getline v; print n "\t" v }' "$desc"
+  done
+}
+shipped_list="$build_cache_dir/airootfs/usr/share/omarchy-iso/offline-mirror.shipped"
+awk -F'\t' '
+  NR == FNR { image[$1 "\t" $2] = 1; next }
+  !(($1 "\t" $2) in image) { print $3 }
+' <(image_package_index) <(mirror_package_index) | sort -u >"$shipped_list"
+# grep -c exits 1 on no match; the count check below wants the 0.
+shipped_count=$(grep -c . "$shipped_list" || true)
+mirror_count=$(mirror_package_index | wc -l)
+if (( shipped_count == 0 || shipped_count >= mirror_count )); then
+  echo "ERROR: the shipped-mirror selection looks wrong: $shipped_count of $mirror_count packages" >&2
+  exit 1
+fi
+echo "Shipping $shipped_count of $mirror_count mirror packages; the root image provides the rest."
+
+# Denominator for the install dashboard's progress bar: what the image holds
+# plus the kernel's closure on top of it, resolved against the image's own
+# local db with the pruned mirror, which is the question the installer's delta
+# pacstrap asks. Plus one for the microcode package every real machine gets.
+# phases.py records expected and actual in the timing JSON, so drift shows up
+# in acceptance runs.
 resolve_expected_packages() {
   local resolve_root=/tmp/omarchy-expected-packages
-  local resolved
-  local -a targets
+  local image_count resolved
 
   rm -rf "$resolve_root"
   mkdir -p "$resolve_root/var/lib/pacman"
-
-  mapfile -t targets < <(
-    {
-      grep -hv '^#\|^$' /builder/archinstall.packages
-      # Read the shipped copy, which is what _runtime_package_list reads at
-      # install time, not the build-time source it came from.
-      grep -hv '^#\|^$' \
-        "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
-      printf '%s\n' "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" \
-        "$OMARCHY_NVIM_PACKAGE"
-    } | sort -u
-  )
+  cp -a "$image_localdb/local" "$resolve_root/var/lib/pacman/"
+  image_count=$(find "$resolve_root/var/lib/pacman/local" -mindepth 1 -maxdepth 1 -type d | wc -l)
 
   pacman --config "$build_cache_dir/pacman-offline.conf" \
     --root "$resolve_root" --dbpath "$resolve_root/var/lib/pacman" \
@@ -318,36 +435,41 @@ resolve_expected_packages() {
   # dashboard's fallback.
   resolved="$(pacman --config "$build_cache_dir/pacman-offline.conf" \
     --root "$resolve_root" --dbpath "$resolve_root/var/lib/pacman" \
-    --noconfirm -S --print --print-format '%n' "${targets[@]}")" || return 1
+    --noconfirm -S --print --print-format '%n' --needed linux)" || return 1
 
-  printf '%s\n' "$resolved" | sort -u | grep -c .
+  echo $(( image_count + $(printf '%s\n' "$resolved" | sort -u | grep -c .) + 1 ))
 }
 
-# Worth failing the build over: -S --print only aborts when a target is missing
-# from the offline repo, which would fail pacstrap the same way. A count that
-# merely looks wrong is not — the dashboard falls back without the file.
+# Both failures are worth the build: -S --print only aborts when a target is
+# missing from the offline repo, which would fail the delta pacstrap the same
+# way, and the count is image packages plus the kernel closure, so one outside
+# the plausible range means the root image itself is short of packages. (The
+# dashboard falls back to a time-based curve without the file, but nothing
+# else would catch a short image before an install.)
 if ! expected_packages="$(resolve_expected_packages)"; then
   echo "ERROR: could not resolve the target package count from the offline mirror." >&2
   echo "       pacman -S --print aborts the whole transaction if any single target" >&2
-  echo "       is missing, so this almost certainly means pacstrap would fail the" >&2
-  echo "       same way at install time." >&2
+  echo "       is missing, so this almost certainly means the installer's delta" >&2
+  echo "       pacstrap would fail the same way." >&2
   exit 1
 fi
 if (( expected_packages < 600 || expected_packages > 2000 )); then
-  echo "WARNING: resolved target package count $expected_packages is outside the" >&2
-  echo "         expected 600-2000 range; shipping no denominator so the install" >&2
-  echo "         dashboard falls back to its time-based curve." >&2
-else
-  printf '%s\n' "$expected_packages" \
-    >"$build_cache_dir/airootfs/usr/share/omarchy-iso/expected-packages"
-  echo "Target install resolves to $expected_packages packages."
+  echo "ERROR: resolved target package count $expected_packages is outside the" >&2
+  echo "       expected 600-2000 range. The count is the image's package count" >&2
+  echo "       plus the kernel closure, so this means the root image is short." >&2
+  exit 1
 fi
+printf '%s\n' "$expected_packages" \
+  >"$build_cache_dir/airootfs/usr/share/omarchy-iso/expected-packages"
+echo "Target install resolves to $expected_packages packages."
 
 # Live ISO uses the same offline pacman.conf.
 cp "$build_cache_dir/pacman-offline.conf" "$build_cache_dir/airootfs/etc/pacman.conf"
 
 # Build the ISO.
+echo "[timing] mkarchiso start $(date +%s)"
 mkarchiso -v -w "$build_cache_dir/work/" -o /out/ "$build_cache_dir/"
+echo "[timing] mkarchiso end $(date +%s)"
 
 # Match host UID/GID on output.
 if [[ -n $HOST_UID && -n $HOST_GID ]]; then

@@ -13,6 +13,14 @@
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
+# This scenario is about a shared UEFI ESP (Windows + a foreign Linux under
+# EFI/Linux, efibootmgr entries) — concepts that do not exist on a legacy BIOS
+# install. Skip it there rather than fail its UEFI-specific assertions.
+if [[ $FIRMWARE != uefi ]]; then
+  log "factory-reset is UEFI-only (shared-ESP dual boot); skipping under $FIRMWARE"
+  exit 0
+fi
+
 FOREIGN_ID="fedcfedcfedcfedcfedcfedcfedcfedc"
 
 base_image_ready || { echo "No base image; run this through ./test/integration" >&2; exit 1; }

@@ -71,7 +71,7 @@ fi
 
 # --- manifest filter -----------------------------------------------------------
 source "$ROOT/builder/aarch64-package-filter.sh"
-result=$(filter_aarch64_packages linux-n1x linux linux-headers amd-ucode tzupdate lib32-nvidia-utils dell-xps13-sidecar-amps mise-bin hyprland omarchy-dev 2>/dev/null | tr '\n' ' ')
+result=$(filter_aarch64_packages linux-n1x linux linux-headers amd-ucode broadcom-wl-dkms tzupdate lib32-nvidia-utils dell-xps13-sidecar-amps mise-bin hyprland omarchy-dev 2>/dev/null | tr '\n' ' ')
 [[ $result == "linux-n1x linux-n1x-headers mise hyprland omarchy-dev " ]] || fail "manifest filter produced: $result"
 
 # --- live initramfs overlay -------------------------------------------------

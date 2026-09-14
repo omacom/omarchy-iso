@@ -21,6 +21,7 @@ class InstallContext:
     encrypt: bool
     authorized_keys_path: Path | None
     tailscale_authkey_path: Path | None
+    bluetooth_unlock_path: Path | None
 
     user_configuration: dict
     user_credentials: dict
@@ -109,6 +110,7 @@ class InstallContext:
             encrypt=_read_text(os.environ.get("OMARCHY_INSTALL_ENCRYPT_FILE")).lower() in ("true", "yes", "1"),
             authorized_keys_path=_optional_path(os.environ.get("OMARCHY_INSTALL_AUTHORIZED_KEYS_FILE")),
             tailscale_authkey_path=_optional_path(os.environ.get("OMARCHY_INSTALL_TAILSCALE_AUTHKEY_FILE")),
+            bluetooth_unlock_path=_optional_path(os.environ.get("OMARCHY_INSTALL_BLUETOOTH_UNLOCK_FILE")),
             user_configuration=user_configuration,
             user_credentials=user_credentials,
             arch_config_path=arch_config_path,

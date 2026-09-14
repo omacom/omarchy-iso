@@ -118,7 +118,7 @@ cp "/tmp/$NODE_FILENAME" "$build_cache_dir/airootfs/opt/packages/"
 # The selected omarchy-settings package is needed here so its post_install hook
 # drops Omarchy's plymouthd.conf into /etc/plymouth before mkarchiso builds the
 # live initramfs.
-arch_packages=(linux-t2 git gum jq openssl plymouth ttfx tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
+arch_packages=(linux-t2 git gum jq openssl plymouth ttfx tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted bluez bluez-utils)
 printf '%s\n' "${arch_packages[@]}" >> "$build_cache_dir/packages.x86_64"
 
 # The live ISO boots linux-t2 (see airootfs/etc/mkinitcpio.d/linux-t2.preset), so
@@ -141,6 +141,7 @@ sed -i -E '/^(linux|broadcom-wl)$/d' "$build_cache_dir/packages.x86_64"
 if [[ -d /omarchy-source ]]; then
   base_pkg_lists=(/omarchy-source/install/omarchy-base.packages /omarchy-source/install/omarchy-other.packages)
   setup_form=/omarchy-source/install/provisioning/setup-form.sh
+  bluetooth_unlock_helper=/omarchy-source/bin/omarchy-setup-security-bluetooth-unlock
 else
   # Pull the same package lists out of the freshly-downloaded Omarchy runtime
   # package so we don't need a local checkout in the non-local-source path.
@@ -162,6 +163,8 @@ else
   # actionable error below.
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/setup-form.sh 2>/dev/null || true
   setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
+  bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/bin/omarchy-setup-security-bluetooth-unlock 2>/dev/null || true
+  bluetooth_unlock_helper=/tmp/omarchy-pkglists/usr/share/omarchy/bin/omarchy-setup-security-bluetooth-unlock
 fi
 
 mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
@@ -186,6 +189,14 @@ if [[ ! -f $setup_form ]]; then
   exit 1
 fi
 cp "$setup_form" "$build_cache_dir/airootfs/usr/share/omarchy-iso/setup-form.sh"
+
+# Older bundled runtimes can pair for installation but cannot enable disk unlock.
+# Advertise the option only when this build's runtime includes its setup command.
+bluetooth_unlock_capability="$build_cache_dir/airootfs/usr/share/omarchy-iso/bluetooth-unlock-supported"
+rm -f "$bluetooth_unlock_capability"
+if [[ -x $bluetooth_unlock_helper ]]; then
+  touch "$bluetooth_unlock_capability"
+fi
 
 # Collect every package we want available in the offline mirror.
 declare -a all_packages

@@ -1,0 +1,143 @@
+#!/bin/bash
+# Single source of truth for validating the root image on the install medium
+# before anything formats a disk.
+#
+# The root image is streamed from the boot medium (copytoram is off), so a bad
+# medium must be caught before the full-disk orchestrator hands off to
+# archinstall *and* before the free-space configurator partitions the target.
+# omarchy-root-image-verify.service hashes the image in the background from boot
+# (idle-class, so it yields to the live system under the boot-medium BFQ rule);
+# this collects that verdict, waiting for the hash if it is still running and
+# starting it if it never did.
+#
+# Also logs the boot device and its I/O scheduler to stdout (the idle class only
+# takes effect under bfq) -- this folds in what used to be omarchy-iso-boot-medium.
+#
+# Exit 0: image verified (device/scheduler line on stdout). Non-zero: corrupt,
+# missing, or unverifiable -- the message is on stderr with the first line
+# written to headline the install dashboard.
+set -uo pipefail
+
+UNIT=omarchy-root-image-verify.service
+BOOT_MEDIUM_MOUNT=/run/archiso/bootmnt
+STREAM="$BOOT_MEDIUM_MOUNT/arch/x86_64/omarchy-root.btrfs.zst"
+CHECKSUM="$STREAM.sha256"
+
+fail() { echo "$1" >&2; exit 1; }
+
+# How far the hasher has read, as an integer percent: the unit's MainPID is
+# sha256sum while it runs, and its fdinfo pos on the stream is the byte
+# offset (the same source the orchestrator mirrors into the dashboard).
+# Fails silently between opens or once the unit is done; callers just skip
+# that sample.
+hash_pct() {
+  local pid fd pos size
+  pid=$(systemctl show "$UNIT" -p MainPID --value 2>/dev/null)
+  [[ $pid =~ ^[0-9]+$ && $pid -gt 0 ]] || return 1
+  size=$(stat -c %s "$STREAM" 2>/dev/null) || return 1
+  ((size > 0)) || return 1
+  for fd in /proc/"$pid"/fd/*; do
+    [[ $(readlink "$fd" 2>/dev/null) == "$STREAM" ]] || continue
+    pos=$(awk '/^pos:/ {print $2; exit}' "/proc/$pid/fdinfo/${fd##*/}" 2>/dev/null)
+    [[ -n $pos ]] && { echo $((pos * 100 / size)); return 0; }
+  done
+  return 1
+}
+
+# --- boot medium + scheduler (absorbed from omarchy-iso-boot-medium) ---
+src=$(findmnt -no SOURCE "$BOOT_MEDIUM_MOUNT" 2>/dev/null || true)
+if [[ -n $src ]]; then
+  disk=$(lsblk -no PKNAME "$src" 2>/dev/null | head -n1)
+  disk=${disk:-${src#/dev/}}
+  sched=unknown
+  [[ -r /sys/block/$disk/queue/scheduler ]] && sched=$(cat "/sys/block/$disk/queue/scheduler")
+  echo "boot medium: $src on /dev/$disk, scheduler: $sched"
+fi
+
+if [[ ! -f $STREAM ]]; then
+  # The archiso hook unmounts the boot medium after copying the airootfs to RAM
+  # (copytoram). The boot entries pin copytoram=n, so this only happens when
+  # someone edits the kernel command line.
+  [[ -d $BOOT_MEDIUM_MOUNT ]] || fail "boot medium is not mounted at $BOOT_MEDIUM_MOUNT: the live system was copied to RAM (copytoram) and the medium released; boot with copytoram=n"
+  fail "root image stream missing: $STREAM"
+fi
+[[ -f $CHECKSUM ]] || fail "root image checksum missing: $CHECKSUM"
+
+[[ "$(systemctl show "$UNIT" -p LoadState --value 2>/dev/null)" == loaded ]] ||
+  fail "$UNIT is not on this live system; cannot verify the root image"
+
+# inactive -> never started; `systemctl start` blocks until the oneshot exits.
+[[ "$(systemctl show "$UNIT" -p ActiveState --value 2>/dev/null)" == inactive ]] &&
+  systemctl start "$UNIT" >/dev/null 2>&1
+
+reported=false
+progress_drawn=false
+settling=0
+# The \r progress line needs terminating before anything else writes to the
+# terminal. Only a verified image gets the cosmetic 100%; a failure (which
+# includes a timed-out, unfinished read) just ends the line.
+finish_progress() {
+  [[ $progress_drawn == true ]] || return 0
+  [[ ${1:-} == full ]] &&
+    printf '\rverifying the install medium: 100%%' >>"$OMARCHY_VERIFY_PROGRESS" 2>/dev/null
+  printf '\n' >>"$OMARCHY_VERIFY_PROGRESS" 2>/dev/null || true
+}
+while :; do
+  case "$(systemctl show "$UNIT" -p ActiveState --value 2>/dev/null)" in
+    active)
+      finish_progress full
+      exit 0
+      ;;
+    failed)
+      finish_progress
+      # Result=timeout: systemd killed the hash at the size-based
+      # TimeoutStartSec the build wrote into the unit (2 MiB/s floor over the
+      # image size). The medium is stalling reads, not returning bad data, so
+      # re-flashing the same stick is not the advice.
+      if [[ "$(systemctl show "$UNIT" -p Result --value 2>/dev/null)" == timeout ]]; then
+        fail "install medium is too slow: try another USB stick or port"$'\n'"reading the root image did not finish within its size-based timeout"
+      fi
+      # The dashboard centres each line in ~80 columns, so the action comes
+      # first and on its own line; the journal tail (the hasher's own output)
+      # follows for debugging.
+      msg="install medium is corrupt: re-flash it"$'\n'"sha256 mismatch on the root image"
+      tail=$(journalctl -b -u "$UNIT" _COMM=sha256sum --no-pager -o cat 2>/dev/null)
+      [[ -n $tail ]] && msg+=$'\n'"$tail"
+      fail "$msg"
+      ;;
+    activating)
+      if [[ $reported == false ]]; then
+        echo "waiting for $UNIT to finish hashing the root image..."
+        reported=true
+      fi
+      # Opt-in live progress for interactive callers (the free-space
+      # configurator gate): a \r-updating percent line written to the path in
+      # OMARCHY_VERIFY_PROGRESS (normally /dev/tty). Kept out of stdout, which
+      # the orchestrator logs line by line, and stderr, whose first line
+      # headlines the dashboard on failure.
+      if [[ -n ${OMARCHY_VERIFY_PROGRESS:-} ]] && pct=$(hash_pct); then
+        printf '\rverifying the install medium: %3d%%' "$pct" >>"$OMARCHY_VERIFY_PROGRESS" 2>/dev/null || true
+        progress_drawn=true
+      fi
+      sleep 0.5
+      ;;
+    deactivating)
+      # A start timeout stops the unit before it settles into failed, and the
+      # stop is what the medium makes slow: SIGTERM does not land on a read
+      # stuck in the driver. Classifying this state now would answer "did not
+      # run" for the one case the size-based TimeoutStartSec exists to name,
+      # so wait for the terminal state -- bounded past DefaultTimeoutStopSec,
+      # because a read on a dead medium may never be reaped at all.
+      if ((settling < 240)); then
+        settling=$((settling + 1))
+        sleep 0.5
+        continue
+      fi
+      finish_progress
+      fail "install medium is too slow: try another USB stick or port"$'\n'"the root image read could not be stopped after its size-based timeout"
+      ;;
+    *)
+      fail "$UNIT did not run; cannot verify the root image"
+      ;;
+  esac
+done

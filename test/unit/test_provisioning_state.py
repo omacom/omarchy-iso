@@ -168,6 +168,7 @@ def make_ctx(target, **overrides):
         user_credentials={"users": []},
         state_dir=target / "state",
         authorized_keys_path=None,
+        state={},
     )
     defaults.update(overrides)
     return types.SimpleNamespace(**defaults)

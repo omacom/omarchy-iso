@@ -5,11 +5,16 @@ Phase ordering (full-disk and protected/pre-mounted):
     prepare_live           → disk cleanup when wiping, load configurator
                              handlers (archinstall patch happens in the
                              wrapper before Python imports it)
-    prepare_install_target → verify pre-mounted target/ESP when the JSON uses
-                             pre_mounted_config; no-op for full-disk installs
+    prepare_install_target → everything that can fail before the disk is
+                             touched: the pre-mounted target/ESP when the JSON
+                             uses pre_mounted_config, the root image stream
+                             and its checksum, and a disk layout the image can
+                             land on
     arch_install_system    → one archinstall flow for partition/mount-or-use,
-                             base install, early Omarchy packages, Limine setup,
-                             useradd, runtime Omarchy packages, fstab
+                             root image unpack (btrfs receive), per-machine
+                             package delta, Limine setup, useradd, fstab; the
+                             per-machine pacman keyring starts as a transient
+                             systemd unit after the last pacstrap
     configure_hibernation  → root-owned swap/resume drop-ins
     run_system_finalizer   → arch-chroot root omarchy-apply-system, including Snapper
     finalize_limine_boot   → final Limine config/UKI build after hardware drop-ins
@@ -18,13 +23,16 @@ Phase ordering (full-disk and protected/pre-mounted):
     configure_ssh_access   → authorized_keys for autoinstall; no-op otherwise
     configure_tailscale    → tailnet join staged for first boot; no-op otherwise
     validate_boot          → assert UKI / limine.conf / kernel cmdline are sane
+    create_factory_snapshot→ joins the keyring unit, then snapshots @ as @factory
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import textwrap
@@ -36,6 +44,7 @@ from . import archinstall_adapter as arch
 from .command import capture, capture_identifier, require_text
 from .context import InstallContext
 from .keyboard import configure_keyboard
+from .phases import write_state
 from .ui import error, info
 
 
@@ -117,43 +126,60 @@ def _omarchy_nvim_package() -> str:
     return _package_targets()["nvim"]
 
 
-# Packages installed BEFORE useradd. The selected omarchy-settings package and
-# omarchy-nvim populate /etc/skel so the user's home gets seeded correctly, and
-# omarchy-settings also ships the limine/snapper configs. Target-side setup
-# commands are installed later by the selected Omarchy runtime package and
-# executed in chroot.
-EARLY_BOOTSTRAP_BASE_PACKAGES = [
-    "base-devel",
-    "git",
-    "limine",
-    "efibootmgr",
-    "omarchy-keyring",
-]
-
-# Install LuaRocks before omarchy-nvim pulls in lua51-lpeg. Arch's lua-luarocks
-# post_install script tries to rebuild manifests for existing rocks trees before
-# the unversioned luarocks-admin command exists if both arrive in the wrong
-# transaction order. Splitting this transaction avoids the harmless but noisy
-# "luarocks-admin: command not found" line during ISO installs.
-EARLY_LUAROCKS_PACKAGES = [
-    "lua51",
-    "luarocks",
-]
-
-
-def _early_bootstrap_packages() -> list[str]:
-    return [*EARLY_BOOTSTRAP_BASE_PACKAGES, _omarchy_settings_package()]
+# The root image: a `btrfs send --compressed-data` stream of the invariant
+# target system (build-root-image.sh), unpacked onto the target in place of
+# pacstrapping it, shipped behind an outer whole-stream zstd layer (the
+# per-extent compression inside the stream cannot reach the send framing or
+# redundancy that spans extents; the outer pass is ~11% of the stream).
+# build-iso.sh ships it as a plain file on the ISO, read straight off the
+# boot medium, with sha256sum output for it (the compressed file) next to it.
+# The subvolume name is what build-root-image.sh sends.
+ROOT_IMAGE_STREAM = Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.btrfs.zst")
+# Decompresses the outer layer in the receive pipe. --long=27 mirrors the
+# compressing side's window: it is within the decoder's default 128 MiB
+# acceptance limit, but saying it here keeps the pair visibly in step with
+# STREAM_COMPRESS in build-root-image.sh.
+ROOT_IMAGE_DECOMPRESS = ("zstd", "-dc", "--long=27")
+ROOT_IMAGE_SUBVOLUME = "omarchy-root"
+# The live ISO starts omarchy-root-image-verify.service at boot: `sha256sum -c`
+# of the stream, running while the user is in the configurator. It is the only
+# verifier. Both this phase and the free-space configurator gate collect its
+# verdict through this helper, which logs the boot medium and its I/O scheduler,
+# waits for the unit if it is still hashing, and starts it if it never ran.
+ROOT_IMAGE_VERIFY_HELPER = "/usr/local/bin/omarchy-wait-root-image-verify"
+ROOT_IMAGE_VERIFY_UNIT = "omarchy-root-image-verify.service"
 
 
-def _early_user_seed_packages() -> list[str]:
-    return [_omarchy_nvim_package()]
+BOOT_MEDIUM_MOUNT = Path("/run/archiso/bootmnt")
 
 
-def _early_packages() -> list[str]:
+def _root_image_stream() -> Path:
+    if not ROOT_IMAGE_STREAM.is_file():
+        # The archiso hook unmounts the boot medium after copying the airootfs
+        # to RAM (copytoram). The boot entries pin copytoram=n, so this only
+        # happens when someone edits the kernel command line.
+        if not BOOT_MEDIUM_MOUNT.is_dir():
+            raise RuntimeError(
+                f"boot medium is not mounted at {BOOT_MEDIUM_MOUNT}: the live system was "
+                "copied to RAM (copytoram) and the medium released; boot with copytoram=n"
+            )
+        raise RuntimeError(f"root image stream missing: {ROOT_IMAGE_STREAM}")
+    return ROOT_IMAGE_STREAM
+
+# Packages the image must carry for the rest of the install to work: Limine
+# setup reads the settings package's limine config, useradd copies the skel the
+# settings and nvim packages populate, and the target-side setup commands come
+# from the runtime package. Checked right after unpacking so a mismatched
+# image fails here with a clear message instead of three phases later.
+ROOT_IMAGE_REQUIRED_PACKAGES = ("limine", "omarchy-keyring")
+
+
+def _root_image_required_packages() -> list[str]:
     return [
-        *_early_bootstrap_packages(),
-        *EARLY_LUAROCKS_PACKAGES,
-        *_early_user_seed_packages(),
+        *ROOT_IMAGE_REQUIRED_PACKAGES,
+        _omarchy_runtime_package(),
+        _omarchy_settings_package(),
+        _omarchy_nvim_package(),
     ]
 
 
@@ -209,12 +235,126 @@ def _install_disk(ctx: InstallContext) -> str | None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def prepare_install_target(ctx: InstallContext) -> None:
+    """Everything that can fail before the disk is touched. The next phase
+    partitions, formats and encrypts as its first step, and a failure after
+    that leaves a wiped (or wiped and encrypted) disk with no system on it:
+    so the stream, its checksum and a layout the image can land on are all
+    checked here, where failing costs nothing."""
     if ctx.is_protected:
         verify_protected_mounts(ctx)
+        # The protected layout exists already; check the real mounts.
+        _root_image_target_mounts(ctx.target)
+    else:
+        verify_root_image_layout(ctx.user_configuration.get("disk_config") or {})
+    verify_root_image_stream(ctx)
+
+
+def verify_root_image_layout(disk_config: dict) -> None:
+    """The root image replaces the target's @ subvolume, so the configurator
+    JSON must put the root on a btrfs @ subvolume, and the image path has no
+    LVM support (install_base_delta). Checked from the JSON so a layout the
+    image cannot land on fails before archinstall creates it."""
+    if disk_config.get("lvm_config"):
+        raise RuntimeError("root image install does not support LVM layouts")
+
+    for mod in disk_config.get("device_modifications") or []:
+        for part in mod.get("partitions") or []:
+            if part.get("fs_type") != "btrfs":
+                continue
+            for subvol in part.get("btrfs") or []:
+                if subvol.get("mountpoint") == "/" and subvol.get("name") in ("@", "/@"):
+                    return
+    raise RuntimeError(
+        "root image install needs the target root on a btrfs @ subvolume; "
+        "disk_config mounts / from no such subvolume"
+    )
+
+
+def verify_root_image_stream(ctx: InstallContext) -> None:
+    """The stream is present and hashes to what the build recorded. A
+    truncated or corrupt copy (a badly flashed USB is the common case) would
+    also trip btrfs receive's per-command checksums, but only after the disk
+    is formatted.
+
+    ROOT_IMAGE_VERIFY_HELPER is the single source of truth: it collects the
+    boot-time hasher's verdict, waiting for the unit if it is still running
+    and starting it if it never did, and logs the boot medium and its I/O
+    scheduler. The free-space configurator gate runs the same helper before it
+    partitions, so both disk-touching paths clear the same check; whoever gets
+    there first pays the wait. The hasher's read also leaves as much of the
+    stream as fits in the page cache for the unpack that follows."""
+    _publish_verify_progress(ctx)
+    try:
+        result = subprocess.run(
+            [ROOT_IMAGE_VERIFY_HELPER],
+            capture_output=True, text=True, check=False,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"could not run {ROOT_IMAGE_VERIFY_HELPER}: {exc}") from exc
+
+    for line in result.stdout.splitlines():
+        if line.strip():
+            info(f"› {line.strip()}")
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr.strip()
+            or f"{ROOT_IMAGE_VERIFY_HELPER} failed with status {result.returncode}"
+        )
+
+
+def _publish_verify_progress(ctx: InstallContext) -> None:
+    """While the boot-time hasher is still reading the stream, mirror its read
+    position into phase_progress so the dashboard bar tracks the actual hash
+    instead of the phase's time-driven band. Best effort throughout: the
+    helper is the authority on the verdict, and any hiccup here (unit already
+    done, hasher between opens, /proc gone) just skips a sample."""
+    try:
+        total = ROOT_IMAGE_STREAM.stat().st_size
+    except OSError:
+        return
+    while total and _verify_unit_property("ActiveState") == "activating":
+        pos = _hasher_read_pos()
+        if pos is not None:
+            _write_phase_progress(ctx, pos / total)
+        time.sleep(0.5)
+
+
+def _verify_unit_property(prop: str) -> str:
+    res = subprocess.run(
+        ["systemctl", "show", ROOT_IMAGE_VERIFY_UNIT, "-p", prop, "--value"],
+        capture_output=True, text=True, check=False,
+    )
+    return res.stdout.strip()
+
+
+def _hasher_read_pos() -> int | None:
+    """Byte offset of the hasher's open fd on the stream: the unit's MainPID
+    is sha256sum while it runs, and fdinfo's pos is how far it has read."""
+    pid = _verify_unit_property("MainPID")
+    if not pid.isdigit() or pid == "0":
+        return None
+    fd_dir = Path("/proc") / pid / "fd"
+    try:
+        for fd in fd_dir.iterdir():
+            try:
+                if fd.resolve() != ROOT_IMAGE_STREAM:
+                    continue
+                fdinfo = (fd_dir.parent / "fdinfo" / fd.name).read_text()
+            except OSError:
+                continue
+            for line in fdinfo.splitlines():
+                if line.startswith("pos:"):
+                    return int(line.split()[1])
+    except OSError:
+        pass
+    return None
 
 
 def arch_install_system(ctx: InstallContext) -> None:
-    """Install the target system from the archinstall JSON.
+    """Install the target system: archinstall partitions and mounts per the
+    configurator JSON, the root image is unpacked onto the mounted layout, and
+    archinstall finishes with the per-machine package delta, users, and fstab.
 
     The phase sequence is the same for full-disk and protected installs. The
     JSON decides whether archinstall should create/mount a disk layout or use
@@ -241,6 +381,11 @@ def arch_install_system(ctx: InstallContext) -> None:
             skip_wkd=True,
         )
 
+        # Before anything writes into the target: the image replaces the
+        # (empty) root subvolume archinstall created, and everything written
+        # there first would go with it.
+        _install_root_image(ctx)
+
         if not pre_mounted and arch.is_encrypted(config):
             installer.generate_key_files()
 
@@ -250,23 +395,19 @@ def arch_install_system(ctx: InstallContext) -> None:
         _mount_offline_package_cache(ctx)
         _mask_mkinitcpio_pacman_hooks(ctx)
         try:
-            info("› installing base system (mkinitcpio deferred to final Limine UKI build)")
+            info("› installing per-machine packages (mkinitcpio deferred to final Limine UKI build)")
             # An empty kb_layout makes archinstall's set_keyboard_language skip
             # booting the target in a container just to run localectl; the
             # keymap is configured offline right after instead.
             kb_layout = config.locale_config.kb_layout if config.locale_config else ""
-            installer.minimal_installation(
-                optional_repositories=(
-                    config.mirror_config.optional_repositories
-                    if config.mirror_config else []
-                ),
-                mkinitcpio=False,
+            arch.install_base_delta(
+                installer,
+                config,
                 hostname=config.hostname,
                 locale_config=(
                     replace(config.locale_config, kb_layout="")
                     if config.locale_config else None
                 ),
-                pacman_config=config.pacman_config,
             )
 
             if not configure_keyboard(installer.target, kb_layout):
@@ -276,10 +417,9 @@ def arch_install_system(ctx: InstallContext) -> None:
                 installer.set_mirrors(mirror_handler, config.mirror_config, on_target=True)
 
             if config.swap and config.swap.enabled:
-                installer.setup_swap(algo=config.swap.algorithm)
+                arch.setup_zram_swap(installer)
                 _drop_archinstall_zram_conf(ctx)
 
-            _install_early_packages(installer)
             _configure_limine_boot(ctx, installer, config)
 
             info("› creating user (with /etc/skel populated)")
@@ -287,11 +427,11 @@ def arch_install_system(ctx: InstallContext) -> None:
                 installer.create_users(config.auth_config.users)
 
             if config.app_config:
-                info("› installing archinstall application selections")
+                # The image carries the PipeWire packages; this adds the audio
+                # firmware archinstall's hardware detection asks for and wires
+                # the per-user PipeWire units.
+                info("› applying archinstall application selections")
                 arch.install_applications(installer, config)
-
-            info("› installing Omarchy runtime + omarchy-base.packages")
-            installer.add_additional_packages(_runtime_package_list(ctx))
 
             # Tailscale is bundled in the offline mirror but only installed
             # when an autoinstall drive staged an auth key; must happen here,
@@ -303,6 +443,11 @@ def arch_install_system(ctx: InstallContext) -> None:
         finally:
             _unmask_mkinitcpio_pacman_hooks(ctx)
             _unmount_offline_package_cache(ctx)
+
+        # After the last pacstrap: each one runs its own pacman-key --init on
+        # the target's gnupg dir. Runs on while the phases below configure the
+        # target; create_factory_snapshot joins it.
+        _start_target_keyring_init(ctx)
 
         # Standard arch finishers.
         if config.timezone:
@@ -316,6 +461,328 @@ def arch_install_system(ctx: InstallContext) -> None:
             _write_pre_mounted_fstab(ctx)
         else:
             installer.genfstab()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Root image: btrfs receive the build-time system into the target filesystem
+# and make it the @ subvolume.
+#
+# archinstall (or the configurator, for protected installs) has created and
+# mounted the subvolume layout by the time this runs: @ at the target, with
+# @home, @log, @pkg and the ESP mounted inside it. `btrfs receive` can only
+# create a new subvolume, never fill an existing one, so the image is received
+# at the filesystem's top level, snapshotted writable, and swapped in for the
+# empty @ while the layout is unmounted; then the layout is mounted again
+# exactly as it was. The mount table is replayed from findmnt rather than
+# asking archinstall to mount a second time, which would also unlock LUKS a
+# second time; the mapper stays open throughout.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _findmnt_mounts(root: Path) -> list[dict]:
+    """Every mount at or below root, parents before children, as dicts with
+    target/source/fstype/options."""
+    res = subprocess.run(
+        ["findmnt", "-R", "-J", "-o", "TARGET,SOURCE,FSTYPE,OPTIONS", str(root)],
+        capture_output=True, text=True, check=True,
+    )
+    flat: list[dict] = []
+
+    def walk(nodes):
+        for node in nodes:
+            flat.append({k: node.get(k) for k in ("target", "source", "fstype", "options")})
+            walk(node.get("children") or [])
+
+    walk(json.loads(res.stdout).get("filesystems") or [])
+    return flat
+
+
+def _remount_option_string(options: str) -> str:
+    # subvolid refers to the subvolume replaced here; subvol= names it.
+    return ",".join(opt for opt in options.split(",") if not opt.startswith("subvolid="))
+
+
+def _root_image_target_mounts(target: Path) -> tuple[list[dict], str]:
+    """The mount table under target, checked for what the image swap needs:
+    target itself mounted, btrfs, on the @ subvolume. Returns the mounts and
+    the device backing the root."""
+    mounts = _findmnt_mounts(target)
+    if not mounts or Path(mounts[0]["target"]) != target:
+        raise RuntimeError(f"{target} is not a mountpoint")
+    root_mount = mounts[0]
+    if root_mount["fstype"] != "btrfs":
+        raise RuntimeError(f"root image install needs a btrfs target root, got {root_mount['fstype']}")
+    root_options = (root_mount["options"] or "").split(",")
+    if not any(opt in ("subvol=/@", "subvol=@") for opt in root_options):
+        raise RuntimeError(f"root image install needs the target root on the @ subvolume, got {root_mount['options']}")
+    device = (root_mount["source"] or "").split("[")[0]
+    if not device:
+        raise RuntimeError(f"could not determine the btrfs device backing {target}")
+    return mounts, device
+
+
+def _install_root_image(ctx: InstallContext) -> None:
+    target = ctx.target
+    stream = _root_image_stream()
+    mounts, device = _root_image_target_mounts(target)
+
+    top = ctx.state_dir / "image-top"
+    top.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["mount", "-o", "subvolid=5", device, str(top)], check=True)
+    try:
+        received = top / ROOT_IMAGE_SUBVOLUME
+        if received.exists():
+            subprocess.run(["btrfs", "subvolume", "delete", str(received)], check=True, capture_output=True)
+
+        info(f"› unpacking root image ({stream.stat().st_size >> 20} MiB stream from {stream})")
+        _receive_root_image(ctx, top, stream)
+
+        staged = top / "@.image"
+        if staged.exists():
+            subprocess.run(["btrfs", "subvolume", "delete", str(staged)], check=True, capture_output=True)
+        subprocess.run(["btrfs", "subvolume", "snapshot", str(received), str(staged)], check=True, capture_output=True)
+        subprocess.run(["btrfs", "subvolume", "delete", str(received)], check=True, capture_output=True)
+
+        # The image's pacman.log ends up under the @log mount; carry it over so
+        # the installed system's log starts with the packages it was built from.
+        image_log = staged / "var" / "log" / "pacman.log"
+        log_subvol = top / "@log"
+        if image_log.is_file() and log_subvol.is_dir():
+            shutil.copy2(image_log, log_subvol / "pacman.log")
+
+        info("› making the image the root subvolume")
+        _umount_tree(target)
+        try:
+            subprocess.run(["btrfs", "subvolume", "delete", str(top / "@")], check=True, capture_output=True)
+            staged.rename(top / "@")
+        finally:
+            for mount in mounts:
+                mountpoint = Path(mount["target"])
+                mountpoint.mkdir(parents=True, exist_ok=True)
+                source = (mount["source"] or "").split("[")[0]
+                subprocess.run(
+                    ["mount", "-t", mount["fstype"], "-o", _remount_option_string(mount["options"] or ""),
+                     source, str(mountpoint)],
+                    check=True,
+                )
+    finally:
+        subprocess.run(["umount", str(top)], check=False, capture_output=True)
+
+    missing = [pkg for pkg in _root_image_required_packages() if not arch.target_has_package(target, pkg)]
+    if missing:
+        raise RuntimeError(f"root image lacks required packages: {', '.join(missing)}")
+
+    # Per-machine identity the image deliberately ships without.
+    subprocess.run(["systemd-machine-id-setup", f"--root={target}"], check=True, capture_output=True)
+
+
+# Transient systemd unit that initialises the target's pacman keyring.
+TARGET_KEYRING_UNIT = "omarchy-target-keyring"
+
+
+def _start_target_keyring_init(ctx: InstallContext) -> None:
+    """Initialise and populate the target's per-machine pacman keyring, as a
+    transient systemd unit that runs on while the install continues.
+
+    The image ships no /etc/pacman.d/gnupg: its master key would be the same
+    on every install, and a shared signing key must never be distributed. On
+    a target pacstrapped directly, pacstrap -K initialised the keyring and
+    the keyring packages' scriptlets populated it; here those packages come
+    from the image, where their scriptlets ran with no keyring to populate.
+    The delta pacstrap's -K still ran --init (generating the master key), and
+    --init is idempotent, so run it again for installs that pacstrapped
+    nothing, then populate from the target's own keyring files. Chroot-free:
+    --gpgdir and --populate-from address the target directly, so no API
+    mounts are held.
+
+    Started after the last pacstrap (each runs its own --init on this dir)
+    and joined by create_factory_snapshot: nothing in between reads the
+    keyring (the offline repo is SigLevel = Never) or writes it, and the
+    snapshot must not capture it half-written. A unit rather than a plain
+    child process: pacman-key leaves a gpg-agent and dirmngr behind, which
+    systemd kills with the rest of the unit's cgroup the moment pacman-key
+    exits (sockets under the target's gnupg dir would otherwise block the
+    unmount); the dashboard's process-group kill does not reach it, while
+    `systemctl stop` still does (stop_target_keyring_init); and its output
+    is in the journal whatever happens to the orchestrator. --wait --pipe
+    give a child to join with the unit's exit status and output.
+    """
+    gpgdir = shlex.quote(str(ctx.target / "etc" / "pacman.d" / "gnupg"))
+    keyrings = shlex.quote(str(ctx.target / "usr" / "share" / "pacman" / "keyrings"))
+    script = (
+        f"pacman-key --gpgdir {gpgdir} --init && "
+        f"pacman-key --gpgdir {gpgdir} --populate-from {keyrings} --populate archlinux omarchy"
+    )
+    info("› initializing per-machine pacman keyring (background unit)")
+    # A failed unit from an earlier attempt would hold the name (--collect
+    # releases it, but not for a unit started without it).
+    subprocess.run(["systemctl", "reset-failed", TARGET_KEYRING_UNIT], check=False, capture_output=True)
+    ctx.state["target_keyring_proc"] = subprocess.Popen(
+        ["systemd-run", "--wait", "--pipe", "--collect", "--quiet",
+         f"--unit={TARGET_KEYRING_UNIT}", "sh", "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+
+def _join_target_keyring_init(ctx: InstallContext, *, raise_on_error: bool = True) -> None:
+    """Wait for the keyring unit if one is running; no-op otherwise."""
+    proc = ctx.state.pop("target_keyring_proc", None)
+    if proc is None:
+        return
+    out, _ = proc.communicate()
+    if raise_on_error and proc.returncode != 0:
+        raise RuntimeError(
+            f"per-machine pacman keyring init failed (exit {proc.returncode}):\n"
+            f"{(out or '').strip()}"
+        )
+
+
+def stop_target_keyring_init(ctx: InstallContext) -> None:
+    """Exit path: end the keyring unit if it is still running, so nothing
+    keeps writing into the target after the install has stopped. The
+    install's own error must win, so a keyring failure is not raised here."""
+    if ctx.state.get("target_keyring_proc") is None:
+        return
+    subprocess.run(["systemctl", "stop", TARGET_KEYRING_UNIT], check=False, capture_output=True)
+    _join_target_keyring_init(ctx, raise_on_error=False)
+
+
+def _umount_tree(root: Path, attempts: int = 20) -> None:
+    """umount -R with a few retries: the dashboard polls the target's pacman
+    db from another process, and a poll landing mid-unmount is EBUSY."""
+    for attempt in range(1, attempts + 1):
+        res = subprocess.run(["umount", "-R", str(root)], capture_output=True, text=True)
+        if res.returncode == 0:
+            return
+        if attempt == attempts:
+            raise RuntimeError(f"could not unmount {root}: {res.stderr.strip()}")
+        time.sleep(0.25)
+
+
+def _receive_root_image(ctx: InstallContext, top: Path, stream_path: Path) -> None:
+    """Pipe the stream through the outer-layer decompressor into btrfs
+    receive, publishing progress for the dashboard as a fraction of stream
+    bytes consumed (compressed bytes — the fraction of the medium read, which
+    is what the wait is made of).
+
+    This loop keeps the read off the medium for itself rather than handing
+    zstd the file: a read error here is the dying-medium case the verify
+    machinery exists for, and it must surface as this process's OSError, not
+    as a decompressor exit code to reverse-engineer.
+    """
+    total = stream_path.stat().st_size
+    errors = ctx.state_dir / "btrfs-receive.err"
+    with errors.open("w") as err:
+        unzstd = subprocess.Popen(
+            [*ROOT_IMAGE_DECOMPRESS],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=err,
+        )
+        try:
+            proc = subprocess.Popen(
+                ["btrfs", "receive", "-q", str(top)],
+                stdin=unzstd.stdout,
+                stderr=err,
+            )
+        except BaseException:
+            # A half-built pipeline has no receive to drain the decompressor,
+            # and _close_receive below never runs: close both of its pipes so
+            # it exits (EOF on stdin; EPIPE once its output has nowhere to
+            # go) and reap it, then let the original exception tell the
+            # story. btrfs is on every live ISO, so this is close to
+            # unreachable -- but a leaked child blocked on stdin is the kind
+            # of close-to that turns a loud failure into a wedged teardown.
+            # BaseException, not Exception: a KeyboardInterrupt aimed at this
+            # process alone must run the same cleanup on its way out (the
+            # block re-raises, so nothing is swallowed).
+            for pipe in (unzstd.stdin, unzstd.stdout):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except OSError:
+                        pass
+            unzstd.wait()
+            raise
+    assert unzstd.stdin is not None
+    assert unzstd.stdout is not None
+    # The receive holds the decoded pipe now. Dropping this copy of its read
+    # end is load-bearing: with it open, a receive that dies early would
+    # never turn zstd's writes into EPIPE, and the whole pipeline — this
+    # loop included — would block on full pipes instead of failing.
+    unzstd.stdout.close()
+    sent = 0
+    last_report = 0.0
+    try:
+        with stream_path.open("rb") as stream:
+            while chunk := stream.read(8 << 20):
+                unzstd.stdin.write(chunk)
+                sent += len(chunk)
+                now = time.monotonic()
+                if now - last_report >= 0.5:
+                    _write_phase_progress(ctx, sent / total if total else 1.0)
+                    last_report = now
+    except BrokenPipeError:
+        pass
+    finally:
+        # Whatever happened above — including the EIO off a dying medium that
+        # the whole verify machinery exists to catch — neither child must be
+        # left blocked on an open stdin. A blocked receive would hold the
+        # caller's staging mount busy, and that umount is check=False: the
+        # mount would leak onto the target filesystem with nothing said.
+        unzstd_code, code = _close_receive(unzstd, proc)
+    if unzstd_code != 0 or code != 0:
+        # Both children share the error file, so the full story is in the
+        # detail either way. When both fail, the order of death is not
+        # knowable from exit codes alone -- a corrupt outer layer kills zstd
+        # and starves the receive, while a dead receive EPIPEs zstd -- so
+        # the headline names both instead of guessing a culprit, and the
+        # detail (zstd's "premature end", the receive's own complaint)
+        # disambiguates.
+        if unzstd_code != 0 and code != 0:
+            stage = "root image decompression and btrfs receive both"
+        elif code != 0:
+            stage = "btrfs receive"
+        else:
+            stage = "root image decompression"
+        raise RuntimeError(f"{stage} failed: {errors.read_text(errors='replace').strip()}")
+    _write_phase_progress(ctx, 1.0)
+
+
+def _close_receive(unzstd: subprocess.Popen, proc: subprocess.Popen) -> tuple[int, int]:
+    """Close the pipeline's intake and reap both children, returning
+    (decompressor, receive) exit statuses.
+
+    Never raises: it runs on the way out of a failing read, where the original
+    exception is the one worth keeping. Closing flushes, so a decompressor
+    that has already died answers with a BrokenPipeError of its own; on EOF it
+    drains what it holds and exits, which ends the receive's stdin in turn.
+    The receive's wait is unbounded because a receive that has read EOF is
+    committing the subvolume, which on slow media is legitimately slow and
+    must not be killed.
+    """
+    if unzstd.stdin is not None:
+        try:
+            unzstd.stdin.close()
+        except OSError:
+            pass
+    return unzstd.wait(), proc.wait()
+
+
+def _write_phase_progress(ctx: InstallContext, fraction: float) -> None:
+    """Record how far the current phase has come (0..1) in the state file the
+    dashboard polls. Best effort: progress display must never fail an install."""
+    state_path = ctx.state_dir / "state.json"
+    try:
+        state = json.loads(state_path.read_text())
+    except (OSError, ValueError):
+        return
+    state["phase_progress"] = max(0.0, min(1.0, fraction))
+    try:
+        write_state(state_path, state)
+    except OSError:
+        pass
 
 
 def _configure_limine_boot(ctx: InstallContext, installer, config) -> None:
@@ -625,20 +1092,6 @@ def _drop_archinstall_zram_conf(ctx: InstallContext) -> None:
     zram_conf.unlink(missing_ok=True)
 
 
-def _install_early_packages(installer) -> None:
-    bootstrap_packages = _early_bootstrap_packages()
-    user_seed_packages = _early_user_seed_packages()
-
-    info(f"› installing early Omarchy packages: {', '.join(bootstrap_packages)}")
-    installer.add_additional_packages(bootstrap_packages)
-
-    info(f"› installing LuaRocks prerequisites: {', '.join(EARLY_LUAROCKS_PACKAGES)}")
-    installer.add_additional_packages(EARLY_LUAROCKS_PACKAGES)
-
-    info(f"› installing user seed packages: {', '.join(user_seed_packages)}")
-    installer.add_additional_packages(user_seed_packages)
-
-
 def _mount_offline_package_cache(ctx: InstallContext) -> None:
     """Let pacstrap consume bundled packages without copying them first.
 
@@ -721,28 +1174,6 @@ def _unmask_mkinitcpio_pacman_hooks(
                 backup.rename(path)
         except OSError as exc:
             info(f"warning: failed to restore pacman hook mask for {name}: {exc}")
-
-
-def _runtime_package_list(ctx: InstallContext) -> list[str]:
-    """Selected Omarchy runtime package + every package in the ISO-bundled
-    base package list that isn't already installed early."""
-    base_pkgs_file = Path("/usr/share/omarchy-iso/omarchy-base.packages")
-    pkgs = [_omarchy_runtime_package()]
-    already_installed = set(_early_packages()) | {
-        _omarchy_runtime_package(),
-        _omarchy_settings_package(),
-        _omarchy_nvim_package(),
-        "omarchy",
-        "omarchy-settings",
-        "omarchy-nvim",
-    }
-    for raw in base_pkgs_file.read_text().splitlines():
-        s = raw.strip()
-        if not s or s.startswith("#"):
-            continue
-        if s not in already_installed and s not in pkgs:
-            pkgs.append(s)
-    return pkgs
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1783,6 +2214,9 @@ def _validate_pre_mounted_filesystems(ctx: InstallContext) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def create_factory_snapshot(ctx: InstallContext) -> None:
+    # The keyring unit writes into @; the snapshot must not catch it midway.
+    _join_target_keyring_init(ctx)
+
     fstype = _findmnt_value(ctx.target, "FSTYPE")
     if fstype != "btrfs":
         info(f"› target root is {fstype or 'unknown'}, not btrfs; skipping factory snapshot")
@@ -1920,10 +2354,16 @@ def cleanup_protected_state(ctx: InstallContext) -> None:
     if not ctx.is_protected:
         return
 
-    subprocess.run(["umount", "-R", str(ctx.target)], check=False, capture_output=True)
-    if Path("/dev/mapper/omarchy_root").exists():
-        subprocess.run(
-            ["cryptsetup", "close", "omarchy_root"],
-            check=False,
-            capture_output=True,
-        )
+    # Swapoff, umount -R, and close of the mappers the mounts were backed by;
+    # shared with the dashboard's pre-reboot release. omarchy_root is named
+    # explicitly because a failure between luksOpen and mount leaves it open
+    # with nothing in the mount table for the release to see. On failure the
+    # script names the holders on stderr; surface that in the install log.
+    result = subprocess.run(
+        ["omarchy-release-install-target", str(ctx.target), "omarchy_root"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    for line in (result.stderr or "").splitlines():
+        info(f"release: {line}")

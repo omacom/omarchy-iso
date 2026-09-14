@@ -7,11 +7,14 @@ keeps a boot route that survives firmware refusing or discarding the
 "Limine" NVRAM entry.
 
 Covers the install intent that turns the fallback on, the
-ENABLE_LIMINE_FALLBACK line it produces in /etc/default/limine, and
-validate_boot's handling of each combination of the two routes.
+ENABLE_LIMINE_FALLBACK line it produces in /etc/default/limine,
+validate_boot's handling of each combination of the two routes, and
+_register_limine_efi_entry surviving firmware that refuses the NVRAM write
+so that the removable route is still deployed.
 """
 
 import json
+import subprocess
 import sys
 import tempfile
 import types
@@ -182,6 +185,93 @@ class BootRouteValidationTest(unittest.TestCase):
             with self.assertRaises(RuntimeError) as caught:
                 phases_impl._validate_uefi_boot_routes(self.esp)
         self.assertIn("no bootable route", str(caught.exception))
+
+
+class BootEntryRegistrationTest(unittest.TestCase):
+    """Firmware that refuses a boot-variable write must not end the install.
+
+    Registration runs in arch_install_system, phases before
+    finalize_limine_boot writes EFI/BOOT/BOOTX64.EFI. Raising here leaves the
+    machine with neither route, which is issue #127.
+    """
+
+    def register(self, results, entries_after=None):
+        """Run _register_limine_efi_entry with efibootmgr's exit codes scripted.
+
+        `results` maps the efibootmgr subcommand (--create, --bootorder,
+        --delete-bootnum) to the CompletedProcess it should return.
+        """
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            result = subprocess.CompletedProcess(argv, 0, "", "")
+            for flag, scripted in results.items():
+                if flag in argv:
+                    result = scripted
+                    break
+            # Honour check= the way subprocess.run does, so a test that asserts
+            # "this does not abort the install" fails against a caller that
+            # still passes check=True.
+            if kwargs.get("check") and result.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    result.returncode, argv, result.stdout, result.stderr
+                )
+            return result
+
+        pre = {"entries": {"0000": "Windows Boot Manager"}, "order": ["0000"], "raw": ""}
+        post = {
+            "entries": entries_after if entries_after is not None else {
+                "0000": "Windows Boot Manager", "0002": "Limine",
+            },
+            "order": ["0000"],
+            "raw": "",
+        }
+        with mock.patch.object(phases_impl.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(phases_impl, "_read_efibootmgr", return_value=post), \
+             mock.patch.object(phases_impl, "error") as warn:
+            phases_impl._register_limine_efi_entry(
+                Path("/dev/nvme0n1"), 6, "\\EFI\\limine\\limine_x64.EFI", pre_state=pre
+            )
+        return calls, warn
+
+    def messages(self, warn):
+        return " ".join(call[0][0] for call in warn.call_args_list)
+
+    def test_refused_create_does_not_raise_and_reports_the_reason(self):
+        refused = subprocess.CompletedProcess(
+            [], 1, "", "Could not prepare Boot variable: No space left on device"
+        )
+        calls, warn = self.register({"--create": refused})
+
+        message = self.messages(warn)
+        self.assertIn("No space left on device", message)
+        self.assertIn("BOOTX64.EFI", message)
+        self.assertNotIn("--bootorder", [flag for argv in calls for flag in argv])
+
+    def test_create_that_leaves_no_entry_does_not_raise(self):
+        calls, warn = self.register(
+            {}, entries_after={"0000": "Windows Boot Manager"}
+        )
+
+        self.assertIn("discarded", self.messages(warn))
+        self.assertNotIn("--bootorder", [flag for argv in calls for flag in argv])
+
+    def test_successful_registration_sets_bootorder_and_stays_quiet(self):
+        calls, warn = self.register({})
+
+        bootorder = [argv for argv in calls if "--bootorder" in argv]
+        self.assertEqual(len(bootorder), 1)
+        self.assertEqual(bootorder[0][-1], "0002,0000")
+        warn.assert_not_called()
+
+    def test_refused_bootorder_keeps_the_entry_and_warns(self):
+        refused = subprocess.CompletedProcess([], 1, "", "write error")
+        calls, warn = self.register({"--bootorder": refused})
+
+        message = self.messages(warn)
+        self.assertIn("BootOrder", message)
+        self.assertIn("boot priority", message)
 
 
 class ConfiguratorTest(unittest.TestCase):

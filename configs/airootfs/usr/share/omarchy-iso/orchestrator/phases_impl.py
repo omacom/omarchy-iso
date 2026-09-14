@@ -17,7 +17,8 @@ Phase ordering (full-disk and protected/pre-mounted):
     configure_login        → sddm state + encrypted-install autologin
     configure_ssh_access   → authorized_keys for autoinstall; no-op otherwise
     configure_tailscale    → tailnet join staged for first boot; no-op otherwise
-    validate_boot          → assert UKI / limine.conf / kernel cmdline are sane
+    validate_boot          → assert UKI / limine.conf / kernel cmdline are sane,
+                             and that at least one UEFI boot route exists
 """
 
 from __future__ import annotations
@@ -440,7 +441,7 @@ def _register_limine_efi_entry(
             check=False, capture_output=True,
         )
 
-    subprocess.run(
+    created = subprocess.run(
         [
             "efibootmgr",
             "--create",
@@ -451,13 +452,30 @@ def _register_limine_efi_entry(
             "--unicode",
             "--verbose",
         ],
-        check=True,
+        check=False,
+        stderr=subprocess.PIPE,
+        text=True,
     )
+    detail = (created.stderr or "").strip()
+    if created.returncode != 0:
+        # Attach the reason to the failure. efibootmgr's stderr did reach the
+        # install log before (the dashboard merges the child's streams), but
+        # CalledProcessError carries only argv and the exit status, so the
+        # traceback people paste into a report says nothing about why.
+        reason = f"efibootmgr --create exited {created.returncode}"
+        _warn_boot_entry_refused(f"{reason}: {detail}" if detail else reason)
+        return
+    if detail:
+        error(f"efibootmgr: {detail}")
 
     post_state = _read_efibootmgr()
     new_limine = _find_label_entries(post_state["entries"], "Limine")
     if not new_limine:
-        raise RuntimeError("efibootmgr --create reported success but no Limine entry found")
+        _warn_boot_entry_refused(
+            "efibootmgr --create exited 0 but no 'Limine' entry is registered, so this "
+            "firmware discarded the variable as soon as it was written"
+        )
+        return
     limine_num = new_limine[0]
 
     keep = [
@@ -467,9 +485,39 @@ def _register_limine_efi_entry(
         and num != limine_num
         and num in pre_state["entries"]
     ]
-    subprocess.run(
+    ordered = subprocess.run(
         ["efibootmgr", "--bootorder", ",".join([limine_num, *keep])],
-        check=True, capture_output=True,
+        check=False, capture_output=True, text=True,
+    )
+    if ordered.returncode != 0:
+        # BootOrder is another NVRAM write and can be refused on its own. The
+        # entry exists either way, so this costs Omarchy its place at the front
+        # of the list, not its boot route.
+        order_detail = (ordered.stderr or "").strip() or f"exit status {ordered.returncode}"
+        error(
+            "Warning: the 'Limine' boot entry was registered but this firmware would "
+            f"not reorder BootOrder to put it first ({order_detail}). Omarchy is reachable "
+            "from the firmware boot menu (F11, F12 or Esc on most boards); move it to "
+            "the top of the firmware's own boot priority list to make it the default."
+        )
+
+
+def _warn_boot_entry_refused(reason: str) -> None:
+    """Registration failed. Report it and carry on to the removable-media route.
+
+    Firmware that refuses a boot-variable write still boots this install from
+    EFI/BOOT/BOOTX64.EFI, which needs no NVRAM. Raising here is what issue #127
+    reports: registration runs several phases before finalize_limine_boot writes
+    that loader, so the abort leaves the machine with neither route. validate_boot
+    is the one place that decides whether an install is reachable, and it already
+    refuses to finish when both routes are missing.
+    """
+    error(
+        f"Warning: this firmware would not register a 'Limine' UEFI boot entry. {reason}. "
+        "The install continues, because Omarchy also deploys EFI/BOOT/BOOTX64.EFI on its "
+        "own EFI partition and firmware takes that path when nothing in NVRAM matches. "
+        "The boot check at the end of the install stops an install that ends up with "
+        "neither route."
     )
 
 

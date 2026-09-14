@@ -257,8 +257,28 @@ mkdir -p "$stubs"
 } >"$stubs/omarchy-install-diagnose-media"
 chmod +x "$stubs/omarchy-install-diagnose-media"
 
-state_file="$work/state.json"
 screen="$work/screen"
+
+# The failed-phase state the dashboard reads from systemd: one phase unit in
+# a fixture roster, a stub systemctl reporting it failed, and the phase's
+# own words as the journal entry the handover leaves -- the same three
+# pieces a real failed install leaves behind.
+units_dir="$work/units"
+state_dir="$work/state"
+mkdir -p "$units_dir" "$state_dir"
+printf '[Service]\nExecStart=/usr/share/omarchy-iso/orchestrator/run-phase arch_install_system "Installing Arch + Omarchy"\n' \
+  >"$units_dir/omarchy-install-strap.service"
+cat >"$stubs/systemctl" <<'EOF'
+#!/bin/bash
+[[ ${1:-} == show ]] || exit 0
+printf 'ActiveState=failed\nStatusText=\n'
+EOF
+cat >"$stubs/journalctl" <<'EOF'
+#!/bin/bash
+[[ $* == *"-t omarchy-phase-error"* ]] || exit 0
+printf 'omarchy-install-strap.service: Pacstrap failed. See /var/log/archinstall.log\n'
+EOF
+chmod +x "$stubs/systemctl" "$stubs/journalctl"
 
 # A ten-line logo, the height of the real one. Without it the dashboard falls
 # back to a single centred word and the screen can never be tall enough to
@@ -276,15 +296,10 @@ mkdir -p "$omarchy_share"
 run_dashboard() {
   local install_log="$1"
 
-  # A real failure carries the failed phase as well as the current one, and
-  # that second summary line is another row the screen has to find space for.
-  cat >"$state_file" <<'STATE'
-{"current_phase": "Installing Arch + Omarchy",
- "phases": [{"name": "Installing Arch + Omarchy", "status": "failed",
-             "error": "Pacstrap failed. See /var/log/archinstall.log"}]}
-STATE
+  # A real failure carries the failed phase's summary lines as well, and
+  # each is another row the screen has to find space for.
   : >"$screen"
-  script -qefc "stty rows 40 cols 120; PATH='$stubs:$PATH' OMARCHY_PATH='$omarchy_share' OMARCHY_UI_INTERACTIVE=no OMARCHY_UI_FAILURE_ACTION=exit OMARCHY_FAILURE_TAIL_LOG='$install_log' '$DASHBOARD' '$install_log' '$state_file' -- bash -c 'exit 1'" \
+  script -qefc "stty rows 40 cols 120; PATH='$stubs:$PATH' OMARCHY_PATH='$omarchy_share' OMARCHY_INSTALL_UNITS_DIR='$units_dir' OMARCHY_INSTALL_STATE_DIR='$state_dir' OMARCHY_UI_INTERACTIVE=no OMARCHY_UI_FAILURE_ACTION=exit OMARCHY_FAILURE_TAIL_LOG='$install_log' '$DASHBOARD' '$install_log' -- bash -c 'exit 1'" \
     "$screen" >/dev/null 2>&1
 }
 
@@ -450,3 +465,44 @@ missing_redraw=$(grep -n 'render_failure "' "$DASHBOARD" | grep -v 'failure_medi
 [[ -z $missing_redraw ]] ||
   fail "every failure-screen redraw carries the diagnosis" "$missing_redraw"
 pass "every failure-screen redraw carries the diagnosis"
+
+# A medium far enough gone returns a read error instead of bytes, and pacman
+# reports it against the package path before it hashes anything. That still
+# names the medium, and must claim no comparison it never made.
+printf 'a package, intact\n' >"$mirror/$PACKAGE"
+write_mirror_db "$(sha256sum "$mirror/$PACKAGE" | cut -d " " -f 1)"
+{
+  echo "[dashboard] installing packages..."
+  echo "[dashboard] error: could not open file $TARGET_CACHE/$PACKAGE: Input/output error"
+  echo "[dashboard] ==> ERROR: Failed to install packages to new root"
+} >"$work/eio.log"
+
+set +e
+output=$(diagnose "$work/eio.log")
+status=$?
+set -e
+
+(( status == 0 )) || fail "a read error is diagnosed" "exit status $status"
+[[ $(head -n 1 <<<"$output") == "The install medium is damaged or misread" ]] ||
+  fail "a read error is diagnosed without over-claiming" "$output"
+grep -qF "read error" <<<"$output" ||
+  fail "a read error says the medium could not be read" "$output"
+grep -qF "$PACKAGE" <<<"$output" ||
+  fail "a read error names the package" "$output"
+if grep -qF "is intact on this ISO" <<<"$output"; then
+  fail "a read error does not call the package intact" "$output"
+fi
+pass "a read error on the mirror names the medium"
+
+# A read error somewhere else is not this ISO's mirror and must not be blamed
+# on the medium.
+printf 'error: could not open file /var/log/somewhere/else.txt: Input/output error\n' \
+  >"$work/eio-elsewhere.log"
+
+set +e
+diagnose "$work/eio-elsewhere.log" >/dev/null
+status=$?
+set -e
+
+(( status == 1 )) || fail "a read error outside the package cache is not diagnosed" "status $status"
+pass "a read error outside the target package cache is left alone"

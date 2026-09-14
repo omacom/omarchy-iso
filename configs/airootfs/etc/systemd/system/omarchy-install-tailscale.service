@@ -1,0 +1,22 @@
+[Unit]
+Description=Stage Tailscale enrollment on the install target
+# One of the small config phases, hosted by run-phase; skips inside the
+# phase function when its input was not provided.
+PartOf=omarchy-install.target
+After=omarchy-install-ssh.service
+Requires=omarchy-install-ssh.service
+
+[Service]
+Type=oneshot
+# Latched: the dashboard reads the graph itself as install state -- active
+# means done, inactive means pending, and the timestamps survive for the
+# timing record. NotifyAccess lets any process in the phase publish
+# sd_notify STATUS= progress.
+RemainAfterExit=yes
+NotifyAccess=all
+EnvironmentFile=/usr/share/omarchy-iso/orchestrator/context.env
+EnvironmentFile=-/run/omarchy-install/context.env
+EnvironmentFile=-/run/omarchy-install/install.env
+ExecStart=/usr/share/omarchy-iso/orchestrator/run-phase configure_tailscale "Configuring Tailscale"
+# Seconds of file writes; two minutes is a stuck guard.
+TimeoutStartSec=120

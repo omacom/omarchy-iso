@@ -1,0 +1,44 @@
+[Unit]
+Description=Warm the page cache for the install payload
+# Opportunistic only: reads the root image head and the offline mirror into
+# clean page cache while the user works through the wizard, so a read-bound
+# install waits on fewer bytes. The script carries the full rationale.
+#
+# Ordered after ALL the boot readers, not just the image hash: ordering is
+# what keeps one reader at a time on the medium, and if the image unit is
+# skipped by its conditions the chain collapses to whatever did run. After=
+# is ordering only -- a failed verify does not block the warm, the pre-flight
+# gate is what judges it.
+After=omarchy-mirror-verify.service omarchy-pacman-sync.service omarchy-root-image-verify.service
+RequiresMountsFor=/run/archiso/bootmnt
+# The A/B switch for throttled-medium comparisons of the same ISO.
+ConditionKernelCommandLine=!omarchy.no_prefetch
+# A group abort has claimed or released the medium; a warm mid-read is the
+# one reader nobody is waiting for, so it goes down with the target.
+PartOf=omarchy-install.target
+
+[Service]
+Type=oneshot
+# Latch like the verify units so a finished warm reads "active", not
+# "inactive" -- nothing gates on it, but a debugging eye should be able to
+# tell "ran and done" from "never ran" at a glance.
+RemainAfterExit=yes
+# Plan, then execute: the decision is written before the first payload read,
+# so what the warm chose -- and why the budget clamped it -- sits readable
+# in /run/omarchy-prefetch/plan for as long as the unit stays latched, and
+# each step reports under its own name. Both run at warm time, back to
+# back: the budget must reflect MemAvailable now, not at boot.
+RuntimeDirectory=omarchy-prefetch
+ExecStart=/usr/local/bin/omarchy-prefetch plan ${RUNTIME_DIRECTORY}/plan
+ExecStart=/usr/local/bin/omarchy-prefetch execute ${RUNTIME_DIRECTORY}/plan
+# Background work: the console, the verifies and the install always win.
+# Idle-class I/O means a prefetch still running when btrfs receive claims
+# the medium yields it entirely.
+# Nothing waits on the prefetch, but a reader hung on a dying medium must
+# not linger unbounded; the strap's cap, for the same class of read.
+TimeoutStartSec=1800
+Nice=15
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

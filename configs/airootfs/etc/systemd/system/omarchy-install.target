@@ -1,0 +1,16 @@
+[Unit]
+Description=Omarchy installation
+Wants=omarchy-install-cpu-boost.service
+# The umbrella for the install phases. The orchestrator starts
+# it when an install begins; phase units (and the keyring init) declare
+# PartOf= it, so `systemctl stop omarchy-install.target` is a group abort
+# that takes every running phase's cgroup down with it. The ordering lives
+# in the phase units themselves: each Requires= and After= its predecessor,
+# and starting the terminal unit walks the whole chain.
+#
+# The destruction boundary: omarchy-install-disk.service partitions,
+# formats and mounts the target, and every later phase unit runs strictly
+# after it by those edges. run-phase enforces it independently — a hosted
+# phase refuses to run unless the target is a mountpoint, so a stray start
+# or a mis-edged graph fails loudly instead of writing into the live
+# system.

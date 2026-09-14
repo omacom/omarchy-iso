@@ -1,0 +1,22 @@
+[Unit]
+Description=Prepare the live environment for the install
+# First phase, pre-format by definition: clean up holders on the disk about
+# to be wiped and load the configurator output. Runs before any target
+# exists, so it carries the run-phase pre-format opt-out.
+PartOf=omarchy-install.target
+
+[Service]
+Type=oneshot
+# Latched: the dashboard reads the graph itself as install state -- active
+# means done, inactive means pending, and the timestamps survive for the
+# timing record. NotifyAccess lets any process in the phase publish
+# sd_notify STATUS= progress.
+RemainAfterExit=yes
+NotifyAccess=all
+Environment=RUN_PHASE_NO_TARGET=1
+EnvironmentFile=/usr/share/omarchy-iso/orchestrator/context.env
+EnvironmentFile=-/run/omarchy-install/context.env
+EnvironmentFile=-/run/omarchy-install/install.env
+ExecStart=/usr/share/omarchy-iso/orchestrator/run-phase prepare_live "Preparing live environment"
+# Holder cleanup and a config parse; ten minutes is a stuck guard.
+TimeoutStartSec=600

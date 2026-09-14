@@ -1,0 +1,95 @@
+#!/bin/bash
+#
+# Run a command and kill it if its reads stop making progress.
+#
+# The boot verifies carry a size-based TimeoutStartSec (a 2 MiB/s floor over
+# what they hash) as the outer backstop, but on a stick that stops answering
+# outright that is a 20-minute wait for a verdict the kernel already knows.
+# This wrapper is the fast path: it samples the child process tree's read
+# progress, and a tree that has not read a byte in OMARCHY_STALL_SECS is
+# killed and reported as a stall. A slow-but-alive medium keeps trickling
+# bytes and never trips it -- naming that is still the size timeout's job.
+#
+# Progress is the sum of rchar over the child's process tree from
+# /proc/<pid>/io: rchar counts reads served from page cache too, so a hasher
+# racing through prefetched bytes is progressing, where cgroup io.stat
+# (real device I/O only) would call it stalled. The tree is walked from the
+# child (this wrapper's own sampling reads must not count as progress), and
+# a process that exits between samples just drops out of the sum.
+#
+# Exit status: the child's own, verbatim -- except a stall, which exits
+# EX_TEMPFAIL (75), the code omarchy-wait-verify translates into the
+# slow-medium verdict. 75 collides with nothing the hashers use (sha256sum
+# exits 1, scripts exit 0/1).
+#
+# Usage: omarchy-stall-watchdog <command> [args...]
+#
+# Environment:
+#   OMARCHY_STALL_SECS         seconds without read progress before the kill
+#                              (default 30)
+#   OMARCHY_STALL_SAMPLE_SECS  sample interval (default 5)
+set -uo pipefail
+
+STALL_SECS="${OMARCHY_STALL_SECS:-30}"
+SAMPLE_SECS="${OMARCHY_STALL_SAMPLE_SECS:-5}"
+
+[[ $# -ge 1 ]] || { echo "usage: omarchy-stall-watchdog <command> [args...]" >&2; exit 1; }
+
+"$@" &
+child=$!
+
+# The child's process tree, itself included: /proc/<pid>/task/*/children is
+# the kernel's own parent->child map, so no pgrep and no cgroup dependency
+# (the wrapper works the same under systemd and in a test harness).
+tree_pids() {
+  local queue=("$child") pid tid
+  while ((${#queue[@]})); do
+    pid=${queue[0]}; queue=("${queue[@]:1}")
+    echo "$pid"
+    for tid in /proc/"$pid"/task/*/children; do
+      [[ -r $tid ]] || continue
+      # shellcheck disable=SC2207
+      queue+=($(<"$tid"))
+    done
+  done
+}
+
+tree_rchar() {
+  local total=0 pid v
+  for pid in $(tree_pids); do
+    v=$(awk '/^rchar:/ { print $2 }' /proc/"$pid"/io 2>/dev/null) || continue
+    [[ -n $v ]] && total=$((total + v))
+  done
+  echo "$total"
+}
+
+last_rchar=-1
+stalled_for=0
+while kill -0 "$child" 2>/dev/null; do
+  sleep "$SAMPLE_SECS" &
+  wait $! 2>/dev/null
+  kill -0 "$child" 2>/dev/null || break
+
+  rchar=$(tree_rchar)
+  # A tree that shrank can make the sum go backwards; any change is life.
+  if [[ $rchar != "$last_rchar" ]]; then
+    last_rchar=$rchar
+    stalled_for=0
+    continue
+  fi
+
+  stalled_for=$((stalled_for + SAMPLE_SECS))
+  if ((stalled_for >= STALL_SECS)); then
+    echo "no read progress for ${stalled_for}s: killing $1" >&2
+    # KILL the whole tree. A read stuck in the driver ignores even this
+    # until the I/O returns; the wrapper does not wait for it -- the unit's
+    # cgroup cleanup and omarchy-wait-verify's deactivating window own that.
+    for pid in $(tree_pids); do
+      kill -9 "$pid" 2>/dev/null || true
+    done
+    exit 75
+  fi
+done
+
+wait "$child"
+exit $?

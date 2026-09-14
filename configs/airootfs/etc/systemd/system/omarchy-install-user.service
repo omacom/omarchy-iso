@@ -1,0 +1,31 @@
+[Unit]
+Description=Finalize the user on the install target
+# omarchy-provision-user in the target's chroot as the
+# install's user. Deferred-provisioning installs skip inside the phase
+# function itself — user creation belongs to first boot there.
+# Deliberately a sibling of the Limine phase, not its successor: the two
+# longest tail phases run concurrently (each chroot in its own mount
+# namespace), and the login phase joins on both.
+PartOf=omarchy-install.target
+After=omarchy-install-provisioning.service
+Requires=omarchy-install-provisioning.service
+# The chroot needs the live tree bound into the target (bundled runtimes
+# under /opt/packages, the mirror for target pacman); a start on an
+# already-active mount is a no-op, so sharing these with the system unit
+# stacks nothing.
+RequiresMountsFor=/mnt/var/cache/omarchy/mirror/offline /mnt/opt/packages
+
+[Service]
+Type=oneshot
+# Latched: the dashboard reads the graph itself as install state -- active
+# means done, inactive means pending, and the timestamps survive for the
+# timing record. NotifyAccess lets any process in the phase publish
+# sd_notify STATUS= progress.
+RemainAfterExit=yes
+NotifyAccess=all
+EnvironmentFile=/usr/share/omarchy-iso/orchestrator/context.env
+EnvironmentFile=-/run/omarchy-install/context.env
+EnvironmentFile=-/run/omarchy-install/install.env
+ExecStart=/usr/share/omarchy-iso/orchestrator/run-phase run_chroot_finalizer "Finalizing user"
+# 13 s on a Core2; fifteen minutes is a stuck-chroot guard, not a budget.
+TimeoutStartSec=900

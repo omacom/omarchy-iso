@@ -1,0 +1,26 @@
+{
+    "app_config": null,
+    "archinstall-language": "English",
+    "auth_config": {},
+    "audio_config": { "audio": "pipewire" },
+    "bootloader_config": { "bootloader": "Limine", "uki": false, "removable": false },
+    "custom_commands": [],
+    "disk_config": { "config_type": "pre_mounted_config", "mountpoint": "/mnt" },
+    "hostname": "omarchy",
+    "kernels": [ "linux" ],
+    "network_config": { "type": "iso" },
+    "ntp": true,
+    "parallel_downloads": 8,
+    "services": [],
+    "swap": true,
+    "timezone": "UTC",
+    "locale_config": { "kb_layout": "us", "sys_enc": "UTF-8", "sys_lang": "en_US.UTF-8" },
+    "mirror_config": {
+        "custom_repositories": [],
+        "custom_servers": [ {"url": "https://mirror.omarchy.org/$repo/os/$arch"} ],
+        "mirror_regions": {},
+        "optional_repositories": []
+    },
+    "packages": [ "base-devel", "git", "omarchy-keyring", "omarchy-settings", "omarchy" ],
+    "version": "3.0.9"
+}

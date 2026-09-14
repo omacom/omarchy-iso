@@ -131,6 +131,7 @@ DOCKER_ARGS=(
   -v "$BUILD_RELEASE_PATH/:/out/"
   -v "$BUILD_ROOT/$BUILD_SCRIPT:/$BUILD_SCRIPT:ro"
   -v "$BUILD_ROOT/archiso:/archiso:ro"
+  -v "$BUILD_ROOT/archinstall-bash:/archinstall-bash:ro"
   -v "$BUILD_ROOT/builder:/builder:ro"
   -v "$BUILD_ROOT/configs:/configs:ro"
 )
@@ -148,10 +149,32 @@ fi
 
 # Mount the build cache directory where packages are downloaded. Channels use
 # different package snapshots and must never share an offline mirror cache.
+# It mounts straight onto the path the [offline] repo is served from, inside
+# and outside the container alike: the mirror ships as a btrfs image built from
+# this cache (builder/stage-mirror-files.sh), so it must stay out of the
+# profile's airootfs, where mkarchiso would also copy it into the squashfs.
 if [[ -z "$NO_CACHE" ]]; then
-  OFFLINE_REPO_BUILD_CACHE_DIR="$HOME/.cache/omarchy/iso_${OMARCHY_MIRROR}/airootfs/var/cache/omarchy"
-  mkdir -p "$OFFLINE_REPO_BUILD_CACHE_DIR"
-  DOCKER_ARGS+=(-v "$OFFLINE_REPO_BUILD_CACHE_DIR:/var/cache/airootfs/var/cache/omarchy")
+  OFFLINE_REPO_BUILD_CACHE_DIR="$HOME/.cache/omarchy/iso_${OMARCHY_MIRROR}/offline-mirror"
+  # Builds from before the mirror moved out of the squashfs kept the same
+  # archives under an airootfs path. Adopt that cache rather than re-downloading
+  # several GB -- by renaming it when this user can (the build container wrote
+  # parts of it as root, so often it cannot), and otherwise by simply mounting
+  # it where it lies. Either way the container sees one path.
+  LEGACY_MIRROR_CACHE="$HOME/.cache/omarchy/iso_${OMARCHY_MIRROR}/airootfs/var/cache/omarchy/mirror/offline"
+  if [[ ! -d $OFFLINE_REPO_BUILD_CACHE_DIR && -d $LEGACY_MIRROR_CACHE ]]; then
+    mkdir -p "${OFFLINE_REPO_BUILD_CACHE_DIR%/*}"
+    if mv "$LEGACY_MIRROR_CACHE" "$OFFLINE_REPO_BUILD_CACHE_DIR" 2>/dev/null; then
+      echo "Moved the offline mirror cache to $OFFLINE_REPO_BUILD_CACHE_DIR."
+    else
+      OFFLINE_REPO_BUILD_CACHE_DIR="$LEGACY_MIRROR_CACHE"
+      echo "Using the existing offline mirror cache at its old path:"
+      echo "  $OFFLINE_REPO_BUILD_CACHE_DIR"
+      echo "It is root-owned from an earlier build. To adopt the new layout:"
+      echo "  sudo mv $LEGACY_MIRROR_CACHE $HOME/.cache/omarchy/iso_${OMARCHY_MIRROR}/offline-mirror"
+    fi
+  fi
+  mkdir -p "$OFFLINE_REPO_BUILD_CACHE_DIR" 2>/dev/null || true
+  DOCKER_ARGS+=(-v "$OFFLINE_REPO_BUILD_CACHE_DIR:/var/cache/omarchy/mirror/offline")
 else
   # The locally cached :latest image is a cache too — docker run never
   # re-checks the registry for it, so refresh it when building cold.

@@ -1,0 +1,20 @@
+[Unit]
+Description=Run the CPUs flat out for the live session and the install
+# Enabled at boot: the boot-time verify hashes and the wizard get the fast
+# CPU, not just the install. PartOf= the install target stays — the
+# orchestrator stops the target on every exit, so a failed install restores
+# the saved governors instead of leaving a laptop cooking at the failure
+# screen; a successful one reboots out of the live system anyway. The
+# target's Wants= keeps the boost alive even on media where boot enablement
+# is lost.
+
+PartOf=omarchy-install.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/omarchy-cpu-governor boost
+ExecStop=/usr/local/bin/omarchy-cpu-governor restore
+
+[Install]
+WantedBy=multi-user.target

@@ -8,14 +8,13 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 <log-file> <state-file> -- <installer command...>" >&2
+  echo "Usage: $0 <log-file> -- <installer command...>" >&2
   exit 2
 }
 
-(( $# >= 4 )) || usage
+(( $# >= 3 )) || usage
 LOG_FILE="$1"
-STATE_FILE="$2"
-shift 2
+shift 1
 [[ ${1:-} == "--" ]] || usage
 shift
 (( $# > 0 )) || usage
@@ -161,25 +160,32 @@ LAST_PM=10
 # one button — so the last thing the installer shows matches the first. It runs
 # one row taller: `gum confirm` always paints prompt/blank/button and clears all
 # three, so the button cannot sit closer than two rows under a title we drew.
-FINISH_HEIGHT=$((LOGO_HEIGHT + 5))
+# Two more rows between title and button: a blank and the medium-removal
+# note — above the prompt, because gum clears everything under its view.
+FINISH_HEIGHT=$((LOGO_HEIGHT + 7))
 FINISH_TOP_ROW=2
 
 # ── Install progress ─────────────────────────────────────────────────────────
 #
-# Position = max(floor, work), both non-decreasing, in per-mille of the bar.
+# Position = 10 + 990 * acc / total-weight, acc summed per unit: a latched
+# unit contributes its full weight, an activating one its credit -- whichever
+# of these is further:
 #
-#   floor  lo + (span-1) * t / (t+tau), on time since this process saw the
-#          phase. Asymptotic, so it approaches the band end without reaching it.
-#          tau is a shape constant, not a duration prediction.
-#   work   packages installed / PKG_TOTAL, for the package phase only (~85% of
-#          the install). libalpm makes one directory per package under
-#          <target>/var/lib/pacman/local; the denominator comes from
-#          build-iso.sh, so there is no second package list to drift.
+#   floor  (weight-1) * t / (t+tau), on time since this process saw the
+#          phase start. Asymptotic, so it approaches the weight's cap
+#          without reaching it. tau is a shape constant, not a prediction.
+#   work   packages installed / PKG_TOTAL for the package phase (libalpm
+#          makes one directory per package under <target>/var/lib/pacman/
+#          local; the denominator comes from build-iso.sh, so there is no
+#          second list to drift), or the unit's own sd_notify
+#          "progress=<fraction>" for a self-measuring phase (the unpack).
 #
-# Per-mille because a whole-percent asymptote over a 2-point band has two
-# reachable values and stops moving. No give-up predicate: two discontinuous
-# curves behind a monotonic clamp freeze. With no signal the floor alone still
-# finishes the band.
+# Weights, not bands: in a fanned graph several phases run at once and each
+# contributes its credit in the same frame -- the bar honestly speeds up.
+# On a linear graph exactly one term is partial and the sum walks the old
+# band table. Per-mille because a whole-percent asymptote over a two-point
+# share has two reachable values and stops moving; the monotone POS clamp
+# is a guard, since the sum itself never decreases.
 EXPECTED_PACKAGES_FILE="${OMARCHY_EXPECTED_PACKAGES_FILE:-/usr/share/omarchy-iso/expected-packages}"
 PKG_TOTAL=0
 if [[ -r $EXPECTED_PACKAGES_FILE ]]; then
@@ -196,11 +202,174 @@ PKG_FLOOR_TAU=900      # with a work signal, time is only a backstop until the
 
 POS=10                 # position, per-mille, monotonic
 PROGRESS_PM=10
+VERIFY_PCT=-1          # honest percent of the pre-flight verify, -1 when idle
 NOW=0                  # monotonic seconds, refreshed once per frame
 DASH_T0=0
-PHASE_NAME=""          # last phase this process observed
-PHASE_T0=0             # NOW when it was first observed
-PHASE_LO=10            # POS on entry, for an unknown phase with no index
+
+# ── Phase state: the systemd unit graph ──────────────────────────────────────
+#
+# The phase units latch (RemainAfterExit=yes), so the graph itself is the
+# install's state and systemd's records are the only copy: active means done,
+# activating means running, failed means failed, and a self-measuring phase
+# publishes its fraction as the unit's sd_notify STATUS=. One `systemctl
+# show` over the roster per frame reads all of it. The roster and the
+# display names come from the unit files (a phase unit is exactly a unit
+# whose ExecStart runs run-phase; the display name is its second argument),
+# ordered by walking each unit's Requires= edge back from the terminal.
+UNITS_DIR="${OMARCHY_INSTALL_UNITS_DIR:-/etc/systemd/system}"
+INSTALL_TARGET="${OMARCHY_INSTALL_TARGET:-/mnt}"
+INSTALL_STATE_DIR="${OMARCHY_INSTALL_STATE_DIR:-/run/omarchy-install}"
+
+PHASE_UNITS=()
+PHASE_DISPLAY=()
+PHASE_FN=()
+# Topological, not linear: each unit may Requires= several phase units and
+# the graph may fan out. Kahn's algorithm over the phase-unit subgraph,
+# scanning in sorted name order, which on a linear chain reproduces the
+# chain exactly and on a fan gives a stable order. A cycle cannot occur in
+# a graph systemd accepted, but a broken edit degrades to name order at the
+# tail rather than an empty roster.
+build_phase_roster() {
+  local f unit name fn line dep ready progressed remaining
+  local -a all=()
+  local -A display=() fns=() requires=() emitted=()
+  for f in "$UNITS_DIR"/omarchy-install-*.service; do
+    [[ -f $f ]] || continue
+    line=$(grep -m1 -E '^ExecStart=.*run-phase ' "$f" 2>/dev/null) || continue
+    unit=${f##*/}
+    name=${line#*run-phase *\"}
+    name=${name%%\"*}
+    fn=${line#*run-phase }
+    fn=${fn%% *}
+    display[$unit]=$name
+    fns[$unit]=$fn
+    all+=("$unit")
+    requires[$unit]=$(grep -E '^Requires=' "$f" 2>/dev/null |
+      grep -oE 'omarchy-install-[a-z-]+\.service' | tr '\n' ' ') || requires[$unit]=""
+  done
+  PHASE_UNITS=()
+  PHASE_DISPLAY=()
+  PHASE_FN=()
+  (( ${#all[@]} > 0 )) || return 0
+  mapfile -t all < <(printf '%s\n' "${all[@]}" | sort)
+  remaining=${#all[@]}
+  while (( remaining > 0 )); do
+    progressed=0
+    for unit in "${all[@]}"; do
+      [[ -n ${emitted[$unit]:-} ]] && continue
+      ready=1
+      for dep in ${requires[$unit]}; do
+        # Only edges into other phase units order the roster; a Requires=
+        # on a mount or helper unit is not a phase.
+        [[ -n ${display[$dep]:-} && -z ${emitted[$dep]:-} ]] && { ready=0; break; }
+      done
+      (( ready )) || continue
+      emitted[$unit]=1
+      PHASE_UNITS+=("$unit")
+      remaining=$((remaining - 1))
+      progressed=1
+    done
+    (( progressed )) || break
+  done
+  for unit in "${all[@]}"; do
+    [[ -z ${emitted[$unit]:-} ]] && PHASE_UNITS+=("$unit")
+  done
+  for unit in "${PHASE_UNITS[@]}"; do
+    PHASE_DISPLAY+=("${display[$unit]}")
+    PHASE_FN+=("${fns[$unit]}")
+  done
+}
+build_phase_roster
+PHASE_TOTAL=${#PHASE_UNITS[@]}
+
+# Each phase's share of the bar (weights, not ranges: concurrent phases in a
+# fanned graph each contribute their credit at the same time), plus tau, the
+# shape constant of its time asymptote. The widths follow the measured X200
+# phase times; the position is scaled by the sum, so an unknown or renamed
+# phase degrades to a default share instead of a runaway or a stall.
+# STARTING_W covers the pre-graph orchestrator work under the same scale.
+STARTING_W=15
+PHASE_W=() PHASE_TAU=() PHASE_PKG=()
+PHASE_W_SUM=$STARTING_W
+for _name in "${PHASE_DISPLAY[@]}"; do
+  _pkg=0
+  case "$_name" in
+    "Preparing live environment") _w=25 _tau=25 ;;
+    "Preparing install target")   _w=15 _tau=20 ;;
+    "Preparing disk layout")      _w=45 _tau=20 ;;
+    "Unpacking root image")       _w=410 _tau=100 ;;
+    "Installing Arch + Omarchy")  _w=160 _tau=60 _pkg=1 ;;
+    "Finalizing base system")     _w=20 _tau=10 ;;
+    "Configuring hibernation")    _w=20 _tau=10 ;;
+    "Configuring system")         _w=130 _tau=120 ;;
+    "Staging provisioning")       _w=5 _tau=5 ;;
+    "Finalizing Limine boot")     _w=95 _tau=90 ;;
+    "Finalizing user")            _w=28 _tau=30 ;;
+    "Configuring login")          _w=6 _tau=5 ;;
+    "Configuring SSH access")     _w=4 _tau=5 ;;
+    "Configuring Tailscale")      _w=3 _tau=5 ;;
+    "Configuring DNS resolver")   _w=3 _tau=5 ;;
+    "Validating boot setup")      _w=4 _tau=5 ;;
+    "Creating factory snapshot")  _w=2 _tau=5 ;;
+    *)                            _w=30 _tau=60 ;;
+  esac
+  PHASE_W+=("$_w")
+  PHASE_TAU+=("$_tau")
+  PHASE_PKG+=("$_pkg")
+  PHASE_W_SUM=$((PHASE_W_SUM + _w))
+done
+unset _name _w _tau _pkg
+
+# One poll of the graph, per-unit: PHASE_STATE[i]/PHASE_STATUS[i] for every
+# roster index (several units may be activating at once in a fanned graph),
+# plus the aggregates -- PHASE_DONE (latched count), PHASE_ACTIVE_N,
+# PHASE_FINISHED (terminal latched), PHASE_FAILED_NAME/UNIT, and
+# PHASE_CUR_NAME (an activating phase, for the failure summary).
+read_phase_state() {
+  PHASE_CUR_NAME="" PHASE_DONE=0 PHASE_ACTIVE_N=0 PHASE_FINISHED=0
+  PHASE_FAILED_NAME="" PHASE_FAILED_UNIT=""
+  PHASE_STATE=() PHASE_STATUS=()
+  (( PHASE_TOTAL > 0 )) || return 0
+  local line key i=0
+  while IFS= read -r line; do
+    if [[ -z $line ]]; then
+      i=$((i + 1))
+      continue
+    fi
+    key=${line%%=*}
+    case "$key" in
+      ActiveState) PHASE_STATE[i]=${line#*=} ;;
+      StatusText) PHASE_STATUS[i]=${line#*=} ;;
+    esac
+  done < <(systemctl show "${PHASE_UNITS[@]}" -p ActiveState,StatusText 2>/dev/null)
+  for ((i = 0; i < PHASE_TOTAL; i++)); do
+    case "${PHASE_STATE[i]:-}" in
+      active) PHASE_DONE=$((PHASE_DONE + 1)) ;;
+      activating)
+        PHASE_ACTIVE_N=$((PHASE_ACTIVE_N + 1))
+        PHASE_CUR_NAME=${PHASE_DISPLAY[i]}
+        ;;
+      failed)
+        PHASE_FAILED_NAME=${PHASE_DISPLAY[i]}
+        PHASE_FAILED_UNIT=${PHASE_UNITS[i]}
+        ;;
+    esac
+  done
+  [[ ${PHASE_STATE[PHASE_TOTAL - 1]:-} == active ]] && PHASE_FINISHED=1
+  # Between phases (the gap is milliseconds) the first pending unit stands
+  # in; before the graph starts the caller's default names the pre-graph
+  # orchestrator work.
+  if [[ -z $PHASE_CUR_NAME ]] && (( ! PHASE_FINISHED && PHASE_DONE > 0 )); then
+    for ((i = 0; i < PHASE_TOTAL; i++)); do
+      [[ ${PHASE_STATE[i]:-} == active ]] && continue
+      PHASE_CUR_NAME=${PHASE_DISPLAY[i]}
+      break
+    done
+  fi
+  return 0
+}
+declare -A PHASE_T0S=()  # NOW when each unit was first observed activating
+PRE_T0=0               # NOW when the pre-graph pseudo-phase was first seen
 PKG_DB_DIR=""
 PKG_COUNT=0
 PKG_BASE=-1            # package count when the phase started
@@ -292,109 +461,109 @@ count_packages() {
 # and the package counters must survive between frames. Print nothing — output
 # here would land on the TTY between the cursor escape and the bar.
 install_progress() {
-  local phase finished index total target
-  local lo hi tau span t pos work gap n pkg_signal=0
-  local -a state
+  local i w tau t acc pos credit work gap n progress_pm any_started
 
   PROGRESS_PM=$POS
-  [[ -f $STATE_FILE ]] || return 0
+  VERIFY_PCT=-1
 
-  mapfile -t state < <(jq -r '
-    (.current_phase // "Starting installation"),
-    ((.finished_at // 0) | tonumber? // 0 | floor),
-    ((.current_index // -1) | tonumber? // -1 | floor),
-    ((.total_phases // 0) | tonumber? // 0 | floor),
-    (.target // "/mnt")
-  ' "$STATE_FILE" 2>/dev/null)
-  (( ${#state[@]} == 5 )) || return 0
-  phase="${state[0]}" finished="${state[1]}"
-  index="${state[2]}" total="${state[3]}" target="${state[4]}"
-  [[ -n $target ]] || target="/mnt"
-
-  if (( finished > 0 )) || [[ $phase == "Installation complete" ]]; then
+  read_phase_state
+  if (( PHASE_FINISHED )); then
     POS=1000
     PROGRESS_PM=1000
     return 0
   fi
+  (( PHASE_TOTAL > 0 )) || return 0
 
-  # Transitions are observed here rather than read from the state file, which
-  # keeps wall clock out of the dashboard entirely.
-  if [[ $phase != "$PHASE_NAME" ]]; then
-    PHASE_NAME="$phase"
-    PHASE_T0=$NOW
-    PHASE_LO=$POS
-    PKG_BASE=-1
-    PKG_SEEN=0
-    PKG_BONUS=0
-    PKG_LAST_CHANGE=$NOW
+  # Position = 10 + 990 * acc / total, acc in milli-weights: every latched
+  # unit contributes its full weight, every activating unit its credit --
+  # its time asymptote or its work signal, whichever is further -- capped
+  # just under its weight. The latch set only grows and a finishing phase
+  # trades partial credit for full weight, so the sum is monotone; on a
+  # linear graph exactly one term is partial and the model reproduces the
+  # old band walk, while concurrent phases each push the bar at once.
+  acc=0
+  any_started=$(( PHASE_DONE > 0 || PHASE_ACTIVE_N > 0 ))
+  if (( any_started )); then
+    acc=$((STARTING_W * 1000))
+  else
+    (( PRE_T0 == 0 )) && PRE_T0=$NOW
+    t=$(( NOW - PRE_T0 ))
+    (( t < 0 )) && t=0
+    acc=$(( (STARTING_W - 1) * 1000 * t / (t + 5) ))
   fi
 
-  # Bands in per-mille, plus tau. The tail bands are wide relative to what they
-  # cost on NVMe: run_system_finalizer can DKMS-build a driver and
-  # finalize_limine_boot rebuilds every UKI, so they vary most on real hardware.
-  # Over-allotting costs a step at a boundary; under-allotting costs a stall.
-  case "$phase" in
-    "Starting installation")      lo=10  hi=25   tau=5   ;;
-    "Preparing live environment") lo=25  hi=50   tau=25  ;;
-    "Preparing install target")   lo=50  hi=65   tau=20  ;;
-    "Installing Arch + Omarchy")  lo=65  hi=700  tau=150 pkg_signal=1 ;;
-    "Configuring hibernation")    lo=700 hi=720  tau=10  ;;
-    "Configuring system")         lo=720 hi=850  tau=120 ;;
-    "Staging provisioning")          lo=850 hi=855  tau=5   ;;
-    "Finalizing Limine boot")     lo=855 hi=950  tau=90  ;;
-    "Finalizing user")            lo=950 hi=978  tau=30  ;;
-    "Configuring login")          lo=978 hi=988  tau=5   ;;
-    "Configuring DNS resolver")   lo=988 hi=994  tau=5   ;;
-    "Validating boot setup")      lo=994 hi=998  tau=5   ;;
-    "Creating factory snapshot")  lo=998 hi=1000 tau=5   ;;
-    *)
-      # Unknown names used to inherit a 1->99 sweep. Derive an even band from
-      # the published index instead; with no index, a bounded slice, so a
-      # renamed phase degrades to one cell rather than a runaway.
-      if (( total >= 2 && index >= 0 && index < total )); then
-        lo=$(( 10 + 990 * index / total ))
-        hi=$(( 10 + 990 * (index + 1) / total ))
-      else
-        lo=$PHASE_LO
-        hi=$(( PHASE_LO + 30 ))
-      fi
-      tau=60
-      ;;
-  esac
+  for ((i = 0; i < PHASE_TOTAL; i++)); do
+    w=${PHASE_W[i]}
+    case "${PHASE_STATE[i]:-}" in
+      active)
+        acc=$(( acc + w * 1000 ))
+        ;;
+      activating)
+        if [[ -z ${PHASE_T0S[$i]:-} ]]; then
+          PHASE_T0S[$i]=$NOW
+          # This process is the session log's phase-marker author now:
+          # the phases themselves log to the journal alone, and the
+          # support file keeps its human-readable spine.
+          dashboard_log "› ${PHASE_DISPLAY[i]}"
+          # The package counters belong to the one package phase; baseline
+          # them the frame it first runs.
+          if (( PHASE_PKG[i] )); then
+            PKG_BASE=-1
+            PKG_SEEN=0
+            PKG_BONUS=0
+            PKG_LAST_CHANGE=$NOW
+          fi
+        fi
+        tau=${PHASE_TAU[i]}
+        (( PHASE_PKG[i] && PKG_TOTAL > 0 )) && tau=$PKG_FLOOR_TAU
+        t=$(( NOW - PHASE_T0S[$i] ))
+        (( t < 0 )) && t=0
+        credit=$(( (w - 1) * 1000 * t / (t + tau) ))
 
-  (( pkg_signal && PKG_TOTAL > 0 )) || pkg_signal=0
-  (( pkg_signal )) && tau=$PKG_FLOOR_TAU
+        if (( PHASE_PKG[i] && PKG_TOTAL > 0 )); then
+          PKG_DB_DIR="$INSTALL_TARGET/var/lib/pacman/local"
+          count_packages
+          # Baseline on first sight: a target that already holds packages
+          # would otherwise pin the credit at its cap for the whole phase.
+          (( PKG_BASE < 0 )) && PKG_BASE=$PKG_COUNT
+          n=$(( PKG_COUNT - PKG_BASE ))
+          (( n < 0 )) && n=0
+          # Running max: a reinstalled package briefly drops its dir.
+          if (( n > PKG_SEEN )); then
+            PKG_SEEN=$n
+            PKG_LAST_CHANGE=$NOW
+          fi
+          gap=$(( NOW - PKG_LAST_CHANGE ))
+          (( gap < 0 )) && gap=0
+          (( gap > PKG_BONUS_MAX_PM )) && gap=$PKG_BONUS_MAX_PM
+          (( gap > PKG_BONUS )) && PKG_BONUS=$gap
+          work=$(( ((w - 1 - PKG_TAIL_PM) * PKG_SEEN / PKG_TOTAL + PKG_BONUS) * 1000 ))
+          (( work > credit )) && credit=$work
+        fi
 
-  t=$(( NOW - PHASE_T0 ))
-  (( t < 0 )) && t=0
-  span=$(( hi - lo ))
-  (( span < 2 )) && span=2
-  (( tau < 1 )) && tau=1
+        # A self-measuring phase publishes "progress=<fraction>" as its
+        # unit's sd_notify STATUS=. The pre-flight gate's share is narrow
+        # (the phase is subsecond once the boot-time hash has finished), so
+        # its honest percent goes to a status line instead (render_dynamic);
+        # the unpack's share is wide enough to carry its progress itself.
+        if [[ ${PHASE_STATUS[i]:-} =~ progress=(1(\.0*)?|0(\.[0-9]+)?) ]]; then
+          progress_pm=$(awk -v p="${BASH_REMATCH[1]}" 'BEGIN { printf "%d", p * 1000 }')
+          (( progress_pm > 1000 )) && progress_pm=1000
+          (( progress_pm < 0 )) && progress_pm=0
+          [[ ${PHASE_DISPLAY[i]} == "Preparing install target" ]] && VERIFY_PCT=$(( progress_pm / 10 ))
+          work=$(( (w - 1 - PKG_TAIL_PM) * progress_pm ))
+          (( work > credit )) && credit=$work
+        fi
 
-  pos=$(( lo + (span - 1) * t / (t + tau) ))
+        (( credit > (w - 1) * 1000 )) && credit=$(( (w - 1) * 1000 ))
+        (( credit < 0 )) && credit=0
+        acc=$(( acc + credit ))
+        ;;
+    esac
+  done
 
-  if (( pkg_signal )); then
-    PKG_DB_DIR="$target/var/lib/pacman/local"
-    count_packages
-    # Baseline on first sight: a target that already holds packages would
-    # otherwise pin the bar at the band ceiling for the whole phase.
-    (( PKG_BASE < 0 )) && PKG_BASE=$PKG_COUNT
-    n=$(( PKG_COUNT - PKG_BASE ))
-    (( n < 0 )) && n=0
-    # Running max: a reinstalled package briefly drops its version-stamped dir.
-    if (( n > PKG_SEEN )); then
-      PKG_SEEN=$n
-      PKG_LAST_CHANGE=$NOW
-    fi
-    gap=$(( NOW - PKG_LAST_CHANGE ))
-    (( gap < 0 )) && gap=0
-    (( gap > PKG_BONUS_MAX_PM )) && gap=$PKG_BONUS_MAX_PM
-    (( gap > PKG_BONUS )) && PKG_BONUS=$gap
-    work=$(( lo + (span - 1 - PKG_TAIL_PM) * PKG_SEEN / PKG_TOTAL + PKG_BONUS ))
-    (( work > pos )) && pos=$work
-  fi
-
-  (( pos > hi - 1 )) && pos=$(( hi - 1 ))
+  pos=$(( 10 + 990 * acc / (PHASE_W_SUM * 1000) ))
+  (( pos > 999 )) && pos=999
   (( pos > POS )) && POS=$pos
   (( POS > 1000 )) && POS=1000
   PROGRESS_PM=$POS
@@ -457,26 +626,52 @@ render_dynamic() {
   line_at "$CONTENT_WIDTH" $(( (CONTENT_WIDTH - 34) / 2 )) ""
   progress_bar "$pm" 34
   printf '\n'
-  blank_line
+  # Same row either way, so the layout height never changes: blank normally,
+  # the verify's honest percent while the pre-flight gate waits on the hash.
+  if (( VERIFY_PCT >= 0 )); then
+    center "${DIM}verifying the install medium: ${VERIFY_PCT}%${RESET}" "$CONTENT_WIDTH"
+  else
+    blank_line
+  fi
   center "${DIM}Tip:${RESET} ${GREEN}$(current_tip)${RESET}" "$CONTENT_WIDTH"
   printf '%s' "$CLEAR_TO_END"
 }
 
-install_duration() {
-  local path line duration
+format_duration() {
+  local secs=$1
+  if (( secs >= 3600 )); then
+    printf '%dh %dm %ds' "$(( secs / 3600 ))" "$(( secs % 3600 / 60 ))" "$(( secs % 60 ))"
+  else
+    printf '%dm %ds' "$(( secs / 60 ))" "$(( secs % 60 ))"
+  fi
+}
 
-  if [[ -f $STATE_FILE ]]; then
-    duration="$(jq -r '
-      ((.started_at // 0) | tonumber? // 0) as $started
-      | ((.finished_at // 0) | tonumber? // 0) as $finished
-      | if $started <= 0 or $finished <= 0 or $finished < $started then empty
-        else (($finished - $started) | round) as $secs
-          | if $secs >= 3600 then "\($secs / 3600 | floor)h \($secs % 3600 / 60 | floor)m \($secs % 60)s"
-            else "\($secs / 60 | floor)m \($secs % 60)s"
-            end
-        end
-    ' "$STATE_FILE" 2>/dev/null || true)"
-    [[ -n $duration ]] && { printf '%s' "$duration"; return 0; }
+install_duration() {
+  local path line duration secs
+
+  # The installer marks its own span in the journal with armored
+  # sentinels -- BEGIN the moment the configurator hands over, END after
+  # the timing record -- so the displayed time is the span the user
+  # pressed start on, not this process's lifetime with its release and
+  # teardown.
+  secs=$(journalctl -b -t omarchy-install-milestone -o short-unix --no-pager 2>/dev/null |
+    awk '/-----BEGIN OMARCHY INSTALL-----$/ && s == "" { s = $1 }
+         /-----END OMARCHY INSTALL-----$/ { f = $1 }
+         END { if (s != "" && f != "" && f > s) printf "%d", f - s }')
+  if [[ $secs =~ ^[0-9]+$ ]] && (( secs > 0 )); then
+    format_duration "$secs"
+    return 0
+  fi
+
+  # No milestones (a preview, a test rig): this process launched the
+  # installer and outlived it, so its own clock is the next best answer.
+  if (( DASH_T0 > 0 )); then
+    set_now
+    secs=$(( NOW - DASH_T0 ))
+    if (( secs > 0 )); then
+      format_duration "$secs"
+      return 0
+    fi
   fi
 
   for path in /mnt/var/log/omarchy-install.log "$LOG_FILE"; do
@@ -513,6 +708,17 @@ render_finish() {
     blank_line
     center "Installed Omarchy in ${duration}" "$CONTENT_WIDTH"
     blank_line
+    # Above the button, not below: gum clears everything under its view on
+    # each repaint, so a line below the prompt would be erased. True because
+    # of release_target + warm_reboot_path: from here to the reboot syscall
+    # nothing reads the install medium again — but only when the release
+    # actually happened, so a failed one withdraws the offer instead of
+    # printing a promise the machine is not keeping.
+    if [[ $TARGET_RELEASED == yes ]]; then
+      center "${DIM}You can now remove the install medium${RESET}" "$CONTENT_WIDTH"
+    else
+      center "${DIM}Leave the install medium in until the reboot completes${RESET}" "$CONTENT_WIDTH"
+    fi
   } >"$TTY_PATH"
 
   if [[ -f $LOGO_PATH ]]; then
@@ -538,6 +744,86 @@ render_finish() {
   fi
 }
 
+# ── Medium-free reboot ──────────────────────────────────────────────────────
+#
+# The live root pages from the install medium on demand (copytoram=n keeps
+# the root image reachable during the install), so pulling the stick is only
+# safe once nothing will fault a cold read anymore. A graceful reboot is the
+# opposite of that: its stop jobs page unit files and ExecStop binaries. So,
+# before the finish screen offers the medium's removal: release the target —
+# fully written to its own disk from that moment, whatever happens after —
+# and pre-fault the binaries the finish screen still runs. The medium is
+# read-only and the live logs are tmpfs, so past the umount nothing anywhere
+# is dirty, which is what makes the immediate reboot at the press clean.
+# Debugging keeps its access: the installed tree is no longer pre-mounted on
+# the other ttys, but one mount command away for whoever wants it.
+#
+# If the release fails, the offer is withheld: the finish screen says to
+# leave the medium in instead, and the button press falls back to a graceful
+# reboot — the medium was never offered for removal, so its stop jobs can
+# still page from it, and systemd gets its own chance at the unmount the
+# release could not do.
+
+TARGET_RELEASED=yes
+
+release_target() {
+  local target out line
+  target=$INSTALL_TARGET
+  # Swapoff, umount, mapper close — shared with the orchestrator's failure
+  # cleanup. On failure the script names the holders on stderr; forward that
+  # into the install log, where the diagnosis is worth more than a shrug.
+  if ! out=$(omarchy-release-install-target "$target" 2>&1); then
+    dashboard_log "release: could not release $target"
+    TARGET_RELEASED=no
+  fi
+  while IFS= read -r line; do
+    [[ -n $line ]] && dashboard_log "release: $line"
+  done <<<"${out:-}"
+}
+
+warm_reboot_path() {
+  local binary path dep
+  # Everything the post-note window still execs: the note goes up inside
+  # render_finish, so the logo effect (up to 8s of it), the timeout in front
+  # of it, the stty that sizes the prompt, and the button gum paints are all
+  # still ahead of the moment the user is invited to pull the stick.
+  for binary in systemctl ttfx gum timeout stty; do
+    path=$(command -v "$binary" 2>/dev/null) || continue
+    cat "$path" >/dev/null 2>&1 || true
+    while IFS= read -r dep; do
+      [[ -f $dep ]] && cat "$dep" >/dev/null 2>&1
+    done < <(ldd "$path" 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^\//) print $i }')
+  done
+
+  # cat+ldd alone still leaves ~1.4 MiB of exec-time reads ldd cannot list
+  # (loader path, locale, runtime data) — measured on a dropped cache in the
+  # live VM: timeout+ttfx 880 KiB, stty 320 KiB, gum 188 KiB, each a
+  # one-time fault. Dry-running the real commands takes those reads now,
+  # while the medium is still welcome. ttfx --version rather than a hidden
+  # effect run: measured to cover the effect's read set to within ~12 KiB,
+  # and it returns in milliseconds instead of burning a capped second.
+  # systemctl needs no dry run: cat+ldd covers the reboot-shaped invocation
+  # (verified via is-system-running: zero reads).
+  cat "$LOGO_PATH" >/dev/null 2>&1 || true
+  ttfx --version >/dev/null 2>&1 || true
+  stty size <"$TTY_PATH" >/dev/null 2>&1 || true
+  gum --version >/dev/null 2>&1 || true
+}
+
+reboot_now() {
+  # Which reboot the button gets is the other half of the release's verdict.
+  # Released: nothing anywhere is dirty and the medium may already be gone,
+  # so skip the stop jobs that would page it back in. Not released: the
+  # finish screen told the user to leave the medium in, which keeps the
+  # graceful path's cold reads safe, and systemd gets its own chance at the
+  # unmount the release could not do.
+  if [[ $TARGET_RELEASED == yes ]]; then
+    systemctl reboot -ff 2>/dev/null || reboot -f 2>/dev/null || true
+  else
+    systemctl reboot 2>/dev/null || reboot 2>/dev/null || true
+  fi
+}
+
 reboot_prompt() {
   local prompt_pad
 
@@ -546,9 +832,9 @@ reboot_prompt() {
   interactive || return 0
 
   # gum paints its prompt row at the cursor and the button two rows under it, so
-  # anchor on the row right below the title to put the button as close to it as
-  # gum allows. FINISH_HEIGHT budgets for the same three rows.
-  printf '%s%d;1H%s' "$CSI" "$((FINISH_TOP_ROW + LOGO_HEIGHT + 2))" "$CLEAR_LINE" >"$TTY_PATH"
+  # anchor on the row right below the removal note to put the button as close
+  # to it as gum allows. FINISH_HEIGHT budgets for the same three rows.
+  printf '%s%d;1H%s' "$CSI" "$((FINISH_TOP_ROW + LOGO_HEIGHT + 4))" "$CLEAR_LINE" >"$TTY_PATH"
 
   prompt_pad=$(( ( $(term_cols) - 18 ) / 2 ))
   (( prompt_pad < 0 )) && prompt_pad=0
@@ -621,6 +907,9 @@ prompt_enter() {
   IFS= read -r _ <"$TTY_PATH" || true
 }
 
+# omarchy-upload-log ships in omarchy-settings, a live ISO package: it posts
+# the session log (the failing phases' journal is appended to it by the
+# orchestrator's exit) and the archinstall library log.
 upload_failure_log() {
   local uploader
   printf '%s%s' "$SHOW_CURSOR" "$CLEAR" >"$TTY_PATH" 2>/dev/null || true
@@ -703,9 +992,14 @@ render_failure() {
 
   if [[ -n $state_summary ]]; then
     blank_line
+    # The failed phase's error is the one thing the user must read, so wrap
+    # it at word boundaries rather than clip it: a multi-line error keeps its
+    # own line breaks, and an over-long line folds instead of losing its end.
     while IFS= read -r line; do
       [[ -n $line ]] || continue
-      center "${DIM}$(truncate_for_width "$line" "$CONTENT_WIDTH")${RESET}" "$CONTENT_WIDTH"
+      while IFS= read -r part; do
+        center "${DIM}${part}${RESET}" "$CONTENT_WIDTH"
+      done < <(fold -s -w "$CONTENT_WIDTH" <<<"$line")
     done <<<"$state_summary"
   fi
 
@@ -771,27 +1065,18 @@ failure_menu() {
 }
 
 sanitize_child_output() {
-  # Archinstall is only a library subsystem in Omarchy's installer. Its own
-  # post-install success/reboot banner can be buffered until process exit and
-  # appear after an Omarchy failure, which makes the unified log contradictory.
-  # Keep that third-party banner out of Omarchy's support log; the raw
-  # archinstall log is still uploaded separately by omarchy-upload-log.
-  sed -u \
-    -e $'s/\x1b\\[[0-9;?]*[A-Za-z]//g' \
-    -e '/^Activating systemd-timesyncd for time synchronization using Arch Linux and ntp.org NTP servers$/d' \
-    -e '/^Enabling service systemd-timesyncd$/d' \
-    -e '/^Setting password for root$/d' \
-    -e '/^Updating \/mnt\/etc\/fstab$/d' \
-    -e '/^Syncing the system\.\.\.$/d' \
-    -e '/^Installation completed without any errors\.$/d' \
-    -e '/^Log files temporarily available at \/var\/log\/archinstall\.$/d' \
-    -e '/^You may reboot when ready\.$/d'
+  # The shared log filter (CSI strip + the archinstall-bash banners that
+  # would read as "done" after a later Omarchy failure): one sed file for
+  # every writer of the unified log -- run-phase applies the same filter to
+  # each phase unit's output, since the banner-printing installer functions
+  # run inside omarchy-install-base.service now, not in this child.
+  sed -u -f /usr/share/omarchy-iso/orchestrator/log-filter.sed
 }
 
 launch_child() {
   mkdir -p "$(dirname "$LOG_FILE")"
   # Child is non-interactive. All visible UI belongs to this supervisor.
-  PYTHONUNBUFFERED=1 setsid "${INSTALL_CMD[@]}" </dev/null > >(sanitize_child_output >>"$LOG_FILE") 2>&1 &
+  setsid "${INSTALL_CMD[@]}" </dev/null > >(sanitize_child_output >>"$LOG_FILE") 2>&1 &
   child_pid=$!
   child_pgid=$child_pid
 }
@@ -801,7 +1086,6 @@ printf '%s' "$HIDE_CURSOR" >"$TTY_PATH"
 render_static >"$TTY_PATH"
 set_now
 DASH_T0=$NOW
-PHASE_T0=$NOW
 PKG_LAST_CHANGE=$NOW
 launch_child
 
@@ -820,8 +1104,11 @@ child_pgid=""
 dashboard_log "installer child exited with status $status"
 
 if (( status == 0 )); then
-  # finished_at lands microseconds before the child exits, so the 0.5s poll
-  # rarely renders a full bar before the finish screen replaces it.
+  # The orchestrator's exit trap stops the install target on its way out, so
+  # by now the latch a poll would read is already torn down -- the child's
+  # clean exit is the finish signal. Complete the bar before the finish
+  # screen replaces it.
+  POS=1000
   render_dynamic >"$TTY_PATH" 2>/dev/null || true
   sleep 0.4
 fi
@@ -829,17 +1116,23 @@ fi
 if (( status != 0 )); then
   failure_status="$status"
   failure_summary=""
-  if [[ -f $STATE_FILE ]]; then
-    failure_summary="$(jq -r '
-      (.current_phase // empty | "last installer phase: \(.)"),
-      ((.phases // []) | map(select(.status == "failed")) | last // empty
-        | "failed phase: \(.name): \(.error)")
-    ' "$STATE_FILE" 2>/dev/null || true)"
-    if [[ -n $failure_summary ]]; then
-      while IFS= read -r line; do
-        [[ -n $line ]] && dashboard_log "$line"
-      done <<<"$failure_summary"
-    fi
+  # A failed phase unit keeps its failed state through the group teardown
+  # (stop is a no-op on it), and its own last words were handed over
+  # through the journal; a death outside any phase leaves neither, and
+  # the log tail on the failure screen carries that story.
+  read_phase_state || true
+  phase_error="$(journalctl -b -t omarchy-phase-error -o cat --no-pager 2>/dev/null |
+    sed -n "s/^$PHASE_FAILED_UNIT: //p" || true)"
+  last_phase="${PHASE_FAILED_NAME:-$PHASE_CUR_NAME}"
+  [[ -n $last_phase ]] && failure_summary="last installer phase: $last_phase"
+  if [[ -n $PHASE_FAILED_NAME ]]; then
+    nl=$'\n'
+    failure_summary+="${failure_summary:+$nl}failed phase: $PHASE_FAILED_NAME: ${phase_error:-see the log above}"
+  fi
+  if [[ -n $failure_summary ]]; then
+    while IFS= read -r line; do
+      [[ -n $line ]] && dashboard_log "$line"
+    done <<<"$failure_summary"
   fi
   failure_media_diagnosis="$(diagnose_media || true)"
   render_failure "$failure_status" "$failure_summary" "$failure_media_diagnosis" >"$TTY_PATH" 2>/dev/null || true
@@ -865,6 +1158,12 @@ if [[ ${OMARCHY_UI_DEFER_PROVISIONING:-} == "yes" ]]; then
   exit 0
 fi
 
+# Before the screen that offers the medium's removal: the target is released
+# first, so the install is fully on its own disk before the user can act on
+# the note; the warm makes the button press itself medium-free.
+release_target 2>/dev/null || true
+warm_reboot_path 2>/dev/null || true
+
 set +e
 render_finish
 finish_render_status=$?
@@ -882,7 +1181,7 @@ if reboot_prompt; then
     exit 0
   fi
   printf '%s' "$CLEAR" >"$TTY_PATH" 2>/dev/null || true
-  reboot 2>/dev/null || systemctl reboot 2>/dev/null || true
+  reboot_now
 fi
 
 exit 0

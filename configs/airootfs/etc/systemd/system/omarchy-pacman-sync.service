@@ -1,0 +1,34 @@
+[Unit]
+Description=Sync the pacman databases from the offline mirror
+# Runs in the background from boot: the mirror mount is up before
+# multi-user.target, so the -Syy is long latched (RemainAfterExit) by the
+# time the first pacman_strap issues its blocking start — that join is a
+# state query, not a resync. On a boot-time failure the join re-runs the
+# unit (systemctl start retries a failed oneshot), so a transient hiccup
+# self-heals and a real one dies loudly at the strap with the journal tail.
+# No ConditionPathExists on the mirror: a condition-skipped start job
+# "succeeds" without syncing, and the join could not tell the difference —
+# a missing mirror must stay a loud failure. PartOf= means a group abort
+# clears the latch, so a second install attempt resyncs.
+RequiresMountsFor=/var/cache/omarchy/mirror/offline
+# Ordering, not dependency: the mirror hash is the read that gates the
+# install, so it gets the medium to itself; the sync runs in its shadow.
+# Costs nothing — the installer will not format before the verify passes,
+# so no strap can be waiting on this while the hash still runs.
+After=omarchy-mirror-verify.service
+PartOf=omarchy-install.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=120
+# Low priority both ways: the sync shares the boot window with the verify
+# hashes, which are the reads that gate the install — idle-class IO yields
+# the medium to them entirely, and the work is small enough that it still
+# finishes long before the wizard does.
+Nice=15
+IOSchedulingClass=idle
+ExecStart=/usr/bin/pacman -Syy
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,19 @@
+[Unit]
+Description=Initialise the install target's per-machine pacman keyring
+# The image ships no keyring (a baked-in one would share its master key
+# across installs); the orchestrator starts this after the last pacstrap and
+# joins it before the factory snapshot — see orchestrator/root_image.sh. A
+# unit so systemd kills the gpg-agent/dirmngr leftovers with the cgroup.
+PartOf=omarchy-install.target
+
+[Service]
+Type=oneshot
+# Sticky success: the unit's state alone answers the orchestrator's join.
+RemainAfterExit=yes
+# The shared install context: defaults, then this run's resolved values.
+EnvironmentFile=/usr/share/omarchy-iso/orchestrator/context.env
+EnvironmentFile=-/run/omarchy-install/context.env
+# oneshot has no default start timeout; the work is CPU-bound seconds.
+TimeoutStartSec=60
+ExecStart=/usr/bin/pacman-key --gpgdir ${CTX_TARGET}/etc/pacman.d/gnupg --init
+ExecStart=/usr/bin/pacman-key --gpgdir ${CTX_TARGET}/etc/pacman.d/gnupg --populate-from ${CTX_TARGET}/usr/share/pacman/keyrings --populate archlinux omarchy

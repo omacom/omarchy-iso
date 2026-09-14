@@ -1,0 +1,32 @@
+[Unit]
+Description=Omarchy offline package mirror from the install medium
+# The mirror ships as ordinary files in the ISO9660 tree, in their own
+# directory beside the root image rather than as squashfs content or a
+# filesystem image: the archives are already zstd-compressed, so any wrapper
+# only added a layer to read them through, and ISO9660 holds them for the cost
+# of its directory records alone.
+#
+# Bind-mounted back onto the path the mirror has always had, so pacman's
+# [offline] repo (file:///var/cache/omarchy/mirror/offline/), the installer's
+# bind mount onto the target package cache, and omarchy-install-diagnose-media
+# all keep addressing it unchanged.
+#
+# The archiso initramfs mounts the boot medium before pivoting, so the files
+# are there from the first unit on; the boot entries pin copytoram=n, which is
+# what keeps them there for the whole install.
+ConditionPathExists=/run/archiso/bootmnt/arch/x86_64/mirror/offline.db.tar.gz
+RequiresMountsFor=/run/archiso/bootmnt
+
+[Mount]
+What=/run/archiso/bootmnt/arch/x86_64/mirror
+Where=/var/cache/omarchy/mirror/offline
+Type=none
+# No loop device and no second filesystem driver: this is the ISO9660 mount the
+# live system already has, shown at a second path. It is read-only because the
+# medium is -- pacman never needs to write here, since the [offline] repo's
+# CacheDir is this same directory and every package it wants is already
+# "cached".
+Options=bind
+
+[Install]
+WantedBy=local-fs.target

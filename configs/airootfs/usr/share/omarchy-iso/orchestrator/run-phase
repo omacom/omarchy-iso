@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Host one orchestrator phase in its own process, for the systemd phase
+# units: `run-phase install_root_image "Unpacking root image"`. Sources the
+# stack main.sh loads (main.sh runs nothing when sourced), rebuilds the
+# context from the unit's EnvironmentFile= inputs, and calls the one
+# function. Sequencing lives in the units' Requires=/After= edges, and the
+# latched units themselves are the install's state -- nothing here writes
+# a second copy.
+set -eEuo pipefail
+
+phase=${1:?usage: run-phase <phase-function> [display-name]}
+phase_name=${2:-$1}
+
+# Which unit hosts this process, from the kernel's own record; empty for a
+# hand-run phase, which consumers treat as being the anchor.
+RUN_PHASE_UNIT=$(awk -F/ '$NF ~ /^omarchy-install-.*\.service$/ { print $NF; exit }' /proc/self/cgroup 2>/dev/null) || RUN_PHASE_UNIT=""
+
+# shellcheck disable=SC1091
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/main.sh"
+
+declare -F "$phase" >/dev/null ||
+  fail "run-phase: no such phase function: $phase"
+
+ctx_from_env
+
+# Phase output belongs to the journal alone (the unit's stdout, with
+# timestamps the flat log never had); the dashboard writes the phase
+# markers into the session log itself, and phases_finalize exports the
+# full journal onto the installed system.
+
+# Reload the library's config view per process: deterministic from the
+# JSON ctx_from_env resolved, so any phase function is hostable here.
+arch_init_library
+arch_load_config
+
+# The cross-phase library state: values only the run itself could produce.
+# Verified edges: the disk phase's format-time PART_* discoveries feed the
+# strap's Limine setup, and the strap's INST_HELPER_FLAGS ledger feeds
+# installer_finish's audit in the base phase. Each phase restores this and
+# persists it back only when its run changed something, so relay phases
+# write nothing and stay safe beside each other in a fanned graph.
+LIBRARY_STATE_VARS=(PART_DEVPATH PART_PARTN PART_PARTUUID PART_UUID
+                    INST_HELPER_FLAGS)
+
+library_state_snapshot() {
+  local v
+  for v in "${LIBRARY_STATE_VARS[@]}"; do
+    declare -p "$v" 2>/dev/null || true
+  done
+}
+
+persist_library_state() {
+  library_state_snapshot >"$CTX_STATE_DIR/library-state.sh"
+}
+# library-state helpers end
+
+# shellcheck disable=SC1091
+[[ ! -f "$CTX_STATE_DIR/library-state.sh" ]] || source "$CTX_STATE_DIR/library-state.sh"
+LIBRARY_STATE_RESTORED=$(library_state_snapshot)
+
+# The destruction boundary: no hosted phase may run before the disk phase
+# mounted the target. Deliberately a loud failure, not a systemd
+# Condition= -- conditions cannot read the env-provided path, and a false
+# condition skips with success, which the graph would count as done. A
+# pre-format phase opts out with Environment=RUN_PHASE_NO_TARGET=1.
+if [[ ${RUN_PHASE_NO_TARGET:-} != 1 ]] && ! mountpoint -q "$CTX_TARGET"; then
+  fail "run-phase: $CTX_TARGET is not a mounted install target; refusing to run $phase before the disk phase"
+fi
+
+# The trap owns only the error handover; the failure itself is the unit's
+# Result, and stage mounts are PartOf= the target's group teardown.
+run_phase_cleanup() {
+  local status=$?
+  ((status != 0)) || return 0
+  # A signal is the install being torn down around this phase, not the
+  # phase failing: the orchestrator writes that story.
+  ((status < 128)) || return 0
+  # fail()'s words, as a journal entry under our own identifier -- the
+  # plain unit stream buries them. The unit name rides IN each line:
+  # cgroup-based attribution loses the race against the unit's teardown
+  # (measured), and the prefix keys concurrent failures apart.
+  [[ -z ${ORCH_LAST_ERROR:-} ]] ||
+    printf '%s\n' "$ORCH_LAST_ERROR" | sed "s/^/${RUN_PHASE_UNIT:-$phase}: /" |
+      systemd-cat -t omarchy-phase-error -p err 2>/dev/null || true
+}
+trap run_phase_cleanup EXIT
+
+info "› $phase_name"
+
+"$phase"
+
+# Reached only on success (set -e): hand the library state to the next
+# phase's process, only when this run changed it.
+[[ "$(library_state_snapshot)" == "$LIBRARY_STATE_RESTORED" ]] || persist_library_state

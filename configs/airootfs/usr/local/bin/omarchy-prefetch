@@ -1,0 +1,109 @@
+#!/bin/bash
+#
+# Warm the page cache for the root image and bundled packages while the user
+# works through the wizard. The install streams a multi-GB root image into
+# btrfs receive and then pacstraps a few packages out of the offline mirror;
+# on media slower than the unpack the install is read-bound and every byte
+# cached here is a byte it never waits for. On faster media this costs nothing
+# but otherwise-idle bandwidth: the medium is untouched while the user types,
+# and the target disk it writes to later is a different device.
+#
+# Runs as omarchy-prefetch.service in two steps -- plan, then execute -- so
+# the decision is a readable artifact (/run/omarchy-prefetch/plan) and each
+# step gets its own line in systemctl status. The unit is ordered after the
+# boot verifies: they read everything once already (mirror and sync first,
+# the image hash last so the stream is freshest for the receive -- an order
+# the plan must not undo), and two readers on one USB stick seek against
+# each other. The unit also carries the priorities (Nice, idle-class I/O),
+# so a warm still running when the install claims the medium yields it.
+#
+# Clean page cache only, so the kernel reclaims it under pressure instead of
+# OOMing, and a budget so small machines never evict what was just warmed.
+# Boot with omarchy.no_prefetch on the kernel command line to A/B the same
+# ISO with this disabled (the unit's condition; running by hand skips that).
+#
+# Usage:
+#   omarchy-prefetch plan <plan-file>     decide what to read; no payload I/O
+#   omarchy-prefetch execute <plan-file>  read what the plan says, in order
+#
+# The plan is one "read <kb> <path>" line per read, in read order; the
+# executor's one primitive is "first <kb> KiB of <path>", which covers the
+# clamped stream head and whole mirror packages alike.
+#
+# Environment (tests override these; the unit runs with the defaults):
+#   OMARCHY_PREFETCH_IMAGE      the root image stream
+#   OMARCHY_PREFETCH_MIRROR     the offline mirror directory
+#   OMARCHY_PREFETCH_BUDGET_KB  cache budget; default MemAvailable/2, with a
+#                               256 MiB floor under which nothing is planned
+set -uo pipefail
+
+image="${OMARCHY_PREFETCH_IMAGE:-/run/archiso/bootmnt/arch/x86_64/omarchy-root.btrfs.zst}"
+mirror="${OMARCHY_PREFETCH_MIRROR:-/run/archiso/bootmnt/arch/x86_64/mirror}"
+
+mode="${1:-}"
+plan_file="${2:-}"
+if [[ ( $mode != plan && $mode != execute ) || -z $plan_file ]]; then
+  echo "usage: omarchy-prefetch plan|execute <plan-file>" >&2
+  exit 1
+fi
+
+plan() {
+  local budget_kb spent_kb=0 mirror_kb=0 size_kb path
+
+  budget_kb="${OMARCHY_PREFETCH_BUDGET_KB:-}"
+  if [[ -z $budget_kb ]]; then
+    budget_kb=$(($(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo) / 2))
+    if ((budget_kb <= 262144)); then
+      : >"$plan_file"
+      echo "plan: budget ${budget_kb}K is under the 256 MiB floor, nothing to warm"
+      return 0
+    fi
+  fi
+
+  # The image head gets the budget first -- btrfs receive reads the stream
+  # front to back, so its leading bytes are the ones worth having cached --
+  # but it is planned LAST, so on machines where the budget forces eviction
+  # it is the mirror that goes, not the stream.
+  local image_kb=0
+  if [[ -f $image ]]; then
+    image_kb=$(du -k -- "$image" | cut -f1)
+    ((image_kb > budget_kb)) && image_kb=$budget_kb
+    spent_kb=$image_kb
+  fi
+
+  # The mirror on the leftover budget, largest first: when it cannot cover
+  # all of it this still front-loads the bytes that dominate.
+  : >"$plan_file"
+  if [[ -d $mirror ]]; then
+    while read -r size_kb path; do
+      ((spent_kb + size_kb > budget_kb)) && continue
+      echo "read $size_kb $path" >>"$plan_file"
+      spent_kb=$((spent_kb + size_kb))
+      mirror_kb=$((mirror_kb + size_kb))
+    done < <(du -k "$mirror"/*.pkg.tar.zst 2>/dev/null | sort -rn)
+  fi
+
+  # And the stream's head last, freshest in the cache: a cache hit where the
+  # verify's pass survived, a re-warm of the front where it did not.
+  ((image_kb > 0)) && echo "read $image_kb $image" >>"$plan_file"
+
+  echo "plan: ${image_kb}K of stream + ${mirror_kb}K of mirror within a ${budget_kb}K budget"
+}
+
+execute() {
+  local reads=0 warmed_kb=0 verb size_kb path
+
+  [[ -f $plan_file ]] || { echo "no plan at $plan_file" >&2; exit 1; }
+  while read -r verb size_kb path; do
+    [[ $verb == read ]] || continue
+    # head's K suffix is KiB, the unit the whole plan speaks.
+    # || true: a file can vanish between plan and execute (a yanked medium);
+    # the warm is opportunistic and the verifies are what judge the medium.
+    head -c "${size_kb}K" -- "$path" >/dev/null 2>&1 || true
+    reads=$((reads + 1))
+    warmed_kb=$((warmed_kb + size_kb))
+  done <"$plan_file"
+  echo "warmed ${warmed_kb}K in ${reads} reads"
+}
+
+"$mode"

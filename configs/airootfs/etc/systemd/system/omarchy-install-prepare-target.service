@@ -1,0 +1,27 @@
+[Unit]
+Description=Prove the install medium and layout before the disk is touched
+# The pre-flight gate as a unit: layout validation plus the waits on the
+# root-image and mirror verify units — everything that can fail before
+# formatting, where failing costs nothing. Pre-format, so it carries the
+# run-phase opt-out.
+PartOf=omarchy-install.target
+After=omarchy-install-prepare-live.service
+Requires=omarchy-install-prepare-live.service
+
+[Service]
+Type=oneshot
+# Latched: the dashboard reads the graph itself as install state -- active
+# means done, inactive means pending, and the timestamps survive for the
+# timing record. NotifyAccess lets any process in the phase publish
+# sd_notify STATUS= progress.
+RemainAfterExit=yes
+NotifyAccess=all
+Environment=RUN_PHASE_NO_TARGET=1
+EnvironmentFile=/usr/share/omarchy-iso/orchestrator/context.env
+EnvironmentFile=-/run/omarchy-install/context.env
+EnvironmentFile=-/run/omarchy-install/install.env
+ExecStart=/usr/share/omarchy-iso/orchestrator/run-phase prepare_install_target "Preparing install target"
+# Unbounded on purpose: the phase's whole job is waiting on the verify
+# units, and each of those carries its own build-time size-based timeout —
+# the bound lives where the byte counts are known.
+TimeoutStartSec=infinity

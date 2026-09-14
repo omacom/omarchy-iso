@@ -734,7 +734,7 @@ run_partition_execute() {
       # not become an argv the process table can show. Folding stderr into
       # stdout still lands any error in the install log.
       if ! printf "%s" "$password" |
-        cryptsetup luksFormat --type luks2 --batch-mode "$root_partition_device" - 2>&1; then
+        cryptsetup luksFormat --type luks2 --sector-size 4096 --batch-mode "$root_partition_device" - 2>&1; then
         disk_abort_hook "Formatting LUKS2 on $root_partition_device failed"
       fi
       if ! printf "%s" "$password" |
@@ -794,7 +794,6 @@ run_partition_execute() {
   cat <<-_EOF_ >user_configuration.json
 {
     "app_config": null,
-    "archinstall-language": "English",
     "auth_config": {},
     "audio_config": { "audio": "pipewire" },
     "bootloader_config": { "bootloader": "Limine", "uki": false, "removable": false },
@@ -1083,6 +1082,33 @@ clear
 write_user_files
 
 if [[ $install_target == "free_space" ]]; then
+  # Refuse a corrupt or missing install medium before we partition or format
+  # anything. The full-disk path clears this in the orchestrator before
+  # archinstall formats; the free-space path formats here, in the configurator,
+  # so it runs the same gate first. omarchy-wait-verify collects the
+  # boot-time hasher's verdict, waiting for it if it is still running. (2>&1
+  # 1>/dev/null captures stderr, where the failure message is, and drops the
+  # boot-medium/scheduler line on stdout — the orchestrator logs that later.
+  # OMARCHY_VERIFY_PROGRESS routes a live percent line straight to the
+  # terminal while the hash is still running, so a wait on a slow medium
+  # shows movement instead of a frozen step header.)
+  # Both of them: the root image is what lands on the disk, and the mirror is
+  # what pacstrap reads afterwards. A package that turns out to be unreadable
+  # once this path has already formatted leaves someone with no system at all,
+  # which is the whole reason the gate is here rather than later.
+  if [[ ${1:-} != "dry" ]]; then
+    step "Verifying the install medium"
+    if ! verify_error=$(OMARCHY_VERIFY_PROGRESS=/dev/tty omarchy-wait-verify \
+      omarchy-root-image-verify.service "the root image" \
+      /run/archiso/bootmnt/arch/x86_64/omarchy-root.btrfs.zst 2>&1 1>/dev/null); then
+      abort "$(head -1 <<<"$verify_error")"
+    fi
+    if ! verify_error=$(OMARCHY_VERIFY_PROGRESS=/dev/tty omarchy-wait-verify \
+      omarchy-mirror-verify.service "the offline mirror" 2>&1 1>/dev/null); then
+      abort "$(head -1 <<<"$verify_error")"
+    fi
+  fi
+
   run_partition_execute "$@"
 
   if [[ ${1:-} == "dry" ]]; then
@@ -1132,7 +1158,6 @@ fi
 cat <<-_EOF_ >user_configuration.json
 {
     "app_config": null,
-    "archinstall-language": "English",
     "auth_config": {},
     "audio_config": { "audio": "pipewire" },
     "bootloader_config": { "bootloader": "Limine", "uki": false, "removable": false },

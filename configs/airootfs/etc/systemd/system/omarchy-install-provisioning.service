@@ -1,0 +1,26 @@
+[Unit]
+Description=Stage first-boot provisioning state on the install target
+# The Node tarball stash on every install, and for
+# deferred-provisioning installs the first-boot service arming and the LUKS
+# auto-unlock keyfile. Everything it reads is rebuilt by run-phase's context
+# load — including the generated LUKS passphrase, which ctx_from_env now
+# persists on first parse and reuses on every later one, so this process
+# stages the passphrase the disk was actually encrypted with.
+PartOf=omarchy-install.target
+After=omarchy-install-system.service
+Requires=omarchy-install-system.service
+
+[Service]
+Type=oneshot
+# Latched: the dashboard reads the graph itself as install state -- active
+# means done, inactive means pending, and the timestamps survive for the
+# timing record. NotifyAccess lets any process in the phase publish
+# sd_notify STATUS= progress.
+RemainAfterExit=yes
+NotifyAccess=all
+EnvironmentFile=/usr/share/omarchy-iso/orchestrator/context.env
+EnvironmentFile=-/run/omarchy-install/context.env
+EnvironmentFile=-/run/omarchy-install/install.env
+ExecStart=/usr/share/omarchy-iso/orchestrator/run-phase stage_provisioning_state "Staging provisioning"
+# Copies a ~50 MB tarball and writes a keyfile; 4 s on a Core2. A stuck guard.
+TimeoutStartSec=300

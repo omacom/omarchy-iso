@@ -12,5 +12,12 @@ for test in "$ROOT"/test/unit/*-test.sh; do
   bash "$test"
 done
 
+# The vendored installer library's own unprivileged tests, run where they
+# live (they source ../lib relative to themselves). tests/test_disk_loop.sh
+# stays out: it is a root-only integration test (loop devices, cryptsetup),
+# run by hand like the QEMU scenarios.
+printf '==> archinstall-bash/tests/test_config.sh\n'
+bash "$ROOT"/archinstall-bash/tests/test_config.sh
+
 printf '==> test/unit/test_*.py\n'
 python3 -m unittest discover -t "$ROOT" -s "$ROOT/test/unit"

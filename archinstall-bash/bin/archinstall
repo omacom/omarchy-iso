@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#
+# archinstall, ported to bash: installs Arch Linux from the JSON configuration
+# archinstall's --config/--creds files describe. Only the guided, non-interactive
+# flow is provided — the menu is not ported.
+
+set -euo pipefail
+
+ARCHINSTALL_BIN_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+ARCHINSTALL_LIB_DIR=${ARCHINSTALL_LIB_DIR:-$ARCHINSTALL_BIN_DIR/../lib}
+# shellcheck disable=SC1091
+source "$ARCHINSTALL_LIB_DIR/archinstall.sh"
+
+usage() {
+  cat <<USAGE
+Usage: archinstall --config FILE [--creds FILE] [options]
+
+Options:
+  --config FILE        JSON configuration (user_configuration.json)
+  --creds FILE         JSON credentials (user_credentials.json)
+  --mountpoint DIR     Target mountpoint (default: /mnt, or disk_config.mountpoint)
+  --silent, --offline, --skip-ntp, --skip-wkd, --skip-boot
+                       Accepted for compatibility: this port is always
+                       non-interactive, never waits for NTP/reflector/WKD and
+                       never installs a bootloader
+  --dry-run            Parse and validate the configuration, write nothing
+  --debug              Echo debug output to stderr
+  --version            Print the version
+  -h, --help           This help
+USAGE
+}
+
+CONFIG_FILE='' CREDS_FILE=''
+while (($#)); do
+  case $1 in
+    --config) CONFIG_FILE=$2; shift 2 ;;
+    --config=*) CONFIG_FILE=${1#*=}; shift ;;
+    --creds) CREDS_FILE=$2; shift 2 ;;
+    --creds=*) CREDS_FILE=${1#*=}; shift ;;
+    --mountpoint) ARGS_MOUNTPOINT=$2; shift 2 ;;
+    --mountpoint=*) ARGS_MOUNTPOINT=${1#*=}; shift ;;
+    --silent|--offline|--skip-ntp|--skip-wkd|--skip-boot) shift ;;
+    --dry-run|--dry_run) ARGS_DRY_RUN=1; shift ;;
+    --debug) ARCHINSTALL_DEBUG=1; shift ;;
+    --script) [[ $2 == guided ]] || die "only the guided script is available"; shift 2 ;;
+    --version|-v) printf 'archinstall-bash %s\n' "$ARCHINSTALL_BASH_VERSION"; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; die "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n $CONFIG_FILE ]] || { usage >&2; die 'a --config file is required (the interactive menu is not ported)'; }
+if ((!ARGS_DRY_RUN)); then
+  [[ $EUID -eq 0 ]] || die 'archinstall requires root privileges'
+  require_cmd jq sfdisk lsblk blkid wipefs findmnt udevadm pacstrap genfstab arch-chroot systemctl
+fi
+
+config_load "$CONFIG_FILE" "$CREDS_FILE"
+guided_main

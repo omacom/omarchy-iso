@@ -1,0 +1,39 @@
+[Unit]
+Description=Verify the offline mirror on the install medium
+# Every package the medium carries, checked before the installer is allowed to
+# format anything. The pre-flight gate waits for this unit, and the phase after
+# the gate wipes the disk: a package that turns out to be unreadable after that
+# leaves someone with neither their old system nor a working new one.
+#
+# Started at boot so the hashing happens while the user works through the
+# wizard, and first of the boot readers: the root image hash runs last so the
+# stream is the freshest thing in the page cache when the receive consumes it
+# (measured on a 6 GB X200: a cache-warm stream cut the image phase from
+# ~213 s to 122 s), and a bad flash usually corrupts broadly, so hashing the
+# smaller artifact first also surfaces the re-flash verdict sooner.
+ConditionPathIsDirectory=/var/cache/omarchy/mirror/offline
+RequiresMountsFor=/var/cache/omarchy/mirror/offline
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The mirror is the working directory, so the verifier resolves the filenames
+# the database carries without stitching a path onto them.
+WorkingDirectory=/var/cache/omarchy/mirror/offline
+# The stall watchdog is the fast path beside the size timeout below: a
+# medium that stops answering outright is named in ~30 s (the wrapper kills
+# the verifier and exits 75, which the wait helper reads as the slow-medium
+# verdict), where the size timeout still owns the slow-but-alive case.
+ExecStart=/usr/local/bin/omarchy-stall-watchdog /usr/local/bin/omarchy-verify-mirror
+# TimeoutStartSec comes from a build-time drop-in sized to the packages
+# (build-iso.sh writes 50-size-timeout.conf): oneshot units have no default
+# start timeout, and a medium that stalls reads instead of erroring would
+# otherwise hang the install waiting on this.
+#
+# Idle in CPU and I/O: the install and the person at the keyboard always win,
+# and the gate is what decides when this has to be finished by.
+Nice=15
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,584 @@
+#!/bin/bash
+#
+# Drive a remote hardware test machine (the X200 class: BIOS, USB boot, on
+# the local network) without chasing its IP across boots.
+#
+# DHCP hands the box a different address almost every boot, so everything
+# here starts from discovery: match a NIC MAC in the neighbor table after a
+# ping sweep, or identify a live-ISO boot behaviorally — the host that
+# accepts root with the baked SSH key and has /run/archiso. Root SSH on the
+# live ISO comes from configs/airootfs/root/.ssh/authorized_keys (untracked;
+# drop your pubkey there before building a test ISO).
+#
+# Usage: omarchy-iso-remote <command> [args]
+#
+#   find [--mac AA:BB:...] [--subnet 192.168.1]
+#       Print the machine's current IP. With --mac (or OMARCHY_REMOTE_MAC),
+#       ping-sweep and match the neighbor table; without, sweep port 22 for
+#       a live-ISO root login.
+#
+#   monitor [host]
+#       (Every command's [host] takes an IP, a hostname, or a MAC address —
+#       a MAC is resolved with a fresh sweep, surviving DHCP reshuffles.)
+#       Watch a live-ISO boot: which USB stick it booted from (model+serial
+#       — sticks differ in speed, so timings are meaningless unnamed), the
+#       boot verifies and the prefetch handing over, per-unit timings and
+#       the prefetch plan once the chain latches. Discovers the host first
+#       when none is given.
+#
+#   log [host] [dest]
+#       Fetch /var/log/omarchy-install.log from the live system.
+#
+#   check-key <iso>
+#       Show the authorized_keys baked into the ISO's live root (the thing
+#       that makes every other command here possible). Reads the one file
+#       straight out of the ISO: the squashfs is a contiguous ISO9660
+#       extent, so unsquashfs -o at the LBA xorriso reports needs no
+#       extraction. Installs squashfs-tools/libisoburn on first use.
+#
+#   write <iso> [host] [--device <path|serial>] [--keyless-ok]
+#       Stream an ISO onto the machine's USB stick over SSH (no read-back
+#       verify: it would double the wall time and its memory pressure could
+#       evict the pinned toolchain -- the boot-time verify units judge the
+#       stick for real on the next boot). Writing the medium the live system runs
+#       from (copytoram=n, what our boot entries pin) corrupts the mounted
+#       squashfs, so from the first written megabyte nothing can load that
+#       is not already in RAM — a naive attempt dies mid-write, half-written
+#       stick and all (measured, not theory). The self-medium path
+#       therefore prepares the session first: stop omarchy-install.target
+#       and every boot reader (verifies, sync, prefetch), so nothing holds
+#       the medium or churns the page cache, then pin the whole write
+#       toolchain and its libraries into RAM. After that the session is
+#       sacrificial: hands off its console, and when the write lands the
+#       tool reboots it itself -- via sysrq-b through bash builtins, the
+#       one reboot path that needs no binaries the dead squashfs would
+#       have to serve (dd's conv=fsync already flushed the stick; the
+#       rest is tmpfs). A write to any other device leaves the session
+#       alone and just says the stick is ready.
+#
+#   autoinstall [host] [--target-disk /dev/sdX] [--encrypt] [--user U]
+#               [--password P] [--hostname H]
+#       Drive a full unattended install on the machine, no keyboard: write
+#       the configurator's own output files onto a CIDATA-labeled partition
+#       appended in the boot stick's free tail (the same autoinstall path
+#       the QEMU rig uses — omarchy-cidata-load finds the label at boot and
+#       the wizard is skipped), reboot, then follow the install log to its
+#       verdict. The target disk defaults to the machine's first non-USB
+#       disk and the layout is sized to it; user/password default to
+#       omarchy/omarchy, and ~/.ssh/id_ed25519.pub becomes the installed
+#       system's authorized_keys, so the result answers SSH. A plain
+#       (non-deferred) cidata install ends at the dashboard's "Reboot Now"
+#       prompt — the machine sits there, installed, until someone presses
+#       or power-cycles.
+#
+# Environment:
+#   OMARCHY_REMOTE_MAC     default MAC for `find` (keeps it out of the repo)
+#   OMARCHY_REMOTE_SUBNET  optional /24 prefix, e.g. 192.168.1, to pin the
+#                          sweep; by default every directly connected IPv4
+#                          network is tried in turn (past a router the
+#                          neighbor table cannot see a MAC anyway, so the
+#                          connected networks are the whole search space)
+
+set -euo pipefail
+
+SSH_OPTS=(-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no
+          -o ConnectTimeout=4 -o BatchMode=yes -o LogLevel=ERROR)
+
+usage() { sed -n '2,82p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+rssh() { local host=$1; shift; ssh "${SSH_OPTS[@]}" "root@$host" "$@"; }
+
+# Every directly connected IPv4 network's /24, one per line. MAC discovery
+# is an L2 affair -- past a router the neighbor table cannot see the MAC at
+# all -- so the connected networks are the entire meaningful search space.
+# Networks wider than /24 are represented by the /24 our own address sits
+# in: sweeping a /16 is 65k pings for a machine that in practice shares the
+# home segment.
+connected_subnets() {
+  ip -4 -o addr show scope global 2>/dev/null |
+    awk '{split($4, a, "[./]"); print a[1] "." a[2] "." a[3]}' | sort -u
+}
+
+# Fill the neighbor table (parallel one-shot pings) and match the MAC there;
+# fall back to the behavioral probe when no MAC is known.
+discover() {
+  local mac="${OMARCHY_REMOTE_MAC:-}" subnets="${OMARCHY_REMOTE_SUBNET:-}" subnet ip i
+  while (($#)); do
+    case "$1" in
+      --mac) mac=$2; shift ;;
+      --subnet) subnets=$2; shift ;;
+      *) echo "find: unknown option $1" >&2; exit 1 ;;
+    esac
+    shift
+  done
+  # No subnet given: try every directly connected network in turn.
+  [[ -n $subnets ]] || subnets=$(connected_subnets)
+  [[ -n $subnets ]] || { echo "no connected IPv4 network found" >&2; exit 1; }
+
+  for subnet in $subnets; do
+    for i in $(seq 1 254); do (ping -c1 -W1 "$subnet.$i" >/dev/null 2>&1) & done
+    wait
+
+    if [[ -n $mac ]]; then
+      ip=$(ip neigh | awk -v m="${mac,,}" 'tolower($5) == m && $NF != "FAILED" {print $1; exit}')
+      [[ -n $ip ]] && { echo "$ip"; return 0; }
+      continue
+    fi
+
+    # No MAC: the live ISO is the host that lets root in and is an archiso.
+    ip=$(for i in $(seq 1 254); do
+      (nc -z -w1 "$subnet.$i" 22 2>/dev/null && echo "$subnet.$i") &
+    done | while read -r ip; do
+      if rssh "$ip" "test -d /run/archiso" 2>/dev/null; then
+        echo "$ip"
+        break
+      fi
+    done)
+    [[ -n $ip ]] && { echo "$ip"; return 0; }
+  done
+
+  if [[ -n $mac ]]; then
+    echo "MAC $mac not found on: $(echo $subnets | tr '\n' ' ')(.0/24 each)" >&2
+  else
+    echo "no live-ISO host found on: $(echo $subnets | tr '\n' ' ')(.0/24 each)" >&2
+  fi
+  return 1
+}
+
+# Every command's [host] accepts an IP/hostname or a MAC address: a MAC is
+# resolved through the sweep, so `write <iso> aa:bb:cc:dd:ee:ff` works
+# across the reboots that shuffle the DHCP lease.
+# Print the ISO's baked root authorized_keys. Returns 0 with the keys on
+# stdout, 1 when the ISO definitively lacks them, 2 when it cannot tell
+# (tools unavailable).
+iso_authorized_keys() {
+  local iso=$1 lba
+  if ! command -v xorriso >/dev/null || ! command -v unsquashfs >/dev/null; then
+    omarchy-pkg-add squashfs-tools libisoburn >/dev/null 2>&1 || return 2
+  fi
+  lba=$(xorriso -indev "$iso" -find /arch/x86_64/airootfs.sfs -exec report_lba 2>/dev/null |
+    awk -F',' '/File data lba/ { gsub(/ /, "", $2); print $2; exit }')
+  [[ -n $lba ]] || return 2
+  unsquashfs -o "$((lba * 2048))" -cat "$iso" root/.ssh/authorized_keys 2>/dev/null |
+    grep . || return 1
+}
+
+cmd_check_key() {
+  local iso="${1:-}" keys rc
+  [[ -f $iso ]] || { echo "check-key: no such ISO: $iso" >&2; exit 1; }
+  keys=$(iso_authorized_keys "$iso" 2>/dev/null); rc=$?
+  case $rc in
+    0)
+      echo "authorized_keys baked into $iso:"
+      ssh-keygen -lf /dev/stdin <<<"$keys" 2>/dev/null || printf '%s\n' "$keys"
+      ;;
+    1) echo "NO authorized_keys in $iso: a machine booting it answers SSH to nobody" >&2; exit 1 ;;
+    *) echo "cannot inspect $iso (xorriso/unsquashfs unavailable)" >&2; exit 2 ;;
+  esac
+}
+
+require_host() {
+  HOST="${1:-}"
+  if [[ $HOST =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
+    HOST=$(discover --mac "$HOST") || exit 1
+  elif [[ -z $HOST ]]; then
+    HOST=$(discover) || exit 1
+  fi
+}
+
+cmd_monitor() {
+  require_host "${1:-}"
+  echo "monitoring $HOST (mac $(ip neigh show "$HOST" | awk '{print $5}'))"
+  rssh "$HOST" '
+    uptime
+    src=$(findmnt -no SOURCE /run/archiso/bootmnt)
+    disk=$(lsblk -no PKNAME "$src" 2>/dev/null | head -1); disk=${disk:-${src#/dev/}}
+    echo "boot medium: $src ($(lsblk -dno MODEL,SERIAL,SIZE,TRAN /dev/$disk 2>/dev/null | tr -s " ")), scheduler: $(cat /sys/block/$disk/queue/scheduler 2>/dev/null)"
+  '
+  local i out
+  for i in $(seq 1 120); do
+    out=$(rssh "$HOST" '
+      echo "load: $(cut -d" " -f1-3 /proc/loadavg)"
+      for u in omarchy-mirror-verify omarchy-pacman-sync omarchy-root-image-verify omarchy-prefetch; do
+        echo "$u: $(systemctl is-active $u.service 2>/dev/null)"
+      done
+      pgrep -x configurator >/dev/null && echo "configurator: running" || true
+      pgrep -f "[o]marchy-iso-install" >/dev/null && echo "installer: running" || true
+    ' 2>/dev/null) || { echo "$(date +%H:%M:%S) sample failed"; sleep 10; continue; }
+    printf '=== %s ===\n%s\n' "$(date +%H:%M:%S)" "$out"
+    if grep -qE "omarchy-prefetch: (active|failed)$" <<<"$out"; then
+      echo "--- chain done: unit timings + prefetch plan ---"
+      rssh "$HOST" '
+        for u in omarchy-mirror-verify omarchy-pacman-sync omarchy-root-image-verify omarchy-prefetch; do
+          systemctl show -p ExecMainStartTimestamp -p ExecMainExitTimestamp -p Result "$u.service" | sed "s/^/$u /"
+        done
+        journalctl -u omarchy-prefetch.service -o short-monotonic --no-pager | tail -4
+        cat /run/omarchy-prefetch/plan 2>/dev/null
+      '
+      return 0
+    fi
+    sleep 15
+  done
+}
+
+cmd_log() {
+  require_host "${1:-}"
+  local dest="${2:-omarchy-install-$HOST.log}"
+  scp -O "${SSH_OPTS[@]}" "root@$HOST:/var/log/omarchy-install.log" "$dest"
+  # The phases log to the journal alone (timestamped); fetch that half of
+  # the story beside the session log.
+  rssh "$HOST" "journalctl -b -u '*omarchy*' -u '*.mount' -o short-iso --no-pager;
+    journalctl -b -t omarchy-phase-error -t omarchy-install-milestone -o short-iso --no-pager" \
+    >"$dest.journal" 2>/dev/null || true
+  echo "saved: $dest (+ $dest.journal)"
+}
+
+cmd_write() {
+  local iso="" device="" keyless_ok=false positional=()
+  while (($#)); do
+    case "$1" in
+      --device) device=$2; shift ;;
+      --keyless-ok) keyless_ok=true ;;
+      *) positional+=("$1") ;;
+    esac
+    shift
+  done
+  iso="${positional[0]:-}"
+  [[ -f $iso ]] || { echo "write: no such ISO: $iso" >&2; exit 1; }
+
+  # A keyless ISO on the remote stick is a lockout: the next boot answers
+  # SSH to nobody and the remote loop is over until someone walks to the
+  # machine. Refuse unless the caller says that is the point (a stick for
+  # hand-off, say).
+  case "$(iso_authorized_keys "$iso" >/dev/null 2>&1; echo $?)" in
+    1)
+      if ! $keyless_ok; then
+        echo "write: $iso has no baked authorized_keys -- the machine that" >&2
+        echo "boots it will answer SSH to nobody. Pass --keyless-ok if that" >&2
+        echo "is intended." >&2
+        exit 1
+      fi
+      echo "note: keyless ISO (--keyless-ok): no SSH into the next boot"
+      ;;
+    2) echo "note: cannot inspect $iso for authorized_keys (tools missing); writing anyway" ;;
+  esac
+
+  require_host "${positional[1]:-}"
+
+  # The target is, in order: --device as a /dev path, --device as a serial
+  # number matched against the machine's disks, or the first USB disk. The
+  # write then refuses/prepares when the live system runs from that same
+  # device (see the header); copytoram=y frees the medium, and the probe
+  # below sees that.
+  local probe
+  # shellcheck disable=SC2029
+  probe=$(rssh "$HOST" "
+    spec='$device'
+    # The medium mounts as a partition on some boots and as the whole disk
+    # on others (hybrid ISO): PKNAME answers only for the former, so fall
+    # back to the source itself -- a bare /dev/ here once made the
+    # self-medium check miss and a naive write go out.
+    src=\$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null) || true
+    disk=''
+    if [[ -n \$src ]]; then
+      disk=\$(lsblk -no PKNAME \"\$src\" 2>/dev/null | head -1)
+      [[ -n \$disk ]] && disk=/dev/\$disk || disk=\$src
+    fi
+    if [[ -z \$spec ]]; then
+      usb=\$(lsblk -dno NAME,TRAN | awk '\$2 == \"usb\" {print \"/dev/\" \$1; exit}')
+    elif [[ \$spec == /dev/* ]]; then
+      [[ -b \$spec ]] && usb=\$spec || usb=''
+    else
+      usb=\$(lsblk -dno NAME,SERIAL | awk -v s=\"\$spec\" '\$2 == s {print \"/dev/\" \$1; exit}')
+    fi
+    ident=''
+    [[ -n \$usb ]] && ident=\$(lsblk -dno MODEL,SERIAL,SIZE \"\$usb\" 2>/dev/null | tr -s ' ')
+    echo \"medium=\$disk usb=\$usb ident=\$ident\"
+  ")
+  local medium usb ident
+  medium=$(sed -n 's/.*medium=\([^ ]*\) .*/\1/p' <<<"$probe")
+  usb=$(sed -n 's/.*usb=\([^ ]*\) .*/\1/p' <<<"$probe")
+  ident=$(sed -n 's/.*ident=\(.*\)/\1/p' <<<"$probe")
+  if [[ -z $usb ]]; then
+    if [[ -n $device ]]; then
+      echo "write: no device on $HOST matching '$device' (path must exist, serial per lsblk -dno NAME,SERIAL)" >&2
+    else
+      echo "write: no USB disk on $HOST" >&2
+    fi
+    exit 1
+  fi
+  echo "target: $HOST:$usb ($ident)"
+  if [[ -n $medium && $medium == "$usb" ]]; then
+    echo "write: $HOST runs its live system FROM $usb -- preparing the session"
+    echo "(everything the write needs is pinned in RAM; the session is"
+    echo "sacrificial after this: hands off its console, reboot when done)"
+    # The console timestamps are rendered here, not on the box: the live
+    # ISO's clock runs UTC, and the person reading the screen holds a
+    # local-time watch. The double-quoted prefix evaluates locally and
+    # splices into the single-quoted remote script as plain assignments.
+    rssh "$HOST" "write_started=$(date +%H:%M:%S) write_back_by=$(date -d '10 minutes' +%H:%M:%S); "'
+      # Freeze the install UI and orchestrator before their world is torn
+      # down: a stopped process observes nothing, so no misleading corrupt-
+      # medium headline lands in the log and no failure screen paints over
+      # the console notice. The session is sacrificial and ends in a
+      # reboot, so nothing is ever resumed.
+      # Bracketed patterns: this whole script rides in the remote shell 
+      # cmdline, and an unbracketed pattern would match -- and freeze --
+      # the shell running these very lines (measured: the prepare stopped
+      # itself at this exact spot).
+      pkill -STOP -f "omarchy-install-[d]ashboard" 2>/dev/null || true
+      pkill -STOP -f "orchestrator/[m]ain.sh" 2>/dev/null || true
+      pkill -STOP -f "omarchy-iso-[i]nstall " 2>/dev/null || true
+      # Nothing may hold the medium or churn the page cache once the write
+      # starts: an aborted install group and stopped boot readers give the
+      # write the medium to itself, and every cached page stays cached.
+      systemctl stop omarchy-install.target 2>/dev/null || true
+      systemctl stop omarchy-prefetch.service omarchy-root-image-verify.service \
+        omarchy-mirror-verify.service omarchy-pacman-sync.service 2>/dev/null || true
+      # Pin the write toolchain: after the first written megabyte, only what
+      # is already in RAM can run -- read every needed binary and its
+      # libraries fully, so no demand fault lands on the dying squashfs.
+      # systemctl and reboot are on the list because stopping units and the
+      # final reboot must work from cache too.
+      pinned=0
+      for b in bash dd head cat sha256sum awk sed grep ldd xargs \
+               systemctl reboot lsblk findmnt; do
+        bin=$(command -v "$b" 2>/dev/null) || continue
+        cat "$bin" >/dev/null 2>&1 && pinned=$((pinned + 1))
+        ldd "$bin" 2>/dev/null | awk "\$3 ~ /^\// {print \$3}"
+      done | sort -u | while read -r lib; do cat "$lib" >/dev/null 2>&1 || true; done
+      cat /usr/lib/ld-linux-x86-64.so.2 >/dev/null 2>&1 || true
+      # The person at the machine sees the console freeze the moment the
+      # squashfs dies; say why on the screen itself first. Builtins only:
+      # printf to the console faults nothing in after the write starts,
+      # and the drawn text survives because nothing repaints over it.
+      # The remote shell is zsh, not bash (sshd runs commands through the
+      # login shell), so nothing bash-only here: the timestamps arrived as
+      # plain assignments from the controller, and printf is a builtin in
+      # both shells, so the message itself faults nothing in.
+      # \r\n, not \n: the install UI leaves the console in raw mode (ONLCR
+      # off), where a bare newline staircases instead of returning to
+      # column 0. Explicit CR renders right in either termios state.
+      {
+        printf "\033[2J\033[H\r\n\r\n"
+        printf "   The installation session on this machine has been stopped.\r\n\r\n"
+        printf "   A remote rewrite of the USB install medium started at %s.\r\n" "$write_started"
+        printf "   This screen stays frozen on purpose while the stick is written.\r\n\r\n"
+        printf "   DO NOT power off: the machine reboots itself into the new\r\n"
+        printf "   image when the write completes -- expect it back around %s.\r\n" "$write_back_by"
+        printf "   If it is still sitting here well past that, the write is stuck.\r\n"
+      } >/dev/tty1 2>/dev/null || true
+      echo "session prepared: readers stopped, toolchain pinned, console told"
+    ' || { echo "write: could not prepare the live session" >&2; exit 1; }
+  fi
+
+  local size
+  size=$(stat -c %s "$iso")
+  echo "writing $((size / 1048576)) MiB to $HOST:$usb"
+  # No read-back verify: re-reading the whole stick doubles the wall time at
+  # stick speed and, on a self-medium write, the read pipe's memory pressure
+  # is exactly what could evict the pinned toolchain. dd's exit status with
+  # conv=fsync is the success signal; the ISO's own boot-time verify units
+  # judge the stick for real on the next boot.
+  # dd's own progress line rides the ssh channel's stderr home: it counts
+  # bytes the device accepted, not bytes fed into the pipe, and needs no
+  # extra tool on either end.
+  # shellcheck disable=SC2029
+  ssh "${SSH_OPTS[@]}" "root@$HOST" \
+    "dd of=$usb bs=4M oflag=direct conv=fsync status=progress" <"$iso" ||
+    { echo "write failed" >&2; exit 1; }
+
+  if [[ -n $medium && $medium == "$usb" ]]; then
+    # The session just overwrote its own medium: it is a dead end, and the
+    # only trustworthy reboot is one that needs no binaries at all -- unit
+    # teardown would exec ExecStop= programs the dead squashfs cannot load.
+    # sysrq-b through bash builtins reboots at the kernel, and skipping the
+    # sync is fine: conv=fsync above flushed the stick, the rest is tmpfs.
+    echo "write complete and flushed: rebooting $HOST into the new image"
+    rssh "$HOST" 'printf 1 > /proc/sys/kernel/sysrq; printf b > /proc/sysrq-trigger' 2>/dev/null || true
+    echo "rebooted (the connection dropping is the reboot happening)"
+  else
+    echo "write complete and flushed: reboot $HOST when ready to boot it"
+  fi
+}
+
+cmd_autoinstall() {
+  local target_disk="" encrypt=false user=omarchy password=omarchy hostname=omarchy positional=()
+  while (($#)); do
+    case "$1" in
+      --target-disk) target_disk=$2; shift ;;
+      --encrypt) encrypt=true ;;
+      --user) user=$2; shift ;;
+      --password) password=$2; shift ;;
+      --hostname) hostname=$2; shift ;;
+      *) positional+=("$1") ;;
+    esac
+    shift
+  done
+  require_host "${positional[0]:-}"
+
+  # What the machine looks like: the boot stick (the cidata partition goes
+  # in its free tail), the install target and its true size (the layout is
+  # cut to it), and whether the mirror carries the dev or stable packages.
+  local probe stick target target_bytes flavor
+  probe=$(rssh "$HOST" '
+    src=$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null) || exit 1
+    disk=$(lsblk -no PKNAME "$src" 2>/dev/null | head -1); disk=${disk:+/dev/$disk}; disk=${disk:-$src}
+    target=$(lsblk -dno NAME,TYPE,TRAN | awk "\$2 == \"disk\" && \$3 != \"usb\" {print \"/dev/\" \$1; exit}")
+    bytes=""; [[ -n $target ]] && bytes=$(blockdev --getsize64 "$target")
+    # find, not a glob: the live root shell is zsh, whose nomatch aborts on
+    # an unmatched glob.
+    flavor=stable
+    find /var/cache/omarchy/mirror/offline -maxdepth 1 -name "omarchy-dev-[0-9]*" 2>/dev/null | grep -q . && flavor=dev
+    echo "stick=$disk target=$target bytes=$bytes flavor=$flavor"
+  ') || { echo "autoinstall: $HOST is not a live ISO session" >&2; exit 1; }
+  stick=$(sed -n 's/.*stick=\([^ ]*\) .*/\1/p' <<<"$probe")
+  target=${target_disk:-$(sed -n 's/.*target=\([^ ]*\) .*/\1/p' <<<"$probe")}
+  target_bytes=$(sed -n 's/.*bytes=\([^ ]*\) .*/\1/p' <<<"$probe")
+  flavor=$(sed -n 's/.*flavor=\([^ ]*\)$/\1/p' <<<"$probe")
+  [[ -n $target && -n $target_bytes ]] || { echo "autoinstall: no install target found on $HOST" >&2; exit 1; }
+  [[ -n $target_disk ]] && target_bytes=$(rssh "$HOST" "blockdev --getsize64 $target_disk")
+  echo "target: $HOST installing to $target ($((target_bytes / 1024 / 1024 / 1024)) GiB), stick $stick, $flavor packages"
+
+  # The configurator's own output files, exactly as the wizard writes them
+  # and as the QEMU rig generates them — sized to the real disk.
+  local dir hash runtime=omarchy settings=omarchy-settings
+  [[ $flavor == dev ]] && runtime=omarchy-dev settings=omarchy-settings-dev
+  local mib=$((1024 * 1024)) gib=$((1024 * 1024 * 1024))
+  local boot_start=$mib boot_size=$((2 * gib))
+  local main_start=$((boot_size + boot_start))
+  # Floored to a whole MiB: the library rejects a misaligned partition, and
+  # a raw disk size is rarely a MiB multiple.
+  local main_size=$(((target_bytes - main_start - mib) / mib * mib))
+  dir=$(mktemp -d)
+  trap 'rm -rf "$dir"' RETURN
+  hash=$(openssl passwd -6 "$password")
+
+  jq -n --arg hash "$hash" --arg user "$user" --arg pw "$password" --argjson enc "$encrypt" '
+    {root_enc_password: $hash,
+     users: [{enc_password: $hash, groups: [], sudo: true, username: $user}]}
+    + (if $enc then {encryption_password: $pw} else {} end)' >"$dir/user_credentials.json"
+
+  # --encrypt must reach the installer the way the configurator's own output
+  # does: as a disk_encryption block naming the root partition (plus the
+  # flag file and the password in the credentials). The flag file alone
+  # makes the boot validation expect LUKS while the disk phase, reading only
+  # the JSON, formats plain btrfs -- the install then halts at validate-boot.
+  jq -n --arg disk "$target" --arg hostname "$hostname" \
+    --arg runtime "$runtime" --arg settings "$settings" \
+    --argjson enc "$encrypt" --arg pw "$password" \
+    --argjson boot_start "$boot_start" --argjson boot_size "$boot_size" \
+    --argjson main_start "$main_start" --argjson main_size "$main_size" '
+    {app_config: null, auth_config: {},
+     audio_config: {audio: "pipewire"},
+     bootloader_config: {bootloader: "Limine", uki: false, removable: false},
+     custom_commands: [],
+     omarchy_install: {
+       mode: "full_disk", defer_provisioning: false, target_mount: "/mnt",
+       boot: {esp_mount: "/boot", esp_path: "/EFI/limine",
+              efi_binary: "limine_x64.efi", enable_fallback: true},
+       storage: {kernel: "linux"}},
+     disk_config: ({config_type: "default_layout", device_modifications: [
+       {device: $disk, wipe: true, partitions: [
+         {btrfs: [], dev_path: null, flags: ["boot", "esp"], fs_type: "fat32",
+          mount_options: [], mountpoint: "/boot",
+          obj_id: "ea21d3f2-82bb-49cc-ab5d-6f81ae94e18d",
+          size: {sector_size: {unit: "B", value: 512}, unit: "B", value: $boot_size},
+          start: {sector_size: {unit: "B", value: 512}, unit: "B", value: $boot_start},
+          status: "create", type: "primary"},
+         {btrfs: [{mountpoint: "/", name: "@"}, {mountpoint: "/home", name: "@home"},
+                  {mountpoint: "/var/log", name: "@log"},
+                  {mountpoint: "/var/cache/pacman/pkg", name: "@pkg"}],
+          dev_path: null, flags: [], fs_type: "btrfs",
+          mount_options: ["compress=zstd"], mountpoint: null,
+          obj_id: "8c2c2b92-1070-455d-b76a-56263bab24aa",
+          size: {sector_size: {unit: "B", value: 512}, unit: "B", value: $main_size},
+          start: {sector_size: {unit: "B", value: 512}, unit: "B", value: $main_start},
+          status: "create", type: "primary"}]}]}
+       + (if $enc then {disk_encryption: {
+            encryption_type: "luks", lvm_volumes: [], iter_time: 2000,
+            partitions: ["8c2c2b92-1070-455d-b76a-56263bab24aa"],
+            encryption_password: $pw}} else {} end)),
+     hostname: $hostname, kernels: ["linux"],
+     network_config: {type: "iso"}, ntp: true, parallel_downloads: 8,
+     script: null, services: [],
+     mirror_config: {
+       custom_repositories: [], mirror_regions: {}, optional_repositories: [],
+       custom_servers: [
+         {url: "https://mirror.omarchy.org/$repo/os/$arch"},
+         {url: "https://mirror.rackspace.com/archlinux/$repo/os/$arch"},
+         {url: "https://geo.mirror.pkgbuild.com/$repo/os/$arch"}]},
+     swap: true,
+     packages: ["base-devel", "git", "omarchy-keyring", $settings, $runtime],
+     profile_config: {gfx_driver: null, greeter: null, profile: {}},
+     version: "3.0.9"}' >"$dir/user_configuration.json"
+
+  echo "Omarchy Remote" >"$dir/user_full_name.txt"
+  echo "remote@omarchy.org" >"$dir/user_email_address.txt"
+  echo "$encrypt" >"$dir/user_encrypt_installation.txt"
+  cp ~/.ssh/id_ed25519.pub "$dir/authorized_keys"
+
+  # The CIDATA partition: appended once in the stick's free tail (any later
+  # `write` of a fresh ISO wipes the table and it gets appended again). The
+  # medium is mounted and busy, so the kernel cannot re-read the whole
+  # table -- partx adds just the new entry.
+  echo "preparing the CIDATA partition on $stick"
+  local part
+  part=$(rssh "$HOST" "
+    if node=\$(blkid -L CIDATA 2>/dev/null) || node=\$(blkid -L cidata 2>/dev/null); then
+      echo \"\$node\"; exit 0
+    fi
+    echo ',256MiB,' | sfdisk --append --no-reread $stick >/dev/null 2>&1
+    partx -a $stick >/dev/null 2>&1 || true
+    udevadm settle 2>/dev/null || true
+    lsblk -nro NAME $stick | tail -1 | sed 's|^|/dev/|'
+  ")
+  [[ -n $part && $part != "$stick" ]] || { echo "autoinstall: could not create a cidata partition on $stick" >&2; exit 1; }
+  # Built as an image and dd'd on, never mkfs'd in place: on some boots
+  # archiso mounts the whole stick as the boot medium (the ISO signature is
+  # on the disk as well as the partition), and a mounted whole disk holds
+  # every partition exclusively -- mkfs and mount fail with EBUSY while
+  # plain writes to the partition node still work. omarchy-cidata-load has
+  # the matching read-side fallback.
+  rssh "$HOST" "umount /run/cidata-prep 2>/dev/null; rm -f /run/cidata.img; truncate -s 33554432 /run/cidata.img && mkfs.vfat -n CIDATA /run/cidata.img >/dev/null && mkdir -p /run/cidata-prep && mount -o loop /run/cidata.img /run/cidata-prep"
+  # --no-same-owner: FAT carries no ownership, and a chown failure is tar's
+  # exit status even though every byte landed.
+  tar -C "$dir" -cf - . | rssh "$HOST" "tar -C /run/cidata-prep -xf - --no-same-owner && umount /run/cidata-prep && dd if=/run/cidata.img of=$part bs=4M conv=fsync 2>/dev/null && rm -f /run/cidata.img && sync"
+  echo "cidata written to $part; rebooting $HOST into the unattended install"
+  rssh "$HOST" "systemctl reboot" 2>/dev/null || true
+
+  # Follow it home: the machine comes back on a fresh lease, the loader
+  # skips the wizard, and the install log carries the verdict.
+  local ip line
+  sleep 45
+  until ip=$(discover); do sleep 10; done
+  echo "live again at $ip; waiting for the autoinstall to take"
+  until rssh "$ip" "grep -q 'Autoinstall configuration found' /var/log/omarchy-install.log" 2>/dev/null; do
+    sleep 5
+  done
+  echo "wizard skipped -- following the install"
+  # The verdict loop reads from a process substitution, not a pipeline: the
+  # follow ssh dies by pkill on either verdict, and under pipefail its 255
+  # would become the exit status of a succeeded install.
+  while IFS= read -r line; do
+    printf '%s %s\n' "$(date +%H:%M:%S)" "$line"
+    case "$line" in
+      *"Installation complete"*) echo "AUTOINSTALL SUCCEEDED on $ip (sitting at the Reboot Now prompt)"; pkill -f 'tail -n +1 -f /var/log/omarchy-install' 2>/dev/null || true; return 0 ;;
+      *"Installation halted"*|*"installer child exited"*) echo "AUTOINSTALL FAILED on $ip -- fetch the log with: omarchy-iso-remote log $ip" >&2; pkill -f 'tail -n +1 -f /var/log/omarchy-install' 2>/dev/null || true; return 1 ;;
+    esac
+  done < <(ssh "${SSH_OPTS[@]}" "root@$ip" 'tail -n +1 -f /var/log/omarchy-install.log' 2>/dev/null |
+    grep --line-buffered -E '›|Installation complete|Installation halted|installer child exited')
+  echo "autoinstall: lost the install log stream from $ip before a verdict" >&2
+  return 1
+}
+
+case "${1:-}" in
+  find) shift; discover "$@" ;;
+  monitor) shift; cmd_monitor "$@" ;;
+  log) shift; cmd_log "$@" ;;
+  check-key) shift; cmd_check_key "$@" ;;
+  autoinstall) shift; cmd_autoinstall "$@" ;;
+  write) shift; cmd_write "$@" ;;
+  -h|--help|'') usage ;;
+  *) echo "unknown command: $1" >&2; usage 1 ;;
+esac

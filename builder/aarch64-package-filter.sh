@@ -27,7 +27,7 @@ filter_aarch64_packages() {
         ;;
       amd-ucode|intel-ucode|syslinux|broadcom-wl|broadcom-wl-dkms|memtest86+|memtest86+-efi|edk2-shell|\
       apple-bcm-firmware|apple-t2-audio-config|t2fanrd|tiny-dfr|macbook12-spi-driver-dkms|\
-      asusctl|dell-xps-touchpad-haptics|dell-xps13-sidecar-amps|intel-ipu7-camera|intel-lpmd|intel-media-driver|libva-intel-driver|vpl-gpu-rt|thermald|\
+      asdcontrol|asusctl|dell-xps-touchpad-haptics|dell-xps13-sidecar-amps|intel-ipu7-camera|intel-lpmd|intel-media-driver|libva-intel-driver|vpl-gpu-rt|thermald|\
       linux-ptl|linux-ptl-headers|qmk-hid|tuxedo-drivers-nocompatcheck-dkms|yt6801-dkms|\
       nvidia-580xx-dkms|nvidia-580xx-utils|nvidia-dkms|lib32-*|vulkan-intel|vulkan-radeon|vulkan-asahi|\
       tzupdate|tensaku)

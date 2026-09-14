@@ -26,6 +26,12 @@ mkdir -p "$work_dir"
 if ! id builder &>/dev/null; then
   useradd -m -s /bin/bash builder
 fi
+# Parallel compression for the package archives; the defaults are single-threaded.
+cat > /home/builder/.makepkg.conf <<'CONF'
+COMPRESSXZ=(xz -c -z -T0 -)
+COMPRESSZST=(zstd -c -z -q -T0 -)
+CONF
+chown builder:builder /home/builder/.makepkg.conf
 echo 'builder ALL=(ALL) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/99-omarchy-pkg-builder
 chmod 440 /etc/sudoers.d/99-omarchy-pkg-builder
 chown builder:builder "$work_dir"
@@ -61,10 +67,13 @@ for pkg in "${packages[@]}"; do
   cp -a "/omarchy-pkgs/pkgbuilds/$pkg" "$pkg_work"
   chown -R builder:builder "$pkg_work"
 
+  # The container's makepkg.conf compresses single-threaded and makes with one
+  # job; use every core of the build host for both.
   su builder -c "
     cd '$pkg_work' &&
     PKGDEST='$work_dir' \
     OMARCHY_SRC=/omarchy-source \
+    MAKEFLAGS='-j$(nproc)' \
     makepkg --noconfirm --skippgpcheck --skipchecksums --nodeps -f
   "
 done

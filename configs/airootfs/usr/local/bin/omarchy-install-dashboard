@@ -466,13 +466,26 @@ install_duration() {
   local path line duration
 
   if [[ -f $STATE_FILE ]]; then
+    # The orchestrator times the run on a monotonic clock and publishes it in
+    # nanoseconds; that is the lap time, shown the way a lap time is read
+    # anywhere in motorsport: m:ss.mmm, one shape whether the run took thirty
+    # seconds or six minutes, and h:mm:ss.mmm from an hour, the way endurance
+    # racing shows it. Older state files only carry wall-clock stamps and keep
+    # the m/s form.
     duration="$(jq -r '
-      ((.started_at // 0) | tonumber? // 0) as $started
-      | ((.finished_at // 0) | tonumber? // 0) as $finished
-      | if $started <= 0 or $finished <= 0 or $finished < $started then empty
-        else (($finished - $started) | round) as $secs
-          | if $secs >= 3600 then "\($secs / 3600 | floor)h \($secs % 3600 / 60 | floor)m \($secs % 60)s"
-            else "\($secs / 60 | floor)m \($secs % 60)s"
+      ((.total_elapsed_ns // 0) | tonumber? // 0) as $ns
+      | if $ns > 0 then
+          ($ns / 1000000 | floor) as $ms
+          | (if $ms >= 3600000 then "\($ms / 3600000 | floor):\(("0" + ($ms % 3600000 / 60000 | floor | tostring))[-2:])" else "\($ms / 60000 | floor)" end)
+            + ":\(("0" + (($ms % 60000) / 1000 | floor | tostring))[-2:]).\(("00" + ($ms % 1000 | tostring))[-3:])"
+        else
+          ((.started_at // 0) | tonumber? // 0) as $started
+          | ((.finished_at // 0) | tonumber? // 0) as $finished
+          | if $started <= 0 or $finished <= 0 or $finished < $started then empty
+            else (($finished - $started) | round) as $secs
+              | if $secs >= 3600 then "\($secs / 3600 | floor)h \($secs % 3600 / 60 | floor)m \($secs % 60)s"
+                else "\($secs / 60 | floor)m \($secs % 60)s"
+                end
             end
         end
     ' "$STATE_FILE" 2>/dev/null || true)"
@@ -492,6 +505,8 @@ install_duration() {
   return 0
 }
 
+# The first eight characters of the run's id. A photo of this screen can be
+# matched to a submitted result by it, which is the cheapest witness there is.
 render_finish() {
   local duration effect_canvas_width
   duration="$(install_duration || true)"

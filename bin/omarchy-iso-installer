@@ -85,6 +85,11 @@ simulate_install() {
   finished_at="$EPOCHREALTIME"
   write_simulation_state "$state_file" "$started_at" "$finished_at" \
     "Installation complete" "$target" "$(( total - 1 ))" "$total" "$finished_at"
+  # The orchestrator publishes the run time on a monotonic clock; the finish
+  # screen shows it as a lap time, so the preview supplies it too.
+  jq --argjson ns "$(awk -v s="$started_at" -v f="$finished_at" 'BEGIN { printf "%d", (f - s) * 1000000000 }')" \
+    '. + {total_elapsed_ns: $ns}' "$state_file" >"$state_file.tmp"
+  mv -f -- "$state_file.tmp" "$state_file"
   sleep 0.3
 }
 

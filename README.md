@@ -90,6 +90,10 @@ Boot order is disk first: the empty disk falls through to the ISO on the first b
 
 Encrypted autoinstalls are not fully unattended — the LUKS passphrase prompt still needs someone at the first boot.
 
+## Install timing
+
+The orchestrator times every phase on a monotonic clock and, when the install succeeds, writes the result to the target as `/var/log/omarchy-install-timing.json`: a schema version, a run id minted before the first phase, the elapsed nanoseconds for the run, and for each phase a stable id and its own elapsed nanoseconds. The finish screen shows the run as a lap time, the same span it has always shown, as m:ss.mmm on both sides of the minute, and h:mm:ss.mmm from an hour. Nothing here contacts a server.
+
 ## Testing the ISO
 
 Run `./bin/omarchy-iso-boot [release/omarchy.iso]`.

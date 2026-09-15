@@ -46,7 +46,7 @@ class ConfigureTailscaleTest(unittest.TestCase):
 
     def fake_run(self, cmd, **kwargs):
         self.calls.append(cmd)
-        if cmd[2] == "ufw":
+        if "ufw" in cmd:
             if self.ufw_writes_rule:
                 rules = self.target / "etc" / "ufw" / "user.rules"
                 rules.parent.mkdir(parents=True, exist_ok=True)
@@ -77,7 +77,21 @@ class ConfigureTailscaleTest(unittest.TestCase):
         return self.target / "etc" / "systemd" / "system" / "omarchy-tailscale-join.service"
 
     def chrooted(self, program):
-        return [cmd for cmd in self.calls if cmd[:2] == ["arch-chroot", str(self.target)] and cmd[2] == program]
+        prefix = phases_impl._private_arch_chroot_command(
+            types.SimpleNamespace(target=self.target)
+        )
+        return [
+            cmd for cmd in self.calls
+            if cmd[:len(prefix)] == prefix and cmd[len(prefix)] == program
+        ]
+
+    def chroot_command(self, *args):
+        return [
+            *phases_impl._private_arch_chroot_command(
+                types.SimpleNamespace(target=self.target)
+            ),
+            *args,
+        ]
 
     def test_no_authkey_is_a_no_op(self):
         self.configure()
@@ -128,14 +142,16 @@ class ConfigureTailscaleTest(unittest.TestCase):
     def test_enables_tailscaled_and_the_join(self):
         self.configure(authkey="tskey-auth-kFAKEKEY\n")
         self.assertEqual(self.chrooted("systemctl"), [
-            ["arch-chroot", str(self.target), "systemctl", "enable",
-             "tailscaled.service", "omarchy-tailscale-join.service"],
+            self.chroot_command(
+                "systemctl", "enable", "tailscaled.service",
+                "omarchy-tailscale-join.service",
+            ),
         ])
 
     def test_allows_tailnet_traffic_through_ufw_despite_chroot_exit_status(self):
         self.configure(authkey="tskey-auth-kFAKEKEY\n")
         self.assertEqual(self.chrooted("ufw"), [
-            ["arch-chroot", str(self.target), "ufw", "allow", "in", "on", "tailscale0"],
+            self.chroot_command("ufw", "allow", "in", "on", "tailscale0"),
         ])
 
     def test_fails_when_ufw_does_not_record_the_rule(self):

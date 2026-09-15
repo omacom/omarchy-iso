@@ -45,7 +45,7 @@ class ConfigureSshAccessTest(unittest.TestCase):
 
     def fake_run(self, cmd, **kwargs):
         self.calls.append(cmd)
-        if cmd[2] == "ufw":
+        if "ufw" in cmd:
             if self.ufw_writes_rule:
                 rules = self.target / "etc" / "ufw" / "user.rules"
                 rules.parent.mkdir(parents=True, exist_ok=True)
@@ -69,7 +69,21 @@ class ConfigureSshAccessTest(unittest.TestCase):
         return self.target / "home" / "jeff" / ".ssh" / "authorized_keys"
 
     def chrooted(self, program):
-        return [cmd for cmd in self.calls if cmd[:2] == ["arch-chroot", str(self.target)] and cmd[2] == program]
+        prefix = phases_impl._private_arch_chroot_command(
+            types.SimpleNamespace(target=self.target)
+        )
+        return [
+            cmd for cmd in self.calls
+            if cmd[:len(prefix)] == prefix and cmd[len(prefix)] == program
+        ]
+
+    def chroot_command(self, *args):
+        return [
+            *phases_impl._private_arch_chroot_command(
+                types.SimpleNamespace(target=self.target)
+            ),
+            *args,
+        ]
 
     def test_no_authorized_keys_is_a_no_op(self):
         self.configure()
@@ -101,19 +115,19 @@ class ConfigureSshAccessTest(unittest.TestCase):
     def test_chowns_ssh_dir_to_the_user(self):
         self.configure(authorized_keys="ssh-ed25519 AAAA jeff@host\n")
         self.assertEqual(self.chrooted("chown"), [
-            ["arch-chroot", str(self.target), "chown", "-R", "jeff:jeff", "/home/jeff/.ssh"],
+            self.chroot_command("chown", "-R", "jeff:jeff", "/home/jeff/.ssh"),
         ])
 
     def test_enables_sshd(self):
         self.configure(authorized_keys="ssh-ed25519 AAAA jeff@host\n")
         self.assertEqual(self.chrooted("systemctl"), [
-            ["arch-chroot", str(self.target), "systemctl", "enable", "sshd.service"],
+            self.chroot_command("systemctl", "enable", "sshd.service"),
         ])
 
     def test_allows_ssh_through_ufw_despite_chroot_exit_status(self):
         self.configure(authorized_keys="ssh-ed25519 AAAA jeff@host\n")
         self.assertEqual(self.chrooted("ufw"), [
-            ["arch-chroot", str(self.target), "ufw", "allow", "ssh"],
+            self.chroot_command("ufw", "allow", "ssh"),
         ])
 
     def test_fails_when_ufw_does_not_record_the_rule(self):

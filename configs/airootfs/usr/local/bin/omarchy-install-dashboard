@@ -161,7 +161,9 @@ LAST_PM=10
 # one button — so the last thing the installer shows matches the first. It runs
 # one row taller: `gum confirm` always paints prompt/blank/button and clears all
 # three, so the button cannot sit closer than two rows under a title we drew.
-FINISH_HEIGHT=$((LOGO_HEIGHT + 5))
+# Two more rows between title and button: a blank and the medium-removal
+# note — above the prompt, because gum clears everything under its view.
+FINISH_HEIGHT=$((LOGO_HEIGHT + 7))
 FINISH_TOP_ROW=2
 
 # ── Install progress ─────────────────────────────────────────────────────────
@@ -175,6 +177,9 @@ FINISH_TOP_ROW=2
 #          the install). libalpm makes one directory per package under
 #          <target>/var/lib/pacman/local; the denominator comes from
 #          build-iso.sh, so there is no second package list to drift.
+#          The root image unpack that precedes the package delta publishes
+#          phase_progress (stream bytes consumed) in the state file; it drives
+#          the same band until the local db fills in when the unpack lands.
 #
 # Per-mille because a whole-percent asymptote over a 2-point band has two
 # reachable values and stops moving. No give-up predicate: two discontinuous
@@ -196,6 +201,7 @@ PKG_FLOOR_TAU=900      # with a work signal, time is only a backstop until the
 
 POS=10                 # position, per-mille, monotonic
 PROGRESS_PM=10
+VERIFY_PCT=-1          # honest percent of the pre-flight verify, -1 when idle
 NOW=0                  # monotonic seconds, refreshed once per frame
 DASH_T0=0
 PHASE_NAME=""          # last phase this process observed
@@ -293,10 +299,11 @@ count_packages() {
 # here would land on the TTY between the cursor escape and the bar.
 install_progress() {
   local phase finished index total target
-  local lo hi tau span t pos work gap n pkg_signal=0
+  local lo hi tau span t pos work gap n pkg_signal=0 progress_pm
   local -a state
 
   PROGRESS_PM=$POS
+  VERIFY_PCT=-1
   [[ -f $STATE_FILE ]] || return 0
 
   mapfile -t state < <(jq -r '
@@ -304,11 +311,14 @@ install_progress() {
     ((.finished_at // 0) | tonumber? // 0 | floor),
     ((.current_index // -1) | tonumber? // -1 | floor),
     ((.total_phases // 0) | tonumber? // 0 | floor),
-    (.target // "/mnt")
+    (.target // "/mnt"),
+    ((.phase_progress // -1) | tonumber? // -1 | . * 1000 | floor)
   ' "$STATE_FILE" 2>/dev/null)
-  (( ${#state[@]} == 5 )) || return 0
+  (( ${#state[@]} == 6 )) || return 0
   phase="${state[0]}" finished="${state[1]}"
   index="${state[2]}" total="${state[3]}" target="${state[4]}"
+  progress_pm="${state[5]}"
+  [[ $progress_pm =~ ^-?[0-9]+$ ]] || progress_pm=-1
   [[ -n $target ]] || target="/mnt"
 
   if (( finished > 0 )) || [[ $phase == "Installation complete" ]]; then
@@ -340,11 +350,8 @@ install_progress() {
     "Installing Arch + Omarchy")  lo=65  hi=700  tau=150 pkg_signal=1 ;;
     "Configuring hibernation")    lo=700 hi=720  tau=10  ;;
     "Configuring system")         lo=720 hi=850  tau=120 ;;
-    "Staging provisioning")          lo=850 hi=855  tau=5   ;;
-    "Finalizing Limine boot")     lo=855 hi=950  tau=90  ;;
-    "Finalizing user")            lo=950 hi=978  tau=30  ;;
-    "Configuring login")          lo=978 hi=988  tau=5   ;;
-    "Configuring DNS resolver")   lo=988 hi=994  tau=5   ;;
+    "Staging provisioning")       lo=850 hi=855  tau=5   ;;
+    "Finalizing boot and user setup") lo=855 hi=994 tau=90 ;;
     "Validating boot setup")      lo=994 hi=998  tau=5   ;;
     "Creating factory snapshot")  lo=998 hi=1000 tau=5   ;;
     *)
@@ -391,6 +398,17 @@ install_progress() {
     (( gap > PKG_BONUS_MAX_PM )) && gap=$PKG_BONUS_MAX_PM
     (( gap > PKG_BONUS )) && PKG_BONUS=$gap
     work=$(( lo + (span - 1 - PKG_TAIL_PM) * PKG_SEEN / PKG_TOTAL + PKG_BONUS ))
+    (( work > pos )) && pos=$work
+  fi
+  if (( progress_pm >= 0 )); then
+    (( progress_pm > 1000 )) && progress_pm=1000
+    # The pre-flight band is 15 per-mille wide (the phase is subsecond once
+    # the boot-time hash has finished), so real progress mapped into it moves
+    # the bar about one cell over minutes and reads as a hang. Surface the
+    # honest percent as a status line instead (render_dynamic); the unpack's
+    # band is wide enough that its progress shows in the bar itself.
+    [[ $phase == "Preparing install target" ]] && VERIFY_PCT=$(( progress_pm / 10 ))
+    work=$(( lo + (span - 1 - PKG_TAIL_PM) * progress_pm / 1000 ))
     (( work > pos )) && pos=$work
   fi
 
@@ -457,7 +475,13 @@ render_dynamic() {
   line_at "$CONTENT_WIDTH" $(( (CONTENT_WIDTH - 34) / 2 )) ""
   progress_bar "$pm" 34
   printf '\n'
-  blank_line
+  # Same row either way, so the layout height never changes: blank normally,
+  # the verify's honest percent while the pre-flight gate waits on the hash.
+  if (( VERIFY_PCT >= 0 )); then
+    center "${DIM}verifying the install medium: ${VERIFY_PCT}%${RESET}" "$CONTENT_WIDTH"
+  else
+    blank_line
+  fi
   center "${DIM}Tip:${RESET} ${GREEN}$(current_tip)${RESET}" "$CONTENT_WIDTH"
   printf '%s' "$CLEAR_TO_END"
 }
@@ -467,13 +491,16 @@ install_duration() {
 
   if [[ -f $STATE_FILE ]]; then
     duration="$(jq -r '
-      ((.started_at // 0) | tonumber? // 0) as $started
+      ((.duration_seconds // -1) | tonumber? // -1) as $duration
+      | ((.started_at // 0) | tonumber? // 0) as $started
       | ((.finished_at // 0) | tonumber? // 0) as $finished
-      | if $started <= 0 or $finished <= 0 or $finished < $started then empty
-        else (($finished - $started) | round) as $secs
-          | if $secs >= 3600 then "\($secs / 3600 | floor)h \($secs % 3600 / 60 | floor)m \($secs % 60)s"
-            else "\($secs / 60 | floor)m \($secs % 60)s"
-            end
+      | if $duration != null and $duration >= 0 then ($duration | round)
+        elif $started > 0 and $finished > 0 and $finished >= $started then (($finished - $started) | round)
+        else null
+        end as $secs
+      | if $secs == null then empty
+        elif $secs >= 3600 then "\($secs / 3600 | floor)h \($secs % 3600 / 60 | floor)m \($secs % 60)s"
+        else "\($secs / 60 | floor)m \($secs % 60)s"
         end
     ' "$STATE_FILE" 2>/dev/null || true)"
     [[ -n $duration ]] && { printf '%s' "$duration"; return 0; }
@@ -513,6 +540,17 @@ render_finish() {
     blank_line
     center "Installed Omarchy in ${duration}" "$CONTENT_WIDTH"
     blank_line
+    # Above the button, not below: gum clears everything under its view on
+    # each repaint, so a line below the prompt would be erased. True because
+    # of release_target + warm_reboot_path: from here to the reboot syscall
+    # nothing reads the install medium again — but only when the release
+    # actually happened, so a failed one withdraws the offer instead of
+    # printing a promise the machine is not keeping.
+    if [[ $TARGET_RELEASED == yes ]]; then
+      center "${DIM}You can now remove the install medium${RESET}" "$CONTENT_WIDTH"
+    else
+      center "${DIM}Leave the install medium in until the reboot completes${RESET}" "$CONTENT_WIDTH"
+    fi
   } >"$TTY_PATH"
 
   if [[ -f $LOGO_PATH ]]; then
@@ -534,7 +572,95 @@ render_finish() {
       laseretch \
       --final-gradient-stops 2 \
       >"$TTY_PATH" 2>/dev/null || dashboard_log "logo effect skipped (ttfx exited $?)"
-    printf '%s%d;1H' "$CSI" "$((FINISH_TOP_ROW + LOGO_HEIGHT + 5))" >"$TTY_PATH"
+    # The effect deliberately breaks the logo into sparks before rebuilding
+    # it. Repaint the canonical static logo after the child exits so an
+    # unattended reboot cannot leave the last visible/captured frame halfway
+    # through that transition.
+    {
+      printf '%s%d;1H' "$CSI" "$FINISH_TOP_ROW"
+      render_logo
+      printf '%s%d;1H' "$CSI" "$((FINISH_TOP_ROW + LOGO_HEIGHT + 5))"
+    } >"$TTY_PATH"
+  fi
+}
+
+# ── Medium-free reboot ──────────────────────────────────────────────────────
+#
+# The live root pages from the install medium on demand (copytoram=n keeps
+# the root image reachable during the install), so pulling the stick is only
+# safe once nothing will fault a cold read anymore. A graceful reboot is the
+# opposite of that: its stop jobs page unit files and ExecStop binaries. So,
+# before the finish screen offers the medium's removal: release the target —
+# fully written to its own disk from that moment, whatever happens after —
+# and pre-fault the binaries the finish screen still runs. The medium is
+# read-only and the live logs are tmpfs, so past the umount nothing anywhere
+# is dirty, which is what makes the immediate reboot at the press clean.
+# Debugging keeps its access: the installed tree is no longer pre-mounted on
+# the other ttys, but one mount command away for whoever wants it.
+#
+# If the release fails, the offer is withheld: the finish screen says to
+# leave the medium in instead, and the button press falls back to a graceful
+# reboot — the medium was never offered for removal, so its stop jobs can
+# still page from it, and systemd gets its own chance at the unmount the
+# release could not do.
+
+TARGET_RELEASED=yes
+
+release_target() {
+  local target out line
+  target=$(jq -r '.target // "/mnt"' "$STATE_FILE" 2>/dev/null) || target=/mnt
+  # Swapoff, umount, mapper close — shared with the orchestrator's failure
+  # cleanup. On failure the script names the holders on stderr; forward that
+  # into the install log, where the diagnosis is worth more than a shrug.
+  if ! out=$(omarchy-release-install-target "$target" 2>&1); then
+    dashboard_log "release: could not release $target"
+    TARGET_RELEASED=no
+  fi
+  while IFS= read -r line; do
+    [[ -n $line ]] && dashboard_log "release: $line"
+  done <<<"${out:-}"
+}
+
+warm_reboot_path() {
+  local binary path dep
+  # Everything the post-note window still execs: the note goes up inside
+  # render_finish, so the logo effect (up to 8s of it), the timeout in front
+  # of it, the stty that sizes the prompt, and the button gum paints are all
+  # still ahead of the moment the user is invited to pull the stick.
+  for binary in systemctl ttfx gum timeout stty; do
+    path=$(command -v "$binary" 2>/dev/null) || continue
+    cat "$path" >/dev/null 2>&1 || true
+    while IFS= read -r dep; do
+      [[ -f $dep ]] && cat "$dep" >/dev/null 2>&1
+    done < <(ldd "$path" 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^\//) print $i }')
+  done
+
+  # cat+ldd alone still leaves ~1.4 MiB of exec-time reads ldd cannot list
+  # (loader path, locale, runtime data) — measured on a dropped cache in the
+  # live VM: timeout+ttfx 880 KiB, stty 320 KiB, gum 188 KiB, each a
+  # one-time fault. Dry-running the real commands takes those reads now,
+  # while the medium is still welcome. ttfx --version rather than a hidden
+  # effect run: measured to cover the effect's read set to within ~12 KiB,
+  # and it returns in milliseconds instead of burning a capped second.
+  # systemctl needs no dry run: cat+ldd covers the reboot-shaped invocation
+  # (verified via is-system-running: zero reads).
+  cat "$LOGO_PATH" >/dev/null 2>&1 || true
+  ttfx --version >/dev/null 2>&1 || true
+  stty size <"$TTY_PATH" >/dev/null 2>&1 || true
+  gum --version >/dev/null 2>&1 || true
+}
+
+reboot_now() {
+  # Which reboot the button gets is the other half of the release's verdict.
+  # Released: nothing anywhere is dirty and the medium may already be gone,
+  # so skip the stop jobs that would page it back in. Not released: the
+  # finish screen told the user to leave the medium in, which keeps the
+  # graceful path's cold reads safe, and systemd gets its own chance at the
+  # unmount the release could not do.
+  if [[ $TARGET_RELEASED == yes ]]; then
+    systemctl reboot -ff 2>/dev/null || reboot -f 2>/dev/null || true
+  else
+    systemctl reboot 2>/dev/null || reboot 2>/dev/null || true
   fi
 }
 
@@ -546,9 +672,9 @@ reboot_prompt() {
   interactive || return 0
 
   # gum paints its prompt row at the cursor and the button two rows under it, so
-  # anchor on the row right below the title to put the button as close to it as
-  # gum allows. FINISH_HEIGHT budgets for the same three rows.
-  printf '%s%d;1H%s' "$CSI" "$((FINISH_TOP_ROW + LOGO_HEIGHT + 2))" "$CLEAR_LINE" >"$TTY_PATH"
+  # anchor on the row right below the removal note to put the button as close
+  # to it as gum allows. FINISH_HEIGHT budgets for the same three rows.
+  printf '%s%d;1H%s' "$CSI" "$((FINISH_TOP_ROW + LOGO_HEIGHT + 4))" "$CLEAR_LINE" >"$TTY_PATH"
 
   prompt_pad=$(( ( $(term_cols) - 18 ) / 2 ))
   (( prompt_pad < 0 )) && prompt_pad=0
@@ -703,9 +829,14 @@ render_failure() {
 
   if [[ -n $state_summary ]]; then
     blank_line
+    # The failed phase's error is the one thing the user must read, so wrap
+    # it at word boundaries rather than clip it: a multi-line error keeps its
+    # own line breaks, and an over-long line folds instead of losing its end.
     while IFS= read -r line; do
       [[ -n $line ]] || continue
-      center "${DIM}$(truncate_for_width "$line" "$CONTENT_WIDTH")${RESET}" "$CONTENT_WIDTH"
+      while IFS= read -r part; do
+        center "${DIM}${part}${RESET}" "$CONTENT_WIDTH"
+      done < <(fold -s -w "$CONTENT_WIDTH" <<<"$line")
     done <<<"$state_summary"
   fi
 
@@ -865,6 +996,12 @@ if [[ ${OMARCHY_UI_DEFER_PROVISIONING:-} == "yes" ]]; then
   exit 0
 fi
 
+# Before the screen that offers the medium's removal: the target is released
+# first, so the install is fully on its own disk before the user can act on
+# the note; the warm makes the button press itself medium-free.
+release_target 2>/dev/null || true
+warm_reboot_path 2>/dev/null || true
+
 set +e
 render_finish
 finish_render_status=$?
@@ -881,8 +1018,11 @@ if reboot_prompt; then
   if [[ ${OMARCHY_UI_AUTO_REBOOT:-} == "no" ]]; then
     exit 0
   fi
+  # Give headless framebuffer recorders (and slow physical displays) one
+  # complete static finish frame after the animated logo has settled.
+  interactive || sleep 1
   printf '%s' "$CLEAR" >"$TTY_PATH" 2>/dev/null || true
-  reboot 2>/dev/null || systemctl reboot 2>/dev/null || true
+  reboot_now
 fi
 
 exit 0

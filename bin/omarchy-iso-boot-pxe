@@ -1,0 +1,139 @@
+#!/bin/bash
+#
+# Boot an Omarchy ISO over PXE in a visible QEMU VM: real display, real
+# keyboard, no install medium attached. The LAN is faked the same way
+# test/integration.d/pxe-test.sh does it — QEMU's built-in TFTP server hands
+# iPXE lpxelinux.0 and the boot files out of the ISO's own trees, and
+# qemu-nbd serves the ISO as the NBD export the initramfs dials back to (the
+# guest reaches the host at 10.0.2.2). BIOS/SeaBIOS only: that is the ISO's
+# netboot path. Drive the install by hand; after "Reboot Now" the VM boots
+# the installed disk (the NBD server outlives the reboot).
+#
+# The PXE menu has no auto-boot timeout — press Enter on the NBD entry.
+
+set -e
+
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/netboot.sh"
+
+ISO=""
+REUSE=""
+SSH_PORT="${OMARCHY_VM_SSH_PORT:-2222}"
+WORK="${OMARCHY_VM_PXE_DIR:-/tmp/omarchy-pxe-boot}"
+EXTRA_QEMU_ARGS=()
+
+usage() {
+  cat <<USAGE
+Usage: omarchy-iso-boot-pxe [options] [release/omarchy.iso]
+
+Options:
+  --reuse              Reuse the existing VM disk
+  --ssh-port PORT      Forward host PORT to guest port 22 (default: $SSH_PORT)
+  --work PATH          Working directory for disk + TFTP root (default: $WORK)
+  -h, --help           Show this help
+  --                   Pass the remaining arguments directly to QEMU
+USAGE
+}
+
+while (($# > 0)); do
+  case "$1" in
+    --reuse | reuse)
+      REUSE="reuse"
+      shift
+      ;;
+    --ssh-port)
+      SSH_PORT="${2:-}"
+      shift 2
+      ;;
+    --work)
+      WORK="${2:-}"
+      shift 2
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      EXTRA_QEMU_ARGS+=("$@")
+      break
+      ;;
+    *)
+      if [[ -z $ISO ]]; then
+        ISO="$1"
+      else
+        echo "Unexpected argument: $1" >&2
+        usage >&2
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z $ISO && -t 0 ]]; then
+  ISO=$(ls -t release/*.iso 2>/dev/null | gum choose --header "Select ISO to netboot")
+  if gum confirm --default=false "Reuse existing disk?"; then
+    REUSE="reuse"
+  fi
+fi
+
+if [[ ! -f ${ISO:-} ]]; then
+  usage >&2
+  exit 1
+fi
+ISO=$(realpath "$ISO")
+
+omarchy-pkg-add qemu-full
+
+# QEMU needs the desktop session for its SDL window (same dance as
+# omarchy-iso-boot).
+if [[ -z ${WAYLAND_DISPLAY:-} && -z ${DISPLAY:-} ]]; then
+  while IFS='=' read -r name value; do
+    case "$name" in
+      WAYLAND_DISPLAY | DISPLAY | XAUTHORITY | XDG_SESSION_TYPE)
+        export "$name=$value"
+        ;;
+    esac
+  done < <(systemctl --user show-environment 2>/dev/null || true)
+fi
+
+if [[ -z ${WAYLAND_DISPLAY:-} && -z ${DISPLAY:-} ]]; then
+  echo "Unable to find a graphical session for QEMU." >&2
+  echo "Run omarchy-iso-boot-pxe from the Omarchy desktop session." >&2
+  exit 1
+fi
+
+TFTP_ROOT="$WORK/tftp"
+DISK="$WORK/disk.qcow2"
+mkdir -p "$WORK"
+
+echo "Assembling the TFTP root from $ISO (cached until the ISO changes)"
+assemble_tftp_root "$ISO" "$TFTP_ROOT"
+
+echo "Serving the ISO as NBD export 'archiso' on 127.0.0.1:$NBD_PORT"
+serve_nbd "$ISO"
+trap 'kill $NBD_PID 2>/dev/null || true' EXIT
+
+if [[ ! -f $DISK || $REUSE != "reuse" ]]; then
+  qemu-img create -f qcow2 "$DISK" 40G
+fi
+
+echo "SSH forwarding enabled: ssh -p $SSH_PORT <user>@localhost"
+
+# SeaBIOS, no pflash: BIOS is the ISO's only netboot path. The empty disk is
+# first in the boot order so the post-install reboot lands on it; SeaBIOS
+# falls through to the NIC while the disk has no boot sector.
+qemu-system-x86_64 \
+  -cpu host -enable-kvm -machine q35,accel=kvm \
+  -smp "$(($(nproc) < 8 ? $(nproc) : 8))" \
+  -m 8192 \
+  -drive file="$DISK",format=qcow2,if=none,id=drive0 \
+  -device virtio-blk-pci,drive=drive0,bootindex=1 \
+  -device virtio-vga-gl \
+  -display sdl,gl=on \
+  -usb -device usb-tablet \
+  -serial none \
+  -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22,tftp=$TFTP_ROOT,bootfile=/boot/syslinux/lpxelinux.0" \
+  -device virtio-net-pci,netdev=net0,bootindex=2 \
+  -boot menu=on \
+  "${EXTRA_QEMU_ARGS[@]}"

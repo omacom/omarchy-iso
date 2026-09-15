@@ -4,6 +4,7 @@ set -e
 
 NO_CACHE=""
 KEEP_PKG_CACHE=""
+NO_HOST_PKG_CACHE=""
 LOCAL_OMARCHY_PATH=""
 LOCAL_PKGS_PATH=""
 while [[ $# -gt 0 ]]; do
@@ -14,6 +15,10 @@ while [[ $# -gt 0 ]]; do
     ;;
   --keep-pkg-cache)
     KEEP_PKG_CACHE=1
+    shift
+    ;;
+  --no-host-pkg-cache)
+    NO_HOST_PKG_CACHE=1
     shift
     ;;
   --no-boot-offer)
@@ -57,7 +62,7 @@ while [[ $# -gt 0 ]]; do
     ;;
   *)
     echo "Unknown option: $1"
-    echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
+    echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-host-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
     exit 1
     ;;
   esac
@@ -107,7 +112,7 @@ lint_file_permissions
 
 # Purging the host package cache needs interactive sudo; --keep-pkg-cache
 # skips it so unattended builds (test rigs, agents) can run without a prompt.
-if [[ -z $KEEP_PKG_CACHE ]]; then
+if [[ -z $KEEP_PKG_CACHE && -z $NO_HOST_PKG_CACHE ]]; then
   sudo rm -rf /var/cache/pacman/pkg/*
 fi
 git submodule update --init --recursive --jobs=8
@@ -142,7 +147,7 @@ if [[ -n $LOCAL_OMARCHY_PATH ]]; then
   )
 fi
 
-if [[ -d /var/cache/pacman/pkg ]]; then
+if [[ -z $NO_HOST_PKG_CACHE && -d /var/cache/pacman/pkg ]]; then
   DOCKER_ARGS+=(-v "/var/cache/pacman/pkg:/var/cache/pacman/pkg")
 fi
 

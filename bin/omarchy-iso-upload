@@ -30,4 +30,15 @@ if [[ ! -f $1.sha256 ]]; then
   echo "Warning: no $1.sha256 to publish, so nobody can verify this download" >&2
 fi
 
+# Publish the torrent only once its web seed and verification files are up.
+# Standalone uploads without torrents retain their existing behavior.
+if [[ -f $1.torrent ]]; then
+  if (( status == 0 )) && [[ -f $1.sig && -f $1.sha256 ]]; then
+    rclone copy "$1.torrent" Omarchy:omarchy/ -P || status=1
+  else
+    echo "Torrent not published: ISO, signature and checksum must upload successfully first" >&2
+    status=1
+  fi
+fi
+
 exit $status

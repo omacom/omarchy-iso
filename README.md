@@ -143,3 +143,9 @@ Run `./bin/omarchy-iso-upload [release/omarchy.iso]`. This requires rclone confi
 ## Full release of the ISO
 
 Run `./bin/omarchy-iso-release VERSION` to create, test, sign, and upload the ISO in one flow. Add `--rc` to release an RC build instead.
+
+## Creating the torrent
+
+Run `./bin/omarchy-iso-torrent [release/omarchy.iso]` to write a `.torrent` beside the ISO. This requires `mktorrent` (`sudo pacman -S mktorrent`). The full release command installs it if missing and generates and uploads the torrent automatically.
+
+Like [Arch](https://archlinux.org/download/#bittorrent-download), torrents use DHT and HTTPS web seeds without trackers. Use a DHT-capable client with web-seed support, and leave it open after downloading to help seed.

@@ -269,6 +269,10 @@ def arch_install_system(ctx: InstallContext) -> None:
                 pacman_config=config.pacman_config,
             )
 
+            # DKMS needs headers for the target kernels, not the live ISO's
+            # kernel or the stock linux-headers pulled in by hardware packages.
+            installer.add_additional_packages([f"{kernel}-headers" for kernel in config.kernels])
+
             if not configure_keyboard(installer.target, kb_layout):
                 error(f"Invalid keyboard language specified: {kb_layout}")
 

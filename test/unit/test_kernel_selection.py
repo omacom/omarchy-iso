@@ -20,6 +20,47 @@ from orchestrator import phases_impl  # noqa: E402
 
 
 class KernelSelectionTest(unittest.TestCase):
+    def test_installs_target_kernel_headers_before_hardware_packages(self):
+        for kernels in (["linux-omarchy"], ["linux-t2"], ["linux", "linux-lts"]):
+            for pre_mounted in (False, True):
+                with self.subTest(kernels=kernels, pre_mounted=pre_mounted):
+                    config = types.SimpleNamespace(
+                        kernels=kernels, mirror_config=None, locale_config=None,
+                        hostname="test", pacman_config=None, swap=None,
+                        auth_config=None, app_config=None, timezone=None, ntp=False,
+                    )
+                    ctx = types.SimpleNamespace(
+                        state={"arch_config_handler": types.SimpleNamespace(config=config),
+                               "mirror_handler": None},
+                        target=Path("/mnt"), tailscale_authkey_path=None,
+                    )
+                    installer = mock.MagicMock()
+                    arch = mock.MagicMock()
+                    arch.is_pre_mount.return_value = pre_mounted
+                    arch.is_encrypted.return_value = False
+                    arch.root_user.return_value = None
+                    arch.open_installer.return_value.__enter__.return_value = installer
+                    with mock.patch.object(phases_impl, "arch", arch), \
+                         mock.patch.object(phases_impl, "_mount_offline_package_cache"), \
+                         mock.patch.object(phases_impl, "_unmount_offline_package_cache"), \
+                         mock.patch.object(phases_impl, "_mask_mkinitcpio_pacman_hooks"), \
+                         mock.patch.object(phases_impl, "_unmask_mkinitcpio_pacman_hooks"), \
+                         mock.patch.object(phases_impl, "configure_keyboard", return_value=True), \
+                         mock.patch.object(phases_impl, "_install_early_packages"), \
+                         mock.patch.object(phases_impl, "_configure_limine_boot"), \
+                         mock.patch.object(phases_impl, "_write_pre_mounted_fstab"), \
+                         mock.patch.object(phases_impl, "_runtime_package_list", return_value=["omarchy"]):
+                        phases_impl.arch_install_system(ctx)
+
+                    installer.add_additional_packages.assert_has_calls([
+                        mock.call([f"{kernel}-headers" for kernel in kernels]),
+                        mock.call(["omarchy"]),
+                    ])
+                    calls = installer.method_calls
+                    base = next(i for i, call in enumerate(calls) if call[0] == "minimal_installation")
+                    headers = next(i for i, call in enumerate(calls) if call[0] == "add_additional_packages")
+                    self.assertLess(base, headers)
+
     def test_hardware_detection(self):
         # Run the configurator's actual probe without starting its disk wizard.
         configurator = (ROOT / "configs/airootfs/root/configurator").read_text()

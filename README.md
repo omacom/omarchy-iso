@@ -41,7 +41,7 @@ These are the configurator's own output files, so the way to get a starting set 
 | File | Required | Purpose |
 |------|----------|---------|
 | `user_configuration.json` | Yes | archinstall config: disk, hostname, timezone, keyboard |
-| `user_credentials.json` | Yes | Username and password hash |
+| `user_credentials.json` | Yes | Username and password hash; on a child install also the parent hash as `root_enc_password`, `sudo: false`, and `parent_encryption_password` when encrypted |
 | `user_full_name.txt` | No | Git full name |
 | `user_email_address.txt` | No | Git email |
 | `user_encrypt_installation.txt` | No | `true` when `user_configuration.json` carries a `disk_encryption` block; defaults to false |
@@ -49,6 +49,8 @@ These are the configurator's own output files, so the way to get a starting set 
 | `tailscale_authkey` | No | Tailscale auth key; the machine joins your tailnet on first boot |
 
 Both required files must be present or the installer falls back to the configurator. Generate the password hash for `user_credentials.json` with `openssl passwd -6 "yourpassword"`.
+
+A child install (Omarchy's kids mode, what the interactive wizard's first question calls _Child_) is selected by `"profile": "child"` inside `omarchy_install` in `user_configuration.json`. Its credentials carry two passwords: the user's hash is the kid password, `root_enc_password` is the parent password's hash, the user has `"sudo": false` so it stays out of `wheel`, and on an encrypted install `encryption_password` (the kid's) formats the disk while `parent_encryption_password` is added as a second key. The installed system records the profile in `/etc/omarchy/profile` and keeps root for the parent through `omarchy-parent`.
 
 Encryption itself is configured by the `disk_encryption` block inside `user_configuration.json` — which carries the passphrase in plaintext, so treat a drive built from an encrypted install accordingly. The flag file must match it: it drives the encrypted install's SDDM autologin and the final boot validation, not the encryption.
 

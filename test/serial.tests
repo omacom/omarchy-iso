@@ -1,0 +1,8 @@
+# Tests that own something global -- a pty, a port, the docker socket, a shared
+# fixture -- and run one at a time after the parallel-safe lane has passed.
+# Say what the global thing is above each entry so the next person can tell
+# whether a new test belongs here.
+
+# Drives the failure screen through a real pty (script) and asserts on the
+# terminal repaint order, which a busy machine can reorder.
+test/unit/install-media-diagnosis-test.sh

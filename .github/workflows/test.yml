@@ -1,0 +1,33 @@
+name: Unit tests
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    # The unit tests exercise scripts that ship on the ISO, so they run against
+    # the same userland: Arch's parted, util-linux script, libarchive bsdtar
+    # and systemd localectl. Ubuntu carries most of these too, but not the
+    # same versions, and a difference there is a test failure nobody asked for.
+    container: archlinux:latest
+    steps:
+      - name: Install test dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            bash git jq libarchive parted python systemd util-linux
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run unit tests
+        run: ./test/all
+
+      - name: Upload test result ledger
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results
+          path: test-runs/unit-test-results.json
+          if-no-files-found: ignore

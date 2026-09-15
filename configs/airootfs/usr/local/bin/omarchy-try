@@ -1,0 +1,224 @@
+#!/bin/bash
+#
+# Try Omarchy: bring up the real desktop from the live ISO without touching a
+# disk. Orchestrates the flow the greeter's "Try" choice starts:
+#   1. offer the NVIDIA driver if the display needs it (the one interactive step)
+#   2. run omarchy-try-setup UNDER omarchy-install-dashboard, so the install and
+#      setup show the same logo + progress bar + tips a real install shows,
+#      never raw pacman output
+#   3. start the desktop as a transient session and wait; when the user picks
+#      "Install Omarchy" it ends and we return to the greeter
+# The installer path is not involved at any point.
+#
+# Exits 0 when the session ended and the greeter should redraw; 1, having said
+# why, when it could not start. Never touches a block device.
+#
+# The optional argument prefixes paths for tests.
+
+set -uo pipefail
+export PATH="/usr/local/bin:/usr/share/omarchy/bin:$PATH"
+
+root=${1:-}
+try_user=try
+try_packages=$root/usr/share/omarchy-iso/try-packages
+meminfo=$root/proc/meminfo
+# A nominal 4 GiB machine, which reads ~3.8 GiB of MemTotal after kernel
+# reservations. Measured on one: the desktop comes up in 10 s and survives the
+# browser, with zram holding ~1 GiB of the overlay and nothing OOM-killed. The
+# real gate is whether the overlay can hold what the set adds, which
+# omarchy-try-setup checks against actual numbers once zram is up; this only
+# rules out machines no cap could rescue.
+min_mem_kib=$((3500 * 1024))
+
+# The session runs as a transient systemd unit on its own VT (not SDDM, which
+# would claim VT1 and kill the greeter). See git history for the full rationale.
+session_unit=omarchy-try-session
+session_vt=7
+state_file=$root/run/omarchy-try/state.json
+log_file=$root/var/log/omarchy-install.log
+
+say() { printf '%s\n' "$*"; }
+refuse() { printf 'Try Omarchy: %s\n' "$*" >&2; exit 1; }
+
+# --- GPU selection (see omarchy-try-setup for the install side) --------------
+is_firmware_fb() { [[ $1 == simple-framebuffer || $1 == simpledrm || -z $1 ]]; }
+
+# Pick the DRM node driving the connected panel, and whether it needs software
+# rendering (firmware framebuffer). Sets TRY_DRM_DEVICE and TRY_SOFTWARE; returns
+# 1 when nothing drives a display. sysfs/dev roots are parameters for tests.
+select_display_gpu() {
+  local sysdrm=${1:-/sys/class/drm} devdri=${2:-/dev/dri}
+  local card name drv st connected_real="" connected_fw="" firmware=""
+  for card in "$sysdrm"/card[0-9]*; do
+    [[ -e $card ]] || continue
+    name=$(basename "$card")
+    [[ $name =~ ^card[0-9]+$ ]] || continue
+    drv=$(basename "$(readlink -f "$card/device/driver" 2>/dev/null)" 2>/dev/null)
+    local has_conn=0
+    for st in "$card"-*/status; do
+      [[ -e $st && $(cat "$st" 2>/dev/null) == connected ]] && has_conn=1
+    done
+    if is_firmware_fb "$drv"; then
+      firmware=$name
+      (( has_conn )) && connected_fw=$name
+    elif (( has_conn )); then
+      connected_real=$name
+    fi
+  done
+  if [[ -n $connected_real ]]; then
+    TRY_DRM_DEVICE="$devdri/$connected_real"; TRY_SOFTWARE=0; return 0
+  fi
+  local target="${connected_fw:-$firmware}"
+  [[ -n $target ]] || return 1
+  TRY_DRM_DEVICE="$devdri/$target"; TRY_SOFTWARE=1; return 0
+}
+
+# True when a display-class NVIDIA GPU is present. Reads sysfs PCI ids directly
+# so it works before the omarchy package (which ships the finer gsp check that
+# omarchy-try-nvidia uses) is installed.
+nvidia_pci_present() {
+  local pci=${1:-/sys/bus/pci/devices} d
+  for d in "$pci"/*; do
+    [[ $(cat "$d/vendor" 2>/dev/null) == 0x10de ]] || continue
+    [[ $(cat "$d/class" 2>/dev/null) == 0x03* ]] || continue
+    return 0
+  done
+  return 1
+}
+
+# Name the GPU behind a panel we could not drive, for a specific failure notice.
+display_gpu_name() {
+  local sysdrm=${1:-/sys/class/drm} card st slot name
+  for card in "$sysdrm"/card[0-9]*; do
+    name=$(basename "$card"); [[ $name =~ ^card[0-9]+$ ]] || continue
+    for st in "$card"-*/status; do
+      [[ -e $st && $(cat "$st" 2>/dev/null) == connected ]] || continue
+      slot=$(basename "$(readlink -f "$card/device" 2>/dev/null)" 2>/dev/null)
+      [[ $slot == *:*:*.* ]] && { lspci -s "$slot" 2>/dev/null | sed 's/^[^ ]* //' | head -1; return; }
+    done
+  done
+}
+
+# Ask, on the greeter's console, whether to set the NVIDIA driver up now (native,
+# accelerated) or take the quick software preview. Returns 0 for the driver, 1
+# for the preview, 2 when the user backed out (Esc / Ctrl+C) — which is not a
+# choice of the preview.
+offer_nvidia() {
+  local choice rows pad
+  # Vertically center the menu the way the greeter centers its welcome, rather
+  # than letting gum draw it at the top of the screen.
+  rows=$(stty size 2>/dev/null </dev/tty | awk '{print $1}'); [[ $rows =~ ^[0-9]+$ ]] || rows=24
+  pad=$(( (rows - 6) / 2 )); (( pad < 0 )) && pad=0
+  { printf '\033[?25l\033[H\033[2J'; printf '\n%.0s' $(seq 1 "$pad"); } >/dev/tty 2>/dev/null
+  choice=$(gum choose \
+    --header "Your display is on an NVIDIA GPU. The full experience needs its driver." \
+    "Set up the NVIDIA driver now (~2 minutes, from the USB stick)" \
+    "Skip — quick software preview (lower resolution)" \
+    </dev/tty 2>/dev/tty) || { printf '\033[?25h' >/dev/tty 2>/dev/null; return 2; }
+  printf '\033[?25h' >/dev/tty 2>/dev/null
+  [[ $choice == Set* ]]
+}
+
+# The installer expects the environment it booted into, so restore it on the way
+# out: stop any session unit, bring the greeter's VT back, stop every daemon
+# omarchy-try-setup started for the session (zram stays — swapoff would only
+# pull the overlay back into RAM), and put iwd/networkd back in NetworkManager's
+# place.
+cleanup() {
+  systemctl stop "$session_unit.service" 2>/dev/null
+  chvt 1 2>/dev/null
+  systemctl stop bluetooth.service power-profiles-daemon.service NetworkManager.service 2>/dev/null
+  # --no-block for the same reason the setup uses it: a start job that queues
+  # behind an unreachable dependency must not strand the user on their way
+  # back to the installer.
+  systemctl start --no-block systemd-networkd.socket systemd-networkd.service iwd.service 2>/dev/null
+}
+
+# --- Guards ------------------------------------------------------------------
+mem_kib=$(awk '/^MemTotal:/ { print $2 }' "$meminfo" 2>/dev/null)
+(( ${mem_kib:-0} >= min_mem_kib )) ||
+  refuse "needs at least 4 GiB of memory to run the desktop from the USB stick; this machine has $(( ${mem_kib:-0} / 1024 )) MiB."
+[[ -s $try_packages ]] || refuse "this medium carries no try package list."
+
+# --- The one interactive step: offer NVIDIA before the dashboard owns the TTY -
+want_nvidia=no
+if [[ -z $root ]] && select_display_gpu && (( TRY_SOFTWARE )) && nvidia_pci_present; then
+  offer_nvidia
+  case $? in
+    0) want_nvidia=nvidia ;;
+    2) exit 0 ;; # backed out: straight back to the greeter, nothing touched
+  esac
+fi
+
+# The installer's mirror prefetch is competing for memory and the medium; stop it
+# only now that the user has committed to a try session.
+[[ -n ${OMARCHY_PREFETCH_PID:-} ]] && kill "$OMARCHY_PREFETCH_PID" 2>/dev/null
+
+# Only the real run touches system state, so only it needs the restore trap.
+[[ -z $root ]] && trap cleanup EXIT
+
+# --- Install + setup under the real progress dashboard -----------------------
+# One path, for tests too: the sandbox stubs the dashboard on PATH and asserts
+# the argv the real greeter runs, rather than a hand-off nothing else exercises.
+mkdir -p "${state_file%/*}" "${log_file%/*}"; : >"$log_file"
+tty_path=$(tty) || tty_path=/dev/tty
+if ! OMARCHY_DASHBOARD_TRY=yes OMARCHY_DASHBOARD_TTY="$tty_path" \
+  omarchy-install-dashboard "$log_file" "$state_file" -- \
+  omarchy-try-setup "$state_file" "$want_nvidia" ${root:+"$root"}; then
+  [[ -n $root ]] && exit 1
+  chvt 1 2>/dev/null
+  say ""
+  say "Try Omarchy could not set up the desktop. See $log_file for details."
+  gum confirm --affirmative="Back to installer" --negative="" "" </dev/tty >/dev/tty 2>&1 || true
+  exit 0
+fi
+
+# --- Point the compositor at the panel's DRM node ----------------------------
+# After the NVIDIA driver loads (if chosen) the panel is on a real node; software
+# rendering is forced only when it is still the firmware framebuffer.
+gpu_env=()
+if [[ -z $root ]] && select_display_gpu; then
+  gpu_env=(-E "AQ_DRM_DEVICES=$TRY_DRM_DEVICE")
+  (( TRY_SOFTWARE )) && gpu_env+=(-E LIBGL_ALWAYS_SOFTWARE=1)
+fi
+
+[[ -n $root ]] && exit 0 # tests stop here; no real session
+
+# --- Start the desktop, active VT first so libseat attaches input ------------
+chvt "$session_vt" 2>/dev/null
+systemctl reset-failed "$session_unit.service" 2>/dev/null
+systemd-run --unit="$session_unit" --collect --quiet \
+  --uid="$try_user" --gid="$try_user" \
+  -p PAMName=login -p TTYPath="/dev/tty$session_vt" \
+  -p TTYReset=yes -p TTYVHangup=yes -p TTYVTDisallocate=yes \
+  -p StandardInput=tty -p StandardOutput=journal -p StandardError=journal \
+  -p WorkingDirectory="/home/$try_user" \
+  -E XDG_SESSION_TYPE=wayland -E XDG_SESSION_CLASS=user "${gpu_env[@]}" \
+  /usr/bin/uwsm start -g -1 -e -D Hyprland hyprland.desktop ||
+  refuse "could not start the desktop session."
+
+uid=$(id -u "$try_user" 2>/dev/null || echo 1000)
+session_up=0
+for _ in $(seq 1 60); do
+  [[ -d /run/user/$uid/hypr ]] && { session_up=1; break; }
+  systemctl is-active --quiet "$session_unit.service" || break
+  sleep 1
+done
+if (( session_up )); then
+  echo OMARCHY_TRY_SESSION_UP >/dev/ttyS0 2>/dev/null
+  while systemctl is-active --quiet "$session_unit.service"; do sleep 2; done
+else
+  systemctl stop "$session_unit.service" 2>/dev/null
+  chvt 1 2>/dev/null
+  gpu=$(display_gpu_name)
+  say ""
+  say "Try Omarchy could not start the desktop on this machine's graphics${gpu:+ ($gpu)}."
+  say "You can still install Omarchy — it sets up the full driver for your card — or,"
+  say "on a desktop with onboard graphics, move the monitor to a motherboard port."
+  say ""
+  gum confirm --affirmative="Back to installer" --negative="" "" </dev/tty >/dev/tty 2>&1 || true
+  exit 0
+fi
+
+chvt 1 2>/dev/null
+exit 0

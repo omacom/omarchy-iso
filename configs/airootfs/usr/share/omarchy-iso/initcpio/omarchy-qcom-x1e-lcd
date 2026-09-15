@@ -1,0 +1,22 @@
+#!/bin/bash
+
+# Build-only hook: DT supplier links are not ordinary module dependencies.
+# Keep the display's suppliers available while the root is still encrypted.
+build() {
+    local tree module
+    for tree in clk/qcom pinctrl/qcom soc/qcom regulator interconnect/qcom \
+        phy/qualcomm usb/dwc3 i2c/busses spmi remoteproc rpmsg \
+        power/domain/qcom pmdomain/qcom; do
+        add_all_modules "/drivers/$tree/"
+    done
+    for module in msm i2c_hid_of panel_edp pwm_bl leds_qcom_lpg \
+        nvmem_qfprom nvmem_qcom_spmi_sdam qcom_hwspinlock qrtr_smd \
+        ps883x gpio_shared_proxy reset_gpio display_connector simple_bridge \
+        gpio_sbu_mux; do
+        add_module "$module"
+    done
+}
+
+help() {
+    echo 'Include X1E LCD display, keyboard and DT supplier modules before root unlock.'
+}

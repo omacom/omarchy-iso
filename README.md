@@ -41,7 +41,7 @@ Snapdragon media uses a UKI with hardware-matched Qualcomm device trees. Generic
 
 Both targets require an ARM package repository. Use `--local-repo <repo-dir>` for a prebuilt repository or `--local-source` as above to build from local checkouts. Offline caches are separated by channel, architecture and media target. Generic image filenames start with `omarchy-generic-`.
 
-[configs/aarch64/platforms.json](configs/aarch64/platforms.json) supplies model-specific packages and installed boot arguments through exact vendor/product matches. Both targets use the package-owned `linux-aarch64-pkgbase-shim` for kernel-image handling.
+[configs/aarch64/platforms.json](configs/aarch64/platforms.json) supplies model-specific packages, installed boot arguments and optional initramfs profiles through exact vendor/product matches. Both targets use the package-owned `linux-aarch64-pkgbase-shim` for kernel-image handling. The [ThinkPad/HP port notes](docs/snapdragon-laptop-port.md) describe the early-display and camera userspace additions, their source hardware evidence and the required upstream-kernel retests.
 
 ### Snapdragon live DSP startup
 

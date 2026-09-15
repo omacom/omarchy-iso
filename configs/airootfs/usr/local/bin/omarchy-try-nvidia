@@ -1,0 +1,75 @@
+#!/bin/bash
+#
+# Set up and load the NVIDIA driver inside a running Try Omarchy live session,
+# so a machine whose display is on an NVIDIA GPU gets a native, accelerated
+# preview instead of the software-rendered firmware-framebuffer fallback.
+#
+# Driver selection reuses Omarchy's own generation check (omarchy-hw-nvidia-gsp
+# / -without-gsp), the same one install/hardware/nvidia.sh uses, so the live and
+# installed systems can never disagree on which driver a card needs. Everything
+# is installed from the bundled offline mirror; nothing is fetched. Boot-image
+# hooks are already masked by omarchy-try, so the DKMS module builds but no
+# initramfs or bootloader hook fires.
+#
+# Exits 0 once an NVIDIA DRM device is driving a card (ready for the compositor);
+# 1 otherwise, leaving the caller to keep the software fallback.
+#
+# The optional argument prefixes the paths this writes and reads; tests use it to
+# run against a sandbox with the omarchy helpers, pacman and modprobe stubbed.
+
+set -uo pipefail
+
+root=${1:-}
+omarchy_bin="${OMARCHY_PATH:-/usr/share/omarchy}/bin"
+
+[[ -x $omarchy_bin/omarchy-hw-nvidia-gsp ]] || exit 1
+
+if "$omarchy_bin/omarchy-hw-nvidia-gsp"; then
+  packages=(nvidia-open-dkms nvidia-utils)
+elif "$omarchy_bin/omarchy-hw-nvidia-without-gsp"; then
+  packages=(nvidia-580xx-dkms nvidia-580xx-utils)
+else
+  exit 1
+fi
+
+# DKMS builds against the running kernel's headers.
+kernel_pkg=$(pacman -Qqs '^linux(-zen|-lts|-hardened|-t2|-ptl)?$' | head -1 || true)
+[[ -n $kernel_pkg ]] && packages+=("$kernel_pkg-headers")
+
+# modeset=1 has to be set before nvidia_drm first loads, so the KMS driver takes
+# the panel over from simpledrm. fbdev=1 alongside it because the greeter this
+# session returns to lives on VT1, and a driver whose fbdev default is 0 leaves
+# that console dark; 610.x already defaults it on, so this pins the behaviour
+# rather than trusting a default to stay put.
+mkdir -p "$root/etc/modprobe.d"
+printf 'options nvidia_drm modeset=1 fbdev=1\n' >"$root/etc/modprobe.d/nvidia.conf"
+
+# -Sy for the same reason omarchy-try uses it: the live pacman sync db is empty
+# (mkarchiso clears it), and the only repo is the offline file:// mirror.
+echo "Setting up your NVIDIA GPU from the USB stick — this takes a couple of minutes."
+pacman -Sy --needed --noconfirm "${packages[@]}" || exit 1
+
+depmod -a 2>/dev/null || true
+# -a is load-bearing: without it modprobe loads only the first name and hands
+# the rest to it as module parameters ("unknown parameter 'nvidia_drm'
+# ignored"), so nvidia_drm never loads and no NVIDIA DRM device appears.
+modprobe -a nvidia nvidia_modeset nvidia_uvm nvidia_drm || exit 1
+udevadm settle 2>/dev/null || true
+
+# Wait until the nvidia DRM driver is not just loaded but actually driving a
+# connected panel. Returning the moment the card node merely appears raced the
+# caller's re-detection, which could still see simpledrm as the connected
+# display and keep the low-resolution software fallback. Require a connected
+# connector on the nvidia card so select_display_gpu reliably picks it.
+for _ in $(seq 1 "${TRY_NVIDIA_RETRIES:-30}"); do
+  for card in "$root"/sys/class/drm/card[0-9]*; do
+    name=$(basename "$card")
+    [[ $name =~ ^card[0-9]+$ ]] || continue
+    [[ $(basename "$(readlink -f "$card/device/driver" 2>/dev/null)" 2>/dev/null) == nvidia ]] || continue
+    for st in "$card"-*/status; do
+      [[ -e $st && $(cat "$st" 2>/dev/null) == connected ]] && exit 0
+    done
+  done
+  sleep 1
+done
+exit 1

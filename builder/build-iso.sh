@@ -62,6 +62,18 @@ rm -rf "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/ref
 rm -rf "$build_cache_dir/airootfs/etc/systemd/system/reflector.service.d"
 rm -rf "$build_cache_dir/airootfs/etc/xdg/reflector"
 
+# Switch live environment networking to NetworkManager so it matches the installed system.
+# The upstream releng profile enables iwd and systemd-networkd which conflict with NetworkManager
+# and lock wireless devices (such as ath9k) out of the box.
+rm -rf "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/iwd.service"
+rm -rf "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/systemd-networkd.service"
+rm -rf "$build_cache_dir/airootfs/etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service"
+rm -rf "$build_cache_dir/airootfs/etc/systemd/system/sockets.target.wants/systemd-networkd"*
+rm -rf "$build_cache_dir/airootfs/etc/systemd/network/"*
+mkdir -p "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants"
+ln -sf /usr/lib/systemd/system/NetworkManager.service \
+  "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/NetworkManager.service"
+
 # Bring in our archiso profile additions.
 cp -r /configs/* "$build_cache_dir/"
 mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
@@ -352,6 +364,96 @@ else
     >"$build_cache_dir/airootfs/usr/share/omarchy-iso/expected-packages"
   echo "Target install resolves to $expected_packages packages."
 fi
+
+# Resolve the Try Omarchy package set against the same offline DB the mirror
+# was pruned by and ship it as "<name> <archive>" lines. Doing it here means a
+# package leaving the mirror fails the build, not the user at the greeter, and
+# gives the tty1 prefetch a list of files to warm before Return is pressed.
+resolve_try_packages() {
+  local resolve_root=/tmp/omarchy-try-packages
+  local -a targets
+  local resolved
+
+  rm -rf "$resolve_root"
+  mkdir -p "$resolve_root/var/lib/pacman"
+  mapfile -t targets < <(grep -hv '^#\|^$' "${TRY_PACKAGES_LIST:-/builder/try.packages}")
+
+  pacman --config "$build_cache_dir/pacman-offline.conf" \
+    --root "$resolve_root" --dbpath "$resolve_root/var/lib/pacman" \
+    --noconfirm -Sy >/dev/null || return 1
+
+  # omarchy depends on limine/snapper for the installed system; the live
+  # overlay has nowhere to deploy either, so omarchy-try installs with these
+  # assumed present. Resolve the same way so the list matches what it installs.
+  # Captured before the sort so pacman's status, not sort's, decides (this
+  # script runs without pipefail).
+  resolved=$(pacman --config "$build_cache_dir/pacman-offline.conf" \
+    --root "$resolve_root" --dbpath "$resolve_root/var/lib/pacman" \
+    --noconfirm -S --print --print-format '%n %f' \
+    --assume-installed limine --assume-installed limine-mkinitcpio-hook \
+    --assume-installed limine-snapper-sync --assume-installed snapper \
+    "${targets[@]}") || return 1
+  resolved=$(printf '%s\n' "$resolved" | sort -u)
+
+  # Each package's installed size in KiB as a third column: omarchy-try-setup
+  # sums the ones not yet installed to check the overlay can hold them, so a
+  # second try in the same boot (set already in place) is not refused.
+  local sizes
+  sizes=$(pacman --config "$build_cache_dir/pacman-offline.conf" \
+    --root "$resolve_root" --dbpath "$resolve_root/var/lib/pacman" \
+    -Si $(printf '%s\n' "$resolved" | awk '{ print $1 }') 2>/dev/null |
+    awk -F': +' '/^Name/ { n = $2 } /^Installed Size/ { split($2, a, " "); f = (a[2] == "KiB") ? 1 : (a[2] == "GiB") ? 1048576 : 1024; printf "%s %d\n", n, a[1] * f }') || return 1
+  awk 'NR == FNR { kib[$1] = $2; next } { print $1, $2, kib[$1] + 0 }' <(printf '%s\n' "$sizes") <(printf '%s\n' "$resolved")
+}
+
+if ! try_packages="$(resolve_try_packages)" || [[ -z $try_packages ]]; then
+  echo "ERROR: could not resolve builder/try.packages from the offline mirror." >&2
+  echo "       Every package Try Omarchy installs must already be in the mirror." >&2
+  exit 1
+fi
+printf '%s\n' "$try_packages" >"$build_cache_dir/airootfs/usr/share/omarchy-iso/try-packages"
+echo "Try Omarchy resolves to $(printf '%s\n' "$try_packages" | grep -c .) packages."
+
+echo "Try Omarchy installs $(( $(printf '%s\n' "$try_packages" | awk '{ kib += $3 } END { print kib + 0 }') / 1024 )) MiB."
+
+# The NVIDIA opt-in installs from the same mirror, so the driver, its utils and
+# the DKMS toolchain have to be on the stick too — a machine on wifi that has
+# not joined a network yet still gets an accelerated session. These come from
+# omarchy-other.packages rather than try.packages, so this warns rather than
+# failing: retiring a driver branch upstream must not break the nightly ISO
+# build over an opt-in extra, and the session already falls back to the
+# software preview and says so when the install does not complete. Both
+# generations are checked, exactly as omarchy-try-nvidia picks between them.
+warn_missing_try_nvidia_packages() {
+  local resolve_root=/tmp/omarchy-try-nvidia
+  local kernel_headers branch missing
+  local -a targets
+
+  # The live root's kernel, whose headers DKMS builds against. The same pattern
+  # omarchy-try-nvidia matches at run time, and deliberately not a looser one:
+  # linux-firmware sorts first in this list and has no -headers package.
+  kernel_headers=$(grep -oE '^linux(-zen|-lts|-hardened|-t2|-ptl)?$' "$build_cache_dir/packages.x86_64" | head -1)-headers
+
+  for branch in "nvidia-open-dkms nvidia-utils" "nvidia-580xx-dkms nvidia-580xx-utils"; do
+    rm -rf "$resolve_root"
+    mkdir -p "$resolve_root/var/lib/pacman"
+    read -ra targets <<<"$branch"
+    pacman --config "$build_cache_dir/pacman-offline.conf" \
+      --root "$resolve_root" --dbpath "$resolve_root/var/lib/pacman" \
+      --noconfirm -Sy >/dev/null 2>&1 || true
+    missing=$(pacman --config "$build_cache_dir/pacman-offline.conf" \
+      --root "$resolve_root" --dbpath "$resolve_root/var/lib/pacman" \
+      --noconfirm -S --print --print-format '%n' \
+      --assume-installed limine --assume-installed limine-mkinitcpio-hook \
+      --assume-installed limine-snapper-sync --assume-installed snapper \
+      "${targets[@]}" "$kernel_headers" 2>&1 >/dev/null) && continue
+    echo "WARNING: Try Omarchy cannot set up '$branch $kernel_headers' from the mirror." >&2
+    echo "         $missing" >&2
+    echo "         Machines on that driver get the software preview instead." >&2
+  done
+}
+warn_missing_try_nvidia_packages
+echo "Try Omarchy checked both NVIDIA driver generations against the mirror."
 
 # Live ISO uses the same offline pacman.conf.
 cp "$build_cache_dir/pacman-offline.conf" "$build_cache_dir/airootfs/etc/pacman.conf"

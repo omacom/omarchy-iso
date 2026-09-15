@@ -841,6 +841,10 @@ if (( status != 0 )); then
       done <<<"$failure_summary"
     fi
   fi
+  if [[ ${OMARCHY_DASHBOARD_TRY:-} == "yes" ]]; then
+    printf '%s%s' "$SHOW_CURSOR" "$CLEAR" >"$TTY_PATH" 2>/dev/null || true
+    exit "$failure_status"
+  fi
   failure_media_diagnosis="$(diagnose_media || true)"
   render_failure "$failure_status" "$failure_summary" "$failure_media_diagnosis" >"$TTY_PATH" 2>/dev/null || true
   # Recorded after the screen is drawn, not before: the log tail on that screen
@@ -852,6 +856,15 @@ if (( status != 0 )); then
   fi
   failure_menu
   exit "$failure_status"
+fi
+
+# Try Omarchy reuses this dashboard for its install-and-setup phase, but the
+# session — not a reboot — comes next, so it exits cleanly here rather than
+# showing the install celebration or a reboot prompt. omarchy-try drives the
+# session from the greeter VT once this returns.
+if [[ ${OMARCHY_DASHBOARD_TRY:-} == "yes" ]]; then
+  printf '%s%s' "$SHOW_CURSOR" "$CLEAR" >"$TTY_PATH" 2>/dev/null || true
+  exit 0
 fi
 
 # Deferred-provisioning installs finish silently and reboot on their own — the

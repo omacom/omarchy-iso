@@ -120,6 +120,36 @@ mkdir -p "$BUILD_RELEASE_PATH"
 OMARCHY_ISO_REF="${OMARCHY_ISO_REF:-quattro}"
 OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
 
+# The docker group is root-equivalent, so Omarchy operators stay out of it on
+# purpose. When the socket refuses the calling user, run the client through
+# sudo instead of requiring group membership.
+#
+# Podman accepts every argument this script passes and needs no daemon, but it
+# has to be ROOTFUL. Rootless was tried and does not work: pacstrap chowns the
+# device nodes it creates in the target, and in a user namespace that is not
+# permitted — the build dies on
+#
+#   fchownat() of /dev/vhost-vsock failed: Operation not permitted
+#
+# partway through package installation, long after it looks like it is working.
+# Rootless also cannot allocate a loop device, though that one does not matter
+# here: mkarchiso builds its EFI image with mtools rather than by mounting.
+if command -v docker &>/dev/null; then
+  CONTAINER=(docker)
+  if ! docker version &>/dev/null; then
+    CONTAINER=(sudo docker)
+  fi
+elif command -v podman &>/dev/null; then
+  if ((EUID == 0)); then
+    CONTAINER=(podman)
+  else
+    CONTAINER=(sudo podman)
+  fi
+else
+  echo "Error: this build needs docker or podman, and found neither." >&2
+  exit 1
+fi
+
 DOCKER_ARGS=(
   --rm
   --privileged
@@ -158,15 +188,7 @@ else
   DOCKER_ARGS+=(--pull=always)
 fi
 
-# The docker group is root-equivalent, so Omarchy operators stay out of it on
-# purpose. When the socket refuses the calling user, run the client through
-# sudo instead of requiring group membership.
-DOCKER=(docker)
-if ! docker version &>/dev/null; then
-  DOCKER=(sudo docker)
-fi
-
-"${DOCKER[@]}" run "${DOCKER_ARGS[@]}" archlinux/archlinux:latest /$BUILD_SCRIPT
+"${CONTAINER[@]}" run "${DOCKER_ARGS[@]}" docker.io/archlinux/archlinux:latest /$BUILD_SCRIPT
 
 latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*.iso | head -n1)
 iso_ref="${latest_iso%.*}-$OMARCHY_ISO_REF.iso"

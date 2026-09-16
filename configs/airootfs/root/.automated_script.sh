@@ -111,6 +111,8 @@ if [[ -f /root/defer-provisioning ]] ||
   export OMARCHY_UI_DEFER_PROVISIONING=yes
 fi
 
+export OMARCHY_UI_EDITION="$(jq -r '.omarchy_install.edition // "desktop"' /root/user_configuration.json 2>/dev/null)"
+
 # The foreground dashboard is now the sole visible install UI owner. It starts
 # the actual installer as a non-interactive child, logs child output, waits for
 # completion, then renders the final installed-time/reboot prompt itself.

@@ -281,17 +281,20 @@ user_step() {
   while true; do
     user_form && status=0 || status=$?
     if ((status != 0)); then
-      # Esc unwinds to the start of the form. Ctrl+C has no side channel in the
-      # user step (only the keyboard and disk screens give it a meaning), so it
-      # keeps its long-standing behaviour of ending the install.
+      # Esc unwinds to the start of the flow: keyboard, then edition, then the
+      # form again. Ctrl+C has no side channel in the user step (only the
+      # keyboard and disk screens give it a meaning), so it keeps its
+      # long-standing behaviour of ending the install.
       ((status == OMARCHY_FORM_BACK)) || abort
       keyboard_form
       $defer_provisioning && return 0
+      edition_step
       continue
     fi
 
     # Add manual padding since gum table -p doesn't respect padding
     echo -e "Field,Value
+Edition,${edition_label:-Desktop}
 Username,$username
 Password,$(printf "%${#password}s" | tr ' ' '*')
 Full name,${full_name:-[Skipped]}
@@ -307,6 +310,7 @@ Keyboard,$keyboard" |
     else
       keyboard_form
       $defer_provisioning && return 0
+      edition_step
     fi
   done
 }
@@ -801,6 +805,7 @@ run_partition_execute() {
     "custom_commands": [],
     "omarchy_install": {
         "mode": "protected",
+        "edition": "$edition",
         "target_mount": "/mnt",
         "boot": {
             "esp_mount": "$esp_mount_in_target",
@@ -946,6 +951,29 @@ install_mode_form() {
   install_mode=$(gum choose --header "Select installation mode on $disk" "${choices[@]}") || abort
 }
 
+# Which Omarchy this machine becomes. Settled at install, never toggled on an
+# installed machine: taking a compositor off, or putting one on, is a
+# migration in both directions, so the answer is a reinstall.
+edition_step() {
+  local choice
+
+  step "Let's pick which Omarchy this machine runs..."
+  choice=$(gum choose --header "Select edition" \
+    "Desktop (Hyprland, apps, the full session)" \
+    "Server (headless, SSH, no desktop)") || abort
+
+  case "$choice" in
+    Server*)
+      edition="server"
+      edition_label="Server"
+      ;;
+    *)
+      edition="desktop"
+      edition_label="Desktop"
+      ;;
+  esac
+}
+
 confirm_disk_overwrite() {
   local mode="encrypted"
   local affirmative confirm_status
@@ -1039,14 +1067,21 @@ install_target="full_disk"
 # isn't measured against the transient 80-column boot console.
 wait_for_stable_terminal
 
+# Deferred provisioning never asks, and an autoinstall drive answers in its own
+# configuration file, so the flow needs a default that means "as before".
+edition="desktop"
+
 greeter
 
 keyboard_form
 
 # Normal install: keyboard (loaded above, so the LUKS passphrase is typed under
-# the right layout) → user → disk → install mode. The user step can unwind to
-# the keyboard screen and arm deferral there, hence the second check.
+# the right layout) → edition → user → disk → install mode. The user step can
+# unwind to the keyboard screen and arm deferral there, hence the second check.
 if ! $defer_provisioning; then
+  # Before the account, so the confirmation table at the end of the user step
+  # can show what was chosen.
+  edition_step
   user_step
 fi
 
@@ -1139,6 +1174,7 @@ cat <<-_EOF_ >user_configuration.json
     "custom_commands": [],
     "omarchy_install": {
         "mode": "full_disk",
+        "edition": "$edition",
         "defer_provisioning": $defer_provisioning,
         "target_mount": "/mnt",
         "boot": {

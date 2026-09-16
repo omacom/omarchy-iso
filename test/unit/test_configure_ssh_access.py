@@ -55,12 +55,12 @@ class ConfigureSshAccessTest(unittest.TestCase):
             return CompletedProcess(cmd, 1)
         return CompletedProcess(cmd, 0)
 
-    def ctx(self, authorized_keys=None):
+    def ctx(self, authorized_keys=None, edition="desktop"):
         authorized_keys_path = None
         if authorized_keys is not None:
             authorized_keys_path = self.target / "authorized_keys"
             authorized_keys_path.write_text(authorized_keys)
-        return types.SimpleNamespace(target=self.target, username="jeff", authorized_keys_path=authorized_keys_path, defer_provisioning=False)
+        return types.SimpleNamespace(target=self.target, username="jeff", authorized_keys_path=authorized_keys_path, defer_provisioning=False, edition=edition)
 
     def configure(self, **kwargs):
         phases_impl.configure_ssh_access(self.ctx(**kwargs))
@@ -74,6 +74,13 @@ class ConfigureSshAccessTest(unittest.TestCase):
     def test_no_authorized_keys_is_a_no_op(self):
         self.configure()
         self.assertEqual(self.calls, [])
+        self.assertFalse((self.target / "home" / "jeff" / ".ssh").exists())
+
+    def test_server_edition_opens_ssh_even_with_no_keys(self):
+        self.configure(edition="server")
+        self.assertEqual(self.chrooted("systemctl"),
+                         [["arch-chroot", str(self.target), "systemctl", "enable", "sshd.service"]])
+        self.assertEqual(len(self.chrooted("ufw")), 1)
         self.assertFalse((self.target / "home" / "jeff" / ".ssh").exists())
 
     def test_installs_keys_one_per_line(self):

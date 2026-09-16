@@ -30,7 +30,9 @@ pacman --noconfirm -Sy archlinux-keyring
 # so this container can be months behind the mirror it installs from. A plain
 # -Sy install is then a partial upgrade — new packages linked against a glibc
 # the container doesn't have yet.
-pacman --noconfirm -Syu archiso git sudo base-devel jq grub imagemagick neovim nodejs npm tree-sitter-cli
+# go is for the packages built from source below, which makepkg will not
+# install itself: build-omarchy-packages.sh runs it with --nodeps.
+pacman --noconfirm -Syu archiso git sudo base-devel go jq grub imagemagick neovim nodejs npm tree-sitter-cli
 
 # Pre-import the omarchy signing key (so pacman trusts our [omarchy] repo
 # during the build without keyserver lookups).
@@ -99,9 +101,17 @@ fi
 # When --local-source is in effect, build omarchy* from the mounted source
 # trees and drop them in the offline mirror. Otherwise pacman -Syw below
 # downloads the published versions from the omarchy network mirror.
+: "${OMARCHY_LOCAL_EXTRA_PACKAGES:=lazyjournal}"
+export OMARCHY_LOCAL_EXTRA_PACKAGES
+
 if [[ -d /omarchy-source && -d /omarchy-pkgs ]]; then
   bash /builder/build-omarchy-packages.sh "$offline_mirror_dir"
   LOCAL_OMARCHY_BUILD=1
+  read -r -a local_built_packages <<<"$OMARCHY_LOCAL_EXTRA_PACKAGES"
+  local_built_packages=(
+    "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"
+    "${local_built_packages[@]}"
+  )
 fi
 
 # Node.js binary for offline mise install.
@@ -140,6 +150,7 @@ sed -i -E '/^(linux|broadcom-wl)$/d' "$build_cache_dir/packages.x86_64"
 # pulls the published omarchy* from the network mirror like any other package.
 if [[ -d /omarchy-source ]]; then
   base_pkg_lists=(/omarchy-source/install/omarchy-base.packages /omarchy-source/install/omarchy-other.packages)
+  server_pkg_list=/omarchy-source/install/omarchy-server.packages
   setup_form=/omarchy-source/install/provisioning/setup-form.sh
 else
   # Pull the same package lists out of the freshly-downloaded Omarchy runtime
@@ -156,6 +167,11 @@ else
   mkdir -p /tmp/omarchy-pkglists
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/omarchy-base.packages usr/share/omarchy/install/omarchy-other.packages
   base_pkg_lists=(/tmp/omarchy-pkglists/usr/share/omarchy/install/omarchy-base.packages /tmp/omarchy-pkglists/usr/share/omarchy/install/omarchy-other.packages)
+  # Extracted on its own and tolerating a miss, like the setup form below: a
+  # runtime predating the server edition ships no such list, and that is a
+  # desktop-only ISO rather than a build failure.
+  bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/omarchy-server.packages 2>/dev/null || true
+  server_pkg_list=/tmp/omarchy-pkglists/usr/share/omarchy/install/omarchy-server.packages
   # Extracted on its own, tolerating a miss: bsdtar exits non-zero for a member
   # it can't find, so asking for this alongside the package lists would abort the
   # build here (set -e) with a bare "Not found in archive" instead of the
@@ -167,6 +183,14 @@ fi
 mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
 cp "${base_pkg_lists[0]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
 cp "${base_pkg_lists[1]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-other.packages"
+
+# The installer reads this when the caller chose the server edition. Without it
+# on the medium, a server install has no list to pacstrap.
+if [[ -f $server_pkg_list ]]; then
+  cp "$server_pkg_list" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-server.packages"
+else
+  echo "WARNING: no omarchy-server.packages in this runtime; the ISO will offer no server edition." >&2
+fi
 
 # The configurator's setup form comes from the runtime this ISO bundles, so the
 # installer and the first-boot setup that finishes a deferred install can never
@@ -193,6 +217,11 @@ mapfile -t all_packages < <(
   {
     cat "$build_cache_dir/packages.x86_64"
     grep -hv '^#\|^$' "${base_pkg_lists[@]}"
+    # Mostly a subset of the base list, but not entirely: openssh, rsync and
+    # lazyjournal are the server edition's own, and the install is offline.
+    if [[ -f $server_pkg_list ]]; then
+      grep -hv '^#\|^$' "$server_pkg_list"
+    fi
     grep -hv '^#\|^$' /builder/archinstall.packages
     # Always include the selected Omarchy packages so the target install can
     # find the runtime and companion packages in the offline mirror.
@@ -214,12 +243,12 @@ mapfile -t all_packages < <(
 # the mirror; strip them from the pacman -Syw list so it doesn't try to fetch
 # the published versions on top.
 if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
+  exclude_args=()
+  for local_package_name in "${local_built_packages[@]}"; do
+    exclude_args+=(-e "$local_package_name")
+  done
   mapfile -t all_packages < <(
-    printf '%s\n' "${all_packages[@]}" |
-      grep -Fxv \
-        -e "$OMARCHY_RUNTIME_PACKAGE" \
-        -e "$OMARCHY_SETTINGS_PACKAGE" \
-        -e "$OMARCHY_NVIM_PACKAGE" || true
+    printf '%s\n' "${all_packages[@]}" | grep -Fxv "${exclude_args[@]}" || true
   )
 fi
 
@@ -255,8 +284,7 @@ mapfile -t required_package_files <<< "$resolved_package_files"
 # checkouts. Add those exact artifacts back to the keep-set after verifying
 # that the local build left exactly one file for each selected package name.
 if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
-  for local_package_name in \
-    "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"; do
+  for local_package_name in "${local_built_packages[@]}"; do
     local_package_file=""
     for candidate in "$offline_mirror_dir/$local_package_name-"*.pkg.tar.*; do
       [[ -f $candidate && $candidate != *.sig ]] || continue

@@ -24,6 +24,12 @@ INSTALL_CMD=("$@")
 TTY_PATH="${OMARCHY_DASHBOARD_TTY:-/dev/tty}"
 LOGO_PATH="${OMARCHY_PATH:-/usr/share/omarchy}/logo.txt"
 
+if [[ ${OMARCHY_UI_EDITION:-desktop} == "server" ]]; then
+  INSTALL_TITLE="Installing Omarchy Server"
+else
+  INSTALL_TITLE="Installing Omarchy"
+fi
+
 # Autoinstall has no one at the keyboard, and every prompt this dashboard owns
 # reads from the TTY, so each would hang forever. Suppress them here rather than
 # in the scripts they live in: this process is the only owner of the visible UI.
@@ -452,7 +458,7 @@ render_dynamic() {
   LAST_PM=$pm
 
   printf '%s%d;1H' "$CSI" "$DYNAMIC_ROW"
-  center "Installing Omarchy" "$CONTENT_WIDTH"
+  center "$INSTALL_TITLE" "$CONTENT_WIDTH"
   blank_line
   line_at "$CONTENT_WIDTH" $(( (CONTENT_WIDTH - 34) / 2 )) ""
   progress_bar "$pm" 34

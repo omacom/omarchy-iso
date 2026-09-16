@@ -4,6 +4,7 @@ set -e
 
 NO_CACHE=""
 KEEP_PKG_CACHE=""
+ISO_LABEL=""
 LOCAL_OMARCHY_PATH=""
 LOCAL_PKGS_PATH=""
 while [[ $# -gt 0 ]]; do
@@ -19,6 +20,18 @@ while [[ $# -gt 0 ]]; do
   --no-boot-offer)
     NO_BOOT_OFFER=1
     shift
+    ;;
+  --label)
+    ISO_LABEL="${2:-}"
+    if [[ -z $ISO_LABEL ]]; then
+      echo "Error: --label requires a name" >&2
+      exit 1
+    fi
+    if [[ ! $ISO_LABEL =~ ^[A-Za-z0-9._-]+$ ]]; then
+      echo "Error: --label may only contain letters, digits, dots, dashes and underscores" >&2
+      exit 1
+    fi
+    shift 2
     ;;
   --debug)
     OMARCHY_INSTALL_DEBUG=1
@@ -57,7 +70,7 @@ while [[ $# -gt 0 ]]; do
     ;;
   *)
     echo "Unknown option: $1"
-    echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
+    echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--label <name>] [--local-source <omarchy-checkout> <pkgs-checkout>]"
     exit 1
     ;;
   esac
@@ -169,7 +182,10 @@ fi
 "${DOCKER[@]}" run "${DOCKER_ARGS[@]}" archlinux/archlinux:latest /$BUILD_SCRIPT
 
 latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*.iso | head -n1)
-iso_ref="${latest_iso%.*}-$OMARCHY_ISO_REF.iso"
+# --label distinguishes builds that share a channel, which every local build
+# does. It names the build, not the medium: one ISO carries both editions and
+# the Configurator asks which to install.
+iso_ref="${latest_iso%.*}-$OMARCHY_ISO_REF${ISO_LABEL:+-$ISO_LABEL}.iso"
 mv -f "$latest_iso" "$iso_ref"
 
 if [[ -z "${NO_BOOT_OFFER:-}" ]]; then

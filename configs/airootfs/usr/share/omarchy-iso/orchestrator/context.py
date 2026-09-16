@@ -21,6 +21,7 @@ class InstallContext:
     encrypt: bool
     authorized_keys_path: Path | None
     tailscale_authkey_path: Path | None
+    edition: str
 
     user_configuration: dict
     user_credentials: dict
@@ -64,6 +65,17 @@ class InstallContext:
         defer_provisioning_marker = _optional_path(os.environ.get("OMARCHY_INSTALL_DEFER_PROVISIONING_FILE"))
         defer_provisioning = bool(omarchy_install.get("defer_provisioning")) or defer_provisioning_marker is not None
         omarchy_install["defer_provisioning"] = defer_provisioning
+
+        # Edition: which Omarchy this machine becomes. Chosen in the
+        # configurator, or set in user_configuration.json by an autoinstall
+        # drive. Anything unrecognised is refused rather than assumed, because
+        # the wrong answer installs the wrong operating system.
+        edition = str(omarchy_install.get("edition") or "desktop").strip().lower()
+        if edition not in ("desktop", "server"):
+            raise RuntimeError(
+                f"omarchy_install.edition must be 'desktop' or 'server', not {edition!r}"
+            )
+        omarchy_install["edition"] = edition
 
         if creds_path.exists():
             user_credentials = json.loads(creds_path.read_text())
@@ -116,6 +128,7 @@ class InstallContext:
             encrypt=_read_text(os.environ.get("OMARCHY_INSTALL_ENCRYPT_FILE")).lower() in ("true", "yes", "1"),
             authorized_keys_path=_optional_path(os.environ.get("OMARCHY_INSTALL_AUTHORIZED_KEYS_FILE")),
             tailscale_authkey_path=_optional_path(os.environ.get("OMARCHY_INSTALL_TAILSCALE_AUTHKEY_FILE")),
+            edition=edition,
             user_configuration=user_configuration,
             user_credentials=user_credentials,
             arch_config_path=arch_config_path,
@@ -199,6 +212,7 @@ def _default_omarchy_install(user_configuration: dict) -> dict[str, Any]:
     mode = "protected" if disk_config.get("config_type") == "pre_mounted_config" else "full_disk"
     return {
         "mode": mode,
+        "edition": "desktop",
         "target_mount": disk_config.get("mountpoint") or "/mnt",
         "boot": {
             "esp_mount": "/boot",

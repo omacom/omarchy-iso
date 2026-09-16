@@ -168,6 +168,7 @@ def make_ctx(target, **overrides):
         user_credentials={"users": []},
         state_dir=target / "state",
         authorized_keys_path=None,
+        edition="desktop",
     )
     defaults.update(overrides)
     return types.SimpleNamespace(**defaults)
@@ -293,6 +294,10 @@ class ConfigureLoginDeferProvisioningTest(unittest.TestCase):
         run_patch.start()
         self.addCleanup(run_patch.stop)
 
+        info_patch = mock.patch.object(phases_impl, "info")
+        info_patch.start()
+        self.addCleanup(info_patch.stop)
+
     def test_deferred_provisioning_login_leaves_user_state_to_first_boot(self):
         ctx = make_ctx(self.target, encrypt=True)
         phases_impl.configure_login(ctx)
@@ -310,6 +315,23 @@ class ConfigureLoginDeferProvisioningTest(unittest.TestCase):
         self.assertIn("User=jeff", autologin)
         state = (self.target / "var/lib/sddm/state.conf").read_text()
         self.assertIn("User=jeff", state)
+
+    def test_encrypted_server_login_autologs_in_on_tty1(self):
+        ctx = make_ctx(self.target, defer_provisioning=False, encrypt=True, username="jeff", edition="server")
+        phases_impl.configure_login(ctx)
+
+        drop_in = (self.target / "etc/systemd/system/getty@tty1.service.d/autologin.conf").read_text()
+        self.assertIn("ExecStart=\n", drop_in)
+        self.assertIn("--autologin jeff", drop_in)
+        self.assertFalse((self.target / "etc/sddm.conf.d").exists())
+        self.assertFalse(any("sddm.service" in cmd for cmd in self.calls))
+
+    def test_unencrypted_server_login_keeps_the_getty_prompt(self):
+        ctx = make_ctx(self.target, defer_provisioning=False, encrypt=False, username="jeff", edition="server")
+        phases_impl.configure_login(ctx)
+
+        self.assertFalse((self.target / "etc/systemd/system/getty@tty1.service.d/autologin.conf").exists())
+        self.assertFalse((self.target / "etc/sddm.conf.d").exists())
 
 
 class ConfigureSshAccessDeferProvisioningTest(unittest.TestCase):

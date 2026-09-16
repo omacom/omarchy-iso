@@ -728,10 +728,19 @@ def _unmask_mkinitcpio_pacman_hooks(
             info(f"warning: failed to restore pacman hook mask for {name}: {exc}")
 
 
+def _edition_package_list_path(ctx: InstallContext) -> Path:
+    """The package list the chosen edition installs. The server list is the
+    base list minus the desktop, so a machine that asked for a server never
+    pacstraps a compositor it would then have to be told to ignore."""
+    if ctx.edition == "server":
+        return Path("/usr/share/omarchy-iso/omarchy-server.packages")
+    return Path("/usr/share/omarchy-iso/omarchy-base.packages")
+
+
 def _runtime_package_list(ctx: InstallContext) -> list[str]:
     """Selected Omarchy runtime package + every package in the ISO-bundled
-    base package list that isn't already installed early."""
-    base_pkgs_file = Path("/usr/share/omarchy-iso/omarchy-base.packages")
+    package list for this edition that isn't already installed early."""
+    base_pkgs_file = _edition_package_list_path(ctx)
     pkgs = [_omarchy_runtime_package()]
     already_installed = set(_early_packages()) | {
         _omarchy_runtime_package(),
@@ -1092,6 +1101,7 @@ def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str 
     env_extras = [
         "OMARCHY_PATH=/usr/share/omarchy",
         "OMARCHY_INSTALL=/usr/share/omarchy/install",
+        f"OMARCHY_EDITION={ctx.edition}",
         f"OMARCHY_INSTALL_USER={ctx.username}",
         f"OMARCHY_START_TIME={omarchy_start_time}",
         f"OMARCHY_START_EPOCH={omarchy_start_epoch}",
@@ -1134,7 +1144,24 @@ def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str 
                 pass
 
 
+def _write_edition_marker(ctx: InstallContext) -> None:
+    """Stamp the target with the edition it was installed as.
+
+    Written before omarchy-apply-system runs, because that is the first thing to
+    read it: the install steps that configure a login manager, a lock screen and
+    a printing stack all gate on this file, and the packages behind them are not
+    there on a server.
+    """
+    marker = ctx.target / "etc" / "omarchy-edition"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(f"{ctx.edition}\n")
+    marker.chmod(0o644)
+    info(f"› edition: {ctx.edition}")
+
+
 def run_system_finalizer(ctx: InstallContext) -> None:
+    _write_edition_marker(ctx)
+
     if ctx.defer_provisioning:
         cmd = ["/usr/bin/omarchy-apply-system", "--defer-provisioning", "--first-install"]
     else:
@@ -1406,6 +1433,23 @@ def _read_omarchy_mirror() -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def configure_login(ctx: InstallContext) -> None:
+    # A server boots to a getty, so its equivalent of the desktop's encrypted
+    # autologin is an agetty --autologin drop-in on tty1.
+    if ctx.edition == "server":
+        autologin = ctx.target / "etc" / "systemd" / "system" / "getty@tty1.service.d" / "autologin.conf"
+        if ctx.encrypt and not ctx.defer_provisioning:
+            info(f"› autologin {ctx.username} on tty1 behind the LUKS prompt")
+            autologin.parent.mkdir(parents=True, exist_ok=True)
+            autologin.write_text(
+                "[Service]\n"
+                "ExecStart=\n"
+                f"ExecStart=-/sbin/agetty -o '-p -f -- \\\\u' --noclear --autologin {ctx.username} %I $TERM\n"
+            )
+        else:
+            info("› server edition: getty login stays the auth screen")
+            autologin.unlink(missing_ok=True)
+        return
+
     sddm_dir = ctx.target / "etc" / "sddm.conf.d"
     sddm_dir.mkdir(parents=True, exist_ok=True)
     (sddm_dir / "99-omarchy-login.conf").write_text(
@@ -1454,12 +1498,14 @@ def configure_login(ctx: InstallContext) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def configure_ssh_access(ctx: InstallContext) -> None:
-    if ctx.authorized_keys_path is None:
+    # A server without SSH is unreachable, so the door opens even when no keys
+    # were given; password auth over the console-set password remains.
+    if ctx.authorized_keys_path is None and ctx.edition != "server":
         return
 
-    keys = _authorized_keys(ctx.authorized_keys_path)
+    keys = [] if ctx.authorized_keys_path is None else _authorized_keys(ctx.authorized_keys_path)
 
-    if ctx.defer_provisioning:
+    if keys and ctx.defer_provisioning:
         # No user to authorize yet. Stage the keys in provisioning state for
         # omarchy-provision-owner to install once first boot creates the owner, and
         # still open the door (sshd + ufw) below.
@@ -1469,7 +1515,7 @@ def configure_ssh_access(ctx: InstallContext) -> None:
         staged = provisioning_dir / "authorized_keys"
         staged.write_text("".join(f"{key}\n" for key in keys))
         staged.chmod(0o600)
-    else:
+    elif keys:
         info(f"› installing {len(keys)} SSH key(s) for {ctx.username}")
 
         ssh_dir = ctx.target / "home" / ctx.username / ".ssh"

@@ -28,6 +28,21 @@ Despite the local folder name, the first argument is the Omarchy source checkout
 
 Use `--dev` or `--rc` to build against those package channels. Both `--dev` and `--edge` select the dev packages from the edge mirror.
 
+## Installing beside the installation media
+
+When the live installer is mounted directly from a partition on a GPT disk,
+the interactive UEFI installer can use existing unallocated space on that same
+disk. Its existing partitions are preserved, including the installer partition.
+Prepare at least 32 GiB of contiguous unallocated space before booting it.
+
+Only free-space installation is offered on the installer disk. Full-disk
+installation, deferred provisioning, and the partition editor remain unavailable
+there. Loopback ISO and device-mapper source layouts are not supported by this
+path. BitLocker checks are unchanged; suspending BitLocker is not sufficient.
+
+The installer partition remains on disk after installation. Boot the installed
+system successfully before reclaiming it yourself.
+
 ## Autoinstall
 
 The shipped ISO installs itself with no keyboard when it finds its configuration on a second drive. Attach a drive labeled `cidata` alongside the ISO and the installer copies the config off it and skips the configurator; with no such drive, nothing changes and the wizard runs as usual. No rebuild, no extra boot entry.
@@ -101,6 +116,11 @@ To exercise installation alongside existing Windows-style partitions, run
 synthetic disk in `/tmp` with an existing ESP and data partition plus ample
 unallocated space, then offers to start an interactive installation on it. The
 fixture exercises Windows partition preservation but does not contain Windows.
+
+Run `sudo bash test/same-disk-partitioning` on Linux for the storage regression
+test. It uses disposable loop-backed images with 512-byte and 4096-byte sectors
+to check that a mounted source survives partition creation, formatting and
+rollback. It does not replace testing a complete same-disk ISO installation.
 
 ## Acceptance testing the ISO
 

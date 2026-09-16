@@ -17,6 +17,50 @@ created_parts=()
 # would run it in a subshell and lose the created_parts bookkeeping.
 created_partition_number=""
 
+# On the live-media disk we only append partitions in existing free space.
+# Keep the original entries, including their byte ranges, for checks before
+# writes and rollback. Other disks keep the existing installation behavior.
+protected_disk=""
+protected_partition_table=""
+
+protect_existing_partitions() {
+  local table
+  table=$(parted -ms "$1" unit B print) || return 1
+  [[ $table == *':gpt:'* ]] || return 1
+  protected_partition_table=$(printf '%s\n' "$table" | grep -E '^[0-9]+:')
+  [[ -n $protected_partition_table ]] || return 1
+  protected_disk="$1"
+}
+
+verify_existing_partitions() {
+  [[ "$1" == "$protected_disk" ]] || return 0
+  local table entry
+  table=$(parted -ms "$1" unit B print) || return 1
+  [[ $table == *':gpt:'* ]] || return 1
+  while IFS= read -r entry; do
+    grep -Fxq "$entry" <<<"$table" || return 1
+  done <<<"$protected_partition_table"
+}
+
+is_existing_partition() {
+  [[ "$1" == "$protected_disk" ]] &&
+    grep -q "^$2:" <<<"$protected_partition_table"
+}
+
+verify_partition_device() {
+  local disk="$1" num="$2" device="$3" start size kernel_start kernel_size
+  is_existing_partition "$disk" "$num" && return 1
+  [[ " ${created_parts[*]} " == *" $num "* ]] || return 1
+  read -r start size < <(parted -ms "$disk" unit B print |
+    awk -F: -v n="$num" '$1 == n { gsub(/B/, "", $2); gsub(/B/, "", $4); print $2, $4 }')
+  # sysfs reports these in 512-byte sectors, including on 4K-sector disks.
+  kernel_start=$(cat "/sys/class/block/${device##*/}/start") || return 1
+  kernel_size=$(cat "/sys/class/block/${device##*/}/size") || return 1
+  [[ $start =~ ^[0-9]+$ && $size =~ ^[0-9]+$ &&
+    $kernel_start =~ ^[0-9]+$ && $kernel_size =~ ^[0-9]+$ ]] || return 1
+  (( start == kernel_start * 512 && size == kernel_size * 512 ))
+}
+
 # Compute partition device path, handling NVMe/mmcblk's pN naming.
 partition_path() {
   local _disk="$1" _num="$2"
@@ -86,6 +130,18 @@ create_partition() {
 
   created_partition_number=""
 
+  verify_existing_partitions "$disk" || return 1
+  if [[ $disk == "$protected_disk" ]]; then
+    # Check the proposed extent explicitly, as well as letting parted reject
+    # overlap. Endpoints in parted's byte output are inclusive.
+    local entry existing_start existing_end
+    while IFS=: read -r entry existing_start existing_end _; do
+      existing_start=${existing_start%B}
+      existing_end=${existing_end%B}
+      (( end < existing_start || start > existing_end )) || return 1
+    done <<<"$protected_partition_table"
+  fi
+
   # Lexicographic sort on both sides: comm needs its inputs ordered the same
   # way it compares them, and `sort -n` (1, 2, 10) is not that order.
   before=$(partition_numbers "$disk" | sort)
@@ -97,6 +153,8 @@ create_partition() {
   after=$(partition_numbers "$disk" | sort)
   num=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | head -1)
   [[ -n $num ]] || return 1
+
+  verify_existing_partitions "$disk" || return 1
 
   # The number must be genuinely new. This is the safety property that keeps a
   # numbering mistake from ever formatting a partition somebody else is using;
@@ -123,7 +181,11 @@ create_partition() {
 rollback_created_parts() {
   local disk="$1" n
   (( ${#created_parts[@]} > 0 )) || return 0
+  # If somebody changed the layout, partition numbers may have been reused.
+  # Leave recovery to the user rather than risk deleting existing data.
+  verify_existing_partitions "$disk" || return 1
   for n in $(printf '%s\n' "${created_parts[@]}" | sort -rn); do
+    is_existing_partition "$disk" "$n" && return 1
     parted --script "$disk" rm "$n" >/dev/null 2>&1 || true
   done
   partprobe "$disk" 2>/dev/null || true

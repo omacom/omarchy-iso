@@ -124,6 +124,38 @@ create_partition "$IMG" "$((100 * MIB))" "$((300 * MIB))" ext4 OVERLAP
 check "overlapping creation failed" "1" "$?"
 check "nothing tracked" "0" "${#created_parts[@]}"
 
+echo "==> live-media disk preserves every existing partition"
+build_holey_disk
+protect_existing_partitions "$IMG"
+check "GPT source can be protected" "0" "$?"
+original_table="$protected_partition_table"
+create_partition "$IMG" "$((1000 * MIB))" "$((1200 * MIB))" fat32 OMARCHY_EFI
+check "new ESP alongside protected source" "0" "$?"
+create_partition "$IMG" "$((1201 * MIB))" "$((2000 * MIB))" btrfs OMARCHY_ROOT
+check "new root alongside protected source" "0" "$?"
+verify_existing_partitions "$IMG"
+check "original entries unchanged" "0" "$?"
+rollback_created_parts "$IMG"
+check "rollback preserves protected entries" "$original_table" "$(parted -ms "$IMG" unit B print | grep -E '^[0-9]+:')"
+
+create_partition "$IMG" "$MIB" "$((100 * MIB))" ext4 OVERLAP
+check "source overlap rejected" "1" "$?"
+check "source overlap not tracked" "0" "${#created_parts[@]}"
+created_parts=(1)
+rollback_created_parts "$IMG"
+check "rollback refuses an existing partition" "1" "$?"
+check "existing partition survived" "$original_table" "$(parted -ms "$IMG" unit B print | grep -E '^[0-9]+:')"
+created_parts=()
+
+parted --script "$IMG" name 1 CHANGED
+create_partition "$IMG" "$((1000 * MIB))" "$((1200 * MIB))" fat32 OMARCHY_EFI
+check "changed source layout rejects creation" "1" "$?"
+check "no partition created after layout change" "1 4" "$(partition_numbers "$IMG" | sort | xargs)"
+created_parts=(4)
+rollback_created_parts "$IMG"
+check "changed layout rejects rollback" "1" "$?"
+check "rollback left disk alone" "1 4" "$(partition_numbers "$IMG" | sort | xargs)"
+
 if (( failures > 0 )); then
   printf '\n%d check(s) failed\n' "$failures"
   exit 1

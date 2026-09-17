@@ -35,6 +35,17 @@ if [[ ! -r $DISK_PARTITIONING ]]; then
 fi
 source "$DISK_PARTITIONING"
 
+# LVM discovery helpers, shared with test/unit/lvm-discovery-test.sh so the
+# in-use checks can be exercised without a real volume group.
+LVM_HELPERS="${LVM_HELPERS:-/usr/share/omarchy-iso/lvm.sh}"
+[[ -r $LVM_HELPERS ]] ||
+  LVM_HELPERS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../usr/share/omarchy-iso/lvm.sh"
+if [[ ! -r $LVM_HELPERS ]]; then
+  echo "ERROR: LVM helpers not found at $LVM_HELPERS" >&2
+  exit 1
+fi
+source "$LVM_HELPERS"
+
 LOGO_WIDTH=$(awk '{ if (length > max) max = length } END { print max+0 }' "$LOGO_PATH")
 
 export GUM_CONFIRM_PROMPT_FOREGROUND="6"
@@ -861,6 +872,422 @@ run_partition_execute() {
 _EOF_
 }
 
+# ── existing LVM volumes ─────────────────────────────────────────────────────
+#
+# Install into logical volumes that already exist, alongside whatever else the
+# volume group holds. Only the root volume is ever formatted; /home, swap and
+# the ESP are adopted exactly as they stand. That asymmetry is the mode, and
+# every prompt below exists to keep it true.
+
+# ESP partitions on $disk, by GPT partition type rather than by filesystem:
+# an ESP is a type, and a stray FAT partition is not one.
+ESP_PARTITION_TYPE="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+
+esp_partitions_on_disk() {
+  local name parttype fstype
+  while read -r name parttype fstype; do
+    [[ $parttype == "$ESP_PARTITION_TYPE" ]] || continue
+    [[ $fstype == "vfat" ]] || continue
+    printf '%s\n' "$name"
+  done < <(lsblk -nrpo NAME,PARTTYPE,FSTYPE "$disk" 2>/dev/null)
+}
+
+describe_esp() {
+  local part="$1" size
+  size=$(lsblk -bdno SIZE "$part" 2>/dev/null)
+  printf '%s (%s)\n' "$part" "$(to_gb "${size:-0}")"
+}
+
+# Present every volume in the group, including the ones already in use. Hiding
+# them would leave the owner hunting for a volume they can see in lsblk; naming
+# them and refusing the selection explains itself.
+#
+# Reports through chosen_lv instead of printing, the way create_partition()
+# reports through created_partition_number and for the same reason: a caller
+# would have to wrap this in a command substitution, and refusing a busy volume
+# draws the logo on stdout through notice(). That output would be captured
+# alongside the path, and the caller would go on to format a device name with a
+# screenful of escape codes in front of it.
+chosen_lv=""
+
+choose_lv() {
+  local header="$1" allow_none="$2" record choice path options=""
+  chosen_lv=""
+
+  while IFS= read -r record; do
+    [[ -n $record ]] || continue
+    options+="$(describe_lv "$record")"$'\n'
+  done <<<"$lvm_records"
+
+  [[ $allow_none == "true" ]] && options="None"$'\n'"$options"
+
+  while true; do
+    choice=$(gum choose --header "$header" <<<"$options") || return 1
+    [[ $choice == "None" ]] && return 0
+
+    path=$(awk '{print $1}' <<<"$choice")
+    if awk -F'|' -v p="$path" '$1 == p && $6 == "busy" { found = 1 } END { exit !found }' <<<"$lvm_records"; then
+      notice "$path is in use by the running system and cannot be selected." 3
+      continue
+    fi
+    chosen_lv="$path"
+    return 0
+  done
+}
+
+lv_fstype() {
+  awk -F'|' -v p="$1" '$1 == p { print $4 }' <<<"$lvm_records"
+}
+
+lv_label() {
+  awk -F'|' -v p="$1" '$1 == p { print $5 }' <<<"$lvm_records"
+}
+
+# Decide half of the LVM install: pick the group and its volumes, confirm, and
+# set the globals run_lvm_execute reads. Returns 1 to fall back to the
+# install-mode picker. Nothing is written to disk here.
+run_lvm_decide() {
+  step "Reading volume groups on $disk"
+
+  local groups
+  groups=$(volume_groups_on_disk "$disk")
+  if [[ -z $groups ]]; then
+    say --foreground 1 "No volume group found on $disk."
+    return 1
+  fi
+
+  if (( $(wc -l <<<"$groups") > 1 )); then
+    lvm_vg=$(gum choose --header "Select volume group" <<<"$groups") || return 1
+  else
+    lvm_vg="$groups"
+  fi
+
+  # The volume group may be known to LVM but not activated, in which case none
+  # of its /dev paths exist yet and every later mount would fail. Activating is
+  # reversible and touches no data.
+  if ! vgchange -ay "$lvm_vg" >/dev/null 2>&1; then
+    say --foreground 1 "Could not activate volume group $lvm_vg."
+    return 1
+  fi
+
+  lvm_records=$(logical_volumes "$lvm_vg")
+  if [[ -z $lvm_records ]]; then
+    say --foreground 1 "Volume group $lvm_vg has no logical volumes."
+    return 1
+  fi
+
+  step "Select the volume for Omarchy"
+  say "This volume will be reformatted. Everything else you pick is mounted as it is."
+  choose_lv "Root volume (will be erased)" false || return 1
+  root_partition_device="$chosen_lv"
+  [[ -n $root_partition_device ]] || return 1
+
+  local root_fstype root_label
+  root_fstype=$(lv_fstype "$root_partition_device")
+  root_label=$(lv_label "$root_partition_device")
+  if [[ -n $root_fstype ]]; then
+    clear_logo
+    echo
+    say --foreground 1 "$root_partition_device already holds a $root_fstype filesystem${root_label:+ labelled \"$root_label\"}."
+    say "Nothing on this disk is mounted right now, so the installer cannot tell"
+    say "whether another system needs it. Installing here erases it."
+    echo
+    gum confirm --affirmative "Erase it" --negative "Pick another volume" \
+      "Erase the $root_fstype filesystem on $root_partition_device?" || return 1
+  fi
+
+  step "Select the volume for /home"
+  say "Choose an existing home to keep it. None puts /home inside the Omarchy volume."
+  choose_lv "Home volume (kept as it is)" true || return 1
+  lvm_home_device="$chosen_lv"
+
+  if [[ -n $lvm_home_device ]] && ! fstype_is_mountable "$(lv_fstype "$lvm_home_device")"; then
+    say --foreground 1 "$lvm_home_device holds no filesystem this mode can mount."
+    say "It reports \"$(lv_fstype "$lvm_home_device")\"; a container such as crypto_LUKS or"
+    say "LVM2_member is not a filesystem. This mode mounts an existing /home; it does not create one."
+    return 1
+  fi
+
+  step "Select the volume for swap"
+  choose_lv "Swap volume (kept as it is)" true || return 1
+  lvm_swap_device="$chosen_lv"
+
+  if [[ -n $lvm_swap_device && $(lv_fstype "$lvm_swap_device") != "swap" ]]; then
+    say --foreground 1 "$lvm_swap_device is not formatted as swap."
+    say "This mode adopts an existing swap volume; it does not create one."
+    return 1
+  fi
+
+  # The same volume cannot fill two roles: the root format would destroy the
+  # home the owner just asked to keep.
+  if [[ -n $lvm_home_device && $lvm_home_device == "$root_partition_device" ]]; then
+    say --foreground 1 "The root and home volumes must be different."
+    return 1
+  fi
+  if [[ -n $lvm_swap_device && ( $lvm_swap_device == "$root_partition_device" || $lvm_swap_device == "$lvm_home_device" ) ]]; then
+    say --foreground 1 "The swap volume must be different from the root and home volumes."
+    return 1
+  fi
+
+  step "Select the EFI system partition"
+  local esps esp_options="" part
+  esps=$(esp_partitions_on_disk)
+  if [[ -z $esps ]]; then
+    say --foreground 1 "No EFI system partition found on $disk."
+    say "This mode adopts an existing ESP; it does not create one."
+    return 1
+  fi
+  while IFS= read -r part; do
+    [[ -n $part ]] || continue
+    esp_options+="$(describe_esp "$part")"$'\n'
+  done <<<"$esps"
+
+  say "The ESP is mounted, never reformatted. Limine installs alongside any bootloader already there."
+  local esp_choice
+  while true; do
+    esp_choice=$(gum choose --header "EFI system partition (kept as it is)" <<<"$esp_options") || return 1
+    efi_dev=$(awk '{print $1}' <<<"$esp_choice")
+    if device_is_busy "$efi_dev"; then
+      notice "$efi_dev is already mounted and cannot be adopted while in use." 3
+      continue
+    fi
+    break
+  done
+
+  # The free-space path creates a 2GB ESP because Unified Kernel Images are
+  # large. An ESP sized for a bootloader that keeps kernels on the root
+  # filesystem will fill, and it fills at kernel-update time, long after the
+  # install looked successful.
+  local esp_size_b
+  esp_size_b=$(lsblk -bdno SIZE "$efi_dev" 2>/dev/null)
+  if [[ -n $esp_size_b ]] && (( esp_size_b < 2 * 1024 * 1024 * 1024 )); then
+    say --foreground 3 "$efi_dev is $(to_gb "$esp_size_b"); Omarchy's kernel images want 2GB."
+    say --foreground 3 "The install will work, but a later kernel update may run it out of space."
+  fi
+
+  local mode="encrypted" affirmative confirm_status
+  while true; do
+    clear_logo
+    echo
+    say "Install Omarchy into $root_partition_device in volume group $lvm_vg."
+    say --foreground 1 "$root_partition_device will be erased."
+    [[ -n $lvm_home_device ]] && say "$lvm_home_device will be mounted at /home and left as it is."
+    [[ -n $lvm_swap_device ]] && say "$lvm_swap_device will be used for swap and left as it is."
+    say "$efi_dev will be mounted as the ESP and left as it is."
+
+    case $mode in
+      encrypted)
+        say --foreground 8 "Press Ctrl+C for unencrypted install."
+        affirmative="Yes, install"
+        ;;
+      unencrypted)
+        affirmative="Yes, install without encryption"
+        ;;
+    esac
+    echo
+
+    gum confirm --affirmative "$affirmative" --negative "No, change it" \
+      "Confirm installing into $root_partition_device"
+    confirm_status=$?
+
+    case $confirm_status in
+      0)
+        [[ $mode == "encrypted" ]] && encrypt_installation=true || encrypt_installation=false
+        break
+        ;;
+      1)
+        return 1
+        ;;
+      130)
+        case $mode in
+          encrypted) mode="unencrypted" ;;
+          unencrypted) mode="encrypted" ;;
+        esac
+        ;;
+      *)
+        abort
+        ;;
+    esac
+  done
+
+  if [[ "$encrypt_installation" == "true" ]]; then
+    esp_mount_in_target=/boot
+    root_mapper="/dev/mapper/omarchy_root"
+  else
+    esp_mount_in_target=/efi
+    root_mapper="$root_partition_device"
+  fi
+
+  kernel_choice=$(detect_kernel)
+}
+
+# Execute half of the LVM install: format and mount the root volume, adopt the
+# rest, and write the pre-mounted (protected) install configuration. Runs after
+# the user step so LUKS can be formatted with the user's password.
+run_lvm_execute() {
+  local dry=false subvol
+  [[ "${1:-}" == "dry" ]] && dry=true
+
+  if $dry; then
+    say "[dry] would format $root_partition_device as Btrfs and create @ @log @pkg"
+    [[ -z $lvm_home_device ]] && say "[dry] would create the @home subvolume"
+    [[ -n $lvm_home_device ]] && say "[dry] would mount $lvm_home_device at /home without formatting"
+    [[ -n $lvm_swap_device ]] && say "[dry] would enable swap on $lvm_swap_device without formatting"
+    say "[dry] would mount $efi_dev at $esp_mount_in_target without formatting"
+    say "[dry] encrypted=$encrypt_installation kernel=$kernel_choice"
+  else
+    wait_for_device "$root_partition_device" ||
+      disk_abort_hook "Root volume $root_partition_device never appeared"
+
+    if [[ "$encrypt_installation" == "true" ]]; then
+      step "Setting up LUKS2 on $root_partition_device"
+      # Kept as pipes rather than routed through disk_step: the passphrase must
+      # not become an argv the process table can show.
+      if ! printf "%s" "$password" |
+        cryptsetup luksFormat --type luks2 --batch-mode "$root_partition_device" - 2>&1; then
+        disk_abort_hook "Formatting LUKS2 on $root_partition_device failed"
+      fi
+      if ! printf "%s" "$password" |
+        cryptsetup open "$root_partition_device" omarchy_root - 2>&1; then
+        disk_abort_hook "Opening the encrypted root on $root_partition_device failed"
+      fi
+    fi
+
+    step "Creating Btrfs filesystem and subvolumes"
+    disk_step "creating the Btrfs filesystem on $root_mapper" \
+      mkfs.btrfs -f -L OMARCHY "$root_mapper"
+    wait_for_device "$root_mapper" || disk_abort_hook "Root device $root_mapper never appeared"
+
+    mkdir -p /mnt/btrfs-root
+    disk_step "mounting $root_mapper" mount "$root_mapper" /mnt/btrfs-root
+    # @home only when /home is not a volume of its own; creating it regardless
+    # would leave an empty subvolume that nothing ever mounts.
+    for subvol in @ @log @pkg; do
+      disk_step "creating subvolume $subvol" btrfs subvolume create "/mnt/btrfs-root/$subvol"
+    done
+    if [[ -z $lvm_home_device ]]; then
+      disk_step "creating subvolume @home" btrfs subvolume create /mnt/btrfs-root/@home
+    fi
+    umount /mnt/btrfs-root
+    rmdir /mnt/btrfs-root
+
+    disk_step "mounting the target root" \
+      mount -o noatime,compress=zstd,subvol=@ "$root_mapper" /mnt
+    mkdir -p /mnt/home /mnt/var/log /mnt/var/cache/pacman/pkg /mnt"$esp_mount_in_target"
+
+    # The one mount that must never be preceded by mkfs. Everything the owner
+    # chose this mode for is on the other side of it.
+    if [[ -n $lvm_home_device ]]; then
+      disk_step "mounting /home from $lvm_home_device" mount "$lvm_home_device" /mnt/home
+    else
+      disk_step "mounting /home" \
+        mount -o noatime,compress=zstd,subvol=@home "$root_mapper" /mnt/home
+    fi
+
+    disk_step "mounting /var/log" \
+      mount -o noatime,compress=zstd,subvol=@log "$root_mapper" /mnt/var/log
+    disk_step "mounting the package cache" \
+      mount -o noatime,compress=zstd,subvol=@pkg "$root_mapper" /mnt/var/cache/pacman/pkg
+
+    disk_step "mounting the ESP" mount "$efi_dev" /mnt"$esp_mount_in_target"
+
+    mountpoint -q /mnt ||
+      disk_abort_hook "Target /mnt is not mounted; not starting the installer"
+    mountpoint -q "/mnt$esp_mount_in_target" ||
+      disk_abort_hook "ESP is not mounted at /mnt$esp_mount_in_target"
+    if [[ -n $lvm_home_device ]]; then
+      mountpoint -q /mnt/home ||
+        disk_abort_hook "Home volume $lvm_home_device is not mounted at /mnt/home"
+    fi
+  fi
+
+  local luks_uuid_json="null" luks_uuid
+  if [[ "$encrypt_installation" == "true" ]]; then
+    if $dry; then
+      luks_uuid="00000000-0000-0000-0000-000000000000"
+    else
+      luks_uuid=$(blkid -s UUID -o value "$root_partition_device")
+    fi
+    luks_uuid_json="\"$luks_uuid\""
+  fi
+
+  local home_device_json="null" swap_device_json="null"
+  [[ -n $lvm_home_device ]] && home_device_json="\"$lvm_home_device\""
+  [[ -n $lvm_swap_device ]] && swap_device_json="\"$lvm_swap_device\""
+
+  cat <<-_EOF_ >user_configuration.json
+{
+    "app_config": null,
+    "archinstall-language": "English",
+    "auth_config": {},
+    "audio_config": { "audio": "pipewire" },
+    "bootloader_config": { "bootloader": "Limine", "uki": false, "removable": false },
+    "custom_commands": [],
+    "omarchy_install": {
+        "mode": "protected",
+        "target_mount": "/mnt",
+        "boot": {
+            "esp_mount": "$esp_mount_in_target",
+            "esp_path": "/EFI/limine",
+            "efi_binary": "limine_x64.efi",
+            "enable_fallback": false
+        },
+        "storage": {
+            "esp_device": "$efi_dev",
+            "root_device": "$root_partition_device",
+            "root_mapper": "$root_mapper",
+            "home_device": $home_device_json,
+            "swap_device": $swap_device_json,
+            "lvm_volume_group": "$lvm_vg",
+            "luks_uuid": $luks_uuid_json,
+            "kernel": "$kernel_choice"
+        }
+    },
+    "disk_config": {
+        "config_type": "pre_mounted_config",
+        "mountpoint": "/mnt"
+    },
+    "hostname": "$hostname",
+    "kernels": [ "$kernel_choice" ],
+    "network_config": { "type": "iso" },
+    "ntp": true,
+    "parallel_downloads": 8,
+    "script": null,
+    "services": [],
+    "swap": $([[ -n $lvm_swap_device ]] && echo false || echo true),
+    "timezone": "$timezone",
+    "locale_config": {
+        "kb_layout": "$keyboard",
+        "sys_enc": "UTF-8",
+        "sys_lang": "en_US.UTF-8"
+    },
+    "mirror_config": {
+        "custom_repositories": [],
+        "custom_servers": [
+            {"url": "https://mirror.omarchy.org/\$repo/os/\$arch"},
+            {"url": "https://mirror.rackspace.com/archlinux/\$repo/os/\$arch"},
+            {"url": "https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"}
+        ],
+        "mirror_regions": {},
+        "optional_repositories": []
+    },
+    "packages": [
+        "base-devel",
+        "git",
+        "omarchy-keyring",
+        "$OMARCHY_SETTINGS_PACKAGE",
+        "$OMARCHY_RUNTIME_PACKAGE"
+    ],
+    "profile_config": {
+        "gfx_driver": null,
+        "greeter": null,
+        "profile": {}
+    },
+    "version": "3.0.9"
+}
+_EOF_
+}
+
 disk_form() {
   step "Let's select where to install Omarchy..."
 
@@ -940,6 +1367,11 @@ install_mode_form() {
   if [[ -d /sys/firmware/efi ]] && ! $full_disk_only; then
     choices+=("Free space install (alongside existing data)")
   fi
+  # Installing into volumes that already exist is a protected-mode install and
+  # registers an EFI boot entry, so it carries the same UEFI-only limit.
+  if [[ -d /sys/firmware/efi ]] && $lvm_available; then
+    choices+=("Existing LVM volumes (advanced)")
+  fi
   choices+=("Choose a different disk")
 
   step "Let's select how to install Omarchy..."
@@ -990,7 +1422,7 @@ confirm_disk_overwrite() {
 # reaches here; it's armed by Ctrl+C on the keyboard screen and goes straight to
 # disk selection.)
 select_installation() {
-  local full_disk_only
+  local full_disk_only lvm_available
 
   while true; do
     if requires_full_disk_install; then
@@ -999,9 +1431,19 @@ select_installation() {
       full_disk_only=false
     fi
 
-    # With no free-space option to offer, a full-disk install is the only
-    # mode, so skip the picker and go straight to the overwrite confirm.
-    if $full_disk_only; then
+    # A disk given over entirely to a physical volume reports no free space,
+    # so free_space and lvm are never both on offer in practice. Both are
+    # checked anyway: a disk can hold a volume group and still have room.
+    if disk_has_lvm "$disk"; then
+      lvm_available=true
+    else
+      lvm_available=false
+    fi
+
+    # With neither free space nor a volume group to install into, a full-disk
+    # install is the only mode, so skip the picker and go straight to the
+    # overwrite confirm.
+    if $full_disk_only && ! $lvm_available; then
       install_mode="Full disk install"
     else
       install_mode_form
@@ -1015,11 +1457,17 @@ select_installation() {
         fi
         # When the picker was skipped, declining the overwrite means the user
         # wants a different disk.
-        $full_disk_only && disk_form
+        $full_disk_only && ! $lvm_available && disk_form
         ;;
       "Free space install"*)
         if run_partition_decide; then
           install_target="free_space"
+          return 0
+        fi
+        ;;
+      "Existing LVM volumes"*)
+        if run_lvm_decide; then
+          install_target="lvm"
           return 0
         fi
         ;;
@@ -1034,6 +1482,13 @@ select_installation() {
 
 defer_provisioning=false
 install_target="full_disk"
+
+# Set by run_lvm_decide. Empty means "no volume of its own": /home falls back to
+# the @home subvolume and the install gets no swap volume.
+lvm_vg=""
+lvm_records=""
+lvm_home_device=""
+lvm_swap_device=""
 
 # Let the live VT reach its settled width before the first screen so the logo
 # isn't measured against the transient 80-column boot console.
@@ -1082,8 +1537,12 @@ clear
 
 write_user_files
 
-if [[ $install_target == "free_space" ]]; then
-  run_partition_execute "$@"
+if [[ $install_target == "free_space" || $install_target == "lvm" ]]; then
+  if [[ $install_target == "lvm" ]]; then
+    run_lvm_execute "$@"
+  else
+    run_partition_execute "$@"
+  fi
 
   if [[ ${1:-} == "dry" ]]; then
     print_dry_run_files

@@ -45,7 +45,7 @@ The ISO branch and package channel are independent. Selecting the `dragon` ISO b
 
 For unpublished changes, use `--local-repo <repo-dir>` for a prebuilt repository or `--local-source` as above to build runtime, settings and Neovim packages from local checkouts. Other missing packages still need to be supplied by the selected repository; the two options can be combined. Offline caches are separated by channel, architecture and media target. Generic image filenames start with `omarchy-generic-`.
 
-[configs/aarch64/platforms.json](configs/aarch64/platforms.json) supplies model-specific packages and installed boot arguments through exact vendor/product matches. Both targets use the package-owned `linux-aarch64-pkgbase-shim` for kernel-image handling.
+[configs/aarch64/platforms.json](configs/aarch64/platforms.json) supplies model-specific packages, installed boot arguments and optional initramfs profiles through exact vendor/product matches. Both targets use the package-owned `linux-aarch64-pkgbase-shim` for kernel-image handling. The [ThinkPad/HP port notes](docs/snapdragon-laptop-port.md) describe the early-display and camera userspace additions, their source hardware evidence and the required upstream-kernel retests.
 
 ### Snapdragon live DSP startup
 

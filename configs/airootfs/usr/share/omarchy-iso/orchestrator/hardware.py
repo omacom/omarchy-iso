@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import platform
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -13,6 +14,9 @@ MEDIA_TARGET = Path("/root/omarchy_media_target")
 DMI = Path("/sys/class/dmi/id")
 TARGETS = {"aarch64/snapdragon", "aarch64/generic"}
 BOOT_CONFIG = Path("etc/limine-entry-tool.d/80-omarchy-aarch64-platform.conf")
+INITRAMFS_CONFIG = Path("etc/mkinitcpio.conf.d/80-omarchy-aarch64-platform.conf")
+INITRAMFS_SOURCE = Path(__file__).resolve().parent.parent / "initcpio"
+INITRAMFS_PROFILES = {"qcom-x1e-lcd"}
 
 
 def load_platforms(manifest: Path) -> list[dict]:
@@ -38,6 +42,12 @@ def load_platforms(manifest: Path) -> list[dict]:
             raise ValueError(f"Missing name for ARM platform {identifier}")
         if entry.get("media_target") not in TARGETS:
             raise ValueError(f"Invalid media target for {identifier}")
+        profile = entry.get("initramfs_profile")
+        if profile is not None and (
+            not isinstance(profile, str) or profile not in INITRAMFS_PROFILES
+            or entry["media_target"] != "aarch64/snapdragon"
+        ):
+            raise ValueError(f"Invalid initramfs_profile for {identifier}")
         matches = entry.get("match")
         if not isinstance(matches, list) or not matches:
             raise ValueError(f"Missing hardware identity for {identifier}")
@@ -83,7 +93,25 @@ def detect_platform() -> dict | None:
 
 
 def configure_boot(target: Path, entry: dict | None) -> None:
-    if not entry or not entry["kernel_cmdline"]:
+    if not entry:
+        return
+    profile = entry.get("initramfs_profile")
+    if profile:
+        if profile not in INITRAMFS_PROFILES:
+            raise ValueError(f"Unknown initramfs profile: {profile}")
+        hook = f"omarchy-{profile}"
+        destination = target / "usr/lib/initcpio/install" / hook
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(INITRAMFS_SOURCE / hook, destination)
+        # mkinitcpio resolves executable build hooks; do not rely on source mode.
+        destination.chmod(0o755)
+        config = target / INITRAMFS_CONFIG
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            f"# Omarchy platform {entry['id']}: early display dependencies\n"
+            f"HOOKS+=({hook})\n"
+        )
+    if not entry["kernel_cmdline"]:
         return
     config = target / BOOT_CONFIG
     config.parent.mkdir(parents=True, exist_ok=True)

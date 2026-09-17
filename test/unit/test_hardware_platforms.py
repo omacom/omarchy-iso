@@ -45,6 +45,7 @@ class HardwarePlatformsTest(unittest.TestCase):
 
     def test_invalid_profiles_fail_validation(self):
         for field, value in [("packages", ["--overwrite"]), ("kernel_cmdline", ['$(touch /tmp/bad)']),
+                             ("initramfs_profile", "../../bad"), ("initramfs_profile", []),
                              ("media_target", "aarch64/unknown"), ("match", [{"product_name": "83ED"}])]:
             with self.subTest(field=field):
                 data = copy.deepcopy(self.platforms)
@@ -146,6 +147,32 @@ class HardwarePlatformsTest(unittest.TestCase):
             target = self.root / "target"
             hardware.configure_boot(target, entry)
             self.assertFalse(target.exists())
+
+    def test_lcd_profiles_preserve_existing_hooks_and_install_executable_build_hook(self):
+        for identifier in ("lenovo-t14s-gen6-lcd", "hp-elitebook-ultra-g1q"):
+            with self.subTest(platform=identifier):
+                entry = next(p for p in self.platforms if p["id"] == identifier)
+                target = self.root / identifier
+                config = target / "etc/mkinitcpio.conf"
+                config.parent.mkdir(parents=True)
+                original = "HOOKS=(base systemd autodetect modconf kms keyboard sd-encrypt filesystems)\n"
+                config.write_text(original)
+                for _ in range(2):
+                    hardware.configure_boot(target, entry)
+                self.assertEqual(config.read_text(), original)
+                hook = target / "usr/lib/initcpio/install/omarchy-qcom-x1e-lcd"
+                self.assertEqual(hook.stat().st_mode & 0o777, 0o755)
+                self.assertEqual(hook.read_bytes(), (hardware.INITRAMFS_SOURCE / hook.name).read_bytes())
+                self.assertEqual((target / hardware.INITRAMFS_CONFIG).read_text().count("HOOKS+="), 1)
+                self.assertFalse((target / hardware.BOOT_CONFIG).exists())
+
+    def test_camera_packages_are_scoped_to_lcd_laptops(self):
+        camera_packages = {"libcamera", "libcamera-tools", "pipewire-libcamera", "gst-plugin-libcamera"}
+        for entry in self.platforms:
+            if entry["id"] in ("lenovo-t14s-gen6-lcd", "hp-elitebook-ultra-g1q"):
+                self.assertTrue(camera_packages <= set(entry["packages"]))
+            else:
+                self.assertFalse(camera_packages & set(entry["packages"]))
 
 
 if __name__ == "__main__":

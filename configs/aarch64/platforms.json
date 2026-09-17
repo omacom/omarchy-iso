@@ -2,6 +2,28 @@
   "schema_version": 1,
   "platforms": [
     {
+      "id": "lenovo-t14s-gen6-lcd",
+      "name": "Lenovo ThinkPad T14s Gen 6 (tested LCD SKU)",
+      "media_target": "aarch64/snapdragon",
+      "match": [
+        { "sys_vendor": "LENOVO", "product_name": "21N10000US" }
+      ],
+      "packages": ["linux-firmware-qcom", "libcamera", "libcamera-tools", "pipewire-libcamera", "gst-plugin-libcamera"],
+      "kernel_cmdline": [],
+      "initramfs_profile": "qcom-x1e-lcd"
+    },
+    {
+      "id": "hp-elitebook-ultra-g1q",
+      "name": "HP EliteBook Ultra G1q 14",
+      "media_target": "aarch64/snapdragon",
+      "match": [
+        { "sys_vendor": "HP", "product_name": "HP EliteBook Ultra G1q 14 inch Notebook AI PC" }
+      ],
+      "packages": ["linux-firmware-qcom", "libcamera", "libcamera-tools", "pipewire-libcamera", "gst-plugin-libcamera"],
+      "kernel_cmdline": [],
+      "initramfs_profile": "qcom-x1e-lcd"
+    },
+    {
       "id": "lenovo-yoga-slim7x",
       "name": "Lenovo Yoga Slim 7x",
       "media_target": "aarch64/snapdragon",

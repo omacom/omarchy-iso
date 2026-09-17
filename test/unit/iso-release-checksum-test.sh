@@ -30,6 +30,11 @@ trap 'rm -rf "$work"' EXIT
 sandbox="$work/repo"
 mkdir -p "$sandbox/bin" "$sandbox/release" "$work/stubs"
 cp "$ROOT/bin/omarchy-iso-release" "$sandbox/bin/"
+cat >"$sandbox/bin/omarchy-iso-torrent" <<'STUB'
+#!/bin/bash
+printf 'torrent\n' >"$1.torrent"
+STUB
+chmod +x "$sandbox/bin/omarchy-iso-torrent"
 printf 'not really an iso\n' >"$sandbox/release/omarchy-2099.01.01-x86_64-quattro.iso"
 
 cat >"$work/stubs/omarchy-iso-sign" <<'STUB'
@@ -55,12 +60,12 @@ STUB
 
 chmod +x "$work/stubs"/*
 
+# This suite isolates checksum behavior; torrent metadata has its own tests.
+printf '#!/bin/bash\nexit 0\n' >"$work/stubs/mktorrent"
+chmod +x "$work/stubs/mktorrent"
+
 export TEST_LOG="$work/log"
 : >"$TEST_LOG"
-
-run_upload() {
-  PATH="$work/stubs:$PATH" "$ROOT/bin/omarchy-iso-upload" "$@" >"$work/rclone-log" 2>"$work/upload-err"
-}
 
 PATH="$work/stubs:$PATH" "$sandbox/bin/omarchy-iso-release" --no-make 9.9.9 >/dev/null
 
@@ -100,11 +105,19 @@ printf 'not really an iso\n' >"$sandbox/release/omarchy-2099.01.02-x86_64-quattr
 cp "$sandbox/release/omarchy-2099.01.02-x86_64-quattro.iso" "$sandbox/release/omarchy-8.8.8.iso"
 chmod 000 "$sandbox/release/omarchy-8.8.8.iso"
 
+# Inject the read failure as well so this case works when run as root.
+cat >"$work/stubs/sha256sum" <<'STUB'
+#!/bin/bash
+exit 1
+STUB
+chmod +x "$work/stubs/sha256sum"
+
 set +e
 PATH="$work/stubs:$PATH" "$sandbox/bin/omarchy-iso-release" --no-make 8.8.8 >/dev/null 2>&1
 release_status=$?
 set -e
 chmod 644 "$sandbox/release/omarchy-8.8.8.iso"
+rm "$work/stubs/sha256sum"
 
 (( release_status != 0 )) ||
   fail "release stops when the ISO cannot be checksummed" "exit status was 0"
@@ -114,9 +127,13 @@ pass "release stops when the ISO cannot be checksummed"
 
 # Uploading: both sidecars go up with the ISO, and a missing one is skipped
 # rather than handed to rclone as a path that does not exist.
-export HOME="$work/home"
-mkdir -p "$HOME/.config/rclone"
-: >"$HOME/.config/rclone/rclone.conf"
+# Redirect the config check in the sandbox copy without changing HOME.
+sed "s|~/.config/rclone/rclone.conf|$work/rclone.conf|" "$ROOT/bin/omarchy-iso-upload" >"$sandbox/bin/omarchy-iso-upload"
+chmod +x "$sandbox/bin/omarchy-iso-upload"
+: >"$work/rclone.conf"
+run_upload() {
+  PATH="$work/stubs:$PATH" "$sandbox/bin/omarchy-iso-upload" "$@" >"$work/rclone-log" 2>"$work/upload-err"
+}
 
 # A space in the path is the case that tells a quoted argument from an unquoted
 # one, so every upload case runs from a directory that has one.

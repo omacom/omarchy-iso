@@ -7,6 +7,8 @@ intel-ucode
 linux-firmware
 linux
 limine
+limine-mkinitcpio-hook
+limine-snapper-sync
 omarchy-keyring
 openssh
 pipewire

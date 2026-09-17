@@ -59,6 +59,7 @@ jobs:
           python3 -m unittest discover -s test/unit -p test_hardware_platforms.py
           python3 -m unittest discover -s test/unit -p test_keyboard.py
           python3 -m unittest discover -s test/unit -p test_arm_packages.py
+          python3 -m unittest discover -s test/unit -p test_limine_target_packages.py
           python3 -m unittest discover -s test/unit -p test_arm_workflow.py
 
       # Leave room for the offline package mirror and ISO staging tree.

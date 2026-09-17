@@ -147,6 +147,10 @@ EARLY_BOOTSTRAP_AARCH64_PACKAGES = [
     "linux-aarch64-pkgbase-shim",
 ]
 
+# This installer uses Limine, but the ARM runtime package does not require it.
+# Install these in the target after the ESP and initial Limine config exist.
+LIMINE_TARGET_PACKAGES = ["limine-mkinitcpio-hook", "limine-snapper-sync", "snapper"]
+
 
 def _early_bootstrap_packages() -> list[str]:
     packages = [*EARLY_BOOTSTRAP_BASE_PACKAGES, _omarchy_settings_package()]
@@ -760,8 +764,7 @@ def _unmask_mkinitcpio_pacman_hooks(
 
 
 def _runtime_package_list(ctx: InstallContext) -> list[str]:
-    """Selected Omarchy runtime package + every package in the ISO-bundled
-    base package list that isn't already installed early."""
+    """Runtime, base, Limine and hardware packages not already installed early."""
     base_pkgs_file = Path("/usr/share/omarchy-iso/omarchy-base.packages")
     pkgs = [_omarchy_runtime_package()]
     already_installed = set(_early_packages()) | {
@@ -773,7 +776,7 @@ def _runtime_package_list(ctx: InstallContext) -> list[str]:
         "omarchy-nvim",
     }
     entry = ctx.state.get("hardware_platform") or {}
-    for raw in base_pkgs_file.read_text().splitlines() + entry.get("packages", []):
+    for raw in base_pkgs_file.read_text().splitlines() + LIMINE_TARGET_PACKAGES + entry.get("packages", []):
         s = raw.strip()
         if not s or s.startswith("#"):
             continue
@@ -1778,9 +1781,9 @@ def _assert_boot_hooks_restored(ctx: InstallContext) -> None:
         backup = hooks_dir / f"{name}.omarchy-backup"
         if backup.exists() or backup.is_symlink():
             raise RuntimeError(f"{backup} left behind by the install-time hook mask")
-        # limine-mkinitcpio-hook is a hard dependency of the Omarchy runtime
-        # package, so the real hook is on disk before the mask ever goes up and
-        # must be on disk again now.
+        # limine-mkinitcpio-hook is installed with the target runtime packages,
+        # so the real hook is on disk before the mask ever goes up and must
+        # be on disk again now.
         if not path.is_file():
             raise RuntimeError(f"{path} is missing — future kernel updates would ship no UKI")
 

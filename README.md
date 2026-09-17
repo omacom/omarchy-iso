@@ -90,6 +90,18 @@ Boot order is disk first: the empty disk falls through to the ISO on the first b
 
 Encrypted autoinstalls are not fully unattended — the LUKS passphrase prompt still needs someone at the first boot.
 
+## Install timing
+
+The orchestrator times every phase on a monotonic clock and, when the install succeeds, writes the result to the target as `/var/log/omarchy-install-timing.json` and `/var/lib/omarchy/leaderboard/timing.json` (same bytes): a schema version, a run id minted before the first phase, the elapsed nanoseconds for the run, for each phase a stable id and its own elapsed nanoseconds, the ISO's identity (ref, mirror, offline database hash), the class the installer observed (full-disk or protected, encrypted, virtualised, page cache warmed) and a hardware sketch with nothing that identifies a person. The finish screen shows the run as a lap time, the same span it has always shown, as m:ss.mmm on both sides of the minute, and h:mm:ss.mmm from an hour, with the first eight characters of the run id beside it, so a photo of the screen can be matched to the file.
+
+The document is sealed: an Ed25519 keypair is generated in the live environment after the last phase, `timing.sig` and `install.pub` land beside the document, and the private key is never written anywhere. Check a result with nothing but openssl:
+
+```bash
+openssl pkeyutl -verify -pubin -rawin -inkey install.pub -in timing.json -sigfile timing.sig
+```
+
+That makes the result tamper-evident, not true: a document and a keypair can be fabricated on any machine. Nothing here contacts a server; sharing a result is a separate, explicit step on the installed system. See `plans/install-leaderboard.md`.
+
 ## Testing the ISO
 
 Run `./bin/omarchy-iso-boot [release/omarchy.iso]`.

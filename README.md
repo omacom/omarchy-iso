@@ -92,7 +92,9 @@ Encrypted autoinstalls are not fully unattended — the LUKS passphrase prompt s
 
 ## Testing the ISO
 
-Run `./bin/omarchy-iso-boot [release/omarchy.iso]`.
+Run `./bin/omarchy-iso-boot [release/omarchy.iso]`. Pass
+`--cidata-dir DIR` to perform an unattended installation from the configurator
+files in `DIR` and provision SSH for the installed user.
 
 Run `./test/all` for the fast, VM-free tests under `test/unit/`, which cover cidata autoinstall loading and the orchestrator's phases without needing a built ISO.
 

@@ -1,0 +1,52 @@
+#!/bin/bash
+# Print Omarchy's Argon2id --pbkdf-memory (KiB) for live-ISO LUKS formatting.
+#
+# cryptsetup's argon2id default (~1 GiB) is OOM-killed on constrained live/PXE
+# boots (cryptsetup dies with SIGKILL 9). Omarchy uses a fixed 256 MiB default
+# so every install gets the same KDF parameters. We only step down to the
+# RFC 9106 64 MiB floor when that default cannot fit, and we refuse to format
+# if even the floor cannot.
+#
+# Argon2id attacker cost scales with memory squared times passes. Lowering
+# --pbkdf-memory is a real hardness reduction; --iter-time does not make up
+# for it. That is why the default is a fixed Omarchy value rather than a
+# function of whatever MemAvailable happens to be at format time.
+#
+# OMARCHY_LUKS_MEMINFO may point at an alternate meminfo file (used by tests).
+
+set -euo pipefail
+
+default_kib=262144 # 256 MiB — Omarchy Argon2id memory cost
+floor_kib=65536    # 64 MiB — RFC 9106 memory-constrained recommendation
+
+# cryptsetup will try to lock --pbkdf-memory KiB. Leave at least as much
+# again for the rest of the live session so the allocation cannot consume
+# all of MemAvailable.
+fits() {
+  local need=$1 avail=$2
+  ((avail >= need * 2))
+}
+
+meminfo=${OMARCHY_LUKS_MEMINFO:-/proc/meminfo}
+avail_kib=0
+if [[ -r $meminfo ]]; then
+  avail_kib=$(awk '/^MemAvailable:/ { print $2; exit }' "$meminfo" 2>/dev/null || echo 0)
+fi
+
+if ! [[ $avail_kib =~ ^[0-9]+$ ]]; then
+  avail_kib=0
+fi
+
+if fits "$default_kib" "$avail_kib"; then
+  printf '%s\n' "$default_kib"
+  exit 0
+fi
+
+if fits "$floor_kib" "$avail_kib"; then
+  echo "omarchy-luks-pbkdf-memory: MemAvailable ${avail_kib} KiB cannot fit the ${default_kib} KiB Omarchy default; using ${floor_kib} KiB floor" >&2
+  printf '%s\n' "$floor_kib"
+  exit 0
+fi
+
+echo "omarchy-luks-pbkdf-memory: MemAvailable ${avail_kib} KiB is too small to fit even the ${floor_kib} KiB Argon2id floor; refusing LUKS format" >&2
+exit 1

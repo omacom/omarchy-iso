@@ -514,9 +514,9 @@ verify_universal_clipboard_shortcuts() {
   local terminal_result="/tmp/omarchy-universal-terminal-paste"
 
   cleanup_shortcut_state
-  ssh_session "setsid -f chromium --new-window about:blank >/dev/null 2>&1"
-  if ! wait_for_guest_state "universal clipboard test opens Chromium" 45 \
-    ssh_session "hyprctl -j clients | jq -e '[.[] | select(.class | test(\"(?i)chromium\"))] | length == 1'"; then
+  ssh_session "omarchy-launch-browser about:blank"
+  if ! wait_for_guest_state "universal clipboard test opens the default browser" 45 \
+    ssh_session "hyprctl -j clients | jq -e '[.[] | select(.class | test(\"(?i)(chromium|brave-origin)\"))] | length == 1'"; then
     capture_console "failure-shortcut-universal-clipboard-browser"
     return 1
   fi
@@ -551,7 +551,7 @@ verify_universal_clipboard_shortcuts() {
   ssh_session 'while read -r address; do
     hyprctl dispatch "hl.dsp.window.close({ window = \"address:$address\" })" >/dev/null 2>&1 ||
       hyprctl dispatch closewindow "address:$address" >/dev/null 2>&1 || true
-  done < <(hyprctl -j clients | jq -r '\''.[] | select(.class | test("(?i)chromium")) | .address'\'')' || true
+  done < <(hyprctl -j clients | jq -r '\''.[] | select(.class | test("(?i)(chromium|brave-origin)")) | .address'\'')' || true
 
   ssh_session "rm -f '$terminal_result'; \
     setsid -f bash -c 'printf \"%s\" \"$terminal_token\" | wl-copy' >/dev/null 2>&1; \

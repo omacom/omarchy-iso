@@ -38,7 +38,23 @@ Prepare at least 32 GiB of contiguous unallocated space before booting it.
 Only free-space installation is offered on the installer disk. Full-disk
 installation, deferred provisioning, and the partition editor remain unavailable
 there. Loopback ISO and device-mapper source layouts are not supported by this
-path. BitLocker checks are unchanged; suspending BitLocker is not sufficient.
+path.
+
+BitLocker volumes may remain encrypted for a free-space install on GPT, provided
+protection is suspended and the ISO can verify a working clear-key protector.
+The check briefly opens a read-only mapping, never mounts Windows, and closes it
+before proceeding. Active protection, unsupported states, and failed checks
+block installation. Existing partitions on these disks are protected from
+overlap, formatting and cleanup, and the partition editor is unavailable.
+
+Prepare free space in Windows first and save your BitLocker recovery key. In
+administrator PowerShell, run `Suspend-BitLocker -MountPoint C: -RebootCount 0`
+for each affected volume (substitute its drive letter). This keeps protection
+suspended until you resume it; the data remains encrypted but is not protected
+against offline access during suspension. After installation, boot Windows
+through the new boot menu, then run `Resume-BitLocker -MountPoint C:`. Resume
+protection in Windows if you cancel installation, too. The ISO does not change
+BitLocker protectors or resume protection for you.
 
 The installer partition remains on disk after installation. Boot the installed
 system successfully before reclaiming it yourself.
@@ -121,6 +137,14 @@ Run `sudo bash test/same-disk-partitioning` on Linux for the storage regression
 test. It uses disposable loop-backed images with 512-byte and 4096-byte sectors
 to check that a mounted source survives partition creation, formatting and
 rollback. It does not replace testing a complete same-disk ISO installation.
+
+Run `sudo python3 test/bitlocker-suspension /path/to/bitlk-images` with cryptsetup
+2.8.6 or newer to test the read-only probe against the upstream cryptsetup
+v2.8.6 fixtures (`tests/bitlk-images.tar.xz`). It checks clear-key, protected,
+partially encrypted and damaged images, including unchanged bytes and mapping
+cleanup. A Windows/TPM installation test is still required: suspend protection,
+install in free space, boot Windows through the new menu, resume protection,
+and boot Windows again. Also test cancellation and return to Windows.
 
 ## Acceptance testing the ISO
 

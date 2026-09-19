@@ -400,17 +400,46 @@ verify_install_media() {
 
 # partition_path lives in disk-partitioning.sh alongside the creation helpers.
 
-# BitLocker writes the "-FVE-FS-" signature at offset 3 of the partition.
-detect_bitlocker() {
-  local p sig
-  for p in $(lsblk -lnpo NAME,TYPE "$disk" | awk '$2=="part"{print $1}'); do
-    sig=$(dd if="$p" bs=1 skip=3 count=8 status=none 2>/dev/null)
-    if [[ "$sig" == "-FVE-FS-" ]]; then
-      echo "$p"
-      return 0
+# A suspended volume keeps its BitLocker signature and TPM protector, but adds
+# a clear-key protector. Ask cryptsetup to validate that key, not just its label.
+# A read-only mapping also rejects unsupported conversion states; a password
+# test alone does not. Never mount the filesystem or change BitLocker metadata.
+bitlocker_is_suspended() (
+  local metadata mapping="omarchy-bitlocker-check-${BASHPID}"
+  metadata=$(LC_ALL=C cryptsetup bitlkDump "$1" 2>/dev/null) || return 1
+  grep -Eq '^[[:space:]]*Protection:[[:space:]]+VMK protected with clear key$' <<<"$metadata" || return 1
+  [[ ! -e /dev/mapper/$mapping ]] || return 1
+  trap 'cryptsetup close "$mapping" >/dev/null 2>&1 || true' EXIT
+  # /dev/null prevents falling back to an interactive password/recovery prompt.
+  LC_ALL=C cryptsetup open --type bitlk --readonly --batch-mode \
+    --key-file /dev/null "$1" "$mapping" </dev/null >/dev/null 2>&1 || return 1
+  cryptsetup close "$mapping" >/dev/null 2>&1 || return 1
+  trap - EXIT
+)
+
+# Check every partition: one suspended volume does not make the others safe.
+# Keep discovery failures distinct from a disk with no BitLocker volumes.
+check_bitlocker() {
+  local devices p type sig
+  bitlocker_found=false
+  devices=$(lsblk -lnpo NAME,TYPE "$disk") || return 1
+  [[ -n $devices ]] || return 1
+  while read -r p type; do
+    [[ $type == part ]] || continue
+    sig=$(od -An -tx1 -j3 -N8 "$p" 2>/dev/null) || return 1
+    sig=${sig//[[:space:]]/}
+    [[ ${#sig} == 16 ]] || return 1
+    [[ $sig == 2d4656452d46532d ]] || continue # -FVE-FS-
+    bitlocker_found=true
+    if ! bitlocker_is_suspended "$p"; then
+      say --foreground 1 "Cannot verify suspended BitLocker protection on $p."
+      say "In Windows, suspend protection on this volume before installing."
+      say "Use Suspend-BitLocker -MountPoint C: -RebootCount 0 in administrator PowerShell (replace C: with its drive letter)."
+      say "If already suspended, this ISO cannot safely verify the volume."
+      return 1
     fi
-  done
-  return 1
+  done <<<"$devices"
+  return 0
 }
 
 # Look for an existing Windows ESP (FAT partition containing EFI/Microsoft) on $disk.
@@ -532,7 +561,7 @@ not_enough_space() {
   local available="${1:-0}"
   step "Not enough free space on $disk"
   say --foreground 1 "$disk has $(to_gb $available) of usable free space; Omarchy needs at least 32GB."
-  if is_install_media_disk; then
+  if is_install_media_disk || [[ $protected_disk == "$disk" ]]; then
     say "Prepare unallocated space before booting this installer, or choose another disk."
     gum input --placeholder "Press Enter to return" >/dev/null || true
     return 1
@@ -553,13 +582,14 @@ run_partition_decide() {
     verify_install_media || abort "The installer source or existing partitions changed; stopping."
   fi
   step "Checking for BitLocker on $disk"
-  local bl_part
-  bl_part=$(detect_bitlocker || true)
-  if [[ -n "$bl_part" ]]; then
-    say --foreground 1 "BitLocker signature detected on $bl_part."
-    say "Turn BitLocker off in Windows and wait for the drive to finish decrypting, then try again."
-    say "Suspending BitLocker is not enough — the drive stays encrypted."
-    abort "Aborted: BitLocker is enabled on this disk."
+  check_bitlocker || abort "Aborted: could not verify BitLocker protection on this disk."
+  if $bitlocker_found; then
+    if [[ $protected_disk != "$disk" ]]; then
+      protect_existing_partitions "$disk" || abort "BitLocker free-space installs require an existing GPT partition table."
+    fi
+    say "BitLocker protection is suspended. Existing partitions will be left untouched."
+    say "Keep your recovery key available. After installation, boot Windows through the new boot menu, then resume protection."
+    gum confirm "Continue with BitLocker protection suspended?" || return 1
   fi
 
   # Omarchy always creates its own dedicated ESP in free space and never
@@ -727,8 +757,13 @@ run_partition_execute() {
   else
     step "Creating partitions on $disk"
     verify_install_media || abort "The installer source or existing partitions changed; stopping."
-    if is_install_media_disk && $needs_mklabel; then
-      abort "Cannot replace the partition table on the installer disk."
+    verify_existing_partitions "$disk" || abort "Existing partitions changed; stopping."
+    check_bitlocker || abort "BitLocker protection could not be verified before writing; stopping."
+    if $bitlocker_found && [[ $protected_disk != "$disk" ]]; then
+      abort "BitLocker state changed after planning; restart the installer."
+    fi
+    if [[ $protected_disk == "$disk" ]] && $needs_mklabel; then
+      abort "Cannot replace the partition table on a protected disk."
     fi
     if $needs_mklabel; then
       disk_step "initializing GPT on $disk" parted --script "$disk" mklabel gpt
@@ -762,7 +797,8 @@ run_partition_execute() {
       disk_abort_hook "Root partition $root_partition_device never appeared"
 
     verify_install_media || disk_abort_hook "The installer source or existing partitions changed; stopping."
-    if is_install_media_disk; then
+    verify_existing_partitions "$disk" || disk_abort_hook "Existing partitions changed; stopping."
+    if [[ $protected_disk == "$disk" ]]; then
       # A stale kernel partition node must never become a formatting target.
       # Match both geometry fields against the table we just wrote.
       verify_partition_device "$disk" "$efi_part_num" "$efi_dev" &&
@@ -949,6 +985,8 @@ disk_form() {
   [[ -n $disk_options ]] || abort "No supported installation disk found."
   selected_display=$(echo "$disk_options" | gum choose --header "Select install disk") || abort
   disk=$(echo "$selected_display" | awk '{print $1}')
+  protected_disk=""
+  protected_partition_table=""
   if is_install_media_disk; then
     protect_existing_partitions "$disk" || abort "Cannot protect the installer disk's existing partitions."
   fi
@@ -957,8 +995,8 @@ disk_form() {
 # STEP 4: INSTALL MODE
 
 open_partition_tool() {
-  if is_install_media_disk; then
-    say "The partition editor is unavailable on the disk containing the running installer."
+  if is_install_media_disk || [[ $protected_disk == "$disk" ]]; then
+    say "The partition editor is unavailable on this protected disk. Prepare free space before booting the installer."
     return 1
   fi
   step "Partition tool for $disk"

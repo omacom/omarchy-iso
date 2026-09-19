@@ -17,7 +17,7 @@ created_parts=()
 # would run it in a subshell and lose the created_parts bookkeeping.
 created_partition_number=""
 
-# On the live-media disk we only append partitions in existing free space.
+# On live-media and suspended-BitLocker disks we only use existing free space.
 # Keep the original entries, including their byte ranges, for checks before
 # writes and rollback. Other disks keep the existing installation behavior.
 protected_disk=""

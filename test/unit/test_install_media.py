@@ -14,7 +14,7 @@ LIB = ROOT / "configs/airootfs/usr/share/omarchy-iso/disk-partitioning.sh"
 
 def functions(*names):
     return "\n".join(
-        re.search(rf"^{name}\(\) \{{.*?^\}}", CONFIGURATOR, re.M | re.S).group()
+        re.search(rf"^{name}\(\) [{{(].*?^[}})](?=\n\n|\Z)", CONFIGURATOR, re.M | re.S).group()
         for name in names
     )
 

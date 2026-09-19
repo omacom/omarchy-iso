@@ -562,8 +562,13 @@ not_enough_space() {
   step "Not enough free space on $disk"
   say --foreground 1 "$disk has $(to_gb $available) of usable free space; Omarchy needs at least 32GB."
   if is_install_media_disk || [[ $protected_disk == "$disk" ]]; then
-    say "Prepare unallocated space before booting this installer, or choose another disk."
-    gum input --placeholder "Press Enter to return" >/dev/null || true
+    if is_install_media_disk; then
+      say "Open the partition tool to delete a partition you no longer need, then try again."
+      open_partition_tool
+    else
+      say "Prepare unallocated space before booting this installer, or choose another disk."
+      gum input --placeholder "Press Enter to return" >/dev/null || true
+    fi
     return 1
   fi
   say "Open the partition tool to free at least 32GB on $disk, then try again."
@@ -988,14 +993,58 @@ disk_form() {
   protected_disk=""
   protected_partition_table=""
   if is_install_media_disk; then
-    protect_existing_partitions "$disk" || abort "Cannot protect the installer disk's existing partitions."
+    protect_install_media_partitions "$disk" "$install_media_partition" || abort "Cannot identify and protect the installer partitions."
   fi
 }
 
 # STEP 4: INSTALL MODE
 
+open_install_media_partition_tool() {
+  local table entry num device size choice expected mounts
+  local options=()
+
+  verify_install_media || abort "The installer source changed; stopping."
+  step "Free space on $disk"
+  say "The installer partitions cannot be removed. You can delete another partition to make room for Omarchy."
+  say "Deleting a partition permanently removes its data. Keep any partitions you still need."
+
+  table=$(parted -ms "$disk" unit B print) || abort "Cannot read the partition table."
+  while IFS= read -r entry; do
+    [[ $entry =~ ^[0-9]+: ]] || continue
+    num=${entry%%:*}
+    is_existing_partition "$disk" "$num" && continue
+    device=$(partition_path "$disk" "$num")
+    mounts=$(lsblk -nr -o MOUNTPOINTS "$device" 2>/dev/null) || continue
+    [[ -z $(tr -d '[:space:]' <<<"$mounts") ]] || continue
+    size=$(awk -F: '{ print $4 }' <<<"$entry")
+    options+=("Partition $num · $size")
+  done <<<"$table"
+
+  if (( ${#options[@]} == 0 )); then
+    say "There are no other unmounted partitions to delete."
+    gum input --placeholder "Press Enter to return" >/dev/null || true
+    return 0
+  fi
+
+  choice=$(gum choose --header "Choose a partition to delete, or return" "Back" "${options[@]}") || return 0
+  [[ $choice != Back ]] || return 0
+  num=${choice#Partition }
+  num=${num%% *}
+  [[ $num =~ ^[0-9]+$ ]] || return 1
+  expected=$(grep -E "^${num}:" <<<"$table") || return 1
+  gum confirm --affirmative "Delete partition $num" --negative "Back" \
+    "Permanently delete partition $num on $disk?" || return 0
+  verify_install_media || abort "The installer source changed; stopping."
+  delete_unprotected_partition "$disk" "$num" "$expected" ||
+    abort "Partition $num changed or could not be safely deleted."
+}
+
 open_partition_tool() {
-  if is_install_media_disk || [[ $protected_disk == "$disk" ]]; then
+  if is_install_media_disk; then
+    open_install_media_partition_tool
+    return $?
+  fi
+  if [[ $protected_disk == "$disk" ]]; then
     say "The partition editor is unavailable on this protected disk. Prepare free space before booting the installer."
     return 1
   fi

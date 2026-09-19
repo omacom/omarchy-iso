@@ -71,19 +71,94 @@ printf '%s\n' "$install_mode"
             self.assertEqual("Full disk install" in result.stdout, expected)
             self.assertIn("Free space install", result.stdout)
 
-    def test_full_disk_and_editor_entry_points_reject_source(self):
-        for entry in ("confirm_disk_overwrite", "open_partition_tool"):
-            result = self.run_shell(functions("is_install_media_disk", entry) + f'''
+    def test_full_disk_entry_point_rejects_source(self):
+        result = self.run_shell(functions("is_install_media_disk", "confirm_disk_overwrite") + r'''
 disk=/dev/sda
 install_media_disk=/dev/sda
-say() {{ :; }}
-abort() {{ exit 9; }}
-gum() {{ echo UNEXPECTED; exit 10; }}
-cfdisk() {{ echo UNEXPECTED; exit 10; }}
-{entry}
+abort() { exit 9; }
+gum() { echo UNEXPECTED; exit 10; }
+confirm_disk_overwrite
 ''')
-            self.assertNotEqual(result.returncode, 0)
-            self.assertNotIn("UNEXPECTED", result.stdout)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("UNEXPECTED", result.stdout)
+
+    def test_source_disk_uses_restricted_editor(self):
+        result = self.run_shell(functions("open_partition_tool") + r'''
+disk=/dev/sda
+is_install_media_disk() { return 0; }
+open_install_media_partition_tool() { echo RESTRICTED; }
+cfdisk() { echo UNEXPECTED; exit 10; }
+open_partition_tool
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "RESTRICTED")
+
+    def test_source_and_temporary_efi_are_protected_but_other_partitions_can_be_deleted(self):
+        result = self.run_shell(r'''
+source "$LIB"
+deleted=false
+parted() {
+  if [[ $1 == --script ]]; then
+    [[ $3 == rm && $4 == 3 ]] || return 1
+    deleted=true
+    return 0
+  fi
+  printf '%s\n' 'BYT;' '/dev/sda:100000000B:scsi:512:512:gpt:disk:;'
+  printf '%s\n' '1:1048576B:535822335B:534773760B:fat32:EFI:boot, esp;'
+  printf '%s\n' '2:535822336B:10000000000B:9464177664B:ntfs:ISO:msftdata;'
+  if ! $deleted; then
+    printf '%s\n' '3:10000000001B:20000000000B:10000000000B:ntfs:OLD:msftdata;'
+  fi
+}
+lsblk() {
+  case "$*" in
+    '-dnro PARTN /dev/sda2') echo 2 ;;
+    '-dnro LABEL /dev/sda2') echo OMARCHY_TMP ;;
+    '-dnro PARTTYPE /dev/sda1') echo c12a7328-f81f-11d2-ba4b-00a0c93ec93b ;;
+    '-dnro LABEL /dev/sda1') echo OMARCHY_TMP ;;
+    '-nr -o MOUNTPOINTS /dev/sda3') : ;;
+  esac
+}
+partprobe() { :; }
+sync() { :; }
+protect_install_media_partitions /dev/sda /dev/sda2 || exit 10
+is_existing_partition /dev/sda 1 || exit 11
+is_existing_partition /dev/sda 2 || exit 12
+is_existing_partition /dev/sda 3 && exit 13
+expected='3:10000000001B:20000000000B:10000000000B:ntfs:OLD:msftdata;'
+delete_unprotected_partition /dev/sda 2 '2:535822336B:10000000000B:9464177664B:ntfs:ISO:msftdata;' && exit 14
+delete_unprotected_partition /dev/sda 3 "$expected" || exit 15
+verify_existing_partitions /dev/sda || exit 16
+''', LIB=str(LIB))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_restricted_editor_lists_only_unmounted_unprotected_partitions(self):
+        result = self.run_shell(functions("open_install_media_partition_tool") + r'''
+disk=/dev/sda
+verify_install_media() { return 0; }
+step() { :; }
+say() { :; }
+abort() { exit 9; }
+parted() {
+  printf '%s\n' 'BYT;' '/dev/sda:100000000B:scsi:512:512:gpt:disk:;'
+  printf '%s\n' '1:1048576B:535822335B:534773760B:fat32:EFI:boot, esp;'
+  printf '%s\n' '2:535822336B:10000000000B:9464177664B:ntfs:ISO:msftdata;'
+  printf '%s\n' '3:10000000001B:20000000000B:10000000000B:ntfs:OLD:msftdata;'
+  printf '%s\n' '4:20000000001B:30000000000B:10000000000B:ntfs:MOUNTED:msftdata;'
+}
+is_existing_partition() { [[ $2 == 1 || $2 == 2 ]]; }
+partition_path() { echo "$1$2"; }
+lsblk() { [[ $* == *'/dev/sda4' ]] && echo '/mounted'; return 0; }
+gum() { printf '%s\n' "$@" >&2; echo Back; }
+delete_unprotected_partition() { echo UNEXPECTED; }
+open_install_media_partition_tool
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Partition 3", result.stderr)
+        self.assertNotIn("Partition 1", result.stderr)
+        self.assertNotIn("Partition 2", result.stderr)
+        self.assertNotIn("Partition 4", result.stderr)
+        self.assertNotIn("UNEXPECTED", result.stdout)
 
     def test_full_source_disk_does_not_take_overwrite_shortcut(self):
         result = self.run_shell(functions("is_install_media_disk", "select_installation") + r'''

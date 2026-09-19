@@ -17,9 +17,10 @@ created_parts=()
 # would run it in a subshell and lose the created_parts bookkeeping.
 created_partition_number=""
 
-# On live-media and suspended-BitLocker disks we only use existing free space.
-# Keep the original entries, including their byte ranges, for checks before
-# writes and rollback. Other disks keep the existing installation behavior.
+# Keep protected entries, including their byte ranges, for checks before writes
+# and rollback. On BitLocker disks this is the whole original table. On a
+# live-media disk it is the mounted source (and our temporary loader, if found),
+# so the restricted editor can free other partitions without touching the ISO.
 protected_disk=""
 protected_partition_table=""
 
@@ -30,6 +31,31 @@ protect_existing_partitions() {
   protected_partition_table=$(printf '%s\n' "$table" | grep -E '^[0-9]+:')
   [[ -n $protected_partition_table ]] || return 1
   protected_disk="$1"
+}
+
+protect_install_media_partitions() {
+  local disk="$1" source="$2" table number entry device type label source_label loader_count=0
+  table=$(parted -ms "$disk" unit B print) || return 1
+  [[ $table == *':gpt:'* ]] || return 1
+  number=$(lsblk -dnro PARTN "$source" 2>/dev/null) || return 1
+  source_label=$(lsblk -dnro LABEL "$source" 2>/dev/null) || return 1
+  [[ $number =~ ^[0-9]+$ ]] || return 1
+  protected_partition_table=$(printf '%s\n' "$table" | grep -E "^${number}:")
+  [[ $(printf '%s\n' "$protected_partition_table" | wc -l) -eq 1 ]] || return 1
+  while IFS= read -r entry; do
+    [[ $entry =~ ^[0-9]+: ]] || continue
+    device=$(partition_path "$disk" "${entry%%:*}")
+    type=$(lsblk -dnro PARTTYPE "$device" 2>/dev/null || true)
+    label=$(lsblk -dnro LABEL "$device" 2>/dev/null || true)
+    if [[ ${entry%%:*} != "$number" && ${type,,} == c12a7328-f81f-11d2-ba4b-00a0c93ec93b && $label == OMARCHY_TMP ]]; then
+      protected_partition_table+=$'\n'"$entry"
+      ((loader_count += 1))
+    fi
+  done <<<"$table"
+  # Our staged NTFS source has a companion EFI loader with this volume label.
+  # If it is missing or ambiguous, do not allow editing this disk.
+  if [[ $source_label == OMARCHY_TMP && $loader_count -ne 1 ]]; then return 1; fi
+  protected_disk="$disk"
 }
 
 verify_existing_partitions() {
@@ -45,6 +71,26 @@ verify_existing_partitions() {
 is_existing_partition() {
   [[ "$1" == "$protected_disk" ]] &&
     grep -q "^$2:" <<<"$protected_partition_table"
+}
+
+# The live-media editor only deletes an explicitly selected, unmounted GPT
+# entry. It cannot open cfdisk on the source disk, where cfdisk could erase the
+# mounted ISO before a post-edit safety check runs.
+delete_unprotected_partition() {
+  local disk="$1" num="$2" expected="$3" device current mounts
+  [[ $disk == "$protected_disk" && $num =~ ^[0-9]+$ ]] || return 1
+  verify_existing_partitions "$disk" || return 1
+  is_existing_partition "$disk" "$num" && return 1
+  current=$(parted -ms "$disk" unit B print | grep -E "^${num}:") || return 1
+  [[ $current == "$expected" ]] || return 1
+  device=$(partition_path "$disk" "$num")
+  # Descendant mountpoints count too (for example, a LUKS mapping).
+  mounts=$(lsblk -nr -o MOUNTPOINTS "$device" 2>/dev/null) || return 1
+  [[ -z $(tr -d '[:space:]' <<<"$mounts") ]] || return 1
+  parted --script "$disk" rm "$num" || return 1
+  partprobe "$disk" 2>/dev/null || true
+  sync
+  verify_existing_partitions "$disk"
 }
 
 verify_partition_device() {

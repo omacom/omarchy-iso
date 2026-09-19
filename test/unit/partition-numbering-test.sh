@@ -124,7 +124,7 @@ create_partition "$IMG" "$((100 * MIB))" "$((300 * MIB))" ext4 OVERLAP
 check "overlapping creation failed" "1" "$?"
 check "nothing tracked" "0" "${#created_parts[@]}"
 
-echo "==> live-media disk preserves every existing partition"
+echo "==> protected disk preserves every snapshotted partition"
 build_holey_disk
 protect_existing_partitions "$IMG"
 check "GPT source can be protected" "0" "$?"
@@ -155,6 +155,26 @@ created_parts=(4)
 rollback_created_parts "$IMG"
 check "changed layout rejects rollback" "1" "$?"
 check "rollback left disk alone" "1 4" "$(partition_numbers "$IMG" | sort | xargs)"
+
+echo "==> live-media source survives deleting another GPT partition"
+build_holey_disk
+protected_disk="$IMG"
+protected_partition_table=$(parted -ms "$IMG" unit B print | grep '^1:')
+other_entry=$(parted -ms "$IMG" unit B print | grep '^4:')
+(
+  # A disk image has no lsblk mountpoint data; the real path checks it.
+  lsblk() { :; }
+  delete_unprotected_partition "$IMG" 1 "$protected_partition_table"
+)
+check "source partition cannot be selected for deletion" "1" "$?"
+(
+  lsblk() { :; }
+  delete_unprotected_partition "$IMG" 4 "$other_entry"
+)
+check "other partition can be removed" "0" "$?"
+verify_existing_partitions "$IMG"
+check "source entry remains unchanged" "0" "$?"
+check "only source partition remains" "1" "$(partition_numbers "$IMG" | sort | xargs)"
 
 if (( failures > 0 )); then
   printf '\n%d check(s) failed\n' "$failures"

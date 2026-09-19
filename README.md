@@ -28,6 +28,46 @@ Despite the local folder name, the first argument is the Omarchy source checkout
 
 Use `--dev` or `--rc` to build against those package channels. Both `--dev` and `--edge` select the dev packages from the edge mirror.
 
+## Installing beside the installation media
+
+When the live installer is mounted directly from a partition on a GPT disk,
+the interactive UEFI installer can use existing unallocated space on that same
+disk. The mounted installer partition and every EFI system partition on that
+disk are protected. If there is not enough room, a guarded partition menu can
+delete another unmounted partition after confirmation. Omarchy then needs at
+least 32 GiB of contiguous unallocated space for its own partitions.
+
+Only free-space installation is offered on the installer disk. Full-disk
+installation and deferred provisioning remain unavailable there. The general
+partition editor is replaced by guarded deletion; it cannot resize partitions
+or remove ESPs, including obsolete ones. Loopback ISO and device-mapper sources
+cannot use same-disk installation. A loopback ISO on local storage can still
+install to a separate disk when its backing disk can be identified. Btrfs-backed
+live media are excluded because the filesystem may span multiple disks.
+If Archiso has detached the source after copying its root image to RAM, normal
+disk choices remain available; the mounted-source partition guard does not apply.
+
+BitLocker volumes may remain encrypted for a free-space install on GPT, provided
+protection is suspended and the ISO can verify a working clear-key protector.
+The check briefly opens a read-only mapping, never mounts Windows, and closes it
+before proceeding. Active protection, unsupported states, and failed checks
+block installation. Free-space installation never formats or cleans up existing
+partitions. On the installer disk, the guarded menu can delete a selected
+unmounted partition; on other BitLocker disks, partition editing is unavailable.
+
+Save your BitLocker recovery key before starting. In administrator PowerShell,
+suspend the Windows OS volume with `Suspend-BitLocker -MountPoint C: -RebootCount 0`.
+For an affected data volume, use `Suspend-BitLocker -MountPoint D:` without
+`-RebootCount` (substitute its actual drive letter).
+The data remains encrypted but is not protected against offline access during
+suspension. After installation, boot Windows through the new boot menu, then
+run `Resume-BitLocker -MountPoint C:` and resume any affected data volumes.
+Resume protection in Windows if you cancel installation, too. The ISO does not
+change BitLocker protectors or resume protection for you.
+
+The installer partition remains on disk after installation. Boot the installed
+system successfully before reclaiming it yourself.
+
 ## Autoinstall
 
 The shipped ISO installs itself with no keyboard when it finds its configuration on a second drive. Attach a drive labeled `cidata` alongside the ISO and the installer copies the config off it and skips the configurator; with no such drive, nothing changes and the wizard runs as usual. No rebuild, no extra boot entry.
@@ -101,6 +141,19 @@ To exercise installation alongside existing Windows-style partitions, run
 synthetic disk in `/tmp` with an existing ESP and data partition plus ample
 unallocated space, then offers to start an interactive installation on it. The
 fixture exercises Windows partition preservation but does not contain Windows.
+
+Run `sudo bash test/same-disk-partitioning` on Linux for the storage regression
+test. It uses disposable loop-backed images with 512-byte and 4096-byte sectors
+to check that a mounted source survives partition creation, formatting and
+rollback. It does not replace testing a complete same-disk ISO installation.
+
+Run `sudo python3 test/bitlocker-suspension /path/to/bitlk-images` with cryptsetup
+2.8.6 or newer to test the read-only probe against the upstream cryptsetup
+v2.8.6 fixtures (`tests/bitlk-images.tar.xz`). It checks clear-key, protected,
+partially encrypted and damaged images, including unchanged bytes and mapping
+cleanup. A Windows/TPM installation test is still required: suspend protection,
+install in free space, boot Windows through the new menu, resume protection,
+and boot Windows again. Also test cancellation and return to Windows.
 
 ## Acceptance testing the ISO
 

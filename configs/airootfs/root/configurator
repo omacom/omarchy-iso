@@ -358,7 +358,7 @@ get_root_disk() {
 
   # /run/archiso/bootmnt usually resolves to the boot partition, but the
   # installer picker works with whole disks. Walk back to the parent disk so
-  # the install media itself never shows up as a wipe target.
+  # it can never be offered for a full-disk install.
   device=$(readlink -f "$device" 2>/dev/null || printf "%s\n" "$device")
 
   while true; do
@@ -372,19 +372,127 @@ get_root_disk() {
   fi
 }
 
+# Archiso can unmount bootmnt after copying its rootfs into RAM, including
+# PXE/HTTP boots. Accept a missing bootmnt only when the mounted live image is
+# demonstrably backed by the dedicated copytoram tmpfs.
+ram_backed_live_root() {
+  local copy_fs root_source backing backing_fs
+  copy_fs=$(findmnt -nro FSTYPE --mountpoint /run/archiso/copytoram 2>/dev/null) || return 1
+  [[ $copy_fs == tmpfs ]] || return 1
+  root_source=$(findmnt -nro SOURCE --mountpoint /run/archiso/airootfs 2>/dev/null) || return 1
+  [[ $(lsblk -dnro TYPE "$root_source" 2>/dev/null) == loop ]] || return 1
+  backing=$(losetup -nO BACK-FILE "$root_source" 2>/dev/null) || return 1
+  backing=$(readlink -f "$backing" 2>/dev/null) || return 1
+  [[ $backing == /run/archiso/copytoram/* && -f $backing ]] || return 1
+  backing_fs=$(findmnt -nro FSTYPE --target "$backing" 2>/dev/null) || return 1
+  [[ $backing_fs == tmpfs ]]
+}
+
+# A loopback ISO is mounted from /dev/loopN, but its file may live on a
+# physical disk. Exclude that backing disk while leaving unrelated targets.
+# Remote and RAM-backed media have no local disk.
+get_install_media_disk() {
+  local source="$1" type backing backing_source backing_fs disk mount_fs
+  type=$(lsblk -dnro TYPE "$source" 2>/dev/null || true)
+  if [[ $type == loop ]]; then
+    backing=$(losetup -nO BACK-FILE "$source" 2>/dev/null) || return 1
+    [[ -f $backing ]] || return 1
+    backing_source=$(findmnt -nro SOURCE --target "$backing" 2>/dev/null) || return 1
+    backing_fs=$(findmnt -nro FSTYPE --target "$backing" 2>/dev/null) || return 1
+    case $backing_fs in
+      tmpfs|ramfs|nfs|nfs4|cifs|smb3) return 0 ;;
+      btrfs) return 1 ;; # SOURCE may name only one disk of a multi-device filesystem.
+    esac
+    disk=$(get_root_disk "$backing_source")
+    [[ -n $disk ]] || return 1
+    printf '%s\n' "$disk"
+    return 0
+  fi
+  [[ $type == rom ]] && return 0
+  mount_fs=$(findmnt -nro FSTYPE /run/archiso/bootmnt 2>/dev/null) || return 1
+  [[ $mount_fs == btrfs ]] && return 1 # A source partition may be one member of a multi-device filesystem.
+  disk=$(get_root_disk "$source")
+  if [[ -n $disk ]]; then
+    printf '%s\n' "$disk"
+    return 0
+  fi
+  case $mount_fs in
+    tmpfs|ramfs|nfs|nfs4|cifs|smb3) return 0 ;;
+  esac
+  return 1
+}
+
+install_media_disk=""
+install_media_partition=""
+configurator_dry_run=false
+[[ ${1:-} == dry ]] && configurator_dry_run=true
+
+is_install_media_disk() {
+  [[ -n $install_media_disk && "$disk" == "$install_media_disk" ]]
+}
+
+# Initially support only a directly mounted partition on a GPT disk. Loopback
+# ISOs and device-mapper stacks need their backing storage resolved separately.
+can_install_beside_media() {
+  [[ -d /sys/firmware/efi && $defer_provisioning == false ]] &&
+    [[ $(lsblk -dno TYPE "$install_media_partition") == part ]] &&
+    [[ $(lsblk -dno PKNAME "$install_media_partition") == "${install_media_disk##*/}" ]] &&
+    [[ $(lsblk -dno PTTYPE "$install_media_disk") == gpt ]]
+}
+
+verify_install_media() {
+  is_install_media_disk || return 0
+  local source
+  source=$(findmnt -nro SOURCE /run/archiso/bootmnt) || return 1
+  source=$(readlink -f "$source") || return 1
+  [[ $source == "$install_media_partition" && $protected_disk == "$disk" &&
+    -n $protected_partition_table ]] &&
+    can_install_beside_media && verify_existing_partitions "$disk"
+}
+
 # partition_path lives in disk-partitioning.sh alongside the creation helpers.
 
-# BitLocker writes the "-FVE-FS-" signature at offset 3 of the partition.
-detect_bitlocker() {
-  local p sig
-  for p in $(lsblk -lnpo NAME,TYPE "$disk" | awk '$2=="part"{print $1}'); do
-    sig=$(dd if="$p" bs=1 skip=3 count=8 status=none 2>/dev/null)
-    if [[ "$sig" == "-FVE-FS-" ]]; then
-      echo "$p"
-      return 0
+# A suspended volume keeps its BitLocker signature and TPM protector, but adds
+# a clear-key protector. Ask cryptsetup to validate that key, not just its label.
+# A read-only mapping also rejects unsupported conversion states; a password
+# test alone does not. Never mount the filesystem or change BitLocker metadata.
+bitlocker_is_suspended() (
+  local metadata mapping="omarchy-bitlocker-check-${BASHPID}"
+  metadata=$(LC_ALL=C cryptsetup bitlkDump "$1" 2>/dev/null) || return 1
+  grep -Eq '^[[:space:]]*Protection:[[:space:]]+VMK protected with clear key$' <<<"$metadata" || return 1
+  [[ ! -e /dev/mapper/$mapping ]] || return 1
+  trap 'cryptsetup close "$mapping" >/dev/null 2>&1 || true' EXIT
+  # /dev/null prevents falling back to an interactive password/recovery prompt.
+  LC_ALL=C cryptsetup open --type bitlk --readonly --batch-mode \
+    --key-file /dev/null "$1" "$mapping" </dev/null >/dev/null 2>&1 || return 1
+  cryptsetup close "$mapping" >/dev/null 2>&1 || return 1
+  trap - EXIT
+)
+
+# Check every partition: one suspended volume does not make the others safe.
+# Keep discovery failures distinct from a disk with no BitLocker volumes.
+check_bitlocker() {
+  local devices p type sig
+  bitlocker_found=false
+  devices=$(lsblk -lnpo NAME,TYPE "$disk") || return 1
+  [[ -n $devices ]] || return 1
+  while read -r p type; do
+    [[ $type == part ]] || continue
+    sig=$(od -An -tx1 -j3 -N8 "$p" 2>/dev/null) || return 1
+    sig=${sig//[[:space:]]/}
+    [[ ${#sig} == 16 ]] || return 1
+    [[ $sig == 2d4656452d46532d ]] || continue # -FVE-FS-
+    bitlocker_found=true
+    if ! bitlocker_is_suspended "$p"; then
+      say --foreground 1 "Cannot verify suspended BitLocker protection on $p."
+      say "In Windows, suspend protection on this volume before installing."
+      say "For Windows C:, use Suspend-BitLocker -MountPoint C: -RebootCount 0 in administrator PowerShell."
+      say "For data volumes, use Suspend-BitLocker -MountPoint D: without -RebootCount (replace D: as needed)."
+      say "If already suspended, this ISO cannot safely verify the volume."
+      return 1
     fi
-  done
-  return 1
+  done <<<"$devices"
+  return 0
 }
 
 # Look for an existing Windows ESP (FAT partition containing EFI/Microsoft) on $disk.
@@ -431,7 +539,7 @@ disk_abort_hook() {
   umount /mnt/btrfs-root 2>/dev/null || true
   rmdir /mnt/btrfs-root 2>/dev/null || true
   cryptsetup close omarchy_root 2>/dev/null || true
-  rollback_created_parts "$disk"
+  rollback_created_parts "$disk" || abort "$1; created partitions could not be safely removed. Inspect the disk before retrying."
   abort "$1"
 }
 
@@ -506,6 +614,16 @@ not_enough_space() {
   local available="${1:-0}"
   step "Not enough free space on $disk"
   say --foreground 1 "$disk has $(to_gb $available) of usable free space; Omarchy needs at least 32GB."
+  if is_install_media_disk || [[ $protected_disk == "$disk" ]]; then
+    if is_install_media_disk; then
+      say "Open the partition tool to delete a partition you no longer need, then try again."
+      open_partition_tool
+    else
+      say "Prepare unallocated space before booting this installer, or choose another disk."
+      gum input --placeholder "Press Enter to return" >/dev/null || true
+    fi
+    return 1
+  fi
   say "Open the partition tool to free at least 32GB on $disk, then try again."
   echo
   if ! gum confirm --affirmative "Back" --negative "Open partition tool" "Return to installation mode?"; then
@@ -518,14 +636,18 @@ not_enough_space() {
 # encryption confirm. Sets the globals run_partition_execute needs. Returns 1
 # to fall back to the install-mode picker.
 run_partition_decide() {
+  if is_install_media_disk; then
+    verify_install_media || abort "The installer source or existing partitions changed; stopping."
+  fi
   step "Checking for BitLocker on $disk"
-  local bl_part
-  bl_part=$(detect_bitlocker || true)
-  if [[ -n "$bl_part" ]]; then
-    say --foreground 1 "BitLocker signature detected on $bl_part."
-    say "Turn BitLocker off in Windows and wait for the drive to finish decrypting, then try again."
-    say "Suspending BitLocker is not enough — the drive stays encrypted."
-    abort "Aborted: BitLocker is enabled on this disk."
+  check_bitlocker || abort "Aborted: could not verify BitLocker protection on this disk."
+  if $bitlocker_found; then
+    if [[ $protected_disk != "$disk" ]]; then
+      protect_existing_partitions "$disk" || abort "BitLocker free-space installs require an existing GPT partition table."
+    fi
+    say "BitLocker protection is suspended. Omarchy installs in free space; only partitions you explicitly delete are removed."
+    say "Keep your recovery key available. After installation, boot Windows through the new boot menu, then resume protection."
+    gum confirm "Continue with BitLocker protection suspended?" || return 1
   fi
 
   # Omarchy always creates its own dedicated ESP in free space and never
@@ -692,6 +814,15 @@ run_partition_execute() {
     say "[dry] encrypted=$encrypt_installation kernel=$kernel_choice"
   else
     step "Creating partitions on $disk"
+    verify_install_media || abort "The installer source or existing partitions changed; stopping."
+    verify_existing_partitions "$disk" || abort "Existing partitions changed; stopping."
+    check_bitlocker || abort "BitLocker protection could not be verified before writing; stopping."
+    if $bitlocker_found && [[ $protected_disk != "$disk" ]]; then
+      abort "BitLocker state changed after planning; restart the installer."
+    fi
+    if [[ $protected_disk == "$disk" ]] && $needs_mklabel; then
+      abort "Cannot replace the partition table on a protected disk."
+    fi
     if $needs_mklabel; then
       disk_step "initializing GPT on $disk" parted --script "$disk" mklabel gpt
       partprobe "$disk" 2>/dev/null || true
@@ -722,6 +853,16 @@ run_partition_execute() {
     wait_for_device "$efi_dev" || disk_abort_hook "EFI partition $efi_dev never appeared"
     wait_for_device "$root_partition_device" ||
       disk_abort_hook "Root partition $root_partition_device never appeared"
+
+    verify_install_media || disk_abort_hook "The installer source or existing partitions changed; stopping."
+    verify_existing_partitions "$disk" || disk_abort_hook "Existing partitions changed; stopping."
+    if [[ $protected_disk == "$disk" ]]; then
+      # A stale kernel partition node must never become a formatting target.
+      # Match both geometry fields against the table we just wrote.
+      verify_partition_device "$disk" "$efi_part_num" "$efi_dev" &&
+        verify_partition_device "$disk" "$root_part_num" "$root_partition_device" ||
+        disk_abort_hook "New partition devices do not match the partition table."
+    fi
 
     # Both partitions are ours and brand new, but the space they occupy may
     # carry signatures from whatever was deleted to free it.
@@ -864,37 +1005,104 @@ _EOF_
 disk_form() {
   step "Let's select where to install Omarchy..."
 
-  # Don't offer the install media as an option (Arch ISO mounts it here)
+  # The source disk is eligible only for the restricted free-space path.
   local boot_source
-  local exclude_disk
   boot_source=$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null || true)
-  exclude_disk=$(get_root_disk "$boot_source")
+  install_media_partition=$(readlink -f "$boot_source" 2>/dev/null || true)
+  if [[ -z $boot_source ]]; then
+    [[ ${configurator_dry_run:-false} == true ]] || ram_backed_live_root ||
+      abort "Cannot identify the installer source; stopping before disk selection."
+    install_media_disk=""
+  else
+    install_media_disk=$(get_install_media_disk "$boot_source") ||
+      abort "Cannot identify the installer backing disk; stopping before disk selection."
+  fi
+  protected_disk=""
+  protected_partition_table=""
 
-  # List all installable disks, excluding the boot device if present
+  # List physical disks; source-disk eligibility is checked below.
   local available_disks
   available_disks=$(
     lsblk -dpno NAME,TYPE |
       awk '$2=="disk"{print $1}' |
-      grep -E '/dev/(sd|hd|vd|nvme|mmcblk|xv)' |
-      { if [[ -n "$exclude_disk" ]]; then grep -Fvx "$exclude_disk"; else cat; fi; }
+      grep -E '/dev/(sd|hd|vd|nvme|mmcblk|xv)'
   )
 
   # Get available disks and format them with info
   local disk_options=""
   while IFS= read -r device; do
     if [[ -n "$device" ]]; then
+      if [[ $device == "$install_media_disk" ]]; then
+        can_install_beside_media || continue
+      fi
       disk_info=$(get_disk_info "$device")
+      [[ $device == "$install_media_disk" ]] && disk_info+=" — installer disk, free space only"
       disk_options="$disk_options$disk_info"$'\n'
     fi
   done <<<"$available_disks"
 
+  [[ -n $disk_options ]] || abort "No supported installation disk found."
   selected_display=$(echo "$disk_options" | gum choose --header "Select install disk") || abort
   disk=$(echo "$selected_display" | awk '{print $1}')
+  protected_disk=""
+  protected_partition_table=""
+  if is_install_media_disk; then
+    protect_install_media_partitions "$disk" "$install_media_partition" || abort "Cannot identify and protect the installer partitions."
+  fi
 }
 
 # STEP 4: INSTALL MODE
 
+open_install_media_partition_tool() {
+  local table entry num device size details choice expected mounts
+  local options=()
+
+  verify_install_media || abort "The installer source changed; stopping."
+  step "Free space on $disk"
+  say "The installer partitions cannot be removed. You can delete another partition to make room for Omarchy."
+  say "Deleting a partition permanently removes its data. Keep any partitions you still need."
+
+  table=$(parted -ms "$disk" unit B print) || abort "Cannot read the partition table."
+  while IFS= read -r entry; do
+    [[ $entry =~ ^[0-9]+: ]] || continue
+    num=${entry%%:*}
+    is_existing_partition "$disk" "$num" && continue
+    device=$(partition_path "$disk" "$num")
+    mounts=$(lsblk -nr -o MOUNTPOINTS "$device" 2>/dev/null) || continue
+    [[ -z $(tr -d '[:space:]' <<<"$mounts") ]] || continue
+    size=$(awk -F: '{ print $4 }' <<<"$entry")
+    details=$(lsblk -dnro FSTYPE,LABEL "$device" 2>/dev/null | head -1)
+    options+=("Partition $num · $size${details:+ · $details}")
+  done <<<"$table"
+
+  if (( ${#options[@]} == 0 )); then
+    say "There are no other unmounted partitions to delete."
+    gum input --placeholder "Press Enter to return" >/dev/null || true
+    return 0
+  fi
+
+  choice=$(gum choose --header "Choose a partition to delete, or return" "Back" "${options[@]}") || return 0
+  [[ $choice != Back ]] || return 0
+  num=${choice#Partition }
+  num=${num%% *}
+  [[ $num =~ ^[0-9]+$ ]] || return 1
+  expected=$(grep -E "^${num}:" <<<"$table") || return 1
+  gum confirm --affirmative "Delete partition $num" --negative "Back" \
+    "Permanently delete $choice on $disk? All its data will be lost." || return 0
+  verify_install_media || abort "The installer source changed; stopping."
+  delete_unprotected_partition "$disk" "$num" "$expected" ||
+    abort "Partition $num changed or could not be safely deleted."
+}
+
 open_partition_tool() {
+  if is_install_media_disk; then
+    open_install_media_partition_tool
+    return $?
+  fi
+  if [[ $protected_disk == "$disk" ]]; then
+    say "The partition editor is unavailable on this protected disk. Prepare free space before booting the installer."
+    return 1
+  fi
   step "Partition tool for $disk"
   gum style "Create unallocated free space for Omarchy, then write changes and quit."
   gum style --foreground 8 "Do not create an Omarchy partition here — leave the target area as Free space."
@@ -934,6 +1142,7 @@ requires_full_disk_install() {
 
 install_mode_form() {
   local choices=("Full disk install")
+  is_install_media_disk && choices=()
 
   # The free-space/protected path registers an EFI boot entry and is UEFI-only.
   # Full-disk installs still support BIOS through the orchestrator's BIOS branch.
@@ -947,6 +1156,7 @@ install_mode_form() {
 }
 
 confirm_disk_overwrite() {
+  is_install_media_disk && abort "Cannot erase the disk containing the running installer."
   local mode="encrypted"
   local affirmative confirm_status
 
@@ -993,7 +1203,8 @@ select_installation() {
   local full_disk_only
 
   while true; do
-    if requires_full_disk_install; then
+    # The source disk must never take the full-disk shortcut, even when full.
+    if ! is_install_media_disk && requires_full_disk_install; then
       full_disk_only=true
     else
       full_disk_only=false
@@ -1092,6 +1303,7 @@ if [[ $install_target == "free_space" ]]; then
 fi
 
 # Setup partition layout
+is_install_media_disk && abort "Cannot erase the disk containing the running installer."
 disk_size=$(lsblk -bdno SIZE "$disk")
 mib=$((1024 * 1024))
 gib=$((mib * 1024))

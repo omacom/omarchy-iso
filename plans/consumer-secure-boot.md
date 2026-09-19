@@ -136,7 +136,7 @@ Dev mode creates local test keys and is only expected to boot in QEMU firmware e
 When the live installer detects Secure Boot enabled:
 
 1. Show a Secure Boot explanation before disk mutation.
-2. If Windows is detected, follow the shipped dual-boot BitLocker policy (decrypt, not suspend — see the configurator's existing checks) and warn the user to have the recovery key available.
+2. If Windows is detected, follow the configurator's dual-boot BitLocker checks: free-space installation accepts suspended protection only when a working clear-key protector can be verified. Remind the user to keep the recovery key available.
 3. Install Omarchy's shim to its own ESP directory, for example `EFI/Omarchy`.
 4. Do not modify `EFI/Microsoft`.
 5. Generate a machine-local MOK keypair under the installed encrypted root.
@@ -285,7 +285,7 @@ On Windows dual-boot machines:
 - Never change BitLocker protectors.
 - Preserve existing firmware default boot order by default.
 - Warn that adding a boot entry or changing ESP contents can trigger BitLocker recovery.
-- Follow the shipped dual-boot policy: tell users to turn BitLocker off in Windows and let the drive finish decrypting before installing (the configurator already enforces this; suspending alone proved insufficient — see #105).
+- Follow the configurator's dual-boot policy: suspend protection in Windows and verify a working clear-key protector before free-space installation. Ask users to resume protection after booting Windows through the new menu. The earlier decryption requirement in #105 reflected the signature-only check.
 
 If the user chooses to make Omarchy first in boot order, capture the old `BootOrder` and provide rollback guidance.
 

@@ -75,6 +75,7 @@ build_holey_disk() {
   parted --script "$IMG" rm 2
   parted --script "$IMG" rm 3
   created_parts=()
+  created_part_identities=()
 }
 
 echo "==> numbering on a disk with holes"
@@ -123,6 +124,109 @@ created_parts=()
 create_partition "$IMG" "$((100 * MIB))" "$((300 * MIB))" ext4 OVERLAP
 check "overlapping creation failed" "1" "$?"
 check "nothing tracked" "0" "${#created_parts[@]}"
+
+echo "==> protected disk preserves every snapshotted partition"
+build_holey_disk
+protect_existing_partitions "$IMG"
+check "GPT source can be protected" "0" "$?"
+original_table="$protected_partition_table"
+create_partition "$IMG" "$((1000 * MIB))" "$((1200 * MIB))" fat32 OMARCHY_EFI
+check "new ESP alongside protected source" "0" "$?"
+create_partition "$IMG" "$((1201 * MIB))" "$((2000 * MIB))" btrfs OMARCHY_ROOT
+check "new root alongside protected source" "0" "$?"
+verify_existing_partitions "$IMG"
+check "original entries unchanged" "0" "$?"
+rollback_created_parts "$IMG"
+check "rollback preserves protected entries" "$original_table" "$(parted -ms "$IMG" unit B print | grep -E '^[0-9]+:')"
+
+create_partition "$IMG" "$MIB" "$((100 * MIB))" ext4 OVERLAP
+check "source overlap rejected" "1" "$?"
+check "source overlap not tracked" "0" "${#created_parts[@]}"
+created_parts=(1)
+rollback_created_parts "$IMG"
+check "rollback refuses an existing partition" "1" "$?"
+check "existing partition survived" "$original_table" "$(parted -ms "$IMG" unit B print | grep -E '^[0-9]+:')"
+created_parts=()
+
+parted --script "$IMG" name 1 CHANGED
+create_partition "$IMG" "$((1000 * MIB))" "$((1200 * MIB))" fat32 OMARCHY_EFI
+check "changed source layout rejects creation" "1" "$?"
+check "no partition created after layout change" "1 4" "$(partition_numbers "$IMG" | sort | xargs)"
+created_parts=(4)
+rollback_created_parts "$IMG"
+check "changed layout rejects rollback" "1" "$?"
+check "rollback left disk alone" "1 4" "$(partition_numbers "$IMG" | sort | xargs)"
+
+echo "==> live-media source survives deleting another GPT partition"
+build_holey_disk
+protected_disk="$IMG"
+protected_partition_table=$(parted -ms "$IMG" unit B print | grep '^1:')
+other_entry=$(parted -ms "$IMG" unit B print | grep '^4:')
+(
+  # A disk image has no lsblk mountpoint data; the real path checks it.
+  lsblk() { :; }
+  delete_unprotected_partition "$IMG" 1 "$protected_partition_table"
+)
+check "source partition cannot be selected for deletion" "1" "$?"
+(
+  lsblk() { :; }
+  delete_unprotected_partition "$IMG" 4 "$other_entry"
+)
+check "other partition can be removed" "0" "$?"
+verify_existing_partitions "$IMG"
+check "source entry remains unchanged" "0" "$?"
+check "only source partition remains" "1" "$(partition_numbers "$IMG" | sort | xargs)"
+
+echo "==> rollback refuses a replaced partition with the same number"
+build_holey_disk
+protected_disk=""
+protected_partition_table=""
+protect_existing_partitions "$IMG"
+create_partition "$IMG" "$((1000 * MIB))" "$((1200 * MIB))" ext4 OMARCHY_ROOT
+check "installer-created partition uses free slot" "2" "$created_partition_number"
+original_uuid=$(sfdisk --part-uuid "$IMG" 2)
+parted --script "$IMG" rm 2
+mkpart_mib UNRELATED_DATA ext4 2001 2300
+replacement_uuid=$(sfdisk --part-uuid "$IMG" 2)
+check "replacement has a new GPT identity" "different" "$([[ $original_uuid == "$replacement_uuid" ]] && echo same || echo different)"
+rollback_created_parts "$IMG"
+check "rollback refuses the replacement" "1" "$?"
+check "replacement remains on disk" "1 2 4" "$(partition_numbers "$IMG" | sort | xargs)"
+
+echo "==> a differently labeled ESP is protected by its GPT type"
+build_holey_disk
+mkpart_mib BOOT fat32 801 900
+parted --script "$IMG" set 2 esp on
+efi_entry=$(parted -ms "$IMG" unit B print | grep '^2:')
+other_entry=$(parted -ms "$IMG" unit B print | grep '^4:')
+(
+  lsblk() {
+    [[ $* == '-dnro PARTN /dev/installer-source' ]] && echo 1
+    return 0
+  }
+  protect_install_media_partitions "$IMG" /dev/installer-source || exit 1
+  is_existing_partition "$IMG" 1 && is_existing_partition "$IMG" 2 || exit 2
+  delete_unprotected_partition "$IMG" 2 "$efi_entry" && exit 3
+  delete_unprotected_partition "$IMG" 4 "$other_entry" || exit 4
+)
+check "source and ESP retained while another partition can be deleted" "0" "$?"
+check "only source and ESP remain" "1 2" "$(partition_numbers "$IMG" | sort | xargs)"
+
+echo "==> MBR free-space partitions still have a rollback identity"
+rm -f "$IMG"
+truncate -s 4G "$IMG"
+parted --script "$IMG" mklabel msdos
+mkpart_mib primary ext4 1 200
+protected_disk=""
+protected_partition_table=""
+created_parts=()
+created_part_identities=()
+create_partition "$IMG" "$((1000 * MIB))" "$((1200 * MIB))" ext4 OMARCHY_ROOT
+check "MBR partition creation succeeds" "0" "$?"
+check "MBR created partition tracked" "2" "$created_partition_number"
+rollback_created_parts "$IMG"
+check "MBR rollback succeeds" "0" "$?"
+check "MBR existing partition remains" "1" "$(partition_numbers "$IMG" | sort | xargs)"
 
 if (( failures > 0 )); then
   printf '\n%d check(s) failed\n' "$failures"

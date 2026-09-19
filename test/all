@@ -13,4 +13,4 @@ for test in "$ROOT"/test/unit/*-test.sh; do
 done
 
 printf '==> test/unit/test_*.py\n'
-python3 -m unittest discover -t "$ROOT" -s "$ROOT/test/unit"
+python3 -m unittest discover -t "$ROOT/test" -s "$ROOT/test/unit"

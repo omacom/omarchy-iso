@@ -12,6 +12,9 @@
 # Partitions this run created, in creation order. rollback_created_parts()
 # undoes exactly these and nothing else.
 created_parts=()
+# On-disk GPT identity for each partition this run created. A partition number
+# can be reused, so cleanup must not treat that number alone as ownership.
+declare -A created_part_identities=()
 
 # Set by create_partition() instead of being printed: a command substitution
 # would run it in a subshell and lose the created_parts bookkeeping.
@@ -19,8 +22,8 @@ created_partition_number=""
 
 # Keep protected entries, including their byte ranges, for checks before writes
 # and rollback. On BitLocker disks this is the whole original table. On a
-# live-media disk it is the mounted source (and our temporary loader, if found),
-# so the restricted editor can free other partitions without touching the ISO.
+# live-media disk it is the mounted source and every ESP, so the restricted
+# editor can free data partitions without removing a possible boot loader.
 protected_disk=""
 protected_partition_table=""
 
@@ -34,27 +37,21 @@ protect_existing_partitions() {
 }
 
 protect_install_media_partitions() {
-  local disk="$1" source="$2" table number entry device type label source_label loader_count=0
+  local disk="$1" source="$2" table number entry type
   table=$(parted -ms "$disk" unit B print) || return 1
   [[ $table == *':gpt:'* ]] || return 1
   number=$(lsblk -dnro PARTN "$source" 2>/dev/null) || return 1
-  source_label=$(lsblk -dnro LABEL "$source" 2>/dev/null) || return 1
   [[ $number =~ ^[0-9]+$ ]] || return 1
   protected_partition_table=$(printf '%s\n' "$table" | grep -E "^${number}:")
   [[ $(printf '%s\n' "$protected_partition_table" | wc -l) -eq 1 ]] || return 1
   while IFS= read -r entry; do
     [[ $entry =~ ^[0-9]+: ]] || continue
-    device=$(partition_path "$disk" "${entry%%:*}")
-    type=$(lsblk -dnro PARTTYPE "$device" 2>/dev/null || true)
-    label=$(lsblk -dnro LABEL "$device" 2>/dev/null || true)
-    if [[ ${entry%%:*} != "$number" && ${type,,} == c12a7328-f81f-11d2-ba4b-00a0c93ec93b && $label == OMARCHY_TMP ]]; then
+    # Read the on-disk GPT type, not a filesystem label or stale kernel node.
+    type=$(sfdisk --part-type "$disk" "${entry%%:*}" 2>/dev/null) || return 1
+    if [[ ${entry%%:*} != "$number" && ${type,,} == c12a7328-f81f-11d2-ba4b-00a0c93ec93b ]]; then
       protected_partition_table+=$'\n'"$entry"
-      ((loader_count += 1))
     fi
   done <<<"$table"
-  # Our staged NTFS source has a companion EFI loader with this volume label.
-  # If it is missing or ambiguous, do not allow editing this disk.
-  if [[ $source_label == OMARCHY_TMP && $loader_count -ne 1 ]]; then return 1; fi
   protected_disk="$disk"
 }
 
@@ -93,10 +90,40 @@ delete_unprotected_partition() {
   verify_existing_partitions "$disk"
 }
 
+created_partition_identity() {
+  local disk="$1" num="$2" table geometry id
+  table=$(parted -ms "$disk" unit B print) || return 1
+  geometry=$(awk -F: -v n="$num" '
+    $1 == n { gsub(/B/, "", $2); gsub(/B/, "", $4); print $2 ":" $4; found=1; exit }
+    END { if (!found) exit 1 }' <<<"$table") || return 1
+  [[ $geometry =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  if [[ $table == *':gpt:'* ]]; then
+    id=$(sfdisk --part-uuid "$disk" "$num" 2>/dev/null) || return 1
+    [[ $id =~ ^[[:xdigit:]-]{36}$ ]] || return 1
+    printf 'gpt:%s:%s\n' "${id,,}" "$geometry"
+  elif [[ $table == *':msdos:'* ]]; then
+    # MBR has no per-partition UUID. Disk ID plus geometry is the strongest
+    # stable identity available and still catches replaced extents.
+    id=$(sfdisk --disk-id "$disk" 2>/dev/null) || return 1
+    [[ $id =~ ^0x[[:xdigit:]]{8}$ ]] || return 1
+    printf 'mbr:%s:%s\n' "${id,,}" "$geometry"
+  else
+    return 1
+  fi
+}
+
+verify_created_partition() {
+  local disk="$1" num="$2" identity
+  [[ -n ${created_part_identities[$num]:-} ]] || return 1
+  identity=$(created_partition_identity "$disk" "$num") || return 1
+  [[ $identity == "${created_part_identities[$num]}" ]]
+}
+
 verify_partition_device() {
   local disk="$1" num="$2" device="$3" start size kernel_start kernel_size
   is_existing_partition "$disk" "$num" && return 1
   [[ " ${created_parts[*]} " == *" $num "* ]] || return 1
+  verify_created_partition "$disk" "$num" || return 1
   read -r start size < <(parted -ms "$disk" unit B print |
     awk -F: -v n="$num" '$1 == n { gsub(/B/, "", $2); gsub(/B/, "", $4); print $2, $4 }')
   # sysfs reports these in 512-byte sectors, including on 4K-sector disks.
@@ -172,7 +199,7 @@ disk_step() {
 # the caller decides how loudly to fail.
 create_partition() {
   local disk="$1" start="$2" end="$3" fstype="$4" name="$5"
-  local before after num actual want tolerance
+  local before after num actual want tolerance identity
 
   created_partition_number=""
 
@@ -216,6 +243,8 @@ create_partition() {
 
   parted --script "$disk" name "$num" "$name" || true
 
+  identity=$(created_partition_identity "$disk" "$num") || return 1
+  created_part_identities[$num]="$identity"
   created_parts+=("$num")
   created_partition_number="$num"
 }
@@ -227,13 +256,17 @@ create_partition() {
 rollback_created_parts() {
   local disk="$1" n
   (( ${#created_parts[@]} > 0 )) || return 0
-  # If somebody changed the layout, partition numbers may have been reused.
-  # Leave recovery to the user rather than risk deleting existing data.
+  # Leave recovery to the user if any number now refers to different data.
   verify_existing_partitions "$disk" || return 1
-  for n in $(printf '%s\n' "${created_parts[@]}" | sort -rn); do
+  for n in "${created_parts[@]}"; do
     is_existing_partition "$disk" "$n" && return 1
-    parted --script "$disk" rm "$n" >/dev/null 2>&1 || true
+    verify_created_partition "$disk" "$n" || return 1
+  done
+  for n in $(printf '%s\n' "${created_parts[@]}" | sort -rn); do
+    verify_created_partition "$disk" "$n" || return 1
+    parted --script "$disk" rm "$n" >/dev/null 2>&1 || return 1
   done
   partprobe "$disk" 2>/dev/null || true
   created_parts=()
+  created_part_identities=()
 }

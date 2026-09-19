@@ -372,8 +372,60 @@ get_root_disk() {
   fi
 }
 
+# Archiso can unmount bootmnt after copying its rootfs into RAM, including
+# PXE/HTTP boots. Accept a missing bootmnt only when the mounted live image is
+# demonstrably backed by the dedicated copytoram tmpfs.
+ram_backed_live_root() {
+  local copy_fs root_source backing backing_fs
+  copy_fs=$(findmnt -nro FSTYPE --mountpoint /run/archiso/copytoram 2>/dev/null) || return 1
+  [[ $copy_fs == tmpfs ]] || return 1
+  root_source=$(findmnt -nro SOURCE --mountpoint /run/archiso/airootfs 2>/dev/null) || return 1
+  [[ $(lsblk -dnro TYPE "$root_source" 2>/dev/null) == loop ]] || return 1
+  backing=$(losetup -nO BACK-FILE "$root_source" 2>/dev/null) || return 1
+  backing=$(readlink -f "$backing" 2>/dev/null) || return 1
+  [[ $backing == /run/archiso/copytoram/* && -f $backing ]] || return 1
+  backing_fs=$(findmnt -nro FSTYPE --target "$backing" 2>/dev/null) || return 1
+  [[ $backing_fs == tmpfs ]]
+}
+
+# A loopback ISO is mounted from /dev/loopN, but its file may live on a
+# physical disk. Exclude that backing disk while leaving unrelated targets.
+# Remote and RAM-backed media have no local disk.
+get_install_media_disk() {
+  local source="$1" type backing backing_source backing_fs disk mount_fs
+  type=$(lsblk -dnro TYPE "$source" 2>/dev/null || true)
+  if [[ $type == loop ]]; then
+    backing=$(losetup -nO BACK-FILE "$source" 2>/dev/null) || return 1
+    [[ -f $backing ]] || return 1
+    backing_source=$(findmnt -nro SOURCE --target "$backing" 2>/dev/null) || return 1
+    backing_fs=$(findmnt -nro FSTYPE --target "$backing" 2>/dev/null) || return 1
+    case $backing_fs in
+      tmpfs|ramfs|nfs|nfs4|cifs|smb3) return 0 ;;
+      btrfs) return 1 ;; # SOURCE may name only one disk of a multi-device filesystem.
+    esac
+    disk=$(get_root_disk "$backing_source")
+    [[ -n $disk ]] || return 1
+    printf '%s\n' "$disk"
+    return 0
+  fi
+  [[ $type == rom ]] && return 0
+  mount_fs=$(findmnt -nro FSTYPE /run/archiso/bootmnt 2>/dev/null) || return 1
+  [[ $mount_fs == btrfs ]] && return 1 # A source partition may be one member of a multi-device filesystem.
+  disk=$(get_root_disk "$source")
+  if [[ -n $disk ]]; then
+    printf '%s\n' "$disk"
+    return 0
+  fi
+  case $mount_fs in
+    tmpfs|ramfs|nfs|nfs4|cifs|smb3) return 0 ;;
+  esac
+  return 1
+}
+
 install_media_disk=""
 install_media_partition=""
+configurator_dry_run=false
+[[ ${1:-} == dry ]] && configurator_dry_run=true
 
 is_install_media_disk() {
   [[ -n $install_media_disk && "$disk" == "$install_media_disk" ]]
@@ -434,7 +486,8 @@ check_bitlocker() {
     if ! bitlocker_is_suspended "$p"; then
       say --foreground 1 "Cannot verify suspended BitLocker protection on $p."
       say "In Windows, suspend protection on this volume before installing."
-      say "Use Suspend-BitLocker -MountPoint C: -RebootCount 0 in administrator PowerShell (replace C: with its drive letter)."
+      say "For Windows C:, use Suspend-BitLocker -MountPoint C: -RebootCount 0 in administrator PowerShell."
+      say "For data volumes, use Suspend-BitLocker -MountPoint D: without -RebootCount (replace D: as needed)."
       say "If already suspended, this ISO cannot safely verify the volume."
       return 1
     fi
@@ -486,7 +539,7 @@ disk_abort_hook() {
   umount /mnt/btrfs-root 2>/dev/null || true
   rmdir /mnt/btrfs-root 2>/dev/null || true
   cryptsetup close omarchy_root 2>/dev/null || true
-  rollback_created_parts "$disk"
+  rollback_created_parts "$disk" || abort "$1; created partitions could not be safely removed. Inspect the disk before retrying."
   abort "$1"
 }
 
@@ -592,7 +645,7 @@ run_partition_decide() {
     if [[ $protected_disk != "$disk" ]]; then
       protect_existing_partitions "$disk" || abort "BitLocker free-space installs require an existing GPT partition table."
     fi
-    say "BitLocker protection is suspended. Existing partitions will be left untouched."
+    say "BitLocker protection is suspended. Omarchy installs in free space; only partitions you explicitly delete are removed."
     say "Keep your recovery key available. After installation, boot Windows through the new boot menu, then resume protection."
     gum confirm "Continue with BitLocker protection suspended?" || return 1
   fi
@@ -956,15 +1009,16 @@ disk_form() {
   local boot_source
   boot_source=$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null || true)
   install_media_partition=$(readlink -f "$boot_source" 2>/dev/null || true)
-  install_media_disk=$(get_root_disk "$boot_source")
+  if [[ -z $boot_source ]]; then
+    [[ ${configurator_dry_run:-false} == true ]] || ram_backed_live_root ||
+      abort "Cannot identify the installer source; stopping before disk selection."
+    install_media_disk=""
+  else
+    install_media_disk=$(get_install_media_disk "$boot_source") ||
+      abort "Cannot identify the installer backing disk; stopping before disk selection."
+  fi
   protected_disk=""
   protected_partition_table=""
-  # Optical media cannot be a disk target. For other unresolved sources, fail
-  # closed: we cannot know which physical disk must be kept out of wipe mode.
-  if [[ -n $boot_source && -z $install_media_disk ]] &&
-    [[ $(lsblk -dno TYPE "$boot_source" 2>/dev/null) != rom ]]; then
-    abort "Cannot identify the installer disk. Boot from directly attached installation media."
-  fi
 
   # List physical disks; source-disk eligibility is checked below.
   local available_disks

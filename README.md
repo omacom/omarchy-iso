@@ -32,29 +32,38 @@ Use `--dev` or `--rc` to build against those package channels. Both `--dev` and 
 
 When the live installer is mounted directly from a partition on a GPT disk,
 the interactive UEFI installer can use existing unallocated space on that same
-disk. Its existing partitions are preserved, including the installer partition.
-Prepare at least 32 GiB of contiguous unallocated space before booting it.
+disk. The mounted installer partition and every EFI system partition on that
+disk are protected. If there is not enough room, a guarded partition menu can
+delete another unmounted partition after confirmation. Omarchy then needs at
+least 32 GiB of contiguous unallocated space for its own partitions.
 
 Only free-space installation is offered on the installer disk. Full-disk
-installation, deferred provisioning, and the partition editor remain unavailable
-there. Loopback ISO and device-mapper source layouts are not supported by this
-path.
+installation and deferred provisioning remain unavailable there. The general
+partition editor is replaced by guarded deletion; it cannot resize partitions
+or remove ESPs, including obsolete ones. Loopback ISO and device-mapper sources
+cannot use same-disk installation. A loopback ISO on local storage can still
+install to a separate disk when its backing disk can be identified. Btrfs-backed
+live media are excluded because the filesystem may span multiple disks.
+If Archiso has detached the source after copying its root image to RAM, normal
+disk choices remain available; the mounted-source partition guard does not apply.
 
 BitLocker volumes may remain encrypted for a free-space install on GPT, provided
 protection is suspended and the ISO can verify a working clear-key protector.
 The check briefly opens a read-only mapping, never mounts Windows, and closes it
 before proceeding. Active protection, unsupported states, and failed checks
-block installation. Existing partitions on these disks are protected from
-overlap, formatting and cleanup, and the partition editor is unavailable.
+block installation. Free-space installation never formats or cleans up existing
+partitions. On the installer disk, the guarded menu can delete a selected
+unmounted partition; on other BitLocker disks, partition editing is unavailable.
 
-Prepare free space in Windows first and save your BitLocker recovery key. In
-administrator PowerShell, run `Suspend-BitLocker -MountPoint C: -RebootCount 0`
-for each affected volume (substitute its drive letter). This keeps protection
-suspended until you resume it; the data remains encrypted but is not protected
-against offline access during suspension. After installation, boot Windows
-through the new boot menu, then run `Resume-BitLocker -MountPoint C:`. Resume
-protection in Windows if you cancel installation, too. The ISO does not change
-BitLocker protectors or resume protection for you.
+Save your BitLocker recovery key before starting. In administrator PowerShell,
+suspend the Windows OS volume with `Suspend-BitLocker -MountPoint C: -RebootCount 0`.
+For an affected data volume, use `Suspend-BitLocker -MountPoint D:` without
+`-RebootCount` (substitute its actual drive letter).
+The data remains encrypted but is not protected against offline access during
+suspension. After installation, boot Windows through the new boot menu, then
+run `Resume-BitLocker -MountPoint C:` and resume any affected data volumes.
+Resume protection in Windows if you cancel installation, too. The ISO does not
+change BitLocker protectors or resume protection for you.
 
 The installer partition remains on disk after installation. Boot the installed
 system successfully before reclaiming it yourself.

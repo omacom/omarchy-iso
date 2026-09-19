@@ -160,6 +160,24 @@ open_install_media_partition_tool
         self.assertNotIn("Partition 4", result.stderr)
         self.assertNotIn("UNEXPECTED", result.stdout)
 
+    def test_staged_source_requires_identifiable_temporary_efi(self):
+        result = self.run_shell(r'''
+source "$LIB"
+parted() {
+  printf '%s\n' 'BYT;' '/dev/sda:100000000B:scsi:512:512:gpt:disk:;'
+  printf '%s\n' '2:535822336B:10000000000B:9464177664B:ntfs:ISO:msftdata;'
+}
+lsblk() {
+  case "$*" in
+    '-dnro PARTN /dev/sda2') echo 2 ;;
+    '-dnro LABEL /dev/sda2') echo OMARCHY_TMP ;;
+  esac
+}
+protect_install_media_partitions /dev/sda /dev/sda2 && exit 10
+exit 0
+''', LIB=str(LIB))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_full_source_disk_does_not_take_overwrite_shortcut(self):
         result = self.run_shell(functions("is_install_media_disk", "select_installation") + r'''
 disk=/dev/sda

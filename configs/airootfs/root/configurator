@@ -1000,7 +1000,7 @@ disk_form() {
 # STEP 4: INSTALL MODE
 
 open_install_media_partition_tool() {
-  local table entry num device size choice expected mounts
+  local table entry num device size details choice expected mounts
   local options=()
 
   verify_install_media || abort "The installer source changed; stopping."
@@ -1017,7 +1017,8 @@ open_install_media_partition_tool() {
     mounts=$(lsblk -nr -o MOUNTPOINTS "$device" 2>/dev/null) || continue
     [[ -z $(tr -d '[:space:]' <<<"$mounts") ]] || continue
     size=$(awk -F: '{ print $4 }' <<<"$entry")
-    options+=("Partition $num · $size")
+    details=$(lsblk -dnro FSTYPE,LABEL "$device" 2>/dev/null | head -1)
+    options+=("Partition $num · $size${details:+ · $details}")
   done <<<"$table"
 
   if (( ${#options[@]} == 0 )); then
@@ -1033,7 +1034,7 @@ open_install_media_partition_tool() {
   [[ $num =~ ^[0-9]+$ ]] || return 1
   expected=$(grep -E "^${num}:" <<<"$table") || return 1
   gum confirm --affirmative "Delete partition $num" --negative "Back" \
-    "Permanently delete partition $num on $disk?" || return 0
+    "Permanently delete $choice on $disk? All its data will be lost." || return 0
   verify_install_media || abort "The installer source changed; stopping."
   delete_unprotected_partition "$disk" "$num" "$expected" ||
     abort "Partition $num changed or could not be safely deleted."

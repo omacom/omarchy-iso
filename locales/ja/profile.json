@@ -1,0 +1,6 @@
+{
+  "locale": "ja_JP.UTF-8",
+  "input_method": "mozc",
+  "packages": ["fcitx5-mozc", "fcitx5-configtool", "noto-fonts-cjk"],
+  "dictation_language": "ja"
+}

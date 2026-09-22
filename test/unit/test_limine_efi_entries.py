@@ -16,29 +16,32 @@ OTHER = "e67c3a69-d060-48b6-992e-307a580f0257"
 LOADER = r"\EFI\limine\limine_aa64.efi"
 
 def entry(uuid=UUID, loader=LOADER, label="Limine", part=3):
-    return f"{label}\tHD({part},GPT,{uuid},0x800,0x400000)/File({loader})"
+    return f"{label}\tHD({part},GPT,{uuid},0x800,0x400000)/{loader}"
 
 class LimineEFIEntriesTest(unittest.TestCase):
     def setUp(self):
         self.before = {"entries": {
-            "0001": "ubuntu", "0002": entry(),
+            "0001": "ubuntu", "0002": entry().upper(),
             "0003": entry(OTHER), "0004": entry(loader=r"\EFI\backup\limine.efi"),
             "0005": entry(label="Limine backup"),
         }, "order": ["0002", "0003", "0001", "0004", "0005", "FFFF"]}
         self.after = {"entries": {**self.before["entries"], "0006": entry()}, "order": []}
 
     def run_registration(self, run=None):
-        with mock.patch.object(phases, "capture", return_value=types.SimpleNamespace(stdout=f"3 {UUID}\n")), \
-             mock.patch.object(phases, "_read_efibootmgr", return_value=self.after), \
+        with mock.patch.object(phases, "_read_efibootmgr", return_value=self.after), \
+             mock.patch.object(phases, "info"), \
              mock.patch.object(phases.subprocess, "run", side_effect=run) as calls:
             phases._register_limine_efi_entry(Path("/dev/nvme0n1"), 3, LOADER, pre_state=self.before)
             return [call.args[0] for call in calls.call_args_list]
 
-    def test_only_replace_same_partition_and_loader_after_creation(self):
+    def deleted(self, calls):
+        return [c[2] for c in calls if "--delete-bootnum" in c]
+
+    def test_only_exact_duplicates_are_replaced_after_creation(self):
         calls = self.run_registration()
         self.assertIn("--create", calls[0])
-        deleted = [c[2] for c in calls if "--delete-bootnum" in c]
-        self.assertEqual(deleted, ["0002"])
+        # 0003 is another disk's Limine entry with the same label and loader.
+        self.assertEqual(self.deleted(calls), ["0002"])
         self.assertEqual(calls[-1], ["efibootmgr", "--bootorder", "0006,0003,0001,0004,0005"])
 
     def test_creation_failure_does_not_delete_existing_entries(self):
@@ -51,23 +54,24 @@ class LimineEFIEntriesTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("--create", calls[0])
 
-    def test_another_disks_limine_does_not_count_as_success(self):
-        self.after = {"entries": {"0003": entry(OTHER)}, "order": []}
-        with self.assertRaisesRegex(RuntimeError, "target EFI loader"):
-            self.run_registration()
+    def test_failed_cleanup_does_not_abort_installation(self):
+        def run(command, **kwargs):
+            return types.SimpleNamespace(returncode=1 if "--delete-bootnum" in command else 0)
+        calls = self.run_registration(run)
+        self.assertEqual(self.deleted(calls), ["0002"])
+        self.assertEqual(calls[-1][-1], "0006,0003,0001,0004,0005")
 
-    def test_firmware_can_reuse_exact_existing_entry(self):
+    def test_label_only_listing_deletes_nothing(self):
+        self.before["entries"] = {"0002": "Limine", "0003": "Limine"}
+        self.after = {"entries": {**self.before["entries"], "0006": "Limine"}, "order": []}
+        calls = self.run_registration()
+        self.assertEqual(self.deleted(calls), [])
+
+    def test_reused_entry_is_left_in_place(self):
         self.after = self.before
         calls = self.run_registration()
-        self.assertFalse(any("--delete-bootnum" in c for c in calls))
-        self.assertEqual(calls[-1][-1], "0002,0003,0001,0004,0005")
-
-    def test_plain_path_mbr_and_different_path_prefix(self):
-        entries = {
-            "0001": f"Limine\tHD(2,MBR,0x1234abcd,0x800,0x400000)/{LOADER}",
-            "0002": f"Limine\tHD(2,MBR,0x1234abcd,0x800,0x400000)/\\backup{LOADER}",
-        }
-        self.assertEqual(phases._find_limine_target_entries(entries, "1234abcd-02", 2, LOADER), ["0001"])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("--create", calls[0])
 
 if __name__ == "__main__":
     unittest.main()

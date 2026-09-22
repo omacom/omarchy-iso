@@ -489,13 +489,6 @@ def _register_limine_efi_entry(
     pre_state: dict | None = None,
 ) -> None:
     pre_state = pre_state or _read_efibootmgr()
-    partitions = capture(["lsblk", "-nr", "-o", "PARTN,PARTUUID", str(disk)], check=True)
-    uuids = [fields[1] for line in partitions.stdout.splitlines()
-             if len(fields := line.split()) == 2 and fields[0] == str(part)]
-    if len(uuids) != 1:
-        raise RuntimeError(f"Could not identify EFI partition {part} on {disk}")
-    partuuid = uuids[0].lower()
-    stale_limine = _find_limine_target_entries(pre_state["entries"], partuuid, part, loader)
 
     subprocess.run(
         [
@@ -512,22 +505,28 @@ def _register_limine_efi_entry(
     )
 
     post_state = _read_efibootmgr()
-    matching = _find_limine_target_entries(post_state["entries"], partuuid, part, loader)
-    new_limine = [num for num in matching if num not in stale_limine]
-    # Some firmware deduplicates an existing entry for this exact loader.
-    new_limine = new_limine or matching
-    if not new_limine:
-        raise RuntimeError("efibootmgr --create reported success but no entry for the target EFI loader was found")
-    limine_num = new_limine[0]
+    new_entries = [num for num in post_state["entries"] if num not in pre_state["entries"]]
+    if len(new_entries) != 1:
+        # Firmware reused an existing entry or added its own; efibootmgr has
+        # already put its entry first, so leave the rest alone.
+        info(f"warning: expected one new EFI boot entry, found {len(new_entries)}; not replacing old Limine entries")
+        return
+    limine_num = new_entries[0]
 
-    # Only retire entries for this partition and loader, and only after a
-    # replacement exists. Other disks may also have a boot entry named Limine.
+    # Retire only entries identical to the new one (same label, partition and
+    # loader). Other disks may also have a boot entry named Limine. Without a
+    # device path the listing cannot tell them apart, so delete nothing.
+    target = post_state["entries"][limine_num].lower()
+    stale_limine = []
+    if "hd(" in target:
+        stale_limine = [num for num, text in pre_state["entries"].items() if text.lower() == target]
     for num in stale_limine:
-        if num != limine_num:
-            subprocess.run(
-                ["efibootmgr", "--bootnum", num, "--delete-bootnum"],
-                check=True, capture_output=True,
-            )
+        res = subprocess.run(
+            ["efibootmgr", "--bootnum", num, "--delete-bootnum"],
+            check=False, capture_output=True,
+        )
+        if res.returncode != 0:
+            info(f"warning: failed to delete old EFI boot entry {num}")
 
     keep = [
         num
@@ -540,30 +539,6 @@ def _register_limine_efi_entry(
         ["efibootmgr", "--bootorder", ",".join([limine_num, *keep])],
         check=True, capture_output=True,
     )
-
-
-def _find_limine_target_entries(
-    entries: dict[str, str], partuuid: str, part: int, loader: str,
-) -> list[str]:
-    matches = []
-    for num, entry in entries.items():
-        if entry.split("\t", 1)[0].lower() != "limine":
-            continue
-        device = re.search(r"HD\((\d+),(GPT|MBR),([^,]+),", entry, re.IGNORECASE)
-        if not device or int(device[1]) != part:
-            continue
-        identity = device[3].lower()
-        if device[2].upper() == "MBR":
-            try:
-                identity = f"{int(identity, 16):08x}-{part:02x}"
-            except ValueError:
-                continue
-        if identity != partuuid.lower():
-            continue
-        path = re.search(r"HD\([^)]*\)/(?:File\()?([^)]*)\)?$", entry, re.IGNORECASE)
-        if path and path[1].lower() == loader.lower():
-            matches.append(num)
-    return matches
 
 
 def _install_limine_bios(ctx: InstallContext, boot_partition) -> None:

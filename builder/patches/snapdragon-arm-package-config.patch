@@ -1,0 +1,37 @@
+diff --git i/pkgbuilds/omarchy-dev/PKGBUILD w/pkgbuilds/omarchy-dev/PKGBUILD
+index 58630ed..a387706 100644
+--- i/pkgbuilds/omarchy-dev/PKGBUILD
++++ w/pkgbuilds/omarchy-dev/PKGBUILD
+@@ -65,6 +65,10 @@ depends_x86_64=(
+ # apply. Wi-Fi on the Broadcom parts only scans reliably through the iwd
+ # backend, which install/hardware/network.sh selects on Apple Silicon.
+ depends_aarch64=(
++  'limine'
++  'limine-mkinitcpio-hook'
++  'limine-snapper-sync'
++  'snapper'
+   'iwd'
+   'networkmanager'
+ )
+diff --git i/pkgbuilds/omarchy-settings-dev/PKGBUILD w/pkgbuilds/omarchy-settings-dev/PKGBUILD
+index 4023b89..15f53a0 100644
+--- i/pkgbuilds/omarchy-settings-dev/PKGBUILD
++++ w/pkgbuilds/omarchy-settings-dev/PKGBUILD
+@@ -222,7 +222,7 @@ package() {
+     # reads every file under /etc/mkinitcpio.conf.d/, so omarchy_hooks.conf
+     # would inject the Limine hooks into the Asahi kernel's initramfs, and the
+     # Limine entry-tool config has no consumer without Limine.
+-    rm -rf "$pkgdir/etc/limine-entry-tool.d" "$pkgdir/etc/mkinitcpio.conf.d"
++    rm -f "$pkgdir/etc/mkinitcpio.conf.d/thunderbolt_module.conf"
+     # Memory stack: no zram device or zswap on the aarch64 install, and
+     # systemd-oomd is not enabled there, so the vm.* reclaim tuning written
+     # for zram would be wrong for it. Keep only the network tuning.
+@@ -328,7 +328,7 @@ EOF
+   cp -a default/. "$pkgdir/usr/share/omarchy/default/"
+   # The Limine template is read by the x86_64 ISO orchestrator only.
+   if [[ $CARCH == aarch64 ]]; then
+-    rm -rf "$pkgdir/usr/share/omarchy/default/limine"
++    : # Snapdragon ARM UEFI uses the Limine templates
+   fi
+
+   # Snapper config template used by the install-time `snapper create-config`.

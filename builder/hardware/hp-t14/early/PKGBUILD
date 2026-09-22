@@ -1,0 +1,13 @@
+pkgname=omarchy-hw-snapdragon-early-experimental
+pkgver=0.3
+pkgrel=1
+pkgdesc='HP and ThinkPad early storage, power, display and input prerequisites for Dragon'
+arch=('any')
+license=('MIT')
+depends=('mkinitcpio' 'linux-firmware-qcom')
+options=('!strip' '!debug')
+package() {
+  install -Dm755 "$startdir/dragon_hp_thinkpad" "$pkgdir/usr/lib/initcpio/install/dragon_hp_thinkpad"
+  install -Dm755 "$startdir/dragon_hp_thinkpad.runtime" "$pkgdir/usr/lib/initcpio/hooks/dragon_hp_thinkpad"
+  install -Dm644 "$startdir/zzzz-dragon-hp-thinkpad.conf" "$pkgdir/etc/mkinitcpio.conf.d/zzzz-dragon-hp-thinkpad.conf"
+}

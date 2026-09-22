@@ -1,0 +1,19 @@
+#!/bin/bash
+# Resolve public source inputs, then use the standard Omarchy ISO builder.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+prepare_only=false
+if [[ ${1:-} == --prepare-only ]]; then
+  prepare_only=true
+  shift
+fi
+mkdir -p "$root/build"
+work=$(mktemp -d "$root/build/snapdragon-sources.XXXXXX")
+bash "$root/builder/prepare-snapdragon-sources.sh" "$work/source"
+if $prepare_only; then
+  printf '%s\n' "$work/source"
+  exit 0
+fi
+exec "$root/bin/omarchy-iso-make" --arch aarch64 --media-target aarch64/snapdragon \
+  --local-source "$work/source/omarchy" "$work/source/omarchy-pkgs" \
+  --keep-pkg-cache --no-boot-offer "$@"

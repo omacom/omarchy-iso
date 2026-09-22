@@ -29,6 +29,12 @@ esac
 : "${OMARCHY_NVIM_PACKAGE:=omarchy-nvim}"
 export OMARCHY_RUNTIME_PACKAGE OMARCHY_SETTINGS_PACKAGE OMARCHY_NVIM_PACKAGE
 
+# QEMU user emulation cannot provide pacman's Landlock syscall sandbox.
+# This opt-in affects only this disposable cross-build environment.
+if [[ ${OMARCHY_BUILD_DISABLE_SANDBOX:-0} == 1 ]]; then
+  sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
+fi
+
 # Packages installed into the Arch container used to build the ISO.
 pacman-key --init
 # Restore Arch Linux ARM trust after initializing the container keyring.
@@ -92,7 +98,25 @@ if [[ $ISO_ARCH == aarch64 ]]; then
     (section == "[core]" || section == "[extra]") && /^Server[[:space:]]*=/ { next }
     { print }
   ' "/configs/pacman-online-${OMARCHY_MIRROR}.conf" > "$PACMAN_ONLINE_CONF"
+  # Arch Linux ARM publishes board-specific dependencies such as libpisp in
+  # [alarm]. Keep its standard repositories in this disposable online config.
+  cat >> "$PACMAN_ONLINE_CONF" <<'ARM_REPOS'
+
+[alarm]
+Include = /etc/pacman.d/mirrorlist
+
+[aur]
+Include = /etc/pacman.d/mirrorlist
+ARM_REPOS
   echo "aarch64: staged $PACMAN_ONLINE_CONF without [multilib]/[arch-mact2]"
+fi
+
+if [[ ${OMARCHY_BUILD_DISABLE_SANDBOX:-0} == 1 ]]; then
+  if [[ $PACMAN_ONLINE_CONF == /configs/* ]]; then
+    cp "$PACMAN_ONLINE_CONF" /tmp/pacman-experimental-build.conf
+    PACMAN_ONLINE_CONF=/tmp/pacman-experimental-build.conf
+  fi
+  sed -i '/^\[options\]/a DisableSandbox' "$PACMAN_ONLINE_CONF"
 fi
 
 # Replace the published Omarchy repository with the mounted local repository.
@@ -165,6 +189,10 @@ rm -rf "$build_cache_dir/airootfs/etc/xdg/reflector"
 # Bring in our archiso profile additions.
 cp -r /configs/* "$build_cache_dir/"
 
+if [[ ${OMARCHY_BUILD_DISABLE_SANDBOX:-0} == 1 ]]; then
+  sed -i '/^\[options\]/a DisableSandbox' "$build_cache_dir/pacman-offline.conf"
+fi
+
 # Point every GRUB path at the selected live kernel.
 for _grub_cfg in "$build_cache_dir"/grub/*.cfg; do
   [[ -e $_grub_cfg ]] || continue
@@ -235,6 +263,11 @@ if [[ ${OMARCHY_INSTALL_DEBUG:-} == "1" ]]; then
       git -c safe.directory=/omarchy-pkgs -C /omarchy-pkgs status --short 2>/dev/null | sed 's/^/omarchy_pkgs_status=/' || true
     fi
   } > "$build_cache_dir/airootfs/usr/share/omarchy-iso/build-info"
+fi
+
+# Generate board firmware packages from pinned public inputs on clean builds.
+if [[ $OMARCHY_MEDIA_TARGET == aarch64/snapdragon ]]; then
+  bash /builder/build-snapdragon-packages.sh "$PACMAN_ONLINE_CONF"
 fi
 
 # When --local-source is in effect, build omarchy* from the mounted source

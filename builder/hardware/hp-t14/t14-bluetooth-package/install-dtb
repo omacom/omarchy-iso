@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+
+board_dtb=/boot/dtbs/qcom/x1e78100-lenovo-thinkpad-t14s.dtb
+trial_dtb=/usr/share/omarchy-hw-t14s-bluetooth-experimental/x1e78100-lenovo-thinkpad-t14s.dtb
+base_sha=f21573bd4946bf7118e467326b22de228cfd64c61255ed7b51baa71185808df9
+trial_sha=8061768e6ac74eaf3cc0039e060cb63c1a56d452850c7dcc6e756aa9f5cde3fb
+
+if ! mountpoint -q /boot; then
+  echo 'T14 Bluetooth DTB: /boot is not mounted' >&2
+  exit 1
+fi
+if [ ! -f "$board_dtb" ]; then
+  echo "T14 Bluetooth DTB: missing $board_dtb" >&2
+  exit 1
+fi
+source_sha=$(sha256sum "$trial_dtb")
+source_sha=${source_sha%% *}
+if [ "$source_sha" != "$trial_sha" ]; then
+  echo 'T14 Bluetooth DTB: package payload hash mismatch' >&2
+  exit 1
+fi
+current_sha=$(sha256sum "$board_dtb")
+current_sha=${current_sha%% *}
+if [ "$current_sha" = "$trial_sha" ]; then
+  exit 0
+fi
+if [ "$current_sha" != "$base_sha" ]; then
+  echo "T14 Bluetooth DTB: kernel tree changed ($current_sha); leaving it in place" >&2
+  exit 0
+fi
+tmp="$board_dtb.omarchy-trial.$$"
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
+install -m644 "$trial_dtb" "$tmp"
+mv -f "$tmp" "$board_dtb"
+trap - EXIT HUP INT TERM
+echo 'T14 Bluetooth DTB: installed tested WCN7850 tree'

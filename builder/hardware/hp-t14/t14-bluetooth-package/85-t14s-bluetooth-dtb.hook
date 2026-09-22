@@ -1,0 +1,10 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = boot/dtbs/qcom/x1e78100-lenovo-thinkpad-t14s.dtb
+
+[Action]
+Description = Restore tested T14s Bluetooth device tree before UKI rebuild
+When = PostTransaction
+Exec = /usr/lib/omarchy-hw-t14s-bluetooth-experimental/install-dtb

@@ -1,0 +1,44 @@
+#!/usr/bin/ash
+# One report on failure; no persistent service or disk writes.
+run_earlyhook() {
+    grep -qw 'dragon.bootdiag=1' /proc/cmdline || return 0
+    # Archiso also calls the rescue shell directly, bypassing emergency hooks.
+    # Retain this mkinitcpio version's exact shell implementation.
+    eval "$(sed -n '/^launch_interactive_shell() {/,/^}/p' /init_functions |
+        sed 's/^launch_interactive_shell()/dragon_original_shell()/')"
+    type dragon_original_shell >/dev/null 2>&1 || return 1
+    launch_interactive_shell() {
+        dragon_boot_report
+        dragon_original_shell "$@"
+    }
+}
+
+run_emergencyhook() {
+    dragon_boot_report
+}
+
+dragon_boot_report() {
+    grep -qw 'dragon.bootdiag=1' /proc/cmdline || return 0
+    [ "${dragon_reported:-0}" = 0 ] || return 0
+    dragon_reported=1
+    # Stop Plymouth from hiding the report when a splash entry was used.
+    command -v plymouth >/dev/null && plymouth quit 2>/dev/null
+    {
+        echo '=== Dragon early boot report ==='
+        uname -r
+        printf 'Device tree: '
+        tr '\0' ' ' < /proc/device-tree/model
+        echo
+        printf 'Boot arguments: '
+        cat /proc/cmdline
+        printf 'Block devices: '
+        ls /sys/class/block
+        printf 'Media labels: '
+        ls /dev/disk/by-label 2>/dev/null
+        echo 'Input devices:'
+        grep -E '^(N:|H:)' /proc/bus/input/devices
+        echo 'Recent storage, input and probe messages:'
+        dmesg | grep -iE 'usb|xhci|dwc3|nvme|i2c|hid|squashfs|defer|fail|error' | tail -16
+        echo '=== Photograph this report; no typing needed ==='
+    } > /dev/console 2>&1
+}

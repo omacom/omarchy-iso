@@ -1,0 +1,7 @@
+post_install() {
+  /usr/lib/omarchy-hw-t14s-bluetooth-experimental/install-dtb
+}
+
+post_upgrade() {
+  /usr/lib/omarchy-hw-t14s-bluetooth-experimental/install-dtb
+}

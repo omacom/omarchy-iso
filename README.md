@@ -33,15 +33,25 @@ Use `--dev` or `--rc` to build against those package channels. Both `--dev` and 
 The build defaults to the host architecture, with Snapdragon media selected on ARM hosts. Use `--arch` and `--media-target` to select explicitly. Docker must support the selected architecture; cross-architecture builds require container emulation.
 
 ```bash
-./bin/omarchy-iso-make --arch aarch64 --media-target aarch64/snapdragon --edge --keep-pkg-cache --no-boot-offer
+./bin/omarchy-iso-make-snapdragon
 ./bin/omarchy-iso-make --arch aarch64 --media-target aarch64/generic --edge --keep-pkg-cache --no-boot-offer
 ```
 
 Snapdragon media uses a UKI with hardware-matched Qualcomm device trees. Generic ARM media uses GRUB and firmware-provided hardware tables, and must be selected explicitly. Neither target supports every ARM board; Apple Silicon and Raspberry Pi boot support are not included. The existing `omarchy-iso-boot` helper is x86-only.
 
-Both targets use published ARM packages by default. The manual `aarch64 ISO Build` workflow selects `edge`, `rc` or `stable` and builds only the ISO. Package building, signing and publication stay with the existing `omarchy-pkgs` pipeline.
+The Snapdragon launcher prepares pinned official Dragon runtime/package sources and uses the existing
+`--local-source` build mode. It includes the pending ARM package recipes and the
+ARM UEFI settings adaptation until those are available in the package channel.
+Snapdragon builds prepare HP/T14 board packages automatically from pinned public
+firmware downloads; no separate hardware checkout or previous ISO is needed.
+See [HP/T14 build inputs and validation](builder/hardware/hp-t14/README.md).
+Select the HP EliteBook / ThinkPad T14s boot entry on those boards. The standard
+Snapdragon entry retains its existing DSP guard. The T14 Bluetooth/Wi-Fi
+power regression is still open; see the hardware status before testing.
 
-The ISO branch and package channel are independent. Selecting the `dragon` ISO branch does not select Dragon runtime sources. The chosen channel must publish a compatible runtime and settings package, `linux-aarch64-pkgbase-shim`, and, for Snapdragon, `qcom-firmware-extract`. The build rejects packages missing the required ARM boot configuration or Snapdragon setup scripts. It does not publish missing packages or change repository trust settings.
+Both targets use published ARM runtime and settings packages by default. The manual `aarch64 ISO Build` workflow selects `edge`, `rc` or `stable` and builds only the ISO. Package building, signing and publication stay with the existing `omarchy-pkgs` pipeline.
+
+The ISO branch and package channel are independent. Selecting the `dragon` ISO branch does not select Dragon runtime sources. The direct published-package build requires a compatible runtime and settings package in the chosen channel. Snapdragon builds prepare `linux-aarch64-pkgbase-shim` and `qcom-firmware-extract` from the pinned team recipes; generic ARM builds still require the kernel shim in their selected channel. The build rejects packages missing the required ARM boot configuration or Snapdragon setup scripts. It does not publish missing packages or change repository trust settings.
 
 For unpublished changes, use `--local-repo <repo-dir>` for a prebuilt repository or `--local-source` as above to build runtime, settings and Neovim packages from local checkouts. Other missing packages still need to be supplied by the selected repository; the two options can be combined. Offline caches are separated by channel, architecture and media target. Generic image filenames start with `omarchy-generic-`.
 

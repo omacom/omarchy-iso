@@ -152,6 +152,7 @@ DOCKER_ARGS=(
   --rm
   --privileged
   --platform "$DOCKER_PLATFORM"
+  -e "OMARCHY_BUILD_DISABLE_SANDBOX=${OMARCHY_BUILD_DISABLE_SANDBOX:-0}"
   -e "OMARCHY_ARCH=$OMARCHY_ARCH"
   -e "OMARCHY_MEDIA_TARGET=$OMARCHY_MEDIA_TARGET"
   -e "OMARCHY_ISO_REF=$OMARCHY_ISO_REF"
@@ -164,6 +165,7 @@ DOCKER_ARGS=(
   -v "$BUILD_ROOT/archiso:/archiso:ro"
   -v "$BUILD_ROOT/builder:/builder:ro"
   -v "$BUILD_ROOT/configs:/configs:ro"
+  -v "$BUILD_ROOT/builder/hardware/hp-t14:/hardware:ro"
 )
 
 if [[ -n $LOCAL_OMARCHY_PATH ]]; then

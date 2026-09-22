@@ -6,9 +6,14 @@
       "name": "Lenovo Yoga Slim 7x",
       "media_target": "aarch64/snapdragon",
       "match": [
-        { "sys_vendor": "LENOVO", "product_name": "83ED" }
+        {
+          "sys_vendor": "LENOVO",
+          "product_name": "83ED"
+        }
       ],
-      "packages": ["linux-firmware-qcom"],
+      "packages": [
+        "linux-firmware-qcom"
+      ],
       "kernel_cmdline": []
     },
     {
@@ -16,7 +21,10 @@
       "name": "NVIDIA DGX Spark",
       "media_target": "aarch64/generic",
       "match": [
-        { "sys_vendor": "NVIDIA", "product_name": "NVIDIA_DGX_Spark" }
+        {
+          "sys_vendor": "NVIDIA",
+          "product_name": "NVIDIA_DGX_Spark"
+        }
       ],
       "packages": [
         "linux-aarch64-headers",
@@ -25,14 +33,20 @@
         "nvidia-utils",
         "nvidia-container-toolkit"
       ],
-      "kernel_cmdline": ["console=tty0", "plymouth.ignore-serial-consoles"]
+      "kernel_cmdline": [
+        "console=tty0",
+        "plymouth.ignore-serial-consoles"
+      ]
     },
     {
       "id": "asus-ascent-gx10",
       "name": "ASUS Ascent GX10",
       "media_target": "aarch64/generic",
       "match": [
-        { "sys_vendor": "ASUSTeK COMPUTER INC.", "product_name": "GX10" }
+        {
+          "sys_vendor": "ASUSTeK COMPUTER INC.",
+          "product_name": "GX10"
+        }
       ],
       "packages": [
         "linux-aarch64-headers",
@@ -42,6 +56,49 @@
         "nvidia-container-toolkit"
       ],
       "kernel_cmdline": []
+    },
+    {
+      "id": "hp-elitebook-ultra-g1q",
+      "name": "HP EliteBook Ultra G1q",
+      "media_target": "aarch64/snapdragon",
+      "match": [
+        {
+          "sys_vendor": "HP",
+          "product_name": "HP EliteBook Ultra G1q 14 inch Notebook AI PC"
+        }
+      ],
+      "packages": [
+        "omarchy-hw-hp-experimental",
+        "libcamera-tools",
+        "pipewire-libcamera",
+        "gst-plugin-libcamera"
+      ],
+      "kernel_cmdline": [
+        "console=tty0",
+        "plymouth.ignore-serial-consoles"
+      ]
+    },
+    {
+      "id": "lenovo-thinkpad-t14s-gen6",
+      "name": "Lenovo ThinkPad T14s Gen 6 LCD",
+      "media_target": "aarch64/snapdragon",
+      "match": [
+        {
+          "sys_vendor": "LENOVO",
+          "product_name": "21N10000US"
+        }
+      ],
+      "packages": [
+        "omarchy-hw-t14s-experimental",
+        "omarchy-hw-t14s-bluetooth-experimental",
+        "libcamera-tools",
+        "pipewire-libcamera",
+        "gst-plugin-libcamera"
+      ],
+      "kernel_cmdline": [
+        "console=tty0",
+        "plymouth.ignore-serial-consoles"
+      ]
     }
   ]
 }

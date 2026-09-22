@@ -1,0 +1,30 @@
+#!/bin/bash
+# Include DT dependencies that module dependency metadata cannot express.
+build() {
+  local tree module firmware candidate found
+  for tree in clk/qcom pinctrl/qcom soc/qcom regulator interconnect/qcom phy/qualcomm usb/dwc3 i2c/busses spmi remoteproc rpmsg pmdomain/qcom power/sequencing pci/pwrctrl; do
+    add_all_modules "/drivers/$tree/"
+  done
+  for module in panel_edp pwm_bl leds_qcom_lpg nvmem_qfprom nvmem_qcom_spmi_sdam qcom_hwspinlock qrtr_smd ps883x gpio_sbu_mux i2c_hid_of pmic_glink_altmode; do
+    if modinfo -k "$KERNELVERSION" "$module" >/dev/null 2>&1; then
+      add_module "$module"
+    fi
+  done
+  # These GPU requests are not all advertised in the driver's module metadata.
+  for firmware in qcom/gen70500_sqe.fw qcom/gen70500_gmu.bin qcom/x1e80100/gen70500_zap.mbn; do
+    found=false
+    for candidate in "/usr/lib/firmware/$firmware"{,.zst,.xz}; do
+      if [[ -f $candidate ]]; then
+        add_file "$candidate"
+        found=true
+        break
+      fi
+    done
+    if ! $found; then
+      error "Missing Snapdragon GPU firmware: $firmware"
+      return 1
+    fi
+  done
+  add_runscript
+}
+help() { echo 'Include Snapdragon HP/ThinkPad display and input prerequisites.'; }

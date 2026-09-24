@@ -206,8 +206,15 @@ mapfile -t all_packages < <(
 # "target not found". Published Omarchy runtime packages that predate the rename
 # still list it in omarchy-other.packages, so map it here until every channel
 # ships a runtime that names broadcom-wl-dkms itself.
+# arch-mact2 dropped apple-bcm-firmware on 2026-09-16 in favour of
+# apple-bcm-firmware-fetcher, which does the same job (pull the T2 Wi-Fi and
+# Bluetooth firmware off the macOS volume) but only conflicts with the old name
+# rather than replacing it, so pacman cannot follow the rename on its own.
 mapfile -t all_packages < <(
-  printf '%s\n' "${all_packages[@]}" | sed 's/^broadcom-wl$/broadcom-wl-dkms/' | sort -u
+  printf '%s\n' "${all_packages[@]}" |
+    sed -e 's/^broadcom-wl$/broadcom-wl-dkms/' \
+      -e 's/^apple-bcm-firmware$/apple-bcm-firmware-fetcher/' |
+    sort -u
 )
 
 # With --local-source we already built these omarchy* packages directly into

@@ -16,6 +16,8 @@
 #   --encrypt          Drive the encrypted install flow (default: unencrypted)
 #   --provision              Drive the deferred-provisioning install flow: no user during install, the
 #                      first boot runs omarchy-provision-owner and creates it there
+#   --try              Start a Try Omarchy session from the greeter first, then
+#                      leave it via Super+Shift+I and continue with the install
 #   --reuse-base       Skip the install phase if a base image already exists
 #   --install-only     Stop after producing the installed base image
 #   --sync-omarchy DIR Push DIR's test suite into the guest before running
@@ -40,6 +42,7 @@ INSTALL_TIMEOUT=2400
 BOOT_TIMEOUT=600
 ENCRYPT=false
 PROVISION=false
+TRY=false
 REUSE_BASE=false
 INSTALL_ONLY=false
 KEEP_RUNNING=false
@@ -55,6 +58,7 @@ while (($#)); do
   case "$1" in
     --encrypt) ENCRYPT=true ;;
     --provision) PROVISION=true ;;
+    --try) TRY=true ;;
     --reuse-base) REUSE_BASE=true ;;
     --install-only) INSTALL_ONLY=true ;;
     --keep-running) KEEP_RUNNING=true ;;
@@ -610,12 +614,50 @@ audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel|omarchy.audio'
 
 # ----------------------------------------------------- driving the installer
 
+# T on the greeter installs the desktop into the live overlay and starts a
+# session. The desktop announces itself on the serial console (OCR cannot read
+# a Wayland session reliably and the live root has no SSH key); Super+Shift+I
+# then ends the session and the greeter comes back.
+drive_try_session() {
+  log "Starting a Try Omarchy session"
+  press t
+  sleep 5
+  capture_console "success-try-01-installing"
+
+  local waited=0
+  until grep -q OMARCHY_TRY_SESSION_UP "$RUN_DIR/install-serial.log" 2>/dev/null; do
+    if ! vm_running; then
+      echo "VM exited while waiting for the try session" >&2
+      return 1
+    fi
+    if ((waited >= 600)); then
+      capture_console "failure-try-session-timeout"
+      echo "Timed out after ${waited}s waiting for the try session" >&2
+      return 1
+    fi
+    sleep 5
+    ((waited += 5))
+  done
+  log "Try session up after ${waited}s"
+  sleep 10 # let the shell paint before the screenshot
+  capture_console "success-try-02-desktop"
+
+  press meta_l-shift-i
+}
+
 drive_configurator() {
   log "Driving the installer wizard"
 
   # A greeter (animated logo + tagline) opens the installer; Return begins.
   wait_for_screen "Linux by DHH" 300
   capture_console "success-installer-00-greeter"
+
+  if $TRY; then
+    drive_try_session
+    # The session ended on the greeter; Return now starts the install.
+    wait_for_screen "Linux by DHH" 120
+    capture_console "success-try-03-back-at-greeter"
+  fi
   press ret
 
   # Keyboard is the first screen. Ctrl+C there is the hidden entry into deferred provisioning

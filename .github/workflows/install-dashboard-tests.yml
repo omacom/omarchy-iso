@@ -1,0 +1,24 @@
+name: Installer dashboard tests
+
+on:
+  pull_request:
+  push:
+    branches: [quattro, feat/install-snake-grid]
+
+permissions:
+  contents: read
+
+jobs:
+  dashboard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq libarchive-tools
+      - name: Validate shell syntax
+        run: bash -n configs/airootfs/usr/local/bin/omarchy-install-dashboard configs/airootfs/usr/share/omarchy-iso/install-snake.sh
+      - name: Check animation, progress and terminal lifecycle
+        run: TERM=xterm-256color bash test/unit/install-snake-test.sh
+      - name: Check installation failure diagnostics
+        run: TERM=dumb bash test/unit/install-media-diagnosis-test.sh

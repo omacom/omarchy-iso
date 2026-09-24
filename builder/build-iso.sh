@@ -140,6 +140,7 @@ sed -i -E '/^(linux|broadcom-wl)$/d' "$build_cache_dir/packages.x86_64"
 # pulls the published omarchy* from the network mirror like any other package.
 if [[ -d /omarchy-source ]]; then
   base_pkg_lists=(/omarchy-source/install/omarchy-base.packages /omarchy-source/install/omarchy-other.packages)
+  child_pkg_list=/omarchy-source/install/omarchy-child.packages
   setup_form=/omarchy-source/install/provisioning/setup-form.sh
 else
   # Pull the same package lists out of the freshly-downloaded Omarchy runtime
@@ -162,11 +163,24 @@ else
   # actionable error below.
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/setup-form.sh 2>/dev/null || true
   setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
+  # The child profile's list, tolerating a runtime that predates it the same
+  # way: a missing member must not abort the build.
+  bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/omarchy-child.packages 2>/dev/null || true
+  child_pkg_list=/tmp/omarchy-pkglists/usr/share/omarchy/install/omarchy-child.packages
 fi
 
 mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
 cp "${base_pkg_lists[0]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
 cp "${base_pkg_lists[1]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-other.packages"
+
+# What a child install (kids mode) adds on top of the base list. The
+# orchestrator reads the vendored copy, so a runtime without one gets an
+# empty list rather than a missing file.
+if [[ -f $child_pkg_list ]]; then
+  cp "$child_pkg_list" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-child.packages"
+else
+  echo "# No child package list in this runtime." >"$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-child.packages"
+fi
 
 # The configurator's setup form comes from the runtime this ISO bundles, so the
 # installer and the first-boot setup that finishes a deferred install can never
@@ -193,6 +207,10 @@ mapfile -t all_packages < <(
   {
     cat "$build_cache_dir/packages.x86_64"
     grep -hv '^#\|^$' "${base_pkg_lists[@]}"
+    # The child list is comment-only until the child app set lands, and grep
+    # exits 1 when it selects nothing; under set -e that would end this group
+    # here and silently drop every list after it from the mirror.
+    grep -hv '^#\|^$' "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-child.packages" || true
     grep -hv '^#\|^$' /builder/archinstall.packages
     # Always include the selected Omarchy packages so the target install can
     # find the runtime and companion packages in the offline mirror.

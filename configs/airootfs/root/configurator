@@ -393,7 +393,7 @@ detect_windows_esp() {
   for p in $(blkid -t TYPE=vfat -o device 2>/dev/null); do
     [[ "$p" == "$disk"* ]] || continue
     tmp_mp=$(mktemp -d)
-    if mount -o ro "$p" "$tmp_mp" 2>/dev/null; then
+    if mount -t vfat -o ro "$p" "$tmp_mp" 2>/dev/null; then
       if [[ -d "$tmp_mp/EFI/Microsoft" ]]; then
         umount "$tmp_mp"; rmdir "$tmp_mp"
         echo "$p"
@@ -770,7 +770,9 @@ run_partition_execute() {
       mount -o noatime,compress=zstd,subvol=@pkg "$root_mapper" /mnt/var/cache/pacman/pkg
 
     disk_step "creating the ESP filesystem on $efi_dev" mkfs.fat -F32 -n OMARCHY_EFI "$efi_dev"
-    disk_step "mounting the ESP" mount "$efi_dev" /mnt"$esp_mount_in_target"
+    # Typed, not probed: an unrecognised probe walks /proc/filesystems, and on
+    # the live ISO squashfs answers first.
+    disk_step "mounting the ESP" mount -t vfat "$efi_dev" /mnt"$esp_mount_in_target"
 
     # The orchestrator's first act is to verify this handoff. Check it here so
     # a failure names the step that broke rather than surfacing later as

@@ -233,9 +233,11 @@ keyboard_form() {
   done
 
   # Only attempt to load keyboard layout if we're on a real console
-  # loadkeys only works on Linux virtual consoles (tty), not in terminal emulators
+  # loadkeys only works on Linux virtual consoles (tty), not in terminal emulators.
+  # XKB-only picker values have no console map; keep US so the password/LUKS
+  # steps stay Latin (omarchy_console_keymap_for lives in setup-form.sh).
   if [[ $(tty 2>/dev/null) == "/dev/tty"* ]]; then
-    loadkeys "$keyboard" 2>/dev/null
+    loadkeys "$(omarchy_console_keymap_for "$keyboard")" 2>/dev/null
   fi
 }
 

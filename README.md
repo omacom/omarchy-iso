@@ -28,6 +28,12 @@ Despite the local folder name, the first argument is the Omarchy source checkout
 
 Use `--dev` or `--rc` to build against those package channels. Both `--dev` and `--edge` select the dev packages from the edge mirror.
 
+## Installing from the target disk
+
+The UEFI installer can use free space on the GPT disk it booted from while
+preserving the installer and EFI partitions. See the [installation guide](docs/same-disk-installation.md)
+for limitations, BitLocker instructions and testing.
+
 ## Autoinstall
 
 The shipped ISO installs itself with no keyboard when it finds its configuration on a second drive. Attach a drive labeled `cidata` alongside the ISO and the installer copies the config off it and skips the configurator; with no such drive, nothing changes and the wizard runs as usual. No rebuild, no extra boot entry.

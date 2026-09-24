@@ -6,8 +6,22 @@ NO_CACHE=""
 KEEP_PKG_CACHE=""
 LOCAL_OMARCHY_PATH=""
 LOCAL_PKGS_PATH=""
+OMARCHY_LOCALE=""
+OMARCHY_WITH_DICTATION=""
 while [[ $# -gt 0 ]]; do
   case $1 in
+  --locale)
+    OMARCHY_LOCALE="${2:-}"
+    if [[ -z $OMARCHY_LOCALE || $OMARCHY_LOCALE == --* ]]; then
+      echo 'Error: --locale requires a profile name (for example ja)' >&2
+      exit 1
+    fi
+    shift 2
+    ;;
+  --with-dictation)
+    OMARCHY_WITH_DICTATION=1
+    shift
+    ;;
   --no-cache)
     NO_CACHE=1
     shift
@@ -57,7 +71,7 @@ while [[ $# -gt 0 ]]; do
     ;;
   *)
     echo "Unknown option: $1"
-    echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
+    echo "Usage: $0 [--locale <profile>] [--with-dictation] [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
     exit 1
     ;;
   esac
@@ -105,6 +119,13 @@ lint_file_permissions() {
 
 lint_file_permissions
 
+# Validate before cache purges, submodule updates, or Docker startup.
+LOCALE_ARGS=(--profiles "${BASH_SOURCE[0]%/*}/../locales" --locale "$OMARCHY_LOCALE")
+[[ -n $OMARCHY_WITH_DICTATION ]] && LOCALE_ARGS+=(--with-dictation)
+if [[ -n $OMARCHY_LOCALE || -n $OMARCHY_WITH_DICTATION ]]; then
+  python3 "${BASH_SOURCE[0]%/*}/../builder/prepare-locale.py" "${LOCALE_ARGS[@]}"
+fi
+
 # Purging the host package cache needs interactive sudo; --keep-pkg-cache
 # skips it so unattended builds (test rigs, agents) can run without a prompt.
 if [[ -z $KEEP_PKG_CACHE ]]; then
@@ -125,6 +146,8 @@ DOCKER_ARGS=(
   --privileged
   -e "OMARCHY_ISO_REF=$OMARCHY_ISO_REF"
   -e "OMARCHY_MIRROR=$OMARCHY_MIRROR"
+  -e "OMARCHY_LOCALE=$OMARCHY_LOCALE"
+  -e "OMARCHY_WITH_DICTATION=$OMARCHY_WITH_DICTATION"
   -e "OMARCHY_INSTALL_DEBUG=${OMARCHY_INSTALL_DEBUG:-}"
   -e "HOST_UID=$(id -u)"
   -e "HOST_GID=$(id -g)"
@@ -133,6 +156,7 @@ DOCKER_ARGS=(
   -v "$BUILD_ROOT/archiso:/archiso:ro"
   -v "$BUILD_ROOT/builder:/builder:ro"
   -v "$BUILD_ROOT/configs:/configs:ro"
+  -v "$BUILD_ROOT/locales:/locales:ro"
 )
 
 if [[ -n $LOCAL_OMARCHY_PATH ]]; then
@@ -169,7 +193,10 @@ fi
 "${DOCKER[@]}" run "${DOCKER_ARGS[@]}" archlinux/archlinux:latest /$BUILD_SCRIPT
 
 latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*.iso | head -n1)
-iso_ref="${latest_iso%.*}-$OMARCHY_ISO_REF.iso"
+iso_suffix="$OMARCHY_ISO_REF"
+[[ -n $OMARCHY_LOCALE ]] && iso_suffix+="-$OMARCHY_LOCALE"
+[[ -n $OMARCHY_WITH_DICTATION ]] && iso_suffix+="-dictation"
+iso_ref="${latest_iso%.*}-$iso_suffix.iso"
 mv -f "$latest_iso" "$iso_ref"
 
 if [[ -z "${NO_BOOT_OFFER:-}" ]]; then

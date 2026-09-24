@@ -28,6 +28,10 @@ Despite the local folder name, the first argument is the Omarchy source checkout
 
 Use `--dev` or `--rc` to build against those package channels. Both `--dev` and `--edge` select the dev packages from the edge mirror.
 
+## Locale profiles
+
+Use `./bin/omarchy-iso-make --locale ja` for Japanese input and user locale defaults. Add `--with-dictation` to include offline Japanese dictation. See [locale profiles](locales/README.md) for the build options and scope, and the [Japanese profile](locales/ja/README.md) for a downloadable image built from this implementation and its verification limits.
+
 ## Autoinstall
 
 The shipped ISO installs itself with no keyboard when it finds its configuration on a second drive. Attach a drive labeled `cidata` alongside the ISO and the installer copies the config off it and skips the configurator; with no such drive, nothing changes and the wizard runs as usual. No rebuild, no extra boot entry.

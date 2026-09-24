@@ -30,7 +30,7 @@ pacman --noconfirm -Sy archlinux-keyring
 # so this container can be months behind the mirror it installs from. A plain
 # -Sy install is then a partial upgrade — new packages linked against a glibc
 # the container doesn't have yet.
-pacman --noconfirm -Syu archiso git sudo base-devel jq grub imagemagick neovim nodejs npm tree-sitter-cli
+pacman --noconfirm -Syu archiso git sudo base-devel jq grub imagemagick neovim nodejs npm tree-sitter-cli python
 
 # Pre-import the omarchy signing key (so pacman trusts our [omarchy] repo
 # during the build without keyserver lookups).
@@ -168,6 +168,16 @@ mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
 cp "${base_pkg_lists[0]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
 cp "${base_pkg_lists[1]}" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-other.packages"
 
+# Add the selected locale's target packages before resolving the offline mirror.
+if [[ -n ${OMARCHY_LOCALE:-} || -n ${OMARCHY_WITH_DICTATION:-} ]]; then
+  locale_args=(--profiles /locales --locale "${OMARCHY_LOCALE:-}" --root "$build_cache_dir/airootfs")
+  [[ -n ${OMARCHY_WITH_DICTATION:-} ]] && locale_args+=(--with-dictation)
+  python /builder/prepare-locale.py "${locale_args[@]}"
+  if [[ -n ${OMARCHY_WITH_DICTATION:-} ]]; then
+    bash /builder/download-dictation.sh "$build_cache_dir/airootfs/usr/local/share/omarchy-locale"
+  fi
+fi
+
 # The configurator's setup form comes from the runtime this ISO bundles, so the
 # installer and the first-boot setup that finishes a deferred install can never
 # disagree. A runtime predating the split ships no such file, which would leave
@@ -192,7 +202,7 @@ declare -a all_packages
 mapfile -t all_packages < <(
   {
     cat "$build_cache_dir/packages.x86_64"
-    grep -hv '^#\|^$' "${base_pkg_lists[@]}"
+    grep -hv '^#\|^$' "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages" "${base_pkg_lists[1]}"
     grep -hv '^#\|^$' /builder/archinstall.packages
     # Always include the selected Omarchy packages so the target install can
     # find the runtime and companion packages in the offline mirror.

@@ -53,6 +53,12 @@ fi
 BUILD_ROOT=$(realpath "${BASH_SOURCE[0]%/*}/..")
 BUILD_RELEASE_PATH="$BUILD_ROOT/release"
 
+# Install the host dependency before building, like omarchy-iso-sign does
+# for gnupg. A failed installation must stop the release here.
+if ! command -v mktorrent >/dev/null; then
+  sudo pacman -S --noconfirm --needed --quiet mktorrent
+fi
+
 # Make ISOs
 if [[ ! " ${MAKE_ARGS[*]} " =~ " --no-make " ]]; then
   echo -e "\e[32mMaking $ISO_REF ISO\e[0m"
@@ -82,10 +88,12 @@ if [[ -z $iso_sha ]] || ! printf '%s  %s\n' "$iso_sha" "${release_iso##*/}" >"$r
 fi
 echo -e "\e[32mSHA256 for $ISO_REF ISO: $iso_sha\e[0m"
 
+"$BUILD_ROOT/bin/omarchy-iso-torrent" "$release_iso"
 omarchy-iso-upload "$release_iso"
 
 # The whole point of a release is handing someone this pair.
 echo -e "\e[32mReleased $ISO_REF ISO $BUILD_VERSION\e[0m"
 echo "  URL:    https://iso.omarchy.org/${release_iso##*/}"
+echo "  Torrent: https://iso.omarchy.org/${release_iso##*/}.torrent"
 echo "  SHA256: $iso_sha"
 echo "  Local:  $release_iso"

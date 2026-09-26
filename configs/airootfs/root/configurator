@@ -415,12 +415,16 @@ to_gb() {
 # platform.
 iso_arch=$(cat /root/omarchy_arch 2>/dev/null || uname -m)
 iso_platform=$(cat /root/omarchy_arm_platform 2>/dev/null || true)
+if [[ $iso_arch == aarch64 && -z $iso_platform ]]; then
+  echo "Error: this aarch64 ISO does not record the platform it was built for" >&2
+  exit 1
+fi
 
 # T2 Macs need their own kernel for keyboard/wifi drivers. aarch64 images are
 # built for one platform kernel (linux-n1x today) and nothing else boots.
 detect_kernel() {
   if [[ $iso_arch == aarch64 ]]; then
-    echo "linux-${iso_platform:?aarch64 ISO without a platform}"
+    echo "linux-$iso_platform"
   elif lspci -nn 2>/dev/null | grep -q "106b:180[12]"; then
     echo "linux-t2"
   else

@@ -81,6 +81,14 @@ source "$ROOT/builder/aarch64-package-filter.sh"
 result=$(filter_aarch64_packages linux-n1x linux linux-headers linux-omarchy linux-omarchy-headers amd-ucode broadcom-wl-dkms tzupdate lib32-nvidia-utils dell-xps13-sidecar-amps mise-bin nvim vi obs-studio yay-debug hyprland omarchy-dev 2>/dev/null | tr '\n' ' ')
 [[ $result == "linux-n1x linux-n1x-headers linux-n1x linux-n1x-headers tzupdate mise-bin neovim ex-vi-compat hyprland omarchy-dev " ]] || fail "manifest filter produced: $result"
 
+# --- N1x settings package ------------------------------------------------------
+grep -Fq "OMARCHY_PLATFORM='\${OMARCHY_ARM_PLATFORM:-}'" "$ROOT/builder/build-omarchy-packages.sh" \
+  || fail "the local package build does not tell omarchy-settings-dev the platform"
+grep -Fq 'lacks $required; was it built without OMARCHY_PLATFORM=n1x?' "$ROOT/builder/build-iso.sh" \
+  || fail "N1x builds do not verify the settings package keeps the Limine stack"
+grep -Fq "grep -qx 'depend = limine-mkinitcpio-hook'" "$ROOT/builder/build-iso.sh" \
+  || fail "N1x builds do not verify the runtime depends on the Limine stack"
+
 # --- recovery entry --------------------------------------------------------------
 grep -Fq "grep -qw 'omarchy.n1x_recovery=1' /proc/cmdline" "$ROOT/configs/airootfs/root/.automated_script.sh" \
   || fail "the N1x recovery entry would start the installer"

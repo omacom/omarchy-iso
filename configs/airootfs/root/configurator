@@ -7,6 +7,20 @@ OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
 OMARCHY_RUNTIME_PACKAGE="${OMARCHY_RUNTIME_PACKAGE:-omarchy}"
 OMARCHY_SETTINGS_PACKAGE="${OMARCHY_SETTINGS_PACKAGE:-omarchy-settings}"
 
+configurator_mode="${1:-install}"
+case "$configurator_mode" in
+  install|dry)
+    cidata_generation=false
+    ;;
+  cidata)
+    cidata_generation=true
+    ;;
+  *)
+    echo "ERROR: unknown configurator mode: $configurator_mode" >&2
+    exit 1
+    ;;
+esac
+
 LOGO_PATH="$OMARCHY_PATH/logo.txt"
 
 # The setup form — keyboard, account, hostname, and timezone questions, plus the
@@ -984,6 +998,45 @@ confirm_disk_overwrite() {
   done
 }
 
+confirm_cidata_generation() {
+  local mode="encrypted"
+  local affirmative confirm_status
+
+  while true; do
+    clear_logo
+    echo
+    say "Generate autoinstall config for a Omarchy VM created with bin/omarchy-iso-boot."
+
+    if [[ $mode == "encrypted" ]]; then
+      say --foreground 8 "Press Ctrl+C for unencrypted install."
+      affirmative="Yes, generate config"
+    else
+      affirmative="Yes, generate unencrypted config"
+    fi
+
+    echo
+    gum confirm --affirmative "$affirmative" --negative "Cancel" \
+      "Generate cidata configuration?"
+    confirm_status=$?
+
+    case $confirm_status in
+      0)
+        [[ $mode == "encrypted" ]] && encrypt_installation=true || encrypt_installation=false
+        return 0
+        ;;
+      1)
+        return 1
+        ;;
+      130)
+        [[ $mode == "encrypted" ]] && mode="unencrypted" || mode="encrypted"
+        ;;
+      *)
+        return "$confirm_status"
+        ;;
+    esac
+  done
+}
+
 # Decide what and how to install: sets install_target (full_disk|free_space),
 # install_target and encrypt_installation. Nothing is written to disk yet —
 # the user step runs between this and the execution below. (deferred provisioning never
@@ -1065,7 +1118,13 @@ if $defer_provisioning; then
   # first-boot OOBE (omarchy-provision-owner).
   hostname="omarchy"
   timezone="UTC"
+fi
 
+if $cidata_generation; then
+  disk="/dev/vda"
+  install_target="full_disk"
+  confirm_cidata_generation || exit $?
+elif $defer_provisioning; then
   # Jump straight to disk selection + overwrite confirmation (encrypted by
   # default, Ctrl+C toggles unencrypted). deferred provisioning is always a full-disk install.
   disk_form
@@ -1083,16 +1142,20 @@ clear
 write_user_files
 
 if [[ $install_target == "free_space" ]]; then
-  run_partition_execute "$@"
+  run_partition_execute "$configurator_mode"
 
-  if [[ ${1:-} == "dry" ]]; then
+  if [[ $configurator_mode == "dry" ]]; then
     print_dry_run_files
   fi
   exit 0
 fi
 
 # Setup partition layout
-disk_size=$(lsblk -bdno SIZE "$disk")
+if $cidata_generation; then
+  disk_size=$((40 * 1024 * 1024 * 1024))
+else
+  disk_size=$(lsblk -bdno SIZE "$disk")
+fi
 mib=$((1024 * 1024))
 gib=$((mib * 1024))
 disk_size_in_mib=$((disk_size / mib * mib)) # Rounds to nearest MiB
@@ -1104,7 +1167,11 @@ boot_partition_size=$((2 * gib))
 main_partition_start=$((boot_partition_size + boot_partition_start))
 main_partition_size=$((disk_size_in_mib - main_partition_start - gpt_backup_reserve))
 
-kernel_choice=$(detect_kernel)
+if $cidata_generation; then
+  kernel_choice="linux"
+else
+  kernel_choice=$(detect_kernel)
+fi
 
 if [[ $encrypt_installation == true ]]; then
   # Deferred-provisioning installs carry no password: the orchestrator generates a throwaway
@@ -1249,6 +1316,6 @@ cat <<-_EOF_ >user_configuration.json
 }
 _EOF_
 
-if [[ $1 == "dry" ]]; then
+if [[ $configurator_mode == "dry" ]]; then
   print_dry_run_files
 fi

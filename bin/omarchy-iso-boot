@@ -6,10 +6,20 @@ ISO=""
 REUSE=""
 SSH_HOST="${OMARCHY_VM_SSH_HOST:-127.0.0.1}"
 SSH_PORT="${OMARCHY_VM_SSH_PORT:-2222}"
+SSH_IDENTITY="${OMARCHY_VM_SSH_IDENTITY:-$HOME/.ssh/omarchy-vm}"
 NETWORK="${OMARCHY_VM_NETWORK:-1}"
 DISK="${OMARCHY_VM_DISK:-/tmp/omarchy-iso-boot.qcow2}"
 OVMF_VARS="${OMARCHY_VM_OVMF_VARS:-/tmp/OVMF_VARS.4m.fd}"
+CIDATA_DIR=""
+CIDATA_WORK=""
+CIDATA_USERNAME=""
 EXTRA_QEMU_ARGS=()
+
+cleanup() {
+  [[ -n $CIDATA_WORK ]] && rm -rf "$CIDATA_WORK"
+  return 0
+}
+trap cleanup EXIT
 
 usage() {
   cat <<USAGE
@@ -19,16 +29,117 @@ Options:
   --reuse              Reuse the existing VM disk
   --ssh-port PORT      Forward host PORT to guest port 22 (default: $SSH_PORT)
   --ssh-host HOST      Host address for SSH forwarding (default: $SSH_HOST)
+  --ssh-identity PATH  Private key used for cidata SSH access (default: $SSH_IDENTITY)
+  --cidata-dir DIR     Autoinstall config directory for unattended installs
   --no-network         Boot without a virtual NIC
   --disk PATH          VM disk path (default: $DISK)
   --ovmf-vars PATH     OVMF vars path (default: $OVMF_VARS)
   -h, --help           Show this help
   --                   Pass the remaining arguments directly to QEMU
 
-SSH access after starting sshd in the guest:
-  ssh -p $SSH_PORT root@localhost
-  scp -P $SSH_PORT /path/to/system-manifest root@localhost:/tmp/
+With --cidata-dir, the VM identity is added to authorized_keys and SSH is
+enabled for the configured Omarchy user. Saved VMs must already have SSH set up.
 USAGE
+}
+
+fail() {
+  echo "omarchy-iso-boot: $*" >&2
+  exit 1
+}
+
+ensure_ssh_identity() {
+  local identity_dir public_from_private public_in_file
+  identity_dir=$(dirname "$SSH_IDENTITY")
+
+  if [[ -f $SSH_IDENTITY.pub && ! -f $SSH_IDENTITY ]]; then
+    fail "public key exists without its private identity: $SSH_IDENTITY.pub"
+  fi
+
+  if [[ ! -f $SSH_IDENTITY ]]; then
+    mkdir -p "$identity_dir"
+    [[ $identity_dir == "$HOME/.ssh" ]] && chmod 700 "$identity_dir"
+    echo "Generating VM SSH identity at $SSH_IDENTITY..."
+    ssh-keygen -q -t ed25519 -N "" -C "omarchy-vm" -f "$SSH_IDENTITY"
+  elif [[ ! -f $SSH_IDENTITY.pub ]]; then
+    ssh-keygen -y -f "$SSH_IDENTITY" >"$SSH_IDENTITY.pub" ||
+      fail "could not derive a public key from $SSH_IDENTITY"
+  fi
+
+  public_from_private=$(ssh-keygen -y -f "$SSH_IDENTITY") ||
+    fail "invalid SSH private identity: $SSH_IDENTITY"
+  public_from_private=$(awk '{ print $1 " " $2 }' <<<"$public_from_private")
+  public_in_file=$(awk 'NF && $1 !~ /^#/ { print $1 " " $2; exit }' "$SSH_IDENTITY.pub")
+  [[ -n $public_in_file ]] || fail "public key is empty: $SSH_IDENTITY.pub"
+  [[ $public_from_private == "$public_in_file" ]] ||
+    fail "$SSH_IDENTITY.pub does not match $SSH_IDENTITY"
+}
+
+validate_cidata_dir() {
+  [[ -d $CIDATA_DIR ]] || fail "cidata directory not found: $CIDATA_DIR"
+  [[ -f $CIDATA_DIR/user_configuration.json ]] ||
+    fail "cidata directory is missing user_configuration.json: $CIDATA_DIR"
+  [[ -f $CIDATA_DIR/user_credentials.json || -f $CIDATA_DIR/defer-provisioning ]] ||
+    fail "cidata directory needs user_credentials.json or defer-provisioning: $CIDATA_DIR"
+}
+
+prepare_cidata() {
+  local file public_key public_key_data stage
+  local -a known_files=(
+    user_configuration.json
+    user_credentials.json
+    defer-provisioning
+    user_full_name.txt
+    user_email_address.txt
+    user_encrypt_installation.txt
+    authorized_keys
+    tailscale_authkey
+  )
+
+  ensure_ssh_identity
+
+  CIDATA_WORK=$(mktemp -d "${TMPDIR:-/tmp}/omarchy-cidata.XXXXXX")
+  stage="$CIDATA_WORK/files"
+  mkdir -p "$stage"
+  for file in "${known_files[@]}"; do
+    [[ -f $CIDATA_DIR/$file ]] && cp "$CIDATA_DIR/$file" "$stage/$file"
+  done
+
+  public_key=$(awk 'NF && $1 !~ /^#/ { print; exit }' "$SSH_IDENTITY.pub")
+  public_key_data=$(awk '{ print $2 }' <<<"$public_key")
+  touch "$stage/authorized_keys"
+  if ! awk -v key="$public_key_data" '
+    { for (field = 1; field <= NF; field++) if ($field == key) found = 1 }
+    END { exit !found }
+  ' "$stage/authorized_keys"; then
+    [[ -s $stage/authorized_keys ]] && printf '\n' >>"$stage/authorized_keys"
+    printf '%s\n' "$public_key" >>"$stage/authorized_keys"
+  fi
+
+  truncate -s 4M "$CIDATA_WORK/cidata.img"
+  mformat -i "$CIDATA_WORK/cidata.img" -v CIDATA ::
+  mcopy -i "$CIDATA_WORK/cidata.img" "$stage"/* ::/
+
+  if [[ -f $stage/user_credentials.json ]]; then
+    CIDATA_USERNAME=$(jq -r '.users[0].username // empty' "$stage/user_credentials.json" 2>/dev/null || true)
+  fi
+}
+
+print_ssh_access() {
+  local username=${CIDATA_USERNAME:-YOUR_USERNAME}
+  local -a identity_args=()
+
+  [[ -f $SSH_IDENTITY ]] && identity_args=(-i "$SSH_IDENTITY")
+  if [[ -n $CIDATA_DIR ]]; then
+    echo "SSH will be enabled for '$username' by the cidata install."
+  else
+    echo "SSH forwarding is configured; the saved guest must already have SSH enabled."
+  fi
+  printf 'SSH command: ssh'
+  ((${#identity_args[@]})) && printf ' -i %q' "$SSH_IDENTITY"
+  printf ' -p %q %s@localhost\n' "$SSH_PORT" "$username"
+  printf 'SCP example: scp'
+  ((${#identity_args[@]})) && printf ' -i %q' "$SSH_IDENTITY"
+  printf ' -P %q /path/to/file %s@localhost:/tmp/\n' "$SSH_PORT" "$username"
 }
 
 while (( $# > 0 )); do
@@ -51,6 +162,22 @@ while (( $# > 0 )); do
       ;;
     --ssh-host=*)
       SSH_HOST="${1#*=}"
+      shift
+      ;;
+    --ssh-identity)
+      SSH_IDENTITY="${2:-}"
+      shift 2
+      ;;
+    --ssh-identity=*)
+      SSH_IDENTITY="${1#*=}"
+      shift
+      ;;
+    --cidata-dir)
+      CIDATA_DIR="${2:-}"
+      shift 2
+      ;;
+    --cidata-dir=*)
+      CIDATA_DIR="${1#*=}"
       shift
       ;;
     --no-network|--no-net)
@@ -112,7 +239,14 @@ if [[ -z $DISK || -z $OVMF_VARS ]]; then
   exit 1
 fi
 
-omarchy-pkg-add qemu-full edk2-ovmf
+if [[ -n $CIDATA_DIR ]]; then
+  [[ -n $SSH_IDENTITY ]] || fail "SSH identity path must not be empty"
+  validate_cidata_dir
+  omarchy-pkg-add qemu-full edk2-ovmf mtools
+  prepare_cidata
+else
+  omarchy-pkg-add qemu-full edk2-ovmf
+fi
 
 if [[ -z ${WAYLAND_DISPLAY:-} && -z ${DISPLAY:-} ]]; then
   while IFS='=' read -r name value; do
@@ -136,11 +270,15 @@ if [[ ! -f $DISK || $REUSE != "reuse" ]]; then
 fi
 
 NET_ARGS=()
+CIDATA_ARGS=()
+if [[ -n $CIDATA_WORK ]]; then
+  CIDATA_ARGS=(-drive "file=$CIDATA_WORK/cidata.img,format=raw,if=none,id=cidata" -device usb-storage,drive=cidata)
+fi
+
 if [[ $NETWORK != "0" && $NETWORK != "false" && $NETWORK != "no" ]]; then
   if [[ -n $SSH_PORT && $SSH_PORT != "0" ]]; then
     NET_ARGS=(-netdev "user,id=net0,hostfwd=tcp:${SSH_HOST}:${SSH_PORT}-:22" -device virtio-net-pci,netdev=net0)
-    echo "SSH forwarding enabled: ssh -p $SSH_PORT root@localhost"
-    echo "SCP example: scp -P $SSH_PORT /path/to/system-manifest root@localhost:/tmp/"
+    print_ssh_access
   else
     NET_ARGS=(-netdev user,id=net0 -device virtio-net-pci,netdev=net0)
     echo "Networking enabled without SSH port forwarding."
@@ -164,6 +302,7 @@ qemu-system-x86_64 \
   -display sdl,gl=on \
   -usb -device usb-tablet \
   -serial none \
+  "${CIDATA_ARGS[@]}" \
   "${NET_ARGS[@]}" \
   -boot menu=on \
   "${EXTRA_QEMU_ARGS[@]}"

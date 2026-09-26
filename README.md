@@ -92,7 +92,9 @@ Encrypted autoinstalls are not fully unattended — the LUKS passphrase prompt s
 
 ## Testing the ISO
 
-Run `./bin/omarchy-iso-boot [release/omarchy.iso]`.
+Run `./bin/omarchy-iso-boot [release/omarchy.iso]`. Pass
+`--cidata-dir DIR` to perform an unattended installation from the configurator
+files in `DIR` and provision SSH for the installed user.
 
 Run `./test/all` for the fast, VM-free tests under `test/unit/`, which cover cidata autoinstall loading and the orchestrator's phases without needing a built ISO.
 
@@ -101,6 +103,54 @@ To exercise installation alongside existing Windows-style partitions, run
 synthetic disk in `/tmp` with an existing ESP and data partition plus ample
 unallocated space, then offers to start an interactive installation on it. The
 fixture exercises Windows partition preservation but does not contain Windows.
+
+## Development VMs
+
+`omarchy-vm` can create a development VM backed by a host workspace containing sibling `omarchy/` and `omarchy-pkgs/` repositories:
+
+```bash
+./bin/omarchy-vm create \
+  --cidata-dir ./cidata \
+  --dev-link .. \
+  release/omarchy.iso
+```
+
+`--cidata-dir ./cidata` is used for unattended install, and can be created by running:
+
+```bash
+./bin/omarchy-iso-configurator --output-dir cidata
+```
+
+The supplied `--dev-link` directory must have this layout:
+
+```text
+workspace/
+├── omarchy/
+└── omarchy-pkgs/
+```
+
+**Voila! You have a working development VM ready to use! 🎉***
+
+You can edit the `omarchy` repository on the host, and the changes are applied to the VM.
+
+### Snapshots
+
+After shutting down, boot the VM again to where you left off:
+
+```bash
+./bin/omarchy-vm boot
+```
+
+`boot` can be supplied with a snapshot name to boot from a previous state.
+
+To create a snapshot shut the VM down before saving it:
+
+```bash
+./bin/omarchy-vm save dev
+./bin/omarchy-vm boot dev
+```
+
+The snapshot's `vm.json` records the canonical host `--dev-link` workspace path. Booting the snapshot reattaches that workspace automatically.
 
 ## Acceptance testing the ISO
 

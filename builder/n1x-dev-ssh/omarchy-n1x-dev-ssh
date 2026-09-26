@@ -22,7 +22,7 @@
 #
 # Removal: delete builder/n1x-dev-ssh/, its block in builder/build-iso.sh and
 # configure_dev_ssh in the orchestrator. On an installed machine: remove
-# /etc/ssh/sshd_config.d/10-omarchy-n1x-dev-ssh.conf, the key from
+# /etc/ssh/sshd_config.d/05-omarchy-n1x-dev-ssh.conf, the key from
 # /root/.ssh/authorized_keys and ~/.ssh/authorized_keys, and run
 # `sudo systemctl disable --now sshd` if nothing else needs it.
 
@@ -57,9 +57,11 @@ install -d -m0700 "$target/root/.ssh"
 append_keys "$target/root/.ssh/authorized_keys"
 
 # sshd keeps the first value it reads and Arch's sshd_config includes the
-# drop-ins before its own settings, so this wins over the defaults.
+# drop-ins, in name order, before its own settings. 05- sorts ahead of every
+# drop-in the live ISO and the installed system ship, including releng's
+# 10-archiso.conf, which turns root password login on.
 install -d -m0755 "$target/etc/ssh/sshd_config.d"
-cat >"$target/etc/ssh/sshd_config.d/10-omarchy-n1x-dev-ssh.conf" <<'CONF'
+cat >"$target/etc/ssh/sshd_config.d/05-omarchy-n1x-dev-ssh.conf" <<'CONF'
 # DEV ONLY (omarchy-n1x-dev-ssh): the development key, no passwords.
 PubkeyAuthentication yes
 PasswordAuthentication no

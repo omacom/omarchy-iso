@@ -187,7 +187,24 @@ def _inject_provisioning_encryption_password(arch_configuration: dict, user_cred
     user_credentials["encryption_password"] = password
 
 
-def _default_kernel(pci_devices: Path = Path("/sys/bus/pci/devices")) -> str:
+# build-iso.sh records the board an aarch64 image was built for; x86_64
+# images carry an empty file.
+ISO_ARM_PLATFORM_FILE = Path("/root/omarchy_arm_platform")
+
+
+def iso_arm_platform(path: Path = ISO_ARM_PLATFORM_FILE) -> str:
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return ""
+
+
+def _default_kernel(pci_devices: Path = Path("/sys/bus/pci/devices"), arm_platform: str | None = None) -> str:
+    # An aarch64 image is built for one platform kernel and nothing else boots;
+    # the configurator's detect_kernel makes the same choice.
+    arm_platform = iso_arm_platform() if arm_platform is None else arm_platform
+    if arm_platform:
+        return f"linux-{arm_platform}"
     for device in pci_devices.glob("*"):
         try:
             vendor = (device / "vendor").read_text().strip().lower()

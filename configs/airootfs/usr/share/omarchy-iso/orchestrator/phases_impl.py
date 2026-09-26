@@ -35,7 +35,7 @@ from pathlib import Path
 
 from . import archinstall_adapter as arch
 from .command import capture, capture_identifier, require_text
-from .context import InstallContext
+from .context import InstallContext, iso_arm_platform
 from .keyboard import configure_keyboard
 from .ui import error, info
 
@@ -1526,6 +1526,17 @@ def configure_ssh_access(ctx: InstallContext) -> None:
         raise RuntimeError(f"ufw did not record an allow rule for port 22 in {rules}")
 
 
+# DEV ONLY (N1x bring-up): only the N1x development ISO carries this script
+# (builder/n1x-dev-ssh), and build_phases lists this phase only when it is
+# there. It authorizes the development key for root on the installed system.
+DEV_SSH_SCRIPT = Path("/usr/local/sbin/omarchy-n1x-dev-ssh")
+
+
+def configure_dev_ssh(ctx: InstallContext) -> None:
+    info("› DEV ONLY: authorizing the N1x development SSH key for root")
+    subprocess.run([str(DEV_SSH_SCRIPT), "--target", str(ctx.target)], check=True)
+
+
 def _authorized_keys(path: Path) -> list[str]:
     """Read the autoinstall authorized_keys: sshd's own format, one public key
     per line, with blank lines and # comments dropped.
@@ -1678,6 +1689,8 @@ def validate_boot(ctx: InstallContext) -> None:
     if ctx.encrypt and "cryptdevice=" not in limine_conf_text:
         raise RuntimeError(f"Encrypted install but {limine_conf} has no cryptdevice=")
 
+    _validate_platform_boot_entries(limine_conf_text, iso_arm_platform())
+
     kernel_cmdline = ctx.target / "etc" / "kernel" / "cmdline"
     if not kernel_cmdline.exists():
         raise RuntimeError(f"{kernel_cmdline} missing — UKI would have no cmdline")
@@ -1710,6 +1723,56 @@ def validate_boot(ctx: InstallContext) -> None:
 
     if ctx.defer_provisioning:
         _validate_provisioning_state(ctx)
+
+
+# The N1x firmware publishes an ACPI SPCR serial console the kernel adopts
+# unless told otherwise, and Limine hands each entry's cmdline to the UKI as
+# load options that replace the embedded one. So the contract has to hold in
+# the generated limine.conf itself: every entry keeps the console on the panel,
+# and the rescue entry boots to a text login. Both failures look like a black
+# screen, which is how the first N1x installs went.
+N1X_REQUIRED_CMDLINE = ("console=tty0", "acpi=nospcr")
+
+
+def _limine_entries(limine_conf_text: str) -> list[tuple[str, dict[str, str]]]:
+    entries: list[tuple[str, dict[str, str]]] = []
+    for line in limine_conf_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("/"):
+            entries.append((stripped, {}))
+        elif entries and ":" in stripped:
+            key, value = stripped.split(":", 1)
+            entries[-1][1][key.strip().lower()] = value.strip()
+    return entries
+
+
+def _validate_platform_boot_entries(limine_conf_text: str, arm_platform: str) -> None:
+    if arm_platform != "n1x":
+        return
+
+    # Kernel entries only: the EFI fallback entry chainloads a loader and has
+    # no cmdline of its own.
+    kernels = [
+        (name, options) for name, options in _limine_entries(limine_conf_text)
+        if "cmdline" in options or "/EFI/Linux/" in options.get("path", "")
+    ]
+    if not kernels:
+        raise RuntimeError("limine.conf has no kernel entries")
+
+    for name, options in kernels:
+        cmdline = options.get("cmdline", "").split()
+        missing = [param for param in N1X_REQUIRED_CMDLINE if param not in cmdline]
+        if missing:
+            raise RuntimeError(
+                f"limine.conf entry {name} lacks {' '.join(missing)}; its console would go to the SPCR serial port"
+            )
+
+    rescue = [options for _, options in kernels if "linux-n1x-rescue" in options.get("path", "")]
+    if not rescue:
+        raise RuntimeError("limine.conf has no linux-n1x-rescue entry")
+    for options in rescue:
+        if "systemd.unit=multi-user.target" not in options.get("cmdline", "").split():
+            raise RuntimeError("linux-n1x-rescue entry does not boot to a text login; its own cmdline was overridden")
 
 
 def _validate_provisioning_state(ctx: InstallContext) -> None:

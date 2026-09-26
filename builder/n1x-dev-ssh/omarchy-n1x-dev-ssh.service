@@ -1,0 +1,13 @@
+[Unit]
+Description=DEV ONLY: key-only SSH for N1x bring-up (omarchy-n1x-dev-ssh)
+# Before sshd reads its config, and before tty1 starts the installer that
+# picks up /root/authorized_keys.
+Before=sshd.service getty@tty1.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/omarchy-n1x-dev-ssh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

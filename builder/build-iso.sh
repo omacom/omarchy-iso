@@ -15,9 +15,8 @@ source /builder/archiso-aarch64-mkinitcpio.sh
 source /builder/grub-platform.sh
 
 # The online pacman configuration drives every package download below. On
-# aarch64 it points at Arch Linux ARM plus the prebuilt bundle mounted at
-# /packages, which stands in for the [omarchy] repo pkgs.omarchy.org does not
-# publish for this architecture.
+# aarch64 it points at the platform bundle mounted at /packages, Omarchy's edge
+# aarch64 repository and Arch Linux ARM.
 case "$OMARCHY_ARCH" in
   x86_64)
     online_pacman_conf="/configs/pacman-online-${OMARCHY_MIRROR}.conf"
@@ -29,11 +28,15 @@ case "$OMARCHY_ARCH" in
       exit 1
     fi
     if [[ ! -d /packages || ! -f /packages/SHA256SUMS ]]; then
-      echo "ERROR: aarch64 builds require the prebuilt package bundle mounted at /packages with SHA256SUMS" >&2
+      echo "ERROR: aarch64 builds require the platform package bundle mounted at /packages with SHA256SUMS" >&2
       exit 1
     fi
     if [[ ! -d /omarchy-source || ! -d /omarchy-pkgs ]]; then
-      echo "ERROR: aarch64 builds require --local-source; no published aarch64 omarchy packages exist" >&2
+      echo "ERROR: aarch64 builds require --local-source; the platform support is not in the published omarchy packages" >&2
+      exit 1
+    fi
+    if [[ $OMARCHY_MIRROR != edge ]]; then
+      echo "ERROR: aarch64 builds use the edge channel, the only one Omarchy publishes for aarch64 (got '$OMARCHY_MIRROR')" >&2
       exit 1
     fi
     ;;
@@ -77,7 +80,7 @@ fi
 # Packages installed into the Arch container used to build the ISO.
 pacman-key --init
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
-  # The prebuilt bundle is the [omarchy] repo for this build. Verify it and
+  # The platform bundle is the [platform] repo for this build. Verify it and
   # index it before pacman first consults it.
   if ! (cd /packages && sha256sum --check --strict --quiet SHA256SUMS); then
     echo "ERROR: package bundle checksum verification failed" >&2
@@ -91,8 +94,8 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
     [[ $archive == *.sig ]] && continue
     ln -s "$archive" "$bundle_index/${archive##*/}"
   done
-  repo-add -q "$bundle_index/omarchy.db.tar.gz" "$bundle_index"/*.pkg.tar.* 2>/dev/null || \
-    repo-add "$bundle_index/omarchy.db.tar.gz" "$bundle_index"/*.pkg.tar.*
+  repo-add -q "$bundle_index/platform.db.tar.gz" "$bundle_index"/*.pkg.tar.* 2>/dev/null || \
+    repo-add "$bundle_index/platform.db.tar.gz" "$bundle_index"/*.pkg.tar.*
   online_pacman_conf=/tmp/pacman-online-aarch64.conf
   sed "s|^Server = file:///packages$|Server = file://$bundle_index|" /configs/pacman-online-aarch64.conf > "$online_pacman_conf"
 
@@ -190,12 +193,19 @@ for grub_config in "$build_cache_dir/grub/grub.cfg" "$build_cache_dir/grub/loopb
     "$grub_config"
 done
 if [[ $OMARCHY_ARM_PLATFORM == n1x ]]; then
-  # The recovery entry must stay useful when the display driver cannot bind the
-  # GPU: key-only root SSH over Ethernet DHCP, and the probe log on disk.
-  install -d -m0700 "$build_cache_dir/airootfs/root/.ssh"
-  install -m0600 /builder/n1x-recovery-authorized-key "$build_cache_dir/airootfs/root/.ssh/authorized_keys"
-  install -Dm0644 /builder/n1x-recovery-sshd.conf "$build_cache_dir/airootfs/etc/ssh/sshd_config.d/20-omarchy-n1x-recovery.conf"
+  # releng's Ethernet DHCP (with mDNS) and sshd serve the recovery entry and
+  # remote debugging under this name.
   printf '%s\n' omarchy-n1x-rescue >"$build_cache_dir/airootfs/etc/hostname"
+
+  # DEV ONLY (N1x bring-up): key-only SSH into the live ISO and the installed
+  # system. See builder/n1x-dev-ssh/omarchy-n1x-dev-ssh; removing that
+  # directory and this block removes it.
+  install -Dm0755 /builder/n1x-dev-ssh/omarchy-n1x-dev-ssh "$build_cache_dir/airootfs/usr/local/sbin/omarchy-n1x-dev-ssh"
+  install -Dm0644 /builder/n1x-dev-ssh/authorized_keys "$build_cache_dir/airootfs/usr/local/share/omarchy-n1x-dev-ssh/authorized_keys"
+  install -Dm0644 /builder/n1x-dev-ssh/omarchy-n1x-dev-ssh.service "$build_cache_dir/airootfs/etc/systemd/system/omarchy-n1x-dev-ssh.service"
+  mkdir -p "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants"
+  ln -sf /etc/systemd/system/omarchy-n1x-dev-ssh.service "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/omarchy-n1x-dev-ssh.service"
+  printf '%s\n' 'file_permissions["/usr/local/sbin/omarchy-n1x-dev-ssh"]="0:0:755"' >>"$build_cache_dir/profiledef.sh"
 fi
 cat > "$build_cache_dir/airootfs/usr/share/omarchy-iso/package-targets" <<EOF
 OMARCHY_RUNTIME_PACKAGE=$OMARCHY_RUNTIME_PACKAGE
@@ -253,10 +263,9 @@ cp "/tmp/$NODE_FILENAME" "$build_cache_dir/airootfs/opt/packages/"
 # drops Omarchy's plymouthd.conf into /etc/plymouth before mkarchiso builds the
 # live initramfs.
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
-  # No tzupdate (x86-only) and no Plymouth payload in the live initramfs; the
-  # configurator falls back to its timezone picker. openssh and pciutils serve
-  # the recovery entry.
-  arch_packages=("$OMARCHY_KERNEL" archlinuxarm-keyring git gum jq openssl openssh pciutils plymouth ttfx omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
+  # Plymouth stays out of the live initramfs (archiso-aarch64-mkinitcpio.sh);
+  # openssh and pciutils serve the recovery entry and remote debugging.
+  arch_packages=("$OMARCHY_KERNEL" archlinuxarm-keyring git gum jq openssl openssh pciutils plymouth ttfx tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
 else
   arch_packages=(linux-t2 git gum jq openssl plymouth ttfx tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
 fi
@@ -383,8 +392,9 @@ mapfile -t all_packages < <(
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   source /builder/aarch64-package-filter.sh
   mapfile -t all_packages < <(filter_aarch64_packages "$OMARCHY_KERNEL" "${all_packages[@]}")
-  # The kernel pair and the Limine helpers come from the bundle at a version
-  # the target-side finalization was validated with.
+  # The platform kernel pair, and the NVIDIA stack the runtime's platform
+  # script installs; the bundle pins its version to the one proven on the
+  # hardware.
   all_packages+=("$OMARCHY_KERNEL" "$OMARCHY_KERNEL-headers" archlinuxarm-keyring nvidia-open-dkms nvidia-utils libva-nvidia-driver limine-mkinitcpio-hook limine-snapper-sync)
   mapfile -t all_packages < <(printf '%s\n' "${all_packages[@]}" | sort -u)
 fi

@@ -1,0 +1,72 @@
+#!/bin/bash
+#
+# DEV ONLY: remote access for N1x bring-up. Remove before an N1x image is
+# handed to anyone but the development bench.
+#
+# Key-only SSH for the development host's key (authorized_keys next to this
+# script in the ISO sources), with password and keyboard-interactive login
+# switched off:
+#
+#   live ISO          ssh root@<address>   (hostname omarchy-n1x-rescue)
+#   installed system  ssh root@<address>   or  <user>@<address>
+#
+# With no argument it prepares the live ISO (omarchy-n1x-dev-ssh.service runs
+# it before sshd starts): root's key, the sshd drop-in, and the key appended to
+# /root/authorized_keys. The live ISO already hands that file to the installer
+# (--authorized-keys-file), whose configure_ssh_access phase authorizes the
+# key for the new user, enables sshd, and opens port 22 in ufw. An autoinstall
+# (cidata) drive replaces the file, so such a drive must carry the key itself.
+#
+# With --target DIR the installer's DEV ONLY phase runs it once more against
+# the installed root: root's key and the same sshd drop-in.
+#
+# Removal: delete builder/n1x-dev-ssh/, its block in builder/build-iso.sh and
+# configure_dev_ssh in the orchestrator. On an installed machine: remove
+# /etc/ssh/sshd_config.d/10-omarchy-n1x-dev-ssh.conf, the key from
+# /root/.ssh/authorized_keys and ~/.ssh/authorized_keys, and run
+# `sudo systemctl disable --now sshd` if nothing else needs it.
+
+set -euo pipefail
+
+key_file=${OMARCHY_N1X_DEV_SSH_KEYS:-/usr/local/share/omarchy-n1x-dev-ssh/authorized_keys}
+
+target=""
+case ${1:-} in
+  "") ;;
+  --target)
+    target=${2:?--target needs the installed root}
+    [[ -d $target/etc ]] || { echo "omarchy-n1x-dev-ssh: $target is not a root filesystem" >&2; exit 1; }
+    ;;
+  *)
+    echo "Usage: omarchy-n1x-dev-ssh [--target DIR]" >&2
+    exit 2
+    ;;
+esac
+
+append_keys() {
+  local destination=$1 key
+  touch "$destination"
+  chmod 0600 "$destination"
+  while IFS= read -r key; do
+    [[ -z $key || $key == \#* ]] && continue
+    grep -qxF -- "$key" "$destination" || printf '%s\n' "$key" >>"$destination"
+  done <"$key_file"
+}
+
+install -d -m0700 "$target/root/.ssh"
+append_keys "$target/root/.ssh/authorized_keys"
+
+# sshd keeps the first value it reads and Arch's sshd_config includes the
+# drop-ins before its own settings, so this wins over the defaults.
+install -d -m0755 "$target/etc/ssh/sshd_config.d"
+cat >"$target/etc/ssh/sshd_config.d/10-omarchy-n1x-dev-ssh.conf" <<'CONF'
+# DEV ONLY (omarchy-n1x-dev-ssh): the development key, no passwords.
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin prohibit-password
+CONF
+
+if [[ -z $target ]]; then
+  append_keys /root/authorized_keys
+fi

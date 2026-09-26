@@ -26,10 +26,9 @@ export OMARCHY_RUNTIME_PACKAGE OMARCHY_SETTINGS_PACKAGE OMARCHY_NVIM_PACKAGE
 # Packages installed into the Arch container used to build the ISO.
 pacman-key --init
 pacman --noconfirm -Sy archlinux-keyring
-# Full upgrade, not just -Sy: docker never re-pulls :latest once it's cached,
-# so this container can be months behind the mirror it installs from. A plain
-# -Sy install is then a partial upgrade — new packages linked against a glibc
-# the container doesn't have yet.
+# Full upgrade, not just -Sy: the pinned container can fall behind the mirror
+# it installs from. A plain -Sy install is then a partial upgrade — new packages
+# can link against a glibc the container doesn't have yet.
 pacman --noconfirm -Syu archiso git sudo base-devel jq grub imagemagick neovim nodejs npm tree-sitter-cli
 
 # Pre-import the omarchy signing key (so pacman trusts our [omarchy] repo

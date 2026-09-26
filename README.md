@@ -18,6 +18,8 @@ Corruption anywhere in the ISO is worth catching before the write, and corruptio
 
 Run `./bin/omarchy-iso-make`; output goes into `./release`. By default the ISO uses the Omarchy packages and tracks the `quattro` branch, from the stable mirror. Pass `--edge` to use `omarchy-dev` and `omarchy-settings-dev` from the edge mirror.
 
+The builder image is pinned by digest in `bin/omarchy-iso-make`. Update that digest through review when changing the builder. Build on a disposable host without credentials: pinning the image does not remove the container's `--privileged` access.
+
 For local development, build the ISO from sibling checkouts:
 
 ```bash

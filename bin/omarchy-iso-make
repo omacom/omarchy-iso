@@ -153,8 +153,7 @@ if [[ -z "$NO_CACHE" ]]; then
   mkdir -p "$OFFLINE_REPO_BUILD_CACHE_DIR"
   DOCKER_ARGS+=(-v "$OFFLINE_REPO_BUILD_CACHE_DIR:/var/cache/airootfs/var/cache/omarchy")
 else
-  # The locally cached :latest image is a cache too — docker run never
-  # re-checks the registry for it, so refresh it when building cold.
+  # Refresh the pinned builder image when building cold.
   DOCKER_ARGS+=(--pull=always)
 fi
 
@@ -166,7 +165,7 @@ if ! docker version &>/dev/null; then
   DOCKER=(sudo docker)
 fi
 
-"${DOCKER[@]}" run "${DOCKER_ARGS[@]}" archlinux/archlinux:latest /$BUILD_SCRIPT
+"${DOCKER[@]}" run "${DOCKER_ARGS[@]}" docker.io/archlinux/archlinux@sha256:a1cd6a460b8c8d2c9e9482d7853b7acab4888f448a7914fdc676ce037ff0a5dc /$BUILD_SCRIPT
 
 latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*.iso | head -n1)
 iso_ref="${latest_iso%.*}-$OMARCHY_ISO_REF.iso"

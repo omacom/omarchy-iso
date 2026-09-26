@@ -78,8 +78,8 @@ fi
 
 # --- manifest filter -----------------------------------------------------------
 source "$ROOT/builder/aarch64-package-filter.sh"
-result=$(filter_aarch64_packages linux-n1x linux linux-headers linux-omarchy linux-omarchy-headers amd-ucode broadcom-wl-dkms tzupdate lib32-nvidia-utils dell-xps13-sidecar-amps mise-bin hyprland omarchy-dev 2>/dev/null | tr '\n' ' ')
-[[ $result == "linux-n1x linux-n1x-headers linux-n1x linux-n1x-headers tzupdate mise-bin hyprland omarchy-dev " ]] || fail "manifest filter produced: $result"
+result=$(filter_aarch64_packages linux-n1x linux linux-headers linux-omarchy linux-omarchy-headers amd-ucode broadcom-wl-dkms tzupdate lib32-nvidia-utils dell-xps13-sidecar-amps mise-bin nvim vi obs-studio yay-debug hyprland omarchy-dev 2>/dev/null | tr '\n' ' ')
+[[ $result == "linux-n1x linux-n1x-headers linux-n1x linux-n1x-headers tzupdate mise-bin neovim ex-vi-compat hyprland omarchy-dev " ]] || fail "manifest filter produced: $result"
 
 # --- recovery entry --------------------------------------------------------------
 grep -Fq "grep -qw 'omarchy.n1x_recovery=1' /proc/cmdline" "$ROOT/configs/airootfs/root/.automated_script.sh" \

@@ -21,6 +21,19 @@ filter_aarch64_packages() {
         echo "aarch64: replacing $package with $kernel-headers" >&2
         printf '%s\n' "$kernel-headers"
         ;;
+      nvim)
+        # Arch Linux ARM still ships Neovim under its previous name.
+        echo "aarch64: replacing $package with neovim" >&2
+        printf '%s\n' neovim
+        ;;
+      vi)
+        echo "aarch64: replacing $package with ex-vi-compat" >&2
+        printf '%s\n' ex-vi-compat
+        ;;
+      obs-studio|yay-debug)
+        # omarchy-pkgs has aarch64 recipes, but edge does not publish them yet.
+        echo "aarch64: excluding $package, not yet published for aarch64" >&2
+        ;;
       amd-ucode|intel-ucode|syslinux|broadcom-wl|broadcom-wl-dkms|memtest86+|memtest86+-efi|edk2-shell|\
       apple-bcm-firmware|apple-t2-audio-config|t2fanrd|tiny-dfr|macbook12-spi-driver-dkms|\
       asusctl|dell-xps-touchpad-haptics|dell-xps13-sidecar-amps|intel-ipu7-camera|intel-lpmd|intel-media-driver|libva-intel-driver|vpl-gpu-rt|thermald|\

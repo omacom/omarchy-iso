@@ -229,6 +229,25 @@ fi
 if [[ -d /omarchy-source && -d /omarchy-pkgs ]]; then
   bash /builder/build-omarchy-packages.sh "$offline_mirror_dir"
   LOCAL_OMARCHY_BUILD=1
+
+  # The N1x boots like the x86_64 machines. Omarchy packages built as the
+  # Apple Silicon variant would install without the Limine template the
+  # orchestrator reads, the initramfs hooks, the Limine drop-ins, or the
+  # Limine/Snapper stack the runtime depends on.
+  if [[ $OMARCHY_ARM_PLATFORM == n1x ]]; then
+    runtime_archive=$(find "$offline_mirror_dir" -maxdepth 1 -name "$OMARCHY_RUNTIME_PACKAGE-[0-9]*.pkg.tar.*" ! -name '*.sig' | head -1)
+    if ! bsdtar -xOf "$runtime_archive" .PKGINFO 2>/dev/null | grep -qx 'depend = limine-mkinitcpio-hook'; then
+      echo "ERROR: ${runtime_archive:-$OMARCHY_RUNTIME_PACKAGE} does not depend on the Limine stack; was it built without OMARCHY_PLATFORM=n1x?" >&2
+      exit 1
+    fi
+    settings_archive=$(find "$offline_mirror_dir" -maxdepth 1 -name "$OMARCHY_SETTINGS_PACKAGE-[0-9]*.pkg.tar.*" ! -name '*.sig' | head -1)
+    for required in usr/share/omarchy/default/limine/default.conf etc/mkinitcpio.conf.d/omarchy_hooks.conf etc/limine-entry-tool.d/omarchy-defaults.conf; do
+      if ! bsdtar -tf "$settings_archive" "$required" >/dev/null 2>&1; then
+        echo "ERROR: ${settings_archive:-$OMARCHY_SETTINGS_PACKAGE} lacks $required; was it built without OMARCHY_PLATFORM=n1x?" >&2
+        exit 1
+      fi
+    done
+  fi
 fi
 
 # Node.js binary for offline mise install, matched to the target architecture.

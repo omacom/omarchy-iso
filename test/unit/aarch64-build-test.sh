@@ -99,9 +99,14 @@ done
 [[ $(stat -c %a "$fixture/target/root/.ssh") == 700 && $(stat -c %a "$fixture/target/root/.ssh/authorized_keys") == 600 ]] \
   || fail "dev SSH wrote loose permissions"
 cmp -s "$fixture/target/root/.ssh/authorized_keys" "$ROOT/builder/n1x-dev-ssh/authorized_keys" || fail "dev SSH key is not authorized exactly once for root"
-grep -Fqx 'PasswordAuthentication no' "$fixture/target/etc/ssh/sshd_config.d/10-omarchy-n1x-dev-ssh.conf" || fail "dev SSH leaves password login on"
-grep -Fqx 'PermitRootLogin prohibit-password' "$fixture/target/etc/ssh/sshd_config.d/10-omarchy-n1x-dev-ssh.conf" || fail "dev SSH root login is not key-only"
+grep -Fqx 'PasswordAuthentication no' "$fixture/target/etc/ssh/sshd_config.d/05-omarchy-n1x-dev-ssh.conf" || fail "dev SSH leaves password login on"
+grep -Fqx 'PermitRootLogin prohibit-password' "$fixture/target/etc/ssh/sshd_config.d/05-omarchy-n1x-dev-ssh.conf" || fail "dev SSH root login is not key-only"
 [[ ! -e $fixture/target/root/authorized_keys ]] || fail "--target must not stage installer keys"
+# sshd keeps the first value it reads; the drop-in must sort before releng's.
+for dropin in "$ROOT"/archiso/configs/releng/airootfs/etc/ssh/sshd_config.d/*.conf; do
+  [[ -e $dropin ]] || continue
+  [[ 05-omarchy-n1x-dev-ssh.conf < ${dropin##*/} ]] || fail "dev SSH drop-in sorts after releng's ${dropin##*/}"
+done
 bash "$dev_ssh" --target "$fixture/missing" 2>/dev/null && fail "dev SSH accepted a target that is not a root filesystem"
 
 # --- live initramfs overlay -------------------------------------------------

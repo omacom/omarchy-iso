@@ -68,18 +68,36 @@ fi
 # OOMing, and a budget so small machines never evict what was just warmed.
 # Set OMARCHY_NO_PREFETCH=1 to A/B the same ISO with this disabled.
 warm_offline_mirror() {
-  local mirror=/var/cache/omarchy/mirror/offline
-  local budget_kb spent_kb=0 size_kb path
+  local mirror=${OMARCHY_MIRROR_DIR:-/var/cache/omarchy/mirror/offline}
+  local try_list=${OMARCHY_TRY_PACKAGES:-/usr/share/omarchy-iso/try-packages}
+  local meminfo=${OMARCHY_MEMINFO:-/proc/meminfo}
+  local budget_kb spent_kb=0 size_kb path file
+  local -A warmed=()
 
   [[ ${OMARCHY_NO_PREFETCH:-} == 1 ]] && return 0
   [[ -d $mirror ]] || return 0
 
-  budget_kb=$(($(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo) / 2))
+  budget_kb=$(($(awk '/^MemAvailable:/ { print $2 }' "$meminfo") / 2))
   ((budget_kb > 262144)) || return 0
+
+  # The try set first: it is what "Try Omarchy" reads seconds after the greeter
+  # appears, and it is small enough to always fit the budget.
+  if [[ -f $try_list ]]; then
+    while read -r _ file _; do
+      path=$mirror/$file
+      [[ -f $path ]] || continue
+      size_kb=$(du -k "$path" | cut -f1)
+      ((spent_kb + size_kb > budget_kb)) && break
+      cat -- "$path" >/dev/null 2>&1 || true
+      spent_kb=$((spent_kb + size_kb)); warmed[$path]=1
+    done <"$try_list"
+  fi
 
   # Largest first: the install reads most of the mirror, so when the budget
   # cannot cover all of it this still front-loads the bytes that dominate.
+  # Archives the try pass already read are neither re-read nor charged again.
   while read -r size_kb path; do
+    [[ -n ${warmed[$path]:-} ]] && continue
     ((spent_kb + size_kb > budget_kb)) && continue
     cat -- "$path" >/dev/null 2>&1 || true
     spent_kb=$((spent_kb + size_kb))
@@ -88,6 +106,8 @@ warm_offline_mirror() {
 
 warm_offline_mirror &
 warm_pid=$!
+# omarchy-try stops the prefetch so a session gets the memory and bandwidth.
+export OMARCHY_PREFETCH_PID=$warm_pid
 trap 'kill "$warm_pid" 2>/dev/null' EXIT
 
 cd /root

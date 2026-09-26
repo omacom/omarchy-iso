@@ -17,7 +17,8 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 bash -n "$ROOT/bin/omarchy-iso-make" "$ROOT/builder/build-iso.sh" \
   "$ROOT/builder/aarch64-package-filter.sh" "$ROOT/builder/grub-platform.sh" \
   "$ROOT/builder/archiso-aarch64-mkinitcpio.sh" "$ROOT/builder/archiso-aarch64-grub-modules.sh" \
-  "$ROOT/builder/node-release.sh" "$ROOT/builder/arm64-kernel-image.sh"
+  "$ROOT/builder/node-release.sh" "$ROOT/builder/arm64-kernel-image.sh" \
+  "$ROOT/builder/n1x-dev-ssh/omarchy-n1x-dev-ssh" "$ROOT/configs/airootfs/root/.automated_script.sh"
 
 grep -Fq 'menci/archlinuxarm@sha256:' "$ROOT/bin/omarchy-iso-make" || fail "aarch64 container is not pinned by digest"
 grep -Fq -- '--arch aarch64 requires --package-dir DIR' "$ROOT/bin/omarchy-iso-make" || fail "aarch64 builds must require the package bundle"
@@ -25,6 +26,7 @@ grep -Fq -- '--arch aarch64 requires --local-source' "$ROOT/bin/omarchy-iso-make
 grep -Fq 'sha256sum --check --strict --quiet SHA256SUMS' "$ROOT/bin/omarchy-iso-make" || fail "bundle checksums are not verified on the host"
 grep -Fq -- '-v "$PACKAGE_DIR:/packages:ro"' "$ROOT/bin/omarchy-iso-make" || fail "bundle is not mounted read-only at /packages"
 grep -Fq 'OMARCHY_ARCH == x86_64 && -d /var/cache/pacman/pkg' "$ROOT/bin/omarchy-iso-make" || fail "host pacman cache would leak into aarch64 builds"
+grep -Fq 'builds use the edge channel' "$ROOT/bin/omarchy-iso-make" || fail "aarch64 builds must be pinned to the edge channel"
 
 # --- builder wiring -----------------------------------------------------------
 grep -Fq 'online_pacman_conf=/configs/pacman-online-aarch64.conf' "$ROOT/builder/build-iso.sh" || fail "aarch64 does not use its own online pacman config"
@@ -34,7 +36,12 @@ fi
 grep -Fq 'configure_archiso_aarch64_mkinitcpio' "$ROOT/builder/build-iso.sh" || fail "live initramfs is not adapted for aarch64"
 grep -Fq 'kernel_options="plymouth.enable=0 console=tty0 acpi=nospcr initramfs_async=0"' "$ROOT/builder/build-iso.sh" || fail "aarch64 live boot does not pin the panel console"
 grep -Fq '"$mkarchiso_command" -v -w' "$ROOT/builder/build-iso.sh" || fail "builder does not use the patched mkarchiso on aarch64"
-grep -Fq 'Server = file:///packages' "$ROOT/configs/pacman-online-aarch64.conf" || fail "aarch64 [omarchy] repo does not point at the bundle"
+# pacman takes the first repository carrying a name: the platform bundle, then
+# Omarchy's edge aarch64 repo, then Arch Linux ARM.
+repos=$(grep -E '^\[|^Server' "$ROOT/configs/pacman-online-aarch64.conf" | grep -v '^\[options\]' | paste -sd' ')
+[[ $repos == '[platform] Server = file:///packages [omarchy] Server = https://pkgs.omarchy.org/edge/$arch [core]'* ]] \
+  || fail "aarch64 repository order is wrong: $repos"
+grep -Fq 'repo-add -q "$bundle_index/platform.db.tar.gz"' "$ROOT/builder/build-iso.sh" || fail "bundle is not indexed as the [platform] repo"
 grep -Fq 'arch="${OMARCHY_ARCH:-x86_64}"' "$ROOT/configs/profiledef.sh" || fail "profiledef ignores OMARCHY_ARCH"
 
 # --- GRUB templating -----------------------------------------------------------
@@ -71,8 +78,31 @@ fi
 
 # --- manifest filter -----------------------------------------------------------
 source "$ROOT/builder/aarch64-package-filter.sh"
-result=$(filter_aarch64_packages linux-n1x linux linux-headers amd-ucode broadcom-wl-dkms tzupdate lib32-nvidia-utils dell-xps13-sidecar-amps mise-bin hyprland omarchy-dev 2>/dev/null | tr '\n' ' ')
-[[ $result == "linux-n1x linux-n1x-headers mise hyprland omarchy-dev " ]] || fail "manifest filter produced: $result"
+result=$(filter_aarch64_packages linux-n1x linux linux-headers linux-omarchy linux-omarchy-headers amd-ucode broadcom-wl-dkms tzupdate lib32-nvidia-utils dell-xps13-sidecar-amps mise-bin hyprland omarchy-dev 2>/dev/null | tr '\n' ' ')
+[[ $result == "linux-n1x linux-n1x-headers linux-n1x linux-n1x-headers tzupdate mise-bin hyprland omarchy-dev " ]] || fail "manifest filter produced: $result"
+
+# --- recovery entry --------------------------------------------------------------
+grep -Fq "grep -qw 'omarchy.n1x_recovery=1' /proc/cmdline" "$ROOT/configs/airootfs/root/.automated_script.sh" \
+  || fail "the N1x recovery entry would start the installer"
+
+# --- DEV ONLY: N1x debug SSH -------------------------------------------------------
+dev_ssh="$ROOT/builder/n1x-dev-ssh/omarchy-n1x-dev-ssh"
+grep -Fq 'install -Dm0755 /builder/n1x-dev-ssh/omarchy-n1x-dev-ssh' "$ROOT/builder/build-iso.sh" || fail "N1x builds do not stage the dev SSH script"
+grep -Fq 'file_permissions["/usr/local/sbin/omarchy-n1x-dev-ssh"]="0:0:755"' "$ROOT/builder/build-iso.sh" || fail "dev SSH script would lose its exec bit"
+grep -Fq 'multi-user.target.wants/omarchy-n1x-dev-ssh.service' "$ROOT/builder/build-iso.sh" || fail "dev SSH unit is not enabled on the live ISO"
+[[ $(grep -c '^ssh-ed25519 ' "$ROOT/builder/n1x-dev-ssh/authorized_keys") == 1 ]] || fail "dev SSH must carry exactly one key"
+mkdir -p "$fixture/target/etc"
+for run in 1 2; do
+  OMARCHY_N1X_DEV_SSH_KEYS="$ROOT/builder/n1x-dev-ssh/authorized_keys" bash "$dev_ssh" --target "$fixture/target" \
+    || fail "dev SSH --target run $run failed"
+done
+[[ $(stat -c %a "$fixture/target/root/.ssh") == 700 && $(stat -c %a "$fixture/target/root/.ssh/authorized_keys") == 600 ]] \
+  || fail "dev SSH wrote loose permissions"
+cmp -s "$fixture/target/root/.ssh/authorized_keys" "$ROOT/builder/n1x-dev-ssh/authorized_keys" || fail "dev SSH key is not authorized exactly once for root"
+grep -Fqx 'PasswordAuthentication no' "$fixture/target/etc/ssh/sshd_config.d/10-omarchy-n1x-dev-ssh.conf" || fail "dev SSH leaves password login on"
+grep -Fqx 'PermitRootLogin prohibit-password' "$fixture/target/etc/ssh/sshd_config.d/10-omarchy-n1x-dev-ssh.conf" || fail "dev SSH root login is not key-only"
+[[ ! -e $fixture/target/root/authorized_keys ]] || fail "--target must not stage installer keys"
+bash "$dev_ssh" --target "$fixture/missing" 2>/dev/null && fail "dev SSH accepted a target that is not a root filesystem"
 
 # --- live initramfs overlay -------------------------------------------------
 source "$ROOT/builder/archiso-aarch64-mkinitcpio.sh"

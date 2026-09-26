@@ -37,9 +37,9 @@ while [[ $# -gt 0 ]]; do
     shift 2
     ;;
   --package-dir)
-    # Prebuilt aarch64 packages that pkgs.omarchy.org does not publish yet:
-    # the platform kernel and headers plus the [omarchy] repo packages. The
-    # directory must carry a SHA256SUMS covering every archive in it.
+    # The platform's own aarch64 packages, which no repository publishes: its
+    # kernel and headers, plus anything pinned to a version proven on the
+    # hardware. The directory must carry a SHA256SUMS covering every archive.
     PACKAGE_DIR="${2:-}"
     if [[ -z $PACKAGE_DIR ]]; then
       echo "Error: --package-dir requires a directory" >&2
@@ -111,9 +111,9 @@ if [[ -n $LOCAL_OMARCHY_PATH ]]; then
 fi
 
 # Architecture selection. x86_64 is unchanged. aarch64 builds run in a pinned
-# Arch Linux ARM container, need the prebuilt package bundle because
-# pkgs.omarchy.org serves no aarch64 repo, and build the omarchy* packages
-# from --local-source for the same reason.
+# Arch Linux ARM container against Omarchy's edge aarch64 repository, need the
+# platform package bundle, and build the omarchy* packages from --local-source
+# because the platform support is not in the published ones.
 CONTAINER_IMAGE=archlinux/archlinux:latest
 CONTAINER_PLATFORM_ARGS=()
 OMARCHY_KERNEL=linux-t2
@@ -127,7 +127,11 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
     exit 1
   fi
   if [[ -z $LOCAL_OMARCHY_PATH ]]; then
-    echo "Error: --arch aarch64 requires --local-source; no published aarch64 omarchy packages exist" >&2
+    echo "Error: --arch aarch64 requires --local-source; the published omarchy packages lack the platform support" >&2
+    exit 1
+  fi
+  if [[ $OMARCHY_MIRROR != edge ]]; then
+    echo "Error: --arch aarch64 builds use the edge channel, the only one Omarchy publishes for aarch64; drop --rc" >&2
     exit 1
   fi
   [[ -d $PACKAGE_DIR ]] || { echo "Error: package directory not found at $PACKAGE_DIR" >&2; exit 1; }

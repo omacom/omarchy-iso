@@ -14,6 +14,11 @@
 # Usage: omarchy-iso-test [release/omarchy.iso] [options]
 #
 #   --encrypt          Drive the encrypted install flow (default: unencrypted)
+#   --nvme             Present the target disk as NVMe rather than virtio-blk,
+#                      so device names are /dev/nvme0n1p1 rather than /dev/vda1
+#   --lvm              Install into existing logical volumes on a fixture disk
+#                      that already holds a sibling system, and afterwards
+#                      assert that sibling came through untouched
 #   --provision              Drive the deferred-provisioning install flow: no user during install, the
 #                      first boot runs omarchy-provision-owner and creates it there
 #   --reuse-base       Skip the install phase if a base image already exists
@@ -40,6 +45,8 @@ INSTALL_TIMEOUT=2400
 BOOT_TIMEOUT=600
 ENCRYPT=false
 PROVISION=false
+LVM=false
+NVME=false
 REUSE_BASE=false
 INSTALL_ONLY=false
 KEEP_RUNNING=false
@@ -54,6 +61,8 @@ GUEST_HOSTNAME="omarchy-test"
 while (($#)); do
   case "$1" in
     --encrypt) ENCRYPT=true ;;
+    --lvm) LVM=true ;;
+    --nvme) NVME=true ;;
     --provision) PROVISION=true ;;
     --reuse-base) REUSE_BASE=true ;;
     --install-only) INSTALL_ONLY=true ;;
@@ -202,6 +211,13 @@ start_vm() {
   local disk="$1" serial="$2"
   shift 2
 
+  local -a DISK_DEVICE
+  if $NVME; then
+    DISK_DEVICE=(-device nvme,drive=drive0,serial=omarchy,bootindex=1)
+  else
+    DISK_DEVICE=(-device virtio-blk-pci,drive=drive0,bootindex=1)
+  fi
+
   # A viewer that resizes the guest display breaks the console driving: OCR
   # cannot read the shrunken font, and a resize during early boot can wedge
   # virtio-gpu before the system comes up.
@@ -214,7 +230,7 @@ start_vm() {
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -drive if=pflash,format=raw,file="$BASE_OVMF" \
     -drive file="$disk",format=qcow2,if=none,id=drive0 \
-    -device virtio-blk-pci,drive=drive0,bootindex=1 \
+    "${DISK_DEVICE[@]}" \
     -device virtio-vga \
     -display none \
     -vnc 127.0.0.1:5 \
@@ -610,6 +626,125 @@ audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel|omarchy.audio'
 
 # ----------------------------------------------------- driving the installer
 
+# Prove the sibling system can still be started, not merely that its files
+# survived. Those are different claims: reading a bootloader back byte-identical
+# says the install did not corrupt it, and says nothing about whether firmware
+# can still reach and execute it once another bootloader has been installed
+# beside it.
+#
+# Pristine firmware variables are what make this a test rather than a
+# formality. With no NVRAM entry matching, the firmware falls back to
+# \EFI\BOOT\BOOTX64.EFI — the sibling's bootloader — so if the Omarchy install
+# had claimed that path, or damaged the sibling's loader configuration, this is
+# where it shows. Reaching the sibling's own menu entry proves the whole path:
+# binary present, executable, and still reading the sibling's config.
+boot_sibling_check() {
+  log "Booting the sibling's bootloader from the UEFI fallback path"
+
+  local saved="$RUN_DIR/ovmf-after-install.fd" status=0
+  cp "$BASE_OVMF" "$saved"
+  cp "$OVMF_VARS_TEMPLATE" "$BASE_OVMF"
+
+  start_vm "$BASE_DISK" "$RUN_DIR/sibling-serial.log"
+
+  # Sibling[0O]S, not SiblingOS: tesseract reads the capital O of "OS" as a
+  # zero against this console font, the same way it reads the V of "LVM" as a U.
+  if wait_for_screen "Sibling[0O]S" 180; then
+    capture_console "success-lvm-19-sibling-still-boots"
+    log "The sibling's bootloader came up and listed its own entry"
+  else
+    capture_console "failure-lvm-sibling-did-not-boot"
+    echo "The sibling's bootloader did not come up after the install" >&2
+    status=1
+  fi
+
+  stop_vm
+  # Put the post-install firmware variables back, so the base image still
+  # carries the boot entries the install created.
+  cp "$saved" "$BASE_OVMF"
+  return $status
+}
+
+# Drive the install into existing logical volumes.
+#
+# Every screen is asserted before a key is sent. "Full disk install" sits two
+# rows above the option this wants, and reaching it by miscounting would erase
+# the very disk the run exists to protect — so a wrong turn has to be caught
+# while it is still only a highlighted menu row, not after a confirm.
+#
+# Menu order is Full disk / Free space / Existing LVM / Choose a different disk.
+# Free space is on that list even though the disk is full: parted counts the
+# 1MiB alignment gap before the first partition as free space, so the free-space
+# option is offered on any partitioned disk. That makes the position stable.
+drive_lvm_mode() {
+  wait_for_screen "installation mode" 60
+  capture_console "success-lvm-11-install-mode"
+
+  # l[vu]m, not lvm: tesseract reads the capital V of "LVM" as a U against this
+  # console font, so the row reads "Existing LUM volumes (advanced)".
+  if ! ocr_screen | grep -qiE "l[vu]m volumes"; then
+    capture_console "failure-lvm-mode-not-offered"
+    echo "The installer did not offer the LVM mode on a disk holding a volume group" >&2
+    return 1
+  fi
+
+  press down
+  press down
+  press ret
+
+  # Landing on the overwrite confirm means the count was wrong. Stop here,
+  # before the keypress that would act on it.
+  wait_for_screen "Root volume\|volume group\|recovery possible" 120
+  if ocr_screen | grep -qi "recovery possible"; then
+    capture_console "failure-lvm-landed-on-full-disk"
+    echo "Selecting the LVM mode landed on the full-disk overwrite confirm" >&2
+    return 1
+  fi
+
+  # lvs orders by name within the group, so the root picker reads
+  #   0 data   1 kde   2 omarchy   3 swap
+  # and omarchy, the empty spare, is the only volume this install may format.
+  lvm_pick "Root volume" 2 "success-lvm-12-root-volume" || return 1
+
+  # The home and swap pickers lead with None, which shifts every volume down
+  # one:  0 None   1 data   2 kde   3 omarchy   4 swap
+  # data is the populated home to adopt; kde is the sibling root and sits right
+  # beside it.
+  lvm_pick "Home volume" 1 "success-lvm-13-home-volume" || return 1
+  lvm_pick "Swap volume" 4 "success-lvm-14-swap-volume" || return 1
+
+  # One ESP on this disk, so the picker opens on the only answer.
+  wait_for_screen "EFI system partition" 60
+  capture_console "success-lvm-15-esp"
+  press ret
+
+  wait_for_screen "will be erased" 60
+  capture_console "success-lvm-16-confirm-encrypted"
+  if ! $ENCRYPT; then
+    press ctrl-c
+    sleep 2
+    capture_console "success-lvm-17-confirm-unencrypted"
+  fi
+  press ret
+
+  sleep 2
+  capture_console "success-lvm-18-install-started"
+}
+
+# Select the nth entry of a gum picker, having first proved the picker on
+# screen is the one meant. `steps` counts rows below the top entry.
+lvm_pick() {
+  local header="$1" steps="$2" shot="$3" i
+
+  wait_for_screen "$header" 120
+  capture_console "$shot"
+
+  for ((i = 0; i < steps; i++)); do
+    press down
+  done
+  press ret
+}
+
 drive_configurator() {
   log "Driving the installer wizard"
 
@@ -695,6 +830,11 @@ drive_configurator() {
   wait_for_screen "install disk" 60
   capture_console "success-installer-10-install-disk"
   press ret # the single virtio disk
+
+  if $LVM; then
+    drive_lvm_mode
+    return $?
+  fi
 
   wait_for_screen "installation mode\|recovery possible" 60
   if ocr_screen | grep -qi "installation mode"; then
@@ -987,7 +1127,12 @@ install_phase() {
   [[ -f $SSH_KEY ]] || ssh-keygen -t ed25519 -N "" -q -C "omarchy-iso-test" -f "$SSH_KEY"
 
   rm -f "$BASE_DISK"
-  qemu-img create -f qcow2 "$BASE_DISK" 40G >/dev/null
+  if $LVM; then
+    log "Building the LVM fixture disk (populated sibling root, home, swap, spare)"
+    "$REPO_DIR/test/lvm-fixture-disk" create --out "$BASE_DISK" --force >/dev/null
+  else
+    qemu-img create -f qcow2 "$BASE_DISK" 40G >/dev/null
+  fi
   cp "$OVMF_VARS_TEMPLATE" "$BASE_OVMF"
 
   start_vm "$BASE_DISK" "$RUN_DIR/install-serial.log" \
@@ -1061,6 +1206,22 @@ install_phase() {
 
   log "Installed system is up. Saving base image."
   stop_vm
+
+  if $LVM; then
+    log "Auditing the fixture: everything the install did not nominate must be intact"
+    if ! "$REPO_DIR/test/lvm-fixture-disk" verify --out "$BASE_DISK"; then
+      echo "The LVM install damaged a volume it was required to leave alone" >&2
+      return 1
+    fi
+    # The fixture falls back to a text stand-in when the build host has no
+    # systemd-boot, and a stand-in cannot boot. Ask the fixture rather than
+    # re-deriving its decision here, so the two cannot drift apart.
+    if "$REPO_DIR/test/lvm-fixture-disk" boot-check-supported; then
+      boot_sibling_check || return 1
+    else
+      log "No systemd-boot on this host: the fixture carries a stand-in bootloader, so the sibling boot check is skipped"
+    fi
+  fi
 }
 
 sync_omarchy() {

@@ -1,5 +1,7 @@
 """aarch64 N1x images: platform kernel selection and the Limine console contract."""
 
+import re
+import subprocess
 import sys
 import tempfile
 import types
@@ -58,6 +60,19 @@ path: boot():/EFI/BOOT/BOOTAA64.EFI
 
 
 class PlatformKernelTest(unittest.TestCase):
+    def test_configurator_selects_the_platform_kernel(self):
+        configurator = (ROOT / "configs/airootfs/root/configurator").read_text()
+        probe = re.search(r"^detect_kernel\(\) \{\n.*?^\}", configurator, re.M | re.S)
+        self.assertIsNotNone(probe)
+        for arch, arm_platform, expected in [("aarch64", "n1x", "linux-n1x"), ("x86_64", "", "linux-omarchy")]:
+            with self.subTest(arch=arch):
+                result = subprocess.run(
+                    ["bash", "-c", f"lspci() {{ :; }}\niso_arch={arch}\niso_platform={arm_platform}\n"
+                     + probe.group() + "\ndetect_kernel"],
+                    check=True, capture_output=True, text=True,
+                )
+                self.assertEqual(result.stdout.strip(), expected)
+
     def test_arm_platform_selects_its_kernel(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(context._default_kernel(Path(tmp), arm_platform="n1x"), "linux-n1x")

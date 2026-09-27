@@ -1217,8 +1217,14 @@ def stage_provisioning_state(ctx: InstallContext) -> None:
         _stage_provisioning_luks_unlock(ctx, provisioning_dir)
 
 
+# Node.js names its builds after the CPU: build-iso.sh bundles the one the
+# live ISO (and so the target) runs on.
+def _node_platform() -> str:
+    return "linux-arm64" if platform.machine() == "aarch64" else "linux-x64"
+
+
 def _stage_node_tarball(ctx: InstallContext, provisioning_dir) -> None:
-    tarballs = sorted(NODE_PACKAGES_DIR.glob("node-v*-linux-x64.tar.gz"))
+    tarballs = sorted(NODE_PACKAGES_DIR.glob(f"node-v*-{_node_platform()}.tar.gz"))
     if not tarballs:
         # Hard error on every install, not just deferred-provisioning installs: the stash is what lets a
         # later factory reset finalize the next owner offline, and an ISO

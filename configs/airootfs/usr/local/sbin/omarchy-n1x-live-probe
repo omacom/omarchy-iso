@@ -45,8 +45,12 @@ section() {
   journalctl -b -k --no-pager | \
     grep -Ei 'efi|framebuffer|fbcon|simpledrm|drm|nvidia|nouveau|acpi|i2c|hid|r8127|mt79|mlx5' || true
 
-  section SSH
-  echo "Ethernet DHCP and sshd are enabled; the development key logs in as root."
-  ip -4 -brief address | awk '$1 != "lo" && $3 { print "Connect with: ssh root@" $3 }' | sed 's|/[0-9]*$||'
-  echo "Or by name, where mDNS works: ssh root@omarchy-n1x-rescue.local"
+  section network
+  ip -4 -brief address | awk '$1 != "lo" && $3 { print $1, $3 }'
+  # Only a --dev-ssh image lets anyone log in remotely.
+  if [[ -x /usr/local/sbin/omarchy-n1x-dev-ssh ]]; then
+    echo "DEV image: the development key logs in as root:"
+    ip -4 -brief address | awk '$1 != "lo" && $3 { print "  ssh root@" $3 }' | sed 's|/[0-9]*$||'
+    echo "  or, where mDNS works: ssh root@omarchy-n1x-rescue.local"
+  fi
 } > >(tee "$log") 2>&1

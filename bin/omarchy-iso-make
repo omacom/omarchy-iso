@@ -8,6 +8,7 @@ LOCAL_OMARCHY_PATH=""
 LOCAL_PKGS_PATH=""
 OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
 OMARCHY_ARM_PLATFORM=""
+N1X_DEV_SSH=""
 PACKAGE_DIR=""
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -35,6 +36,12 @@ while [[ $# -gt 0 ]]; do
       ;;
     esac
     shift 2
+    ;;
+  --dev-ssh)
+    # DEV ONLY: bakes the development key into an N1x image for key-only root
+    # SSH on the live ISO and the installed system (builder/n1x-dev-ssh/).
+    N1X_DEV_SSH=1
+    shift
     ;;
   --package-dir)
     # The platform's own aarch64 packages, which no repository publishes: its
@@ -97,7 +104,7 @@ while [[ $# -gt 0 ]]; do
   *)
     echo "Unknown option: $1"
     echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
-    echo "       $0 --arch aarch64 --platform n1x --package-dir DIR --local-source <omarchy-checkout> <pkgs-checkout> [...]"
+    echo "       $0 --arch aarch64 --platform n1x [--dev-ssh] --package-dir DIR --local-source <omarchy-checkout> <pkgs-checkout> [...]"
     exit 1
     ;;
   esac
@@ -149,8 +156,8 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # so a mutable third-party tag is not acceptable.
   CONTAINER_IMAGE=menci/archlinuxarm@sha256:3e1074c407fc1a57c2a2117af6920c96a7cc906fa6f1f2da8a4a7fd3aa2c2f4e
   CONTAINER_PLATFORM_ARGS=(--platform linux/arm64)
-elif [[ -n $OMARCHY_ARM_PLATFORM || -n $PACKAGE_DIR ]]; then
-  echo "Error: --platform and --package-dir are only valid with --arch aarch64" >&2
+elif [[ -n $OMARCHY_ARM_PLATFORM || -n $PACKAGE_DIR || -n $N1X_DEV_SSH ]]; then
+  echo "Error: --platform, --package-dir and --dev-ssh are only valid with --arch aarch64" >&2
   exit 1
 fi
 
@@ -214,6 +221,7 @@ DOCKER_ARGS=(
   -e "OMARCHY_ARCH=$OMARCHY_ARCH"
   -e "OMARCHY_ARM_PLATFORM=$OMARCHY_ARM_PLATFORM"
   -e "OMARCHY_KERNEL=$OMARCHY_KERNEL"
+  -e "OMARCHY_N1X_DEV_SSH=$N1X_DEV_SSH"
   # Optional overrides of the Omarchy package pair build-iso.sh installs, e.g.
   # the release recipes (omarchy, omarchy-settings) built from --local-source
   # instead of the -dev ones that track quattro.
@@ -274,7 +282,7 @@ fi
 
 latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*.iso | head -n1)
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
-  iso_ref="${latest_iso%.*}-$OMARCHY_ARM_PLATFORM-$OMARCHY_ISO_REF.iso"
+  iso_ref="${latest_iso%.*}-$OMARCHY_ARM_PLATFORM${N1X_DEV_SSH:+-devssh}-$OMARCHY_ISO_REF.iso"
 else
   iso_ref="${latest_iso%.*}-$OMARCHY_ISO_REF.iso"
 fi

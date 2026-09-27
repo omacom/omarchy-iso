@@ -432,15 +432,17 @@ detect_kernel() {
   fi
 }
 
-# Limine's UEFI binary and the package mirrors follow the architecture.
+# Limine's UEFI binary and the package mirrors follow the architecture. The
+# mirror lines are pasted into the JSON heredocs below, which do not reprocess
+# a variable's value: $repo/$arch stay literal here without backslashes.
 if [[ $iso_arch == aarch64 ]]; then
   limine_efi_binary="limine_aa64.efi"
-  archinstall_custom_servers='            {"url": "http://mirror.archlinuxarm.org/\$arch/\$repo"}'
+  archinstall_custom_servers='            {"url": "http://mirror.archlinuxarm.org/$arch/$repo"}'
 else
   limine_efi_binary="limine_x64.efi"
-  archinstall_custom_servers='            {"url": "https://mirror.omarchy.org/\$repo/os/\$arch"},
-            {"url": "https://mirror.rackspace.com/archlinux/\$repo/os/\$arch"},
-            {"url": "https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"}'
+  archinstall_custom_servers='            {"url": "https://mirror.omarchy.org/$repo/os/$arch"},
+            {"url": "https://mirror.rackspace.com/archlinux/$repo/os/$arch"},
+            {"url": "https://geo.mirror.pkgbuild.com/$repo/os/$arch"}'
 fi
 
 # wait_for_device lives in disk-partitioning.sh: it now reports failure, and

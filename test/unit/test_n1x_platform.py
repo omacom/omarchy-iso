@@ -1,5 +1,6 @@
 """aarch64 N1x images: platform kernel selection and the Limine console contract."""
 
+import json
 import re
 import subprocess
 import sys
@@ -90,6 +91,24 @@ class PlatformKernelTest(unittest.TestCase):
             self.assertEqual(context.iso_arm_platform(path), "")
             path.write_text("n1x\n")
             self.assertEqual(context.iso_arm_platform(path), "n1x")
+
+
+class ConfiguratorMirrorsTest(unittest.TestCase):
+    # The configurator pastes these lines into its user_configuration.json
+    # heredocs; a stray backslash there made the N1x installer die on
+    # "Invalid \\escape" before it touched the disk.
+    def test_mirror_lines_are_valid_json_in_the_heredoc(self):
+        configurator = (ROOT / "configs/airootfs/root/configurator").read_text()
+        block = re.search(r"^if \[\[ \$iso_arch == aarch64 \]\]; then\n  limine_efi_binary=.*?^fi$", configurator, re.M | re.S)
+        self.assertIsNotNone(block)
+        for arch, first_url in [("aarch64", "http://mirror.archlinuxarm.org/$arch/$repo"),
+                                ("x86_64", "https://mirror.omarchy.org/$repo/os/$arch")]:
+            with self.subTest(arch=arch):
+                script = (f"iso_arch={arch}\n" + block.group()
+                          + '\ncat <<-_EOF_\n{"custom_servers": [\n$archinstall_custom_servers\n]}\n_EOF_\n')
+                result = subprocess.run(["bash", "-c", script], check=True, capture_output=True, text=True)
+                servers = json.loads(result.stdout)["custom_servers"]
+                self.assertEqual(servers[0]["url"], first_url)
 
 
 class NodeTarballTest(unittest.TestCase):

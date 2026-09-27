@@ -214,6 +214,11 @@ DOCKER_ARGS=(
   -e "OMARCHY_ARCH=$OMARCHY_ARCH"
   -e "OMARCHY_ARM_PLATFORM=$OMARCHY_ARM_PLATFORM"
   -e "OMARCHY_KERNEL=$OMARCHY_KERNEL"
+  # Optional overrides of the Omarchy package pair build-iso.sh installs, e.g.
+  # the release recipes (omarchy, omarchy-settings) built from --local-source
+  # instead of the -dev ones that track quattro.
+  -e "OMARCHY_RUNTIME_PACKAGE=${OMARCHY_RUNTIME_PACKAGE:-}"
+  -e "OMARCHY_SETTINGS_PACKAGE=${OMARCHY_SETTINGS_PACKAGE:-}"
   -e "HOST_UID=$(id -u)"
   -e "HOST_GID=$(id -g)"
   -v "$BUILD_RELEASE_PATH/:/out/"

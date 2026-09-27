@@ -7,6 +7,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "configs/airootfs/usr/share/omarchy-iso"))
@@ -89,6 +90,29 @@ class PlatformKernelTest(unittest.TestCase):
             self.assertEqual(context.iso_arm_platform(path), "")
             path.write_text("n1x\n")
             self.assertEqual(context.iso_arm_platform(path), "n1x")
+
+
+class NodeTarballTest(unittest.TestCase):
+    def test_stages_the_tarball_for_the_running_cpu(self):
+        for machine, bundled in [("aarch64", "node-v26.10.0-linux-arm64.tar.gz"), ("x86_64", "node-v26.10.0-linux-x64.tar.gz")]:
+            with self.subTest(machine=machine), tempfile.TemporaryDirectory() as tmp:
+                packages, provisioning = Path(tmp) / "packages", Path(tmp) / "provisioning"
+                packages.mkdir()
+                (packages / "node-v26.10.0-linux-arm64.tar.gz" if machine == "x86_64" else packages / "node-v26.10.0-linux-x64.tar.gz").write_text("other cpu")
+                (packages / bundled).write_text("node")
+                with mock.patch.object(phases_impl, "NODE_PACKAGES_DIR", packages), \
+                        mock.patch.object(phases_impl.platform, "machine", return_value=machine):
+                    phases_impl._stage_node_tarball(None, provisioning)
+                self.assertEqual([p.name for p in (provisioning / "packages").iterdir()], [bundled])
+
+    def test_missing_tarball_for_the_cpu_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            packages = Path(tmp)
+            (packages / "node-v26.10.0-linux-x64.tar.gz").write_text("x86")
+            with mock.patch.object(phases_impl, "NODE_PACKAGES_DIR", packages), \
+                    mock.patch.object(phases_impl.platform, "machine", return_value="aarch64"), \
+                    self.assertRaisesRegex(RuntimeError, "no bundled Node tarball"):
+                phases_impl._stage_node_tarball(None, packages / "provisioning")
 
 
 class N1xLimineContractTest(unittest.TestCase):

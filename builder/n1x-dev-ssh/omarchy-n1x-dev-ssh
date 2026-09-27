@@ -20,8 +20,10 @@
 # With --target DIR the installer's DEV ONLY phase runs it once more against
 # the installed root: root's key and the same sshd drop-in.
 #
-# Removal: delete builder/n1x-dev-ssh/, its block in builder/build-iso.sh and
-# configure_dev_ssh in the orchestrator. On an installed machine: remove
+# Only images built with `omarchy-iso-make --dev-ssh` carry this; the normal N1x
+# image does not. Removal from the source: delete builder/n1x-dev-ssh/, the
+# --dev-ssh flag, its block in builder/build-iso.sh and configure_dev_ssh in
+# the orchestrator. On an installed machine: remove
 # /etc/ssh/sshd_config.d/05-omarchy-n1x-dev-ssh.conf, the key from
 # /root/.ssh/authorized_keys and ~/.ssh/authorized_keys, and run
 # `sudo systemctl disable --now sshd` if nothing else needs it.

@@ -98,7 +98,14 @@ grep -Fq "grep -qw 'omarchy.n1x_recovery=1' /proc/cmdline" "$ROOT/configs/airoot
 
 # --- DEV ONLY: N1x debug SSH -------------------------------------------------------
 dev_ssh="$ROOT/builder/n1x-dev-ssh/omarchy-n1x-dev-ssh"
-grep -Fq 'install -Dm0755 /builder/n1x-dev-ssh/omarchy-n1x-dev-ssh' "$ROOT/builder/build-iso.sh" || fail "N1x builds do not stage the dev SSH script"
+grep -Fq 'install -Dm0755 /builder/n1x-dev-ssh/omarchy-n1x-dev-ssh' "$ROOT/builder/build-iso.sh" || fail "--dev-ssh builds do not stage the dev SSH script"
+# The dev key is opt-in: only the --dev-ssh flag stages it.
+dev_block=$(awk '/^if \[\[ -n \$\{OMARCHY_N1X_DEV_SSH:-\} \]\]; then$/,/^fi$/' "$ROOT/builder/build-iso.sh")
+grep -Fq 'n1x-dev-ssh' <<<"$dev_block" || fail "dev SSH staging is not gated on OMARCHY_N1X_DEV_SSH"
+[[ $(grep -c 'n1x-dev-ssh/' "$ROOT/builder/build-iso.sh") == $(grep -c 'n1x-dev-ssh/' <<<"$dev_block") ]] \
+  || fail "dev SSH files are staged outside the --dev-ssh block"
+grep -Fq -- '-e "OMARCHY_N1X_DEV_SSH=$N1X_DEV_SSH"' "$ROOT/bin/omarchy-iso-make" || fail "--dev-ssh does not reach the build container"
+grep -Fq -- '${N1X_DEV_SSH:+-devssh}' "$ROOT/bin/omarchy-iso-make" || fail "dev images are not named apart from normal ones"
 grep -Fq 'file_permissions["/usr/local/sbin/omarchy-n1x-dev-ssh"]="0:0:755"' "$ROOT/builder/build-iso.sh" || fail "dev SSH script would lose its exec bit"
 grep -Fq 'multi-user.target.wants/omarchy-n1x-dev-ssh.service' "$ROOT/builder/build-iso.sh" || fail "dev SSH unit is not enabled on the live ISO"
 [[ $(grep -c '^ssh-ed25519 ' "$ROOT/builder/n1x-dev-ssh/authorized_keys") == 1 ]] || fail "dev SSH must carry exactly one key"

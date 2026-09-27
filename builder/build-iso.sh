@@ -180,13 +180,17 @@ for grub_config in "$build_cache_dir/grub/grub.cfg" "$build_cache_dir/grub/loopb
     "$grub_config"
 done
 if [[ $OMARCHY_ARM_PLATFORM == n1x ]]; then
-  # releng's Ethernet DHCP (with mDNS) and sshd serve the recovery entry and
-  # remote debugging under this name.
+  # The live system's name on the network (releng's Ethernet DHCP with mDNS).
   printf '%s\n' omarchy-n1x-rescue >"$build_cache_dir/airootfs/etc/hostname"
-
-  # DEV ONLY (N1x bring-up): key-only SSH into the live ISO and the installed
+fi
+if [[ -n ${OMARCHY_N1X_DEV_SSH:-} ]]; then
+  # DEV ONLY (--dev-ssh): key-only SSH into the live ISO and the installed
   # system. See builder/n1x-dev-ssh/omarchy-n1x-dev-ssh; removing that
   # directory and this block removes it.
+  if [[ $OMARCHY_ARM_PLATFORM != n1x ]]; then
+    echo "ERROR: --dev-ssh is only for N1x images" >&2
+    exit 1
+  fi
   install -Dm0755 /builder/n1x-dev-ssh/omarchy-n1x-dev-ssh "$build_cache_dir/airootfs/usr/local/sbin/omarchy-n1x-dev-ssh"
   install -Dm0644 /builder/n1x-dev-ssh/authorized_keys "$build_cache_dir/airootfs/usr/local/share/omarchy-n1x-dev-ssh/authorized_keys"
   install -Dm0644 /builder/n1x-dev-ssh/omarchy-n1x-dev-ssh.service "$build_cache_dir/airootfs/etc/systemd/system/omarchy-n1x-dev-ssh.service"

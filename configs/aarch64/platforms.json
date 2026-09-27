@@ -12,6 +12,16 @@
       "kernel_cmdline": []
     },
     {
+      "id": "microsoft-surface-pro-11",
+      "name": "Microsoft Surface Pro 11",
+      "media_target": "aarch64/snapdragon",
+      "match": [
+        { "sys_vendor": "Microsoft Corporation", "product_name": "Microsoft Surface Pro, 11th Edition" }
+      ],
+      "packages": ["linux-firmware-qcom", "linux-sp11", "surface-pro-11-support", "iptsd", "libcamera-surface-pro-11", "pipewire-libcamera", "surface-pro-11-sensors", "power-profiles-daemon-surface-pro-11"],
+      "kernel_cmdline": []
+    },
+    {
       "id": "nvidia-dgx-spark",
       "name": "NVIDIA DGX Spark",
       "media_target": "aarch64/generic",

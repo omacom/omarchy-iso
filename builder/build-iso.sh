@@ -210,6 +210,16 @@ mapfile -t all_packages < <(
   printf '%s\n' "${all_packages[@]}" | sed 's/^broadcom-wl$/broadcom-wl-dkms/' | sort -u
 )
 
+# arch-mact2 replaced apple-bcm-firmware with apple-bcm-firmware-fetcher on
+# 2026-09-26 (the fetcher declares conflicts=(apple-bcm-firmware)). Published
+# Omarchy runtime packages still list apple-bcm-firmware in
+# omarchy-other.packages, so map it here until every channel ships a runtime
+# that names the fetcher itself.
+mapfile -t all_packages < <(
+  printf '%s\n' "${all_packages[@]}" |
+    sed 's/^apple-bcm-firmware$/apple-bcm-firmware-fetcher/' | sort -u
+)
+
 # With --local-source we already built these omarchy* packages directly into
 # the mirror; strip them from the pacman -Syw list so it doesn't try to fetch
 # the published versions on top.

@@ -1318,6 +1318,55 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     if "cryptdevice=" in cmdline and "cryptdevice=" not in limine_conf.read_text():
         raise RuntimeError(f"encrypted install but {limine_conf} has no cryptdevice=")
 
+    if not arch.has_uefi():
+        _write_bios_grub_config(esp_root, cmdline)
+
+
+def _write_bios_grub_config(esp_root: Path, cmdline: str) -> None:
+    """On BIOS installs, also leave a grub.cfg on the ESP.
+
+    Firmware that boots through a GRUB payload scans disks for a config
+    (grub.cfg / syslinux / extlinux) and never chainloads the MBR. Omarchy
+    installs Limine, whose limine.conf such firmware does not read, so the
+    installed system does not start. A minimal grub.cfg booting the same kernel
+    lets that firmware hand off to the system. Harmless elsewhere: ordinary
+    BIOS boots the MBR Limine and never reads this file.
+    """
+    text = (esp_root / "limine.conf").read_text()
+    kernel = _limine_entry_boot_path(text, "path")
+    initramfs = _limine_entry_boot_path(text, "module_path")
+    if not kernel or not initramfs:
+        return
+
+    ucode = next(
+        (name for name in ("intel-ucode.img", "amd-ucode.img") if (esp_root / name).exists()),
+        None,
+    )
+    initrd = " ".join(f"/{path}" for path in (ucode, initramfs) if path)
+
+    grub_dir = esp_root / "grub"
+    grub_dir.mkdir(parents=True, exist_ok=True)
+    (grub_dir / "grub.cfg").write_text(
+        "set timeout=3\n"
+        'menuentry "Omarchy" {\n'
+        f"  linux /{kernel} {cmdline}\n"
+        f"  initrd {initrd}\n"
+        "}\n"
+    )
+    info(f"› wrote {grub_dir / 'grub.cfg'} for GRUB-payload firmware")
+
+
+def _limine_entry_boot_path(text: str, key: str) -> str | None:
+    """Pull a `boot():` path out of a generated limine.conf entry.
+
+    limine-entry-tool writes lines like
+    `path: boot():/<machine-id>/linux-omarchy/vmlinuz#<hash>`; strip the
+    boot(): prefix and any content hash so the result is an ESP-relative path.
+    """
+    pattern = re.compile(rf"^\s*{re.escape(key)}:\s*boot\(\):(\S+)", re.MULTILINE)
+    match = pattern.search(text)
+    return match.group(1).split("#", 1)[0].lstrip("/") if match else None
+
 
 def _strip_shell_quotes(value: str) -> str:
     value = value.strip()

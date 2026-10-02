@@ -3,7 +3,7 @@
 ONLY this module imports from archinstall. Everything else uses these helpers.
 If archinstall's API churns, the blast radius is contained here.
 
-Tested against archinstall 4.4 (Python 3.14).
+Tested against archinstall 4.5 (Python 3.14).
 
 The canonical call sequence (mirrored from archinstall.scripts.guided.py) is:
 
@@ -13,7 +13,7 @@ The canonical call sequence (mirrored from archinstall.scripts.guided.py) is:
         # configs do their own mounting before the Installer context opens.
         if disk_config.config_type != DiskLayoutType.Pre_mount:
             inst.mount_ordered_layout()
-        inst.sanity_check(offline=, skip_ntp=, skip_wkd=)
+        inst.sanity_check(skip_ntp=, skip_wkd=)
         inst.generate_key_files()                     # encrypted only
         inst.set_mirrors(handler, mirror_config, on_target=False)
         inst.minimal_installation(...)                # base + linux pacstrap

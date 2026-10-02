@@ -236,7 +236,6 @@ def arch_install_system(ctx: InstallContext) -> None:
             installer.mount_ordered_layout()
 
         installer.sanity_check(
-            offline=True,
             skip_ntp=True,
             skip_wkd=True,
         )

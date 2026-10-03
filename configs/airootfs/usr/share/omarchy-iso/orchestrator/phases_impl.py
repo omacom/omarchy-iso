@@ -1719,14 +1719,17 @@ def validate_boot(ctx: InstallContext) -> None:
         if not limine_binary.exists() or limine_binary.stat().st_size == 0:
             raise RuntimeError(f"{limine_binary} missing or empty")
 
-        # Hardware packages (omarchy-hw-intel-ptl, …) can swap the kernel out
-        # from under us mid-install, so trust what's on disk over what we asked
-        # for and only fall back to the configured name when nothing's there.
-        uki_dir = esp_mount / "EFI" / "Linux"
-        candidates = _installed_kernels(ctx) or [kernel]
-        ukis = [uki_dir / f"{uki_prefix}_{name}.efi" for name in candidates]
-        if not any(uki.exists() and uki.stat().st_size for uki in ukis):
-            raise RuntimeError(f"{' / '.join(str(uki) for uki in ukis)} missing or empty")
+        if _limine_setting(config_text, "ENABLE_UKI", "yes") == "no":
+            _validate_linux_boot_entry(esp_mount, limine_conf_text, ctx.encrypt)
+        else:
+            # Hardware packages (omarchy-hw-intel-ptl, …) can swap the kernel out
+            # from under us mid-install, so trust what's on disk over what we asked
+            # for and only fall back to the configured name when nothing's there.
+            uki_dir = esp_mount / "EFI" / "Linux"
+            candidates = _installed_kernels(ctx) or [kernel]
+            ukis = [uki_dir / f"{uki_prefix}_{name}.efi" for name in candidates]
+            if not any(uki.exists() and uki.stat().st_size for uki in ukis):
+                raise RuntimeError(f"{' / '.join(str(uki) for uki in ukis)} missing or empty")
 
         post = _read_efibootmgr()
         if not _find_label_entries(post["entries"], "Limine"):
@@ -1737,6 +1740,45 @@ def validate_boot(ctx: InstallContext) -> None:
 
     if ctx.defer_provisioning:
         _validate_provisioning_state(ctx)
+
+
+def _validate_linux_boot_entry(esp_mount: Path, config_text: str, encrypted: bool) -> None:
+    """Check the kernel and initramfs that limine-entry-tool copied to the ESP."""
+    # limine-entry-tool writes an indented //<kernel> entry per kernel under
+    # /+Omarchy; deeper entries belong to snapshots.
+    entries: list[list[str]] = []
+    in_omarchy = False
+    current: list[str] | None = None
+    for line in config_text.splitlines():
+        header = re.match(r"\s*(/+)\+?(.*)$", line)
+        if header:
+            depth = len(header.group(1))
+            if depth == 1:
+                in_omarchy = header.group(2).startswith("Omarchy")
+            current = [] if in_omarchy and depth == 2 else None
+            if current is not None:
+                entries.append(current)
+        elif current is not None:
+            current.append(line)
+
+    for entry in map("\n".join, entries):
+        if not re.search(r"(?m)^\s*protocol:\s*linux\s*$", entry):
+            continue
+        cmdline = re.search(r"(?m)^\s*cmdline:\s*(.*)$", entry)
+        if not cmdline or not re.search(r"(?:^|\s)root=\S+", cmdline.group(1)):
+            continue
+        if encrypted and not re.search(r"(?:^|\s)cryptdevice=\S+", cmdline.group(1)):
+            continue
+        kernel = re.findall(r"(?m)^\s*path:\s*(\S+)\s*$", entry)
+        modules = re.findall(r"(?m)^\s*module_path:\s*(\S+)\s*$", entry)
+        if not kernel or not modules:
+            continue
+        # limine-entry-tool writes boot():/<path>#<hash>; resources elsewhere
+        # don't resolve on the ESP and so fail the check.
+        files = [esp_mount / r.removeprefix("boot():").split("#", 1)[0].lstrip("/") for r in kernel + modules]
+        if all(path.is_file() and path.stat().st_size for path in files):
+            return
+    raise RuntimeError(f"{esp_mount / 'limine.conf'} has no bootable Omarchy Linux entry with a kernel and initramfs")
 
 
 def _validate_provisioning_state(ctx: InstallContext) -> None:

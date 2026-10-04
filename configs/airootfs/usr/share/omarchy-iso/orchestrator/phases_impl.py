@@ -35,7 +35,7 @@ from pathlib import Path
 
 from . import archinstall_adapter as arch
 from .command import capture, capture_identifier, require_text
-from .context import InstallContext, iso_arm_platform
+from .context import InstallContext, iso_arm_platform, iso_kernel
 from .keyboard import configure_keyboard
 from .ui import error, info
 
@@ -760,6 +760,14 @@ def _runtime_package_list(ctx: InstallContext) -> list[str]:
             continue
         if s not in already_installed and s not in pkgs:
             pkgs.append(s)
+    # The x86_64 runtime depends on the Limine/Snapper stack; the aarch64 one
+    # does not, because Apple Silicon boots through its own loader. UEFI aarch64
+    # machines install with this ISO and boot like x86_64, so add the stack here,
+    # in the same masked-hooks transaction the dependency would have used.
+    if platform.machine() == "aarch64":
+        for s in ("limine", "limine-mkinitcpio-hook", "limine-snapper-sync", "snapper"):
+            if s not in already_installed and s not in pkgs:
+                pkgs.append(s)
     return pkgs
 
 
@@ -1695,7 +1703,7 @@ def validate_boot(ctx: InstallContext) -> None:
     if ctx.encrypt and "cryptdevice=" not in limine_conf_text:
         raise RuntimeError(f"Encrypted install but {limine_conf} has no cryptdevice=")
 
-    _validate_platform_boot_entries(limine_conf_text, iso_arm_platform())
+    _validate_platform_boot_entries(limine_conf_text, _installed_arm_platform(ctx), iso_kernel())
 
     kernel_cmdline = ctx.target / "etc" / "kernel" / "cmdline"
     if not kernel_cmdline.exists():
@@ -1752,7 +1760,26 @@ def _limine_entries(limine_conf_text: str) -> list[tuple[str, dict[str, str]]]:
     return entries
 
 
-def _validate_platform_boot_entries(limine_conf_text: str, arm_platform: str) -> None:
+def _installed_arm_platform(ctx: InstallContext) -> str:
+    """The board an aarch64 image was built for, when the target really is one.
+
+    The platform's boot contract comes from its hardware script, which only runs
+    on that hardware; an N1x image installed in a VM gets a generic aarch64
+    setup and is validated as one. The target's own detector decides."""
+    arm_platform = iso_arm_platform()
+    if arm_platform != "n1x":
+        return arm_platform
+    detected = subprocess.run(
+        ["arch-chroot", str(ctx.target), "omarchy-hw-n1x"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    if detected.returncode != 0:
+        info("Not N1x hardware; skipping the N1x boot entry checks")
+        return ""
+    return arm_platform
+
+
+def _validate_platform_boot_entries(limine_conf_text: str, arm_platform: str, kernel: str = "") -> None:
     if arm_platform != "n1x":
         return
 
@@ -1773,12 +1800,15 @@ def _validate_platform_boot_entries(limine_conf_text: str, arm_platform: str) ->
                 f"limine.conf entry {name} lacks {' '.join(missing)}; its console would go to the SPCR serial port"
             )
 
-    rescue = [options for _, options in kernels if "linux-n1x-rescue" in options.get("path", "")]
+    # The rescue entry is the kernel's fallback UKI, booted with its own cmdline.
+    rescue_name = f"{kernel}-fallback"
+    rescue = [options for _, options in kernels if f"_{rescue_name}.efi" in options.get("path", "")]
     if not rescue:
-        raise RuntimeError("limine.conf has no linux-n1x-rescue entry")
+        raise RuntimeError(f"limine.conf has no {rescue_name} rescue entry")
     for options in rescue:
-        if "systemd.unit=multi-user.target" not in options.get("cmdline", "").split():
-            raise RuntimeError("linux-n1x-rescue entry does not boot to a text login; its own cmdline was overridden")
+        cmdline = options.get("cmdline", "").split()
+        if "systemd.unit=multi-user.target" not in cmdline or "plymouth.enable=0" not in cmdline:
+            raise RuntimeError(f"{rescue_name} entry does not boot to a text login; its own cmdline was overridden")
 
 
 def _validate_provisioning_state(ctx: InstallContext) -> None:

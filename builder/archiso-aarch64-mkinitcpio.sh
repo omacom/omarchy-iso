@@ -35,7 +35,7 @@ configure_archiso_aarch64_mkinitcpio() {
     case "$hook" in
       microcode) ((microcode_count += 1)) ;;
       memdisk) ((memdisk_count += 1)) ;;
-      plymouth) ((plymouth_count += 1)) ;;
+      plymouth) ((plymouth_count += 1)); filtered_hooks+=("$hook") ;;
       *) filtered_hooks+=("$hook") ;;
     esac
   done
@@ -46,8 +46,8 @@ configure_archiso_aarch64_mkinitcpio() {
 
   # CPU microcode packages and memdiskfind are x86-only. Keeping memdisk after
   # excluding memtest86+ makes mkinitcpio report an incomplete ARM64 image.
-  # Plymouth 26.134.222-2 aborts in the GB10 initramfs while initializing its
-  # console and boot-server event sources, so the live image boots without it.
+  # Plymouth stays: 26.134.222-2 aborted in the GB10 initramfs, but -3 runs
+  # there.
   printf -v replacement 'HOOKS=(%s)' "${filtered_hooks[*]}"
   sed -i "s|^HOOKS=.*$|$replacement|" "$config"
 

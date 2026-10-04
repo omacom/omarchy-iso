@@ -8,7 +8,7 @@ LOCAL_OMARCHY_PATH=""
 LOCAL_PKGS_PATH=""
 OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
 OMARCHY_ARM_PLATFORM=""
-N1X_DEV_SSH=""
+N1X_DEV_SSH_KEY=""
 PACKAGE_DIR=""
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -25,8 +25,8 @@ while [[ $# -gt 0 ]]; do
     ;;
   --platform)
     # Board-specific overlay on top of the generic architecture build. Only
-    # the NVIDIA N1x laptop is known today; it selects the linux-n1x kernel
-    # and the console/SSH recovery entry that bring-up depends on.
+    # the NVIDIA N1x laptop is known today; it selects the linux-omarchy-n1x
+    # kernel and the hardware-probe recovery entry.
     OMARCHY_ARM_PLATFORM="${2:-}"
     case "$OMARCHY_ARM_PLATFORM" in
     n1x) ;;
@@ -38,10 +38,14 @@ while [[ $# -gt 0 ]]; do
     shift 2
     ;;
   --dev-ssh)
-    # DEV ONLY: bakes the development key into an N1x image for key-only root
+    # DEV ONLY: bakes the given public key into an N1x image for key-only root
     # SSH on the live ISO and the installed system (builder/n1x-dev-ssh/).
-    N1X_DEV_SSH=1
-    shift
+    N1X_DEV_SSH_KEY="${2:-}"
+    if [[ -z $N1X_DEV_SSH_KEY ]]; then
+      echo "Error: --dev-ssh requires a public key file" >&2
+      exit 1
+    fi
+    shift 2
     ;;
   --package-dir)
     # The platform's own aarch64 packages, which no repository publishes: its
@@ -104,7 +108,7 @@ while [[ $# -gt 0 ]]; do
   *)
     echo "Unknown option: $1"
     echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
-    echo "       $0 --arch aarch64 --platform n1x [--dev-ssh] --package-dir DIR --local-source <omarchy-checkout> <pkgs-checkout> [...]"
+    echo "       $0 --arch aarch64 --platform n1x [--dev-ssh <pubkey>] --package-dir DIR --local-source <omarchy-checkout> <pkgs-checkout> [...]"
     exit 1
     ;;
   esac
@@ -151,12 +155,22 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
     echo "Error: package bundle checksum verification failed in $PACKAGE_DIR" >&2
     exit 1
   fi
-  OMARCHY_KERNEL="linux-$OMARCHY_ARM_PLATFORM"
+  case $OMARCHY_ARM_PLATFORM in
+  n1x) OMARCHY_KERNEL=linux-omarchy-n1x ;;
+  esac
+  if [[ -n $N1X_DEV_SSH_KEY ]]; then
+    [[ -f $N1X_DEV_SSH_KEY ]] || { echo "Error: SSH public key not found at $N1X_DEV_SSH_KEY" >&2; exit 1; }
+    N1X_DEV_SSH_KEY=$(realpath "$N1X_DEV_SSH_KEY")
+    if ! grep -Eq '^(ssh-|ecdsa-|sk-)' "$N1X_DEV_SSH_KEY" || grep -Evq '^(ssh-|ecdsa-|sk-|#|$)' "$N1X_DEV_SSH_KEY"; then
+      echo "Error: $N1X_DEV_SSH_KEY must hold public keys only, one per line" >&2
+      exit 1
+    fi
+  fi
   # Pinned by digest: this container runs with the privileges archiso needs,
   # so a mutable third-party tag is not acceptable.
   CONTAINER_IMAGE=menci/archlinuxarm@sha256:3e1074c407fc1a57c2a2117af6920c96a7cc906fa6f1f2da8a4a7fd3aa2c2f4e
   CONTAINER_PLATFORM_ARGS=(--platform linux/arm64)
-elif [[ -n $OMARCHY_ARM_PLATFORM || -n $PACKAGE_DIR || -n $N1X_DEV_SSH ]]; then
+elif [[ -n $OMARCHY_ARM_PLATFORM || -n $PACKAGE_DIR || -n $N1X_DEV_SSH_KEY ]]; then
   echo "Error: --platform, --package-dir and --dev-ssh are only valid with --arch aarch64" >&2
   exit 1
 fi
@@ -221,7 +235,7 @@ DOCKER_ARGS=(
   -e "OMARCHY_ARCH=$OMARCHY_ARCH"
   -e "OMARCHY_ARM_PLATFORM=$OMARCHY_ARM_PLATFORM"
   -e "OMARCHY_KERNEL=$OMARCHY_KERNEL"
-  -e "OMARCHY_N1X_DEV_SSH=$N1X_DEV_SSH"
+  -e "OMARCHY_N1X_DEV_SSH=${N1X_DEV_SSH_KEY:+1}"
   # Optional overrides of the Omarchy package pair build-iso.sh installs, e.g.
   # the release recipes (omarchy, omarchy-settings) built from --local-source
   # instead of the -dev ones that track quattro.
@@ -245,6 +259,10 @@ fi
 
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   DOCKER_ARGS+=(-v "$PACKAGE_DIR:/packages:ro")
+fi
+
+if [[ -n $N1X_DEV_SSH_KEY ]]; then
+  DOCKER_ARGS+=(-v "$N1X_DEV_SSH_KEY:/dev-ssh/authorized_keys:ro")
 fi
 
 # The host pacman cache belongs to the host architecture; sharing it with an
@@ -282,16 +300,13 @@ fi
 
 latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*.iso | head -n1)
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
-  iso_ref="${latest_iso%.*}-$OMARCHY_ARM_PLATFORM${N1X_DEV_SSH:+-devssh}-$OMARCHY_ISO_REF.iso"
+  iso_ref="${latest_iso%.*}-$OMARCHY_ARM_PLATFORM${N1X_DEV_SSH_KEY:+-devssh}-$OMARCHY_ISO_REF.iso"
 else
   iso_ref="${latest_iso%.*}-$OMARCHY_ISO_REF.iso"
 fi
 mv -f "$latest_iso" "$iso_ref"
 
-if [[ $OMARCHY_ARCH == aarch64 ]]; then
-  echo
-  echo "$OMARCHY_ARM_PLATFORM ISO built at $iso_ref (boot offer skipped: omarchy-iso-boot is x86_64-only)"
-elif [[ -z "${NO_BOOT_OFFER:-}" ]]; then
+if [[ -z "${NO_BOOT_OFFER:-}" ]]; then
   echo
   gum confirm "Boot $iso_ref?" && "$BUILD_ROOT/bin/omarchy-iso-boot" "$iso_ref"
 fi

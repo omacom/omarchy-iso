@@ -18,8 +18,11 @@ Both install the same Omarchy. Only the dev image opens remote access, so do not
 - **Console:** every boot entry carries `console=tty0 acpi=nospcr`. Without it the firmware's serial console takes over and the screen stays black, the disk passphrase prompt included.
 - **Boot splash:** Plymouth, as on every Omarchy machine, with the panel lit for the passphrase prompt.
 - **Sleep:** suspend to idle. The firmware's deep sleep returns at once.
-- **USB4 (ProArt P14):** docks, displays and PCIe devices such as 10 GbE adapters work through the USB4 ports. A dock or adapter plugged in while you are logged in and unlocked is approved once, with a notification, and connects on every plug after that. One plugged in at the lock screen, or already connected at boot the first time, stays without its PCIe devices (a dock's Ethernet, for one) until it is plugged in again after unlocking. The three USB4 PCIe ports are kept out of runtime suspend, because a dock that comes up behind a suspended port never shows its PCIe devices; a kernel fix that wakes the port instead would give back their idle power.
-- **ProArt P14:** the RAM the firmware reserves for Windows' GPU is given to Linux (about 122 GiB of 128), and the speakers get ASUS's amplifier tuning.
+- **USB4:** docks, displays and PCIe devices such as 10 GbE adapters work through the USB4 ports. A dock or adapter plugged in while you are logged in and unlocked is approved once, with a notification, and connects on every plug after that. One plugged in at the lock screen, or already connected at boot the first time, stays without its PCIe devices (a dock's Ethernet, for one) until it is plugged in again after unlocking. On the ProArt P14 the three USB4 PCIe ports are kept out of runtime suspend, because a dock that comes up behind a suspended port never shows its PCIe devices; a kernel fix that wakes the port instead would give back their idle power.
+- **RAM:** most of the memory the firmware reserves for Windows' GPU is given to Linux, about 118 GiB of 128 on the ProArt P14. The 3.9 GiB next to the GPU firmware's own memory stay reserved, because the firmware writes into them when it drives a large external display.
+- **Memory:** swap on zram and the same memory tuning as x86_64.
+- **ProArt P14:** the speakers get ASUS's amplifier tuning.
+- **Dell XPS 16:** a sound profile for its speakers, headphones and microphones, the battery reading and the mic-mute key, and brightness keys that change its OLED panel.
 - **Wired and Wi-Fi together:** each interface answers ARP only for its own address (`/etc/sysctl.d/90-omarchy-arp.conf`), so a dock's Ethernet on the same network as the Wi-Fi keeps its routes and becomes the default route.
 - **Packages:** everything else comes from Omarchy's aarch64 repository (`pkgs.omarchy.org/edge/aarch64`) and Arch Linux ARM. OBS Studio is not installed; it has no aarch64 build.
 
@@ -77,8 +80,8 @@ sudo ufw delete allow ssh
 ## Known limitations
 
 - **USB4 devices across suspend** are not validated yet.
-- **Battery, lid and thermal readings are missing on the Dell XPS 16.** Its embedded controller uses a newer interface than NVIDIA's driver implements.
-- **USB4 is only set up on the ProArt P14** until it is tested on the Dell.
+- **The Dell XPS 16's embedded controller sends no events:** AC and battery changes are not reported, and the lid and suspend are not tested yet.
+- **Docks on the Dell XPS 16** don't get the ProArt's USB4 port fix yet, so a dock plugged in some time after boot may not show its Ethernet.
 
 ## Building the images
 

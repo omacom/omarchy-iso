@@ -50,6 +50,7 @@ class BootValidationTest(unittest.TestCase):
         self.write("boot/machine/7.2/vmlinuz", "kernel")
         self.write("boot/machine/7.2/initramfs", "initramfs")
         self.write("usr/lib/modules/7.2/pkgbase", "linux-aarch64\n")
+        self.write("usr/lib/modules/7.2/build/include/config/kernel.release", "7.2\n")
         for patch in (
             mock.patch.object(phases, "_assert_boot_hooks_restored"),
             mock.patch.object(phases.arch, "has_uefi", return_value=True, create=True),

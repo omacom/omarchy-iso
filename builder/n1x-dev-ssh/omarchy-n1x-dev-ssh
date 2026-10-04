@@ -3,9 +3,9 @@
 # DEV ONLY: remote access for N1x bring-up. Remove before an N1x image is
 # handed to anyone but the development bench.
 #
-# Key-only SSH for the development host's key (authorized_keys next to this
-# script in the ISO sources), with password and keyboard-interactive login
-# switched off:
+# Key-only SSH for the public key the image was built with
+# (`omarchy-iso-make --dev-ssh <file>`), with password and keyboard-interactive
+# login switched off:
 #
 #   live ISO          ssh root@<address>   (hostname omarchy-n1x-rescue)
 #   installed system  ssh root@<address>   or  <user>@<address>
@@ -20,7 +20,7 @@
 # With --target DIR the installer's DEV ONLY phase runs it once more against
 # the installed root: root's key and the same sshd drop-in.
 #
-# Only images built with `omarchy-iso-make --dev-ssh` carry this; the normal N1x
+# Only images built with `omarchy-iso-make --dev-ssh <file>` carry this; the normal N1x
 # image does not. Removal from the source: delete builder/n1x-dev-ssh/, the
 # --dev-ssh flag, its block in builder/build-iso.sh and configure_dev_ssh in
 # the orchestrator. On an installed machine: remove

@@ -11,11 +11,11 @@ if [[ -z $offline_mirror_dir ]]; then
 fi
 
 if [[ ! -d /omarchy-source ]]; then
-  echo "ERROR: /omarchy-source not mounted (pass --local-source or set OMARCHY_SOURCE_PATH)" >&2
+  echo "ERROR: /omarchy-source not mounted (pass --local-source)" >&2
   exit 1
 fi
 if [[ ! -d /omarchy-pkgs ]]; then
-  echo "ERROR: /omarchy-pkgs not mounted (set OMARCHY_PKGS_PATH or place ../omarchy-pkgs)" >&2
+  echo "ERROR: /omarchy-pkgs not mounted (pass --local-source)" >&2
   exit 1
 fi
 
@@ -69,13 +69,11 @@ for pkg in "${packages[@]}"; do
 
   # The container's makepkg.conf compresses single-threaded and makes with one
   # job; use every core of the build host for both. su resets the environment,
-  # so the board platform (omarchy-settings-dev keys its aarch64 contents on
-  # it) is passed like the source path.
+  # so the source path is passed explicitly.
   su builder -c "
     cd '$pkg_work' &&
     PKGDEST='$work_dir' \
     OMARCHY_SRC=/omarchy-source \
-    OMARCHY_PLATFORM='${OMARCHY_ARM_PLATFORM:-}' \
     MAKEFLAGS='-j$(nproc)' \
     makepkg --noconfirm --skippgpcheck --skipchecksums --nodeps -f
   "

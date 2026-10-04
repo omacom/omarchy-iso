@@ -22,9 +22,10 @@ ROOT_CMDLINE = (
     "cryptdevice=PARTUUID=f073914b-b386-4b56-b181-61ea375509ee:root root=/dev/mapper/root "
     "zswap.enabled=0 rootflags=subvol=@ rw rootfstype=btrfs"
 )
+KERNEL = "linux-omarchy-n1x"
 RESCUE_CMDLINE = (
-    f"{ROOT_CMDLINE} omarchy.n1x_recovery=1 acpi=nospcr plymouth.enable=0 nomodeset "
-    "systemd.unit=multi-user.target console=tty0 fbcon=map:0 loglevel=7"
+    f"{ROOT_CMDLINE} console=tty0 acpi=nospcr plymouth.enable=0 nomodeset "
+    "systemd.unit=multi-user.target fbcon=map:0 loglevel=7"
 )
 NORMAL_CMDLINE = (
     " quiet splash loglevel=0 console=tty0 acpi=nospcr loglevel=7 systemd.show_status=1 "
@@ -32,14 +33,15 @@ NORMAL_CMDLINE = (
 )
 
 
-# Shaped like the limine.conf limine-entry-tool wrote on the N1x (2026-09-03).
+# Shaped like the limine.conf limine-entry-tool writes for linux-omarchy-n1x with
+# its fallback UKI as the rescue entry.
 def limine_conf(rescue_cmdline=RESCUE_CMDLINE, normal_cmdline=NORMAL_CMDLINE, rescue=True):
     rescue_entry = f"""\
-  //linux-n1x-rescue
-  comment: N1x SSH recovery (graphics disabled)
-  comment: kernel-id=linux-n1x-rescue
+  //linux-omarchy-n1x-fallback
+  comment: Kernel version: 7.2.5-9-omarchy-n1x
+  comment: kernel-id=linux-omarchy-n1x-fallback
   protocol: efi
-  path: boot():/EFI/Linux/omarchy_linux-n1x-rescue.efi#5187fcdd
+  path: boot():/EFI/Linux/omarchy_linux-omarchy-n1x-fallback.efi#5187fcdd
   cmdline: {rescue_cmdline}
 """ if rescue else ""
     return f"""\
@@ -48,12 +50,13 @@ default_entry: 2
 
 /+Omarchy
 comment: Omarchy
-{rescue_entry}  //linux-n1x
-  comment: Kernel version: 7.0.14-2-n1x
-  comment: kernel-id=linux-n1x
+  //linux-omarchy-n1x
+  comment: Kernel version: 7.2.5-9-omarchy-n1x
+  comment: kernel-id=linux-omarchy-n1x
   protocol: efi
-  path: boot():/EFI/Linux/omarchy_linux-n1x.efi#1ebecba8
+  path: boot():/EFI/Linux/omarchy_linux-omarchy-n1x.efi#1ebecba8
   cmdline: {normal_cmdline}
+{rescue_entry}
 /EFI fallback
 comment: Default EFI loader
 protocol: efi
@@ -66,22 +69,29 @@ class PlatformKernelTest(unittest.TestCase):
         configurator = (ROOT / "configs/airootfs/root/configurator").read_text()
         probe = re.search(r"^detect_kernel\(\) \{\n.*?^\}", configurator, re.M | re.S)
         self.assertIsNotNone(probe)
-        for arch, arm_platform, expected in [("aarch64", "n1x", "linux-n1x"), ("x86_64", "", "linux-omarchy")]:
+        for arch, kernel, expected in [("aarch64", KERNEL, KERNEL), ("x86_64", "", "linux-omarchy")]:
             with self.subTest(arch=arch):
                 result = subprocess.run(
-                    ["bash", "-c", f"lspci() {{ :; }}\niso_arch={arch}\niso_platform={arm_platform}\n"
+                    ["bash", "-c", f"lspci() {{ :; }}\niso_arch={arch}\niso_kernel={kernel}\n"
                      + probe.group() + "\ndetect_kernel"],
                     check=True, capture_output=True, text=True,
                 )
                 self.assertEqual(result.stdout.strip(), expected)
 
-    def test_arm_platform_selects_its_kernel(self):
+    def test_platform_kernel_is_installed(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(context._default_kernel(Path(tmp), arm_platform="n1x"), "linux-n1x")
+            self.assertEqual(context._default_kernel(Path(tmp), platform_kernel=KERNEL), KERNEL)
 
-    def test_empty_platform_keeps_x86_default(self):
+    def test_no_platform_kernel_keeps_x86_default(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(context._default_kernel(Path(tmp), arm_platform=""), "linux-omarchy")
+            self.assertEqual(context._default_kernel(Path(tmp), platform_kernel=""), "linux-omarchy")
+
+    def test_kernel_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "omarchy_kernel"
+            self.assertEqual(context.iso_kernel(path), "")
+            path.write_text(f"{KERNEL}\n")
+            self.assertEqual(context.iso_kernel(path), KERNEL)
 
     def test_platform_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -135,7 +145,9 @@ class NodeTarballTest(unittest.TestCase):
 
 
 class N1xLimineContractTest(unittest.TestCase):
-    validate = staticmethod(phases_impl._validate_platform_boot_entries)
+    @staticmethod
+    def validate(conf, arm_platform):
+        phases_impl._validate_platform_boot_entries(conf, arm_platform, KERNEL)
 
     def test_generated_config_passes(self):
         self.validate(limine_conf(), "n1x")
@@ -144,7 +156,7 @@ class N1xLimineContractTest(unittest.TestCase):
         self.validate(limine_conf(normal_cmdline=ROOT_CMDLINE), "")
 
     def test_entry_without_panel_console_fails(self):
-        with self.assertRaisesRegex(RuntimeError, "linux-n1x lacks console=tty0"):
+        with self.assertRaisesRegex(RuntimeError, "linux-omarchy-n1x lacks console=tty0"):
             self.validate(limine_conf(normal_cmdline=f"quiet splash acpi=nospcr {ROOT_CMDLINE}"), "n1x")
 
     def test_entry_without_nospcr_fails(self):
@@ -156,7 +168,7 @@ class N1xLimineContractTest(unittest.TestCase):
             self.validate(limine_conf(normal_cmdline=f"console=tty0,115200 acpi=nospcr {ROOT_CMDLINE}"), "n1x")
 
     def test_missing_rescue_entry_fails(self):
-        with self.assertRaisesRegex(RuntimeError, "no linux-n1x-rescue entry"):
+        with self.assertRaisesRegex(RuntimeError, "no linux-omarchy-n1x-fallback rescue entry"):
             self.validate(limine_conf(rescue=False), "n1x")
 
     # The 2026-09-03 failure: the rescue entry carried the normal cmdline, so
@@ -165,9 +177,33 @@ class N1xLimineContractTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "does not boot to a text login"):
             self.validate(limine_conf(rescue_cmdline=NORMAL_CMDLINE), "n1x")
 
+    def test_rescue_with_plymouth_fails(self):
+        with self.assertRaisesRegex(RuntimeError, "does not boot to a text login"):
+            self.validate(limine_conf(rescue_cmdline=RESCUE_CMDLINE.replace(" plymouth.enable=0", "")), "n1x")
+
     def test_no_kernel_entries_fails(self):
         with self.assertRaisesRegex(RuntimeError, "no kernel entries"):
             self.validate("timeout: 3\n/EFI fallback\nprotocol: efi\npath: boot():/EFI/BOOT/BOOTAA64.EFI\n", "n1x")
+
+
+class N1xHardwareGateTest(unittest.TestCase):
+    # An N1x image installed somewhere that is not an N1x (a VM, say) gets the
+    # generic aarch64 setup, so the N1x boot contract must not be enforced.
+    def installed_platform(self, returncode):
+        ctx = types.SimpleNamespace(target=Path("/mnt"))
+        with mock.patch.object(phases_impl, "iso_arm_platform", return_value="n1x"), \
+                mock.patch.object(phases_impl.subprocess, "run", return_value=mock.Mock(returncode=returncode)) as run, \
+                mock.patch.object(phases_impl, "info"):
+            platform = phases_impl._installed_arm_platform(ctx)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["arch-chroot", "/mnt", "omarchy-hw-n1x"])
+        return platform
+
+    def test_n1x_hardware_is_checked(self):
+        self.assertEqual(self.installed_platform(0), "n1x")
+
+    def test_other_hardware_is_not(self):
+        self.assertEqual(self.installed_platform(1), "")
 
 
 if __name__ == "__main__":

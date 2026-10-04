@@ -23,8 +23,8 @@ case "$OMARCHY_ARCH" in
     ;;
   aarch64)
     online_pacman_conf=/configs/pacman-online-aarch64.conf
-    if [[ $OMARCHY_ARM_PLATFORM != n1x || $OMARCHY_KERNEL != "linux-$OMARCHY_ARM_PLATFORM" ]]; then
-      echo "ERROR: aarch64 builds need OMARCHY_ARM_PLATFORM=n1x and OMARCHY_KERNEL=linux-n1x (got '$OMARCHY_ARM_PLATFORM'/'$OMARCHY_KERNEL')" >&2
+    if [[ $OMARCHY_ARM_PLATFORM != n1x || -z $OMARCHY_KERNEL || ! -f /builder/$OMARCHY_KERNEL.preset ]]; then
+      echo "ERROR: aarch64 builds need OMARCHY_ARM_PLATFORM=n1x and a platform kernel with a live preset (got '$OMARCHY_ARM_PLATFORM'/'$OMARCHY_KERNEL')" >&2
       exit 1
     fi
     if [[ ! -d /packages || ! -f /packages/SHA256SUMS ]]; then
@@ -147,6 +147,13 @@ echo "$OMARCHY_MIRROR" > "$build_cache_dir/airootfs/root/omarchy_mirror"
 echo "$OMARCHY_ISO_REF" > "$build_cache_dir/airootfs/root/omarchy_iso_ref"
 echo "$OMARCHY_ARCH" > "$build_cache_dir/airootfs/root/omarchy_arch"
 echo "$OMARCHY_ARM_PLATFORM" > "$build_cache_dir/airootfs/root/omarchy_arm_platform"
+# The kernel the installer puts on the target: the platform kernel on aarch64,
+# empty on x86_64, where the installer picks per machine.
+if [[ $OMARCHY_ARCH == aarch64 ]]; then
+  echo "$OMARCHY_KERNEL" > "$build_cache_dir/airootfs/root/omarchy_kernel"
+else
+  : > "$build_cache_dir/airootfs/root/omarchy_kernel"
+fi
 
 # Architecture overlay on the shared profile: live kernel, initramfs hooks,
 # GRUB entries. x86_64 keeps its exact previous behaviour.
@@ -161,11 +168,12 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   rm -f "$build_cache_dir/packages.x86_64"
   rm -f "$build_cache_dir/airootfs/etc/mkinitcpio.d/linux.preset" "$build_cache_dir/airootfs/etc/mkinitcpio.d/linux-t2.preset"
   cp "/builder/${OMARCHY_KERNEL}.preset" "$build_cache_dir/airootfs/etc/mkinitcpio.d/${OMARCHY_KERNEL}.preset"
-  # Drops the x86-only microcode/memdisk hooks and Plymouth (which crashes on
-  # AArch64), and adds the Tegra/MediaTek I2C-HID keyboard modules.
+  # Drops the x86-only microcode/memdisk hooks and adds the Tegra/MediaTek
+  # I2C-HID keyboard modules. The N1x firmware's SPCR serial console would
+  # take the console from the panel, hence console=tty0 acpi=nospcr.
   configure_archiso_aarch64_mkinitcpio "$build_cache_dir/airootfs/etc/mkinitcpio.conf.d/archiso.conf"
-  boot_splash_kernel_options=""
-  kernel_options="plymouth.enable=0 console=tty0 acpi=nospcr initramfs_async=0"
+  boot_splash_kernel_options="quiet splash "
+  kernel_options="console=tty0 acpi=nospcr initramfs_async=0"
   rm -rf "$build_cache_dir/syslinux" "$build_cache_dir/efiboot"
 else
   boot_splash_kernel_options="quiet splash "
@@ -192,7 +200,7 @@ if [[ -n ${OMARCHY_N1X_DEV_SSH:-} ]]; then
     exit 1
   fi
   install -Dm0755 /builder/n1x-dev-ssh/omarchy-n1x-dev-ssh "$build_cache_dir/airootfs/usr/local/sbin/omarchy-n1x-dev-ssh"
-  install -Dm0644 /builder/n1x-dev-ssh/authorized_keys "$build_cache_dir/airootfs/usr/local/share/omarchy-n1x-dev-ssh/authorized_keys"
+  install -Dm0644 /dev-ssh/authorized_keys "$build_cache_dir/airootfs/usr/local/share/omarchy-n1x-dev-ssh/authorized_keys"
   install -Dm0644 /builder/n1x-dev-ssh/omarchy-n1x-dev-ssh.service "$build_cache_dir/airootfs/etc/systemd/system/omarchy-n1x-dev-ssh.service"
   mkdir -p "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants"
   ln -sf /etc/systemd/system/omarchy-n1x-dev-ssh.service "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/omarchy-n1x-dev-ssh.service"
@@ -234,20 +242,15 @@ if [[ -d /omarchy-source && -d /omarchy-pkgs ]]; then
   bash /builder/build-omarchy-packages.sh "$offline_mirror_dir"
   LOCAL_OMARCHY_BUILD=1
 
-  # The N1x boots like the x86_64 machines. Omarchy packages built as the
-  # Apple Silicon variant would install without the Limine template the
-  # orchestrator reads, the initramfs hooks, the Limine drop-ins, or the
-  # Limine/Snapper stack the runtime depends on.
+  # The N1x boots like the x86_64 machines: the installer reads the Limine
+  # template, and the target needs the initramfs hooks and Limine drop-ins.
+  # The installer adds the Limine/Snapper stack itself on aarch64, where the
+  # runtime does not depend on it because Apple Silicon boots differently.
   if [[ $OMARCHY_ARM_PLATFORM == n1x ]]; then
-    runtime_archive=$(find "$offline_mirror_dir" -maxdepth 1 -name "$OMARCHY_RUNTIME_PACKAGE-[0-9]*.pkg.tar.*" ! -name '*.sig' | head -1)
-    if ! bsdtar -xOf "$runtime_archive" .PKGINFO 2>/dev/null | grep -qx 'depend = limine-mkinitcpio-hook'; then
-      echo "ERROR: ${runtime_archive:-$OMARCHY_RUNTIME_PACKAGE} does not depend on the Limine stack; was it built without OMARCHY_PLATFORM=n1x?" >&2
-      exit 1
-    fi
     settings_archive=$(find "$offline_mirror_dir" -maxdepth 1 -name "$OMARCHY_SETTINGS_PACKAGE-[0-9]*.pkg.tar.*" ! -name '*.sig' | head -1)
     for required in usr/share/omarchy/default/limine/default.conf etc/mkinitcpio.conf.d/omarchy_hooks.conf etc/limine-entry-tool.d/omarchy-defaults.conf; do
       if ! bsdtar -tf "$settings_archive" "$required" >/dev/null 2>&1; then
-        echo "ERROR: ${settings_archive:-$OMARCHY_SETTINGS_PACKAGE} lacks $required; was it built without OMARCHY_PLATFORM=n1x?" >&2
+        echo "ERROR: ${settings_archive:-$OMARCHY_SETTINGS_PACKAGE} lacks $required, which the N1x install needs" >&2
         exit 1
       fi
     done
@@ -402,10 +405,16 @@ mapfile -t all_packages < <(
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   source /builder/aarch64-package-filter.sh
   mapfile -t all_packages < <(filter_aarch64_packages "$OMARCHY_KERNEL" "${all_packages[@]}")
-  # The platform kernel pair, and the NVIDIA stack the runtime's platform
-  # script installs; the bundle pins its version to the one proven on the
-  # hardware.
-  all_packages+=("$OMARCHY_KERNEL" "$OMARCHY_KERNEL-headers" archlinuxarm-keyring nvidia-open-dkms nvidia-utils libva-nvidia-driver limine-mkinitcpio-hook limine-snapper-sync)
+  # The platform kernel pair and everything else in the bundle (the ASUS
+  # ProArt P14's amplifier firmware, say), the NVIDIA stack and pciutils the
+  # runtime's platform script installs, and the Limine/Snapper stack the
+  # installer adds on aarch64.
+  mapfile -t platform_packages < <(
+    for archive in /packages/*.pkg.tar.*; do
+      [[ $archive == *.sig ]] || pacman -Qqp "$archive"
+    done
+  )
+  all_packages+=("$OMARCHY_KERNEL" "$OMARCHY_KERNEL-headers" "${platform_packages[@]}" archlinuxarm-keyring nvidia-open-dkms nvidia-utils libva-nvidia-driver limine limine-mkinitcpio-hook limine-snapper-sync snapper pciutils)
   mapfile -t all_packages < <(printf '%s\n' "${all_packages[@]}" | sort -u)
 fi
 

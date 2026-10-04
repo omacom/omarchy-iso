@@ -18,7 +18,7 @@ Both install the same Omarchy. Only the dev image opens remote access, so do not
 - **Console:** every boot entry carries `console=tty0 acpi=nospcr`. Without it the firmware's serial console takes over and the screen stays black, the disk passphrase prompt included.
 - **Boot splash:** Plymouth, as on every Omarchy machine, with the panel lit for the passphrase prompt.
 - **Sleep:** suspend to idle. The firmware's deep sleep returns at once.
-- **USB4 (ProArt P14):** docks, displays and PCIe devices such as 10 GbE adapters work through the USB4 ports. Approve a dock or adapter once with `boltctl enroll --policy auto`; after that it connects on every plug.
+- **USB4 (ProArt P14):** docks, displays and PCIe devices such as 10 GbE adapters work through the USB4 ports. A dock or adapter plugged in while you are logged in and unlocked is approved once, with a notification, and connects on every plug after that. One plugged in at the lock screen, or already connected at boot the first time, stays without its PCIe devices (a dock's Ethernet, for one) until it is plugged in again after unlocking.
 - **ProArt P14:** the RAM the firmware reserves for Windows' GPU is given to Linux (about 122 GiB of 128), and the speakers get ASUS's amplifier tuning.
 - **Packages:** everything else comes from Omarchy's aarch64 repository (`pkgs.omarchy.org/edge/aarch64`) and Arch Linux ARM. OBS Studio is not installed; it has no aarch64 build.
 

@@ -791,6 +791,13 @@ run_partition_execute() {
     luks_uuid_json="\"$luks_uuid\""
   fi
 
+  # enable_fallback writes the loader to EFI/BOOT/BOOTX64.EFI as well as
+  # EFI/limine. That path is only ever claimed on the Omarchy ESP, which
+  # run_partition_execute just created, wipefs'd and mkfs.fat'd in free
+  # space; the Windows ESP is never mounted here. Firmware that drops or
+  # ignores the "Limine" NVRAM entry (some AMI/MSI boards) still finds the
+  # install through the removable-media path, which is the only route left
+  # when a boot variable does not survive.
   cat <<-_EOF_ >user_configuration.json
 {
     "app_config": null,
@@ -806,7 +813,7 @@ run_partition_execute() {
             "esp_mount": "$esp_mount_in_target",
             "esp_path": "/EFI/limine",
             "efi_binary": "limine_x64.efi",
-            "enable_fallback": false
+            "enable_fallback": true
         },
         "storage": {
             "esp_device": "$efi_dev",

@@ -550,6 +550,9 @@ def _write_limine_defaults_from_config(ctx: InstallContext, installer, config) -
     _write_limine_defaults(ctx, cmdline, esp_mount=_installer_esp_mount(installer))
 
 
+AARCH64_CONSOLE_CONF = "00-omarchy-console.conf"
+
+
 def _write_limine_defaults(
     ctx: InstallContext,
     cmdline: str,
@@ -577,6 +580,18 @@ def _write_limine_defaults(
     kernel_cmdline = ctx.target / "etc" / "kernel" / "cmdline"
     kernel_cmdline.parent.mkdir(parents=True, exist_ok=True)
     kernel_cmdline.write_text(cmdline + "\n")
+
+    if platform.machine() == "aarch64":
+        # arm64 firmware commonly publishes an ACPI serial console (SPCR), which
+        # the kernel adopts unless told otherwise; the disk passphrase prompt
+        # then goes to a serial port nobody is watching. The live ISO boots with
+        # the console on the screen; carry that to the installed system.
+        console_conf = ctx.target / "etc" / "limine-entry-tool.d" / AARCH64_CONSOLE_CONF
+        console_conf.parent.mkdir(parents=True, exist_ok=True)
+        console_conf.write_text(
+            "# aarch64: keep the console on the screen rather than the firmware's serial port.\n"
+            'KERNEL_CMDLINE[default]+=" console=tty0 acpi=nospcr"\n'
+        )
 
     limine_conf = ctx.target / esp_mount.lstrip("/") / "limine.conf"
     limine_conf.parent.mkdir(parents=True, exist_ok=True)

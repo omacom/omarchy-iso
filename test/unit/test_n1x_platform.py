@@ -186,6 +186,31 @@ class N1xLimineContractTest(unittest.TestCase):
             self.validate("timeout: 3\n/EFI fallback\nprotocol: efi\npath: boot():/EFI/BOOT/BOOTAA64.EFI\n", "n1x")
 
 
+class Aarch64ConsoleTest(unittest.TestCase):
+    # arm64 firmware (the N1x, QEMU's virt machine) publishes an ACPI serial
+    # console that would take the disk passphrase prompt off the screen.
+    def write_defaults(self, machine):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        target = Path(tmp.name)
+        templates = target / "usr/share/omarchy/default/limine"
+        templates.mkdir(parents=True)
+        (templates / "default.conf").write_text('KERNEL_CMDLINE[default]="@@CMDLINE@@"\nESP_PATH="/boot"\n')
+        (templates / "limine.conf").write_text("timeout: 3\n")
+        ctx = types.SimpleNamespace(target=target, omarchy_path=target / "omarchy")
+        with mock.patch.object(phases_impl.platform, "machine", return_value=machine), \
+                mock.patch.object(phases_impl.arch, "has_uefi", return_value=True, create=True):
+            phases_impl._write_limine_defaults(ctx, ROOT_CMDLINE, esp_mount="/boot")
+        return target / "etc/limine-entry-tool.d" / phases_impl.AARCH64_CONSOLE_CONF
+
+    def test_aarch64_keeps_the_console_on_the_screen(self):
+        console_conf = self.write_defaults("aarch64")
+        self.assertIn('KERNEL_CMDLINE[default]+=" console=tty0 acpi=nospcr"', console_conf.read_text())
+
+    def test_x86_64_is_left_alone(self):
+        self.assertFalse(self.write_defaults("x86_64").exists())
+
+
 class N1xHardwareGateTest(unittest.TestCase):
     # An N1x image installed somewhere that is not an N1x (a VM, say) gets the
     # generic aarch64 setup, so the N1x boot contract must not be enforced.

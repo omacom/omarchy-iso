@@ -117,20 +117,34 @@ class Aarch64CustomizeTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        for directory in ("boot", "etc/mkinitcpio.d", "root", "tools"):
+        for directory in ("boot/dtbs/qcom", "etc/mkinitcpio.d", "root", "tools", "usr/lib/modules/test"):
             (self.root / directory).mkdir(parents=True, exist_ok=True)
         (self.root / "boot/Image").write_bytes(b"kernel")
+        (self.root / "etc/pacman.conf").write_text("[options]\nDisableSandbox\n")
+        (self.root / "boot/dtbs/qcom/x1e78100-lenovo-thinkpad-t14s.dtb").write_bytes(b"base")
+        (self.root / "root/t14-bluetooth.dtb").write_bytes(b"board")
         (self.root / "etc/mkinitcpio.d/linux-t2.preset").touch()
         script = (ROOT / "configs/aarch64/customize_airootfs.sh").read_text()
         # Redirect the production script's absolute live-root paths into a
         # disposable fixture. No chroot, root access or host /boot writes.
-        for directory in ("boot", "etc", "root"):
+        for directory in ("boot", "etc", "root", "usr/lib/modules"):
             script = script.replace(f"/{directory}/", f"{self.root}/{directory}/")
         self.script = self.root / "customize.sh"
         self.script.write_text(script)
         self.env = dict(os.environ, PATH=f"{self.root}/tools:{os.environ['PATH']}",
                         TEST_ROOT=str(self.root), TEST_HOOKS="hooks/archiso\nhooks/archiso_loop_mnt")
+        required = ["hooks/dragon_hp_thinkpad", "drivers/panel-edp.ko"]
+        required += ["drivers/" + module + ".ko" for module in
+                     ("nvme", "phy-qcom-qmp-pcie", "pwrseq-qcom-wcn", "pci-pwrctrl-pwrseq")]
+        required += ["usr/lib/firmware/" + name for name in
+                     ("qcom/gen70500_sqe.fw", "qcom/gen70500_gmu.bin", "qcom/x1e80100/gen70500_zap.mbn")]
+        required += ["usr/lib/firmware/updates/qcom/x1e80100/" + board + "/" + name
+                     for board in ("hp/elitebook-ultra-g1q", "LENOVO/21N1")
+                     for name in ("qcadsp8380.mbn", "qccdsp8380.mbn", "cdsp_dtbs.elf")]
+        self.env["TEST_HOOKS"] += "\n" + "\n".join(required)
         commands = {
+            "tools/sha256sum": "cat >/dev/null",  # DT byte hashes are checked in real package preparation.
+            "tools/modinfo": "echo module.ko",
             "tools/uname": "echo aarch64",
             "tools/stat": "echo 4",
             "tools/mkinitcpio": 'printf initrd > "$TEST_ROOT/boot/initramfs-linux-aarch64.img"',
@@ -150,8 +164,18 @@ class Aarch64CustomizeTest(unittest.TestCase):
         result = self.run_customize("aarch64/snapdragon")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.root / "uki-built").exists())
+        self.assertNotIn("DisableSandbox", (self.root / "etc/pacman.conf").read_text())
+        self.assertEqual((self.root / "boot/dtbs/qcom/x1e78100-lenovo-thinkpad-t14s.dtb").read_bytes(), b"board")
         self.assertEqual((self.root / "boot/vmlinuz-linux-aarch64").read_bytes(), b"kernel")
         self.assertFalse((self.root / "etc/mkinitcpio.d/linux-t2.preset").exists())
+
+    def test_missing_board_firmware_prevents_uki_build(self):
+        self.env["TEST_HOOKS"] = self.env["TEST_HOOKS"].replace(
+            "usr/lib/firmware/updates/qcom/x1e80100/LENOVO/21N1/cdsp_dtbs.elf", "")
+        result = self.run_customize("aarch64/snapdragon")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing experimental firmware", result.stderr)
+        self.assertFalse((self.root / "uki-built").exists())
 
     def test_generic_does_not_require_qualcomm_uki(self):
         (self.root / "root/live-uki.sh").unlink()

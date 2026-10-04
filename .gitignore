@@ -7,3 +7,6 @@ __pycache__/
 
 # Acceptance test harness artifacts
 test-runs/**
+
+# Local experimental build inputs and logs
+build/

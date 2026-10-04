@@ -1,0 +1,18 @@
+pkgname=omarchy-hw-t14s-bluetooth-experimental
+pkgver=0.1
+pkgrel=1
+pkgdesc='T14s Gen 6 WCN7850 device-tree experiment for Dragon kernel 7.2.6'
+arch=('aarch64')
+license=('BSD-3-Clause')
+depends=('linux-aarch64')
+install=t14-bluetooth.install
+options=('!strip' '!debug')
+
+package() {
+  install -Dm644 "$startdir/x1e78100-lenovo-thinkpad-t14s.dtb" \
+    "$pkgdir/usr/share/omarchy-hw-t14s-bluetooth-experimental/x1e78100-lenovo-thinkpad-t14s.dtb"
+  install -Dm755 "$startdir/install-dtb" \
+    "$pkgdir/usr/lib/omarchy-hw-t14s-bluetooth-experimental/install-dtb"
+  install -Dm644 "$startdir/85-t14s-bluetooth-dtb.hook" \
+    "$pkgdir/usr/share/libalpm/hooks/85-t14s-bluetooth-dtb.hook"
+}

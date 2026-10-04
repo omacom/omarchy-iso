@@ -1,0 +1,22 @@
+{
+  "hp": {
+    "url": "https://ftp.hp.com/pub/softpaq/sp162501-163000/sp162865.exe",
+    "sha256": "215ec14bef7090660a5e868f22e84fbeea2ee1139706a0615bfda62948417e08",
+    "filename": "sp162865.exe"
+  },
+  "lenovo": {
+    "url": "https://download.lenovo.com/pccbbs/mobiles/n42qq23w.exe",
+    "sha256": "9ec6ae30abd40f56aa6b3b0b480686acbbb72ff12ba186b3f45f61fc924ef4f3",
+    "filename": "n42qq23w.exe"
+  },
+  "ubuntu": {
+    "url": "https://cdimage.ubuntu.com/releases/26.04/release/ubuntu-26.04.1-desktop-arm64.iso",
+    "sha256": "c54d196489d3c867975fb3bbb72ca52ec2e137456e305481f81096304e4d2517",
+    "filename": "ubuntu-26.04.1-desktop-arm64.iso"
+  },
+  "audio": {
+    "url": "https://codeload.github.com/linux-msm/audioreach-topology/tar.gz/e7b20b2b16cdda18eb8ae143c8d95c4815c0288e",
+    "sha256": "bce3f22893decde37a810ed17ac690abc9c9fd39e7417021abc37e925cb1c82e",
+    "filename": "audioreach-e7b20b2.tar.gz"
+  }
+}

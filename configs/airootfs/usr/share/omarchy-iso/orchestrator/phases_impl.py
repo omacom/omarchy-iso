@@ -17,7 +17,8 @@ Phase ordering (full-disk and protected/pre-mounted):
     configure_login        → sddm state + encrypted-install autologin
     configure_ssh_access   → authorized_keys for autoinstall; no-op otherwise
     configure_tailscale    → tailnet join staged for first boot; no-op otherwise
-    validate_boot          → assert UKI / limine.conf / kernel cmdline are sane
+    validate_boot          → assert UKI / limine.conf / kernel cmdline are sane,
+                             and that the target keyring trusts its packages
 """
 
 from __future__ import annotations
@@ -142,8 +143,22 @@ EARLY_LUAROCKS_PACKAGES = [
 ]
 
 
+# Arch Linux ARM signs every package in its repositories, archlinux-keyring
+# included, with its own build key, and only archlinuxarm-keyring carries it.
+# pacstrap has initialized the target keyring by now, so the package's install
+# script populates and locally signs the Arch Linux ARM keys the way
+# archlinux-keyring's did. Without it the offline install (SigLevel = Never)
+# looks fine, and the first online pacman run fails with "unknown trust".
+AARCH64_BOOTSTRAP_PACKAGES = [
+    "archlinuxarm-keyring",
+]
+
+
 def _early_bootstrap_packages() -> list[str]:
-    return [*EARLY_BOOTSTRAP_BASE_PACKAGES, _omarchy_settings_package()]
+    packages = [*EARLY_BOOTSTRAP_BASE_PACKAGES]
+    if platform.machine() == "aarch64":
+        packages += AARCH64_BOOTSTRAP_PACKAGES
+    return [*packages, _omarchy_settings_package()]
 
 
 def _early_user_seed_packages() -> list[str]:
@@ -1752,6 +1767,48 @@ def validate_boot(ctx: InstallContext) -> None:
 
     if ctx.defer_provisioning:
         _validate_provisioning_state(ctx)
+
+    _validate_package_signing(ctx)
+
+
+OFFLINE_MIRROR = Path("/var/cache/omarchy/mirror/offline")
+
+
+def _validate_package_signing(ctx: InstallContext, mirror: Path = OFFLINE_MIRROR) -> None:
+    """The installed keyring must trust the packages its repositories ship.
+
+    The install itself never checks a signature (SigLevel = Never), so a target
+    keyring missing a distribution key only shows up at the first online pacman
+    run. On aarch64 every Arch Linux ARM package carries its build key's
+    signature, and the offline mirror keeps them. Verify one against the target
+    keyring and require the full or ultimate validity pacman requires."""
+    if platform.machine() != "aarch64":
+        return
+
+    signatures = sorted(mirror.glob("archlinuxarm-keyring-*.pkg.tar.*.sig"))
+    if not signatures:
+        raise RuntimeError(f"no archlinuxarm-keyring signature in {mirror} to check the target keyring against")
+    signature = signatures[-1]
+    package = signature.with_suffix("")
+
+    gnupg = ctx.target / "etc/pacman.d/gnupg"
+    try:
+        result = subprocess.run(
+            ["gpg", "--homedir", str(gnupg), "--batch", "--no-permission-warning",
+             "--status-fd", "1", "--verify", str(signature), str(package)],
+            capture_output=True, text=True,
+        )
+    finally:
+        # Nothing should be left holding the target mount when it is unmounted.
+        subprocess.run(["gpgconf", "--homedir", str(gnupg), "--kill", "all"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    statuses = [line.split()[1] for line in result.stdout.splitlines() if line.startswith("[GNUPG:] ")]
+    if result.returncode != 0 or "VALIDSIG" not in statuses or not {"TRUST_FULLY", "TRUST_ULTIMATE"} & set(statuses):
+        raise RuntimeError(
+            f"the installed pacman keyring does not trust the Arch Linux ARM signature on {package.name}; "
+            "every online package install would fail with 'unknown trust'"
+        )
 
 
 # The N1x firmware publishes an ACPI SPCR serial console the kernel adopts

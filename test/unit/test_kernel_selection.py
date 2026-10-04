@@ -182,6 +182,7 @@ class KernelSelectionTest(unittest.TestCase):
                     is_protected=False, defer_provisioning=False,
                 )
                 with mock.patch.object(phases_impl, "_assert_boot_hooks_restored"), \
+                     mock.patch.object(phases_impl, "_validate_package_signing"), \
                      mock.patch.object(phases_impl.arch, "has_uefi", return_value=True, create=True), \
                      mock.patch.object(phases_impl, "_read_efibootmgr", return_value={
                          "entries": {"0001": "Limine\tHD(1,GPT,test)"},

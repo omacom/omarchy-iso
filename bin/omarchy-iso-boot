@@ -8,7 +8,14 @@ SSH_HOST="${OMARCHY_VM_SSH_HOST:-127.0.0.1}"
 SSH_PORT="${OMARCHY_VM_SSH_PORT:-2222}"
 NETWORK="${OMARCHY_VM_NETWORK:-1}"
 DISK="${OMARCHY_VM_DISK:-/tmp/omarchy-iso-boot.qcow2}"
-OVMF_VARS="${OMARCHY_VM_OVMF_VARS:-/tmp/OVMF_VARS.4m.fd}"
+HOST_ARCH=$(uname -m)
+# The VM runs the host's architecture under KVM: an aarch64 host boots
+# aarch64 ISOs in a virt machine, an x86_64 host boots x86_64 ISOs in q35.
+if [[ $HOST_ARCH == aarch64 ]]; then
+  OVMF_VARS="${OMARCHY_VM_OVMF_VARS:-/tmp/QEMU_VARS.aarch64.fd}"
+else
+  OVMF_VARS="${OMARCHY_VM_OVMF_VARS:-/tmp/OVMF_VARS.4m.fd}"
+fi
 EXTRA_QEMU_ARGS=()
 
 usage() {
@@ -21,7 +28,7 @@ Options:
   --ssh-host HOST      Host address for SSH forwarding (default: $SSH_HOST)
   --no-network         Boot without a virtual NIC
   --disk PATH          VM disk path (default: $DISK)
-  --ovmf-vars PATH     OVMF vars path (default: $OVMF_VARS)
+  --ovmf-vars PATH     UEFI vars path (default: $OVMF_VARS)
   -h, --help           Show this help
   --                   Pass the remaining arguments directly to QEMU
 
@@ -112,7 +119,23 @@ if [[ -z $DISK || -z $OVMF_VARS ]]; then
   exit 1
 fi
 
-omarchy-pkg-add qemu-full edk2-ovmf
+if [[ $HOST_ARCH == aarch64 ]]; then
+  # Arch Linux ARM carries QEMU but no aarch64 UEFI firmware; Arch's own
+  # edk2-aarch64 is architecture-independent and provides it.
+  omarchy-pkg-add qemu-desktop
+  UEFI_CODE=/usr/share/edk2/aarch64/QEMU_EFI.fd
+  UEFI_VARS_TEMPLATE=/usr/share/edk2/aarch64/QEMU_VARS.fd
+  if [[ ! -f $UEFI_CODE || ! -f $UEFI_VARS_TEMPLATE ]]; then
+    echo "Missing aarch64 UEFI firmware ($UEFI_CODE)." >&2
+    echo "Install Arch's edk2-aarch64 (arch=any) from https://archlinux.org/packages/extra/any/edk2-aarch64/" >&2
+    echo "after checking its signature with pacman-key --verify, then: sudo pacman -U edk2-aarch64-*.pkg.tar.zst" >&2
+    exit 1
+  fi
+else
+  omarchy-pkg-add qemu-full edk2-ovmf
+  UEFI_CODE=/usr/share/edk2/x64/OVMF_CODE.4m.fd
+  UEFI_VARS_TEMPLATE=/usr/share/edk2/x64/OVMF_VARS.4m.fd
+fi
 
 if [[ -z ${WAYLAND_DISPLAY:-} && -z ${DISPLAY:-} ]]; then
   while IFS='=' read -r name value; do
@@ -132,7 +155,7 @@ fi
 
 if [[ ! -f $DISK || $REUSE != "reuse" ]]; then
   qemu-img create -f qcow2 "$DISK" 40G
-  cp /usr/share/edk2/x64/OVMF_VARS.4m.fd "$OVMF_VARS"
+  cp "$UEFI_VARS_TEMPLATE" "$OVMF_VARS"
 fi
 
 NET_ARGS=()
@@ -149,21 +172,67 @@ else
   echo "Networking disabled."
 fi
 
+# One core type only: KVM vCPUs that move between big and little cores see
+# different CPU IDs and counters. Use the fastest cores the host has.
+fastest_cores() {
+  local cpu fastest=0 freq
+  local -a cores=()
+  for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
+    freq=$(<"$cpu/cpufreq/cpuinfo_max_freq")
+    if (( freq > fastest )); then
+      fastest=$freq
+      cores=("${cpu##*cpu}")
+    elif (( freq == fastest )); then
+      cores+=("${cpu##*cpu}")
+    fi
+  done
+  local IFS=,
+  echo "${cores[*]}"
+}
+
 # Boot from ISO before we've installed, then boot from drive after
-qemu-system-x86_64 \
-  -cpu host -enable-kvm -machine q35,accel=kvm \
-  -smp "$(($(nproc) < 8 ? $(nproc) : 8))" \
-  -m 8192 \
-  -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.4m.fd \
-  -drive if=pflash,format=raw,file="$OVMF_VARS" \
-  -drive file="$DISK",format=qcow2,if=none,id=drive0 \
-  -device virtio-blk-pci,drive=drive0,bootindex=1 \
-  -drive file="$ISO",media=cdrom,if=none,format=raw,id=cdrom0 \
-  -device ide-cd,drive=cdrom0,bootindex=2 \
-  -device virtio-vga-gl \
-  -display sdl,gl=on \
-  -usb -device usb-tablet \
-  -serial none \
-  "${NET_ARGS[@]}" \
-  -boot menu=on \
-  "${EXTRA_QEMU_ARGS[@]}"
+if [[ $HOST_ARCH == aarch64 ]]; then
+  cores=$(fastest_cores)
+  core_count=$(tr ',' '\n' <<<"$cores" | wc -l)
+  if [[ ${OMARCHY_VM_GL:-1} == "0" ]]; then
+    DISPLAY_ARGS=(-device virtio-gpu-pci -display gtk)
+  else
+    DISPLAY_ARGS=(-device virtio-gpu-gl-pci -display sdl,gl=on)
+  fi
+  taskset -c "$cores" qemu-system-aarch64 \
+    -machine virt,gic-version=host -accel kvm -cpu host,pmu=off \
+    -smp "$((core_count < 8 ? core_count : 8))" \
+    -m 8192 \
+    -drive if=pflash,format=raw,readonly=on,file="$UEFI_CODE" \
+    -drive if=pflash,format=raw,file="$OVMF_VARS" \
+    -drive file="$DISK",format=qcow2,if=none,id=drive0 \
+    -device virtio-blk-pci,drive=drive0,bootindex=1 \
+    -device virtio-scsi-pci,id=scsi0 \
+    -drive file="$ISO",media=cdrom,if=none,format=raw,readonly=on,id=cdrom0 \
+    -device scsi-cd,bus=scsi0.0,drive=cdrom0,bootindex=2 \
+    "${DISPLAY_ARGS[@]}" \
+    -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-tablet,bus=xhci.0 \
+    -device virtio-rng-pci \
+    -serial file:/tmp/omarchy-iso-boot-serial.log \
+    "${NET_ARGS[@]}" \
+    -boot menu=on \
+    "${EXTRA_QEMU_ARGS[@]}"
+else
+  qemu-system-x86_64 \
+    -cpu host -enable-kvm -machine q35,accel=kvm \
+    -smp "$(($(nproc) < 8 ? $(nproc) : 8))" \
+    -m 8192 \
+    -drive if=pflash,format=raw,readonly=on,file="$UEFI_CODE" \
+    -drive if=pflash,format=raw,file="$OVMF_VARS" \
+    -drive file="$DISK",format=qcow2,if=none,id=drive0 \
+    -device virtio-blk-pci,drive=drive0,bootindex=1 \
+    -drive file="$ISO",media=cdrom,if=none,format=raw,id=cdrom0 \
+    -device ide-cd,drive=cdrom0,bootindex=2 \
+    -device virtio-vga-gl \
+    -display sdl,gl=on \
+    -usb -device usb-tablet \
+    -serial none \
+    "${NET_ARGS[@]}" \
+    -boot menu=on \
+    "${EXTRA_QEMU_ARGS[@]}"
+fi

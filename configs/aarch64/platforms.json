@@ -28,7 +28,9 @@
         "dgx-dashboard",
         "nsight-compute",
         "nsight-systems",
-        "rdma-core"
+        "rdma-core",
+        "perftest",
+        "cuda"
       ],
       "kernel_cmdline": ["console=tty0", "plymouth.ignore-serial-consoles"]
     },

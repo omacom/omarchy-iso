@@ -13,6 +13,9 @@
 #   --port PORT    Host port forwarded to guest SSH (default 2322)
 #   --memory MB    VM memory (default 8192)
 #   --timeout SECS Install timeout (default 2400)
+#   --iso-bps N    Read the install medium at N bytes/s instead of the host
+#                  disk's speed, to stand in for a USB stick (USB 2 is about
+#                  40000000)
 #   --no-preview   Do not open the collected screenshots in imv
 
 set -euo pipefail
@@ -35,6 +38,7 @@ while (($#)); do
     --port) OMARCHY_INTEGRATION_SSH_PORT="$2"; shift ;;
     --memory) OMARCHY_INTEGRATION_MEMORY="$2"; shift ;;
     --timeout) OMARCHY_INTEGRATION_INSTALL_TIMEOUT="$2"; shift ;;
+    --iso-bps) export OMARCHY_INTEGRATION_ISO_BPS="$2"; shift ;;
     -*) echo "Unknown option: $1" >&2; exit 1 ;;
     *)
       if [[ $1 == *.iso ]]; then

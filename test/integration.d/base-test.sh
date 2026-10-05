@@ -17,6 +17,10 @@ INSTALL_TIMEOUT="${OMARCHY_INTEGRATION_INSTALL_TIMEOUT:-2400}"
 # cache=none keeps the host page cache out of the guest's disk writes, so
 # install times measure the installer rather than the host (CI sets it).
 DISK_CACHE="${OMARCHY_INTEGRATION_DISK_CACHE:-}"
+# Read rate of the install medium in bytes/s. The host serves the ISO from
+# NVMe and page cache, which hides everything a real stick makes people wait
+# for; unset reads at that speed.
+ISO_BPS="${OMARCHY_INTEGRATION_ISO_BPS:-}"
 NO_PREVIEW="${OMARCHY_INTEGRATION_NO_PREVIEW:-false}"
 BOOT_TIMEOUT=600
 
@@ -528,7 +532,7 @@ install_phase() {
   ACTIVE_OVMF="$BASE_OVMF"
 
   start_vm "$BASE_DISK.building" "$RUN_DIR/install-serial.log" \
-    -drive "file=$ISO,media=cdrom,if=none,format=raw,id=cdrom0" \
+    -drive "file=$ISO,media=cdrom,if=none,format=raw,id=cdrom0${ISO_BPS:+,throttling.bps-read=$ISO_BPS}" \
     -device ide-cd,drive=cdrom0,bootindex=2 \
     -drive "file=$CIDATA_IMG,format=raw,if=none,id=cidata" \
     -device usb-storage,drive=cidata

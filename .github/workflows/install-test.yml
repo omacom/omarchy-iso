@@ -21,8 +21,16 @@ concurrency:
 
 jobs:
   install:
+    name: install (${{ matrix.medium }})
     runs-on: ubuntu-24.04
     timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        # "full" reads the ISO at the runner's disk speed. "usb2" reads it at
+        # 40 MB/s, where people with an ordinary stick actually wait; it adds
+        # a few minutes, so it runs on quattro and on request, not per PR.
+        medium: ${{ fromJSON(github.event_name == 'pull_request' && '["full"]' || '["full", "usb2"]') }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
 
@@ -47,6 +55,7 @@ jobs:
           sudo chmod 0666 /dev/kvm
           docker run --rm --device /dev/kvm -v "$PWD:/w" -w /w \
             -e OMARCHY_INTEGRATION_DISK_CACHE=none \
+            -e OMARCHY_INTEGRATION_ISO_BPS=${{ matrix.medium == 'usb2' && '40000000' || '' }} \
             archlinux:latest bash -euo pipefail -c '
               pacman -Syu --noconfirm --needed qemu-system-x86 qemu-hw-display-virtio-gpu qemu-hw-display-virtio-vga qemu-img edk2-ovmf socat \
                 imagemagick tesseract tesseract-data-eng mtools dosfstools jq openssh openssl python curl >/dev/null
@@ -71,7 +80,7 @@ jobs:
           base=$(ls -d test-runs/*-integration 2>/dev/null | head -1)
           [ -n "$base" ] || { echo "No test run to report" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
           {
-            echo "## Install test"
+            echo "## Install test, ${{ matrix.medium == 'usb2' && 'ISO read at 40 MB/s (USB 2)' || 'ISO read at full speed' }}"
             echo
             if [ -f "$base/omarchy-install-timing.json" ]; then
               jq -r '"**Install:** \((.finished_at - .started_at) * 10 | round / 10) s across \(.phases | length) phases"' "$base/omarchy-install-timing.json"
@@ -103,7 +112,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: install-test-${{ github.run_id }}-${{ github.run_attempt }}
+          # The comment workflow reads the full-speed run under this name.
+          name: install-test-${{ matrix.medium == 'full' && '' || format('{0}-', matrix.medium) }}${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             test-runs/pr-number
             test-runs/*/omarchy-install-timing.json

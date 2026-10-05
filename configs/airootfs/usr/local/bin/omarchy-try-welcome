@@ -1,0 +1,6 @@
+#!/bin/bash
+#
+# Started once by the try user's autostart.lua. One notification, then done.
+sleep 3
+exec notify-send -a "Try Omarchy" -t 20000 "You are trying Omarchy" \
+  "Running from the USB stick — nothing has been written to your disk. Every Omarchy app installs from the stick too. Press Super+Shift+I to install."

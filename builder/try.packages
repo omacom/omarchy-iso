@@ -1,0 +1,58 @@
+# What Try Omarchy installs from the bundled mirror into the live overlay.
+# Every name must already be in the mirror; the build fails otherwise
+# (resolve_try_packages in build-iso.sh). The list is what the default
+# desktop, its keybindings and its shell actually call, and nothing more:
+# the rest of what Omarchy ships is one offline `pacman -S` away inside the
+# session, and the live root already carries tmux, tzupdate and the base
+# tools. Roughly 460 packages / 2.6 GiB installed.
+
+# The desktop
+omarchy
+mesa
+vulkan-radeon
+vulkan-intel
+networkmanager
+noto-fonts
+noto-fonts-emoji
+foot
+xdg-terminal-exec
+chromium
+
+# Sound: pactl (volume keys) and Chromium reach PipeWire through its
+# PulseAudio server, which is a dependency of nothing above.
+pipewire-pulse
+pipewire-alsa
+
+# What the shell, portals and GTK expect around them
+xdg-desktop-portal-gtk
+gnome-themes-extra
+webp-pixbuf-loader
+power-profiles-daemon
+bluez
+bluez-utils
+xdg-user-dirs
+zram-generator
+
+# Default keybindings: clipboard, screenshots, colour picker, nightlight,
+# brightness keys, calculator, editor
+wl-clipboard
+grim
+slurp
+hyprpicker
+hyprsunset
+brightnessctl
+wtype
+omacalc
+omarchy-nvim
+
+# The terminal Omarchy's bash config is written for
+bash-completion
+bat
+btop
+eza
+fastfetch
+fd
+fzf
+ripgrep
+starship
+zoxide

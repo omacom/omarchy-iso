@@ -1,0 +1,6 @@
+#!/bin/bash
+#
+# Bound to Super+Shift+I in a Try Omarchy session. Stopping the session unit
+# ends the session; omarchy-try on tty1 notices, brings the greeter back, and
+# hands off to the ordinary install.
+exec sudo systemctl stop omarchy-try-session.service

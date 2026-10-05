@@ -1,0 +1,168 @@
+#!/bin/bash
+#
+# The install-and-setup worker for Try Omarchy. It is run as the child of
+# omarchy-install-dashboard so its output stays in the log and the user sees the
+# same logo + progress bar + tips a real install shows — never raw pacman
+# output. It writes phase state to the state file the dashboard polls, using the
+# same JSON shape the install orchestrator writes (orchestrator/phases.py).
+#
+# Does everything that can run non-interactively: grow the overlay, install the
+# desktop from the offline mirror, optionally install the NVIDIA driver, swap to
+# NetworkManager, and create and seed the throwaway user. It does NOT start the
+# session or restore networking — omarchy-try owns those, on the greeter VT,
+# after this returns.
+#
+# Args: <state-file> [nvidia]   ("nvidia" = the user opted into the driver)
+# The optional 3rd arg is a path prefix for tests.
+
+set -uo pipefail
+export PATH="/usr/local/bin:/usr/share/omarchy/bin:$PATH"
+
+state_file=${1:?state file required}
+want_nvidia=${2:-no}
+root=${3:-}
+
+try_user=try
+try_packages=$root/usr/share/omarchy-iso/try-packages
+hooks_dir=$root/etc/pacman.d/hooks
+cowspace=$root/run/archiso/cowspace
+sudoers=$root/etc/sudoers.d/$try_user
+home=$root/home/$try_user
+
+deferred_boot_hooks=(
+  60-mkinitcpio-remove.hook
+  60-limine-mkinitcpio-remove-pre.hook
+  80-limine-efi-deploy.hook
+  90-limine-mkinitcpio-remove-post.hook
+  90-mkinitcpio-install.hook
+)
+assume_installed=(limine limine-mkinitcpio-hook limine-snapper-sync snapper)
+
+# Total phases the dashboard sweeps its bar across. The NVIDIA install is a phase
+# only when the user asked for it.
+total_phases=3
+[[ $want_nvidia == nvidia ]] && total_phases=4
+
+# Write one phase to the state file in the dashboard's schema. Unknown phase
+# names (these) make the dashboard derive an even band from current_index /
+# total_phases, so the bar advances a step per phase. target "/" points its
+# optional package counter at the live root.
+phase() {
+  local index=$1 name=$2
+  mkdir -p "${state_file%/*}"
+  cat >"$state_file" <<JSON
+{"current_phase": "$name", "current_index": $index, "total_phases": $total_phases, "target": "/", "finished_at": 0}
+JSON
+}
+finish() {
+  cat >"$state_file" <<JSON
+{"current_phase": "Ready", "current_index": $((total_phases - 1)), "total_phases": $total_phases, "target": "/", "finished_at": $(date +%s)}
+JSON
+}
+fail() { echo "omarchy-try-setup: $*" >&2; exit 1; }
+
+idx=0
+phase "$idx" "Preparing the live desktop"
+mapfile -t packages < <(awk '{ print $1 }' "$try_packages")
+mount -o remount,size=100% "$cowspace" || fail "could not grow the live overlay"
+
+
+# Compressed swap before the install starts filling that overlay, not after.
+# zram-generator is a 1 MiB package on the stick; omarchy-settings (already in
+# the live root) ships the zram config an installed system runs, so once the
+# generator is installed a daemon-reload is all it needs. -Sy: the live sync db
+# is empty (mkarchiso clears it); the only repo is the offline file:// mirror.
+# A Ctrl+C in an earlier attempt can leave pacman's lock behind; nothing else
+# runs pacman on this console before the installer, so a lock with no pacman
+# alive is stale.
+lock=$root/var/lib/pacman/db.lck
+[[ -e $lock ]] && ! pgrep -x pacman >/dev/null && rm -f "$lock"
+pacman -Sy --needed --noconfirm zram-generator || fail "could not install zram-generator"
+systemctl daemon-reload
+systemctl start systemd-zram-setup@zram0.service ||
+  echo "omarchy-try-setup: no zram; the desktop runs without compressed swap." >&2
+
+# Only now is the overlay worth judging: it is a tmpfs the size of RAM, and the
+# compressed swap that makes filling it survivable is up. What the try set still
+# has to add (the list carries each package's installed size, and a second try
+# in the same boot finds most of it already there) has to fit with room for the
+# session. Say how far short a machine is rather than letting pacman fail
+# mid-transaction on a full overlay.
+need_kib=$(awk -v have="$(pacman -Qq | tr '\n' ' ')" \
+  'BEGIN { n = split(have, a, " "); for (i = 1; i <= n; i++) present[a[i]] = 1 }
+   !($1 in present) { kib += $3 }
+   END { print int((kib + 0) * 5 / 4) }' "$try_packages")
+avail_kib=$(df -k --output=avail "$cowspace" | tail -1)
+(( avail_kib >= need_kib )) ||
+  fail "the live overlay has $(( avail_kib / 1024 )) MiB free; the desktop needs $(( need_kib / 1024 )) MiB"
+
+mkdir -p "$hooks_dir"
+for hook in "${deferred_boot_hooks[@]}"; do ln -sfn /dev/null "$hooks_dir/$hook"; done
+
+idx=$((idx + 1))
+phase "$idx" "Installing the desktop"
+assume=(); for pkg in "${assume_installed[@]}"; do assume+=(--assume-installed "$pkg"); done
+pacman -S --needed --noconfirm "${assume[@]}" "${packages[@]}" || fail "installing the desktop failed"
+
+if [[ $want_nvidia == nvidia ]]; then
+  idx=$((idx + 1))
+  phase "$idx" "Setting up NVIDIA graphics"
+  omarchy-try-nvidia "$root" || echo "omarchy-try-setup: NVIDIA setup did not complete; the software preview will be used." >&2
+fi
+
+idx=$((idx + 1))
+phase "$idx" "Setting up your session"
+# Omarchy's shell drives NetworkManager; the live root boots iwd/networkd.
+systemctl stop iwd.service systemd-networkd.service systemd-networkd.socket || true
+systemctl start NetworkManager.service || fail "could not start NetworkManager"
+# The other daemons the shell's panels talk to, which an installed system
+# enables. --no-block, and not because it is tidier: power-profiles-daemon
+# orders after time-sync.target, so on a machine with no network — a laptop
+# that has not joined wifi yet — systemd-time-wait-sync never finishes, the
+# start job waits behind it forever, and a blocking systemctl never returns.
+# The install would sit at the progress bar and the desktop would never come
+# up. Neither daemon is needed for the session, so queue them and move on.
+systemctl start --no-block bluetooth.service power-profiles-daemon.service || true
+
+# The bar's clock should read local time — the installed system asks tzupdate
+# the same question. Only when the network is already up; never wait for a
+# wifi network that isn't configured yet.
+if nm-online -q -t 4 2>/dev/null; then
+  timeout 15 tzupdate >/dev/null 2>&1 || true
+fi
+
+if ! id "$try_user" &>/dev/null; then
+  useradd -m -G wheel,video,input,audio -s /bin/bash "$try_user" || fail "could not create the try user"
+  # Locked rather than empty: nothing can authenticate as this user. The session
+  # is started by systemd-run as root and never consults the password field, and
+  # sudo does not either (NOPASSWD below), so locking costs nothing.
+  passwd -l "$try_user" >/dev/null
+fi
+mkdir -p "${sudoers%/*}"
+printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$try_user" >"$sudoers"
+chmod 440 "$sudoers"
+
+# Seed the try user's extras on top of /etc/skel (which useradd copied). The
+# greeter re-runs all of this on every T, so each append is guarded by its own
+# marker.
+mkdir -p "$home/.config/hypr" "$home/.config/systemd/user"
+grep -qs omarchy-try-install "$home/.config/hypr/bindings.lua" || cat >>"$home/.config/hypr/bindings.lua" <<'LUA'
+
+-- Try Omarchy: end this session and start the installer.
+o.bind("SUPER + SHIFT + I", "Install Omarchy", "omarchy-try-install")
+LUA
+grep -qs omarchy-try-welcome "$home/.config/hypr/autostart.lua" || cat >>"$home/.config/hypr/autostart.lua" <<'LUA'
+
+-- Try Omarchy: one notification saying what this session is.
+o.launch_on_start("omarchy-try-welcome")
+LUA
+# fcitx5 isn't in the try set; mask its user service so it doesn't crash-loop.
+ln -sfn /dev/null "$home/.config/systemd/user/omarchy-fcitx5.service"
+id "$try_user" &>/dev/null && chown -R "$try_user:$try_user" "$home"
+
+runuser -u "$try_user" -- env HOME="$home" OMARCHY_THEME_HEADLESS=1 \
+  /usr/share/omarchy/bin/omarchy-theme-set "Tokyo Night" >/dev/null 2>&1 || true
+runuser -u "$try_user" -- env HOME="$home" xdg-user-dirs-update >/dev/null 2>&1 || true
+
+finish
+exit 0

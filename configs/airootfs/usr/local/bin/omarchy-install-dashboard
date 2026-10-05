@@ -691,13 +691,28 @@ install_duration() {
   local path line duration
 
   if [[ -f $STATE_FILE ]]; then
+    # Keep the units explicit, with thousandths only for sub-minute installs.
+    # The timing document retains nanoseconds regardless of the display.
+    # Older state files only carry wall-clock stamps, shown in whole seconds.
     duration="$(jq -r '
-      ((.started_at // 0) | tonumber? // 0) as $started
-      | ((.finished_at // 0) | tonumber? // 0) as $finished
-      | if $started <= 0 or $finished <= 0 or $finished < $started then empty
-        else (($finished - $started) | round) as $secs
-          | if $secs >= 3600 then "\($secs / 3600 | floor)h \($secs % 3600 / 60 | floor)m \($secs % 60)s"
-            else "\($secs / 60 | floor)m \($secs % 60)s"
+      ((.total_elapsed_ns // 0) | tonumber? // 0) as $ns
+      | if $ns > 0 then
+          ($ns / 1000000 | floor) as $ms
+          | if $ns < 60000000000 then
+              "0 min \($ms / 1000 | floor).\(("00" + ($ms % 1000 | tostring))[-3:]) s"
+            else ($ms / 1000 | floor) as $secs
+              | if $secs >= 3600 then "\($secs / 3600 | floor) h \($secs % 3600 / 60 | floor) min \($secs % 60) s"
+                else "\($secs / 60 | floor) min \($secs % 60) s"
+                end
+            end
+        else
+          ((.started_at // 0) | tonumber? // 0) as $started
+          | ((.finished_at // 0) | tonumber? // 0) as $finished
+          | if $started <= 0 or $finished <= 0 or $finished < $started then empty
+            else (($finished - $started) | round) as $secs
+              | if $secs >= 3600 then "\($secs / 3600 | floor) h \($secs % 3600 / 60 | floor) min \($secs % 60) s"
+                else "\($secs / 60 | floor) min \($secs % 60) s"
+                end
             end
         end
     ' "$STATE_FILE" 2>/dev/null || true)"

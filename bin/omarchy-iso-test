@@ -641,7 +641,7 @@ if label not in labels:
     raise SystemExit(f"Keyboard choice is absent from the ISO source: {label}")
 print(labels.index(label) - labels.index("English (US)"))
 PYTHON
-  )
+  ) || return 1
   if (( index < 0 )); then
     direction="up"
     index=$((-index))

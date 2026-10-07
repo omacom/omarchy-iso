@@ -13,7 +13,9 @@
 #
 # Usage: omarchy-iso-test [release/omarchy.iso] [options]
 #
-#   --keyboard LABEL   Installer keyboard choice (default: English (US))
+#   --keyboard LABEL   English (US/UK), Japanese, Japanese (US keyboard), Korean,
+#                      or Chinese (Simplified, Pinyin)/(Traditional, Zhuyin).
+#                      OMARCHY_PATH must be the source tree used to build the ISO.
 #   --encrypt          Drive the encrypted install flow (default: unencrypted)
 #   --provision              Drive the deferred-provisioning install flow: no user during install, the
 #                      first boot runs omarchy-provision-owner and creates it there
@@ -86,6 +88,11 @@ if [[ ! -f ${ISO:-} ]]; then
   echo "Usage: omarchy-iso-test [release/omarchy.iso] [options]" >&2
   exit 1
 fi
+
+case "$KEYBOARD_LABEL" in
+  "English (US)" | "English (UK)" | "Japanese" | "Japanese (US keyboard)" | "Korean" | "Chinese (Simplified, Pinyin)" | "Chinese (Traditional, Zhuyin)") ;;
+  *) echo "The VM harness cannot type credentials with keyboard: $KEYBOARD_LABEL" >&2; exit 1 ;;
+esac
 
 omarchy-pkg-add qemu-full edk2-ovmf socat imagemagick tesseract tesseract-data-eng
 
@@ -617,19 +624,30 @@ audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel|omarchy.audio'
 # ----------------------------------------------------- driving the installer
 
 select_keyboard() {
-  local label="$1" index
+  local label="$1" index direction="down"
   # gum choose uses arrows, not a searchable text field. Read the same ordered
   # choices the ISO vendors from the runtime rather than hard-code row numbers.
   index=$(OMARCHY_TEST_KEYBOARD="$label" python - <<'PYTHON'
 import os, re
 from pathlib import Path
-text = (Path(os.environ["OMARCHY_PATH"]) / "install/provisioning/setup-form.sh").read_text()
+source = Path(os.environ.get("OMARCHY_PATH", "")) / "install/provisioning/setup-form.sh"
+if not source.is_file():
+    raise SystemExit("Set OMARCHY_PATH to the source tree used to build this ISO")
+text = source.read_text()
 rows = re.search(r"OMARCHY_KEYBOARD_LAYOUTS=\$'(.*?)'\n", text, re.S).group(1).splitlines()
-print(next(index for index, row in enumerate(rows) if row.split("|")[0] == os.environ["OMARCHY_TEST_KEYBOARD"]))
+labels = [row.split("|")[0] for row in rows]
+label = os.environ["OMARCHY_TEST_KEYBOARD"]
+if label not in labels:
+    raise SystemExit(f"Keyboard choice is absent from the ISO source: {label}")
+print(labels.index(label) - labels.index("English (US)"))
 PYTHON
   )
+  if (( index < 0 )); then
+    direction="up"
+    index=$((-index))
+  fi
   for (( i = 0; i < index; i++ )); do
-    press down
+    press "$direction"
     sleep 0.1
   done
 }
@@ -706,6 +724,8 @@ drive_configurator() {
   type_text "test"
   if [[ $KEYBOARD_LABEL == "Japanese" ]]; then
     press bracket_left
+  elif [[ $KEYBOARD_LABEL == "English (UK)" ]]; then
+    press shift-apostrophe
   else
     press shift-2
   fi
@@ -801,7 +821,7 @@ drive_provision_owner() {
   # Shift+2 as on US); send that keycode so the typed email is correct under
   # the new layout — itself further proof the deferred keymap took effect.
   type_text "test"
-  if [[ $KEYBOARD_LABEL == "English (US)" ]]; then
+  if [[ $KEYBOARD_LABEL == "English (US)" || $KEYBOARD_LABEL == "English (UK)" ]]; then
     press shift-apostrophe
   elif [[ $KEYBOARD_LABEL == "Japanese" ]]; then
     press bracket_left

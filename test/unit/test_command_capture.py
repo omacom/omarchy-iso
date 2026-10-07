@@ -111,7 +111,9 @@ class CommandCaptureTest(unittest.TestCase):
         # under it; a replaced byte must stop the phase before that, not turn
         # into an opaque mount failure.
         self.fake_findmnt(source=b"/dev/sda\xe02[/@]")
-        ctx = types.SimpleNamespace(target=Path("/mnt"), state_dir=Path("/run/omarchy"))
+        ctx = types.SimpleNamespace(
+            target=Path("/mnt"), state_dir=Path("/run/omarchy"), state={}
+        )
 
         with mock.patch.object(phases_impl, "info"), self.assertRaises(RuntimeError) as raised:
             phases_impl.create_factory_snapshot(ctx)

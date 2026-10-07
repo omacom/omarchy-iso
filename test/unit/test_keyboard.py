@@ -38,6 +38,25 @@ def supported_keymaps():
 SUPPORTED_KEYMAPS = supported_keymaps()
 
 
+def localectl_lists_keymaps() -> bool:
+    """Whether this host can answer "which keymaps exist".
+
+    The cases below compare the configurator's list against the system's, so
+    they need a systemd-booted Arch: localectl reads /usr/share/kbd/keymaps
+    and refuses to run at all when PID 1 is not systemd. That is true on the
+    live ISO and on a developer's Arch box, and false on a container and on
+    the Ubuntu runners the CI lint/unit jobs use. Skip there rather than
+    error, so this file can be part of a run on any host."""
+    try:
+        return KEYBOARD.capture(["localectl", "--no-pager", "list-keymaps"]).returncode == 0
+    except Exception:
+        return False
+
+
+LOCALECTL_AVAILABLE = localectl_lists_keymaps()
+
+
+@unittest.skipUnless(LOCALECTL_AVAILABLE, "localectl cannot list keymaps on this host")
 class KeyboardConfigurationTest(unittest.TestCase):
     def target(self, directory: str) -> Path:
         target = Path(directory)

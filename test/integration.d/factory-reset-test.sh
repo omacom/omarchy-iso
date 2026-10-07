@@ -13,6 +13,14 @@
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
+# This scenario is about a shared UEFI ESP (Windows + a foreign Linux under
+# EFI/Linux, efibootmgr entries) — concepts that do not exist on a legacy BIOS
+# install. Skip it there rather than fail its UEFI-specific assertions.
+if [[ $FIRMWARE != uefi ]]; then
+  log "factory-reset is UEFI-only (shared-ESP dual boot); skipping under $FIRMWARE"
+  exit 0
+fi
+
 FOREIGN_ID="fedcfedcfedcfedcfedcfedcfedcfedc"
 
 base_image_ready || { echo "No base image; run this through ./test/integration" >&2; exit 1; }
@@ -105,6 +113,17 @@ reset_phase() {
   start_vm_from_base
   wait_for_ssh "$BOOT_TIMEOUT"
 
+  # The encrypted variant only reaches here because the boot passphrase was
+  # typed and SSH then answered -- but prove the disk is genuinely encrypted at
+  # rest and unlocked, not just that a prompt appeared. A plain install has no
+  # LUKS volume, so these run only for the encrypted variant.
+  if [[ ${ENCRYPT:-false} == true ]]; then
+    check "disk carries a LUKS volume at rest" \
+      ssh_sudo 'blkid | grep -q crypto_LUKS'
+    check "root runs on an unlocked dm-crypt device" \
+      ssh_sudo 'lsblk -no TYPE | grep -qx crypt'
+  fi
+
   fixture_shared_esp
 
   log "Running omarchy-system-factory-reset"
@@ -112,6 +131,15 @@ reset_phase() {
   wait_for_reset_output "Type 'reset' to continue" 60
   capture_console "success-reset-confirm"
   ssh_guest "printf 'reset\r' >/tmp/reset.in"
+
+  # An encrypted install re-keys its LUKS volume during staging, and asks for
+  # the current passphrase before it will (stage_luks_rekey). Nothing else
+  # answers that prompt, so the reset would sit at it until the timeout below;
+  # a plain install never shows it.
+  if [[ ${ENCRYPT:-false} == true ]]; then
+    wait_for_reset_output "encryption passphrase" 120
+    ssh_guest "printf '%s\r' '$GUEST_PASSWORD' >/tmp/reset.in"
+  fi
 
   # Staging clones @factory, rebuilds the UKI in a chroot, and reworks the
   # ESP; only then does the reboot prompt appear.

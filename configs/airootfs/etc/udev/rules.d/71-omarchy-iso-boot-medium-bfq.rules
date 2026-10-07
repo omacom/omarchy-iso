@@ -1,0 +1,20 @@
+# Put the live ISO's boot medium on the BFQ I/O scheduler.
+#
+# The live system pages its airootfs in lazily from the boot medium (copytoram
+# is pinned off because the root image is streamed from the same medium), and
+# omarchy-root-image-verify.service hashes that multi-GB image from boot with
+# IOSchedulingClass=idle. Only BFQ implements I/O priority classes; under the
+# default mq-deadline the hash's sequential reads compete as equals with every
+# squashfs page-in, and on a USB 2.0 stick the boot crawls for the two minutes
+# the hash takes. With BFQ the idle-class hash yields to the live system and
+# fills the gaps instead.
+#
+# Matched wider than just the boot medium, on purpose (udev cannot know which
+# disk we booted from): every USB whole disk, including a USB install target
+# or a cidata drive; optical drives; and every mmcblk node, including internal
+# eMMC and its boot0/rpmb partitions. The consequence is only the scheduler
+# choice, and BFQ is a fine default on all of them. Internal SATA/NVMe keep
+# their default.
+# 71- so it runs after 60-persistent-storage.rules, which sets ID_BUS.
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", ENV{ID_BUS}=="usb", ATTR{queue/scheduler}="bfq"
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", KERNEL=="sr[0-9]*|mmcblk[0-9]*", ATTR{queue/scheduler}="bfq"

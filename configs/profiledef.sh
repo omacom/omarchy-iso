@@ -15,6 +15,7 @@ airootfs_image_type="squashfs"
 # Package archives in the offline mirror are already zstd-compressed. Storing
 # them in an outer stream saves little space but makes pacman decompress the
 # outer layer while hashing and extracting every package during installation.
+# (The root image stream is a plain file on the ISO, outside the squashfs.)
 #
 # Everything else in the live root is zstd rather than xz. Squashfs decompresses
 # on the page-fault path through a single stream (CONFIG_SQUASHFS_DECOMP_SINGLE),
@@ -35,9 +36,12 @@ file_permissions=(
   ["/root/.automated_script.sh"]="0:0:755"
   ["/root/.gnupg"]="0:0:700"
   ["/root/configurator"]="0:0:755"
+  ["/root/customize_airootfs.sh"]="0:0:755"
   ["/usr/local/bin/choose-mirror"]="0:0:755"
   ["/usr/local/bin/omarchy-cidata-load"]="0:0:755"
+  ["/usr/local/bin/omarchy-wait-root-image-verify"]="0:0:755"
   ["/usr/local/bin/omarchy-iso-cleanup-disk"]="0:0:755"
+  ["/usr/local/bin/omarchy-release-install-target"]="0:0:755"
   ["/usr/local/bin/omarchy-install-dashboard"]="0:0:755"
   ["/usr/local/bin/omarchy-install-diagnose-media"]="0:0:755"
   ["/usr/local/bin/omarchy-iso-install"]="0:0:755"

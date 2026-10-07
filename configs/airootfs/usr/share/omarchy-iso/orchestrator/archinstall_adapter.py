@@ -17,6 +17,9 @@ The canonical call sequence (mirrored from archinstall.scripts.guided.py) is:
         inst.generate_key_files()                     # encrypted only
         inst.set_mirrors(handler, mirror_config, on_target=False)
         inst.minimal_installation(...)                # base + linux pacstrap
+                                                      # (we unpack the root image
+                                                      # and run install_base_delta
+                                                      # instead; see below)
         inst.set_mirrors(handler, mirror_config, on_target=True)
         inst.setup_swap(algo=...)
         inst.create_users(users)
@@ -35,6 +38,7 @@ from the start.
 from __future__ import annotations
 
 import importlib
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -50,7 +54,11 @@ from archinstall.lib.installer import Installer
 from archinstall.lib.mirror.mirror_handler import MirrorListHandler
 from archinstall.lib.models import Bootloader
 from archinstall.lib.models.device import DiskLayoutType, EncryptionType
+from archinstall.lib.pacman.config import PacmanConfig
 from archinstall.lib.models.users import User
+
+from . import luks_tuning
+luks_tuning.apply()
 
 from .ui import info
 
@@ -82,7 +90,114 @@ def make_mirror_handler(offline: bool = True) -> MirrorListHandler:
     return MirrorListHandler(offline=offline, verbose=False)
 
 
-def perform_filesystem_operations(arch_config: ArchConfig) -> None:
+@contextmanager
+def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
+    """Time the pieces of archinstall's filesystem step, and keep mkfs.btrfs
+    from discarding the whole device when the filesystem it makes is thrown
+    away.
+
+    The step is one number in the log (2.0 s in a VM, 4.4 s on an XPS 16,
+    22.2 s on a ThinkPad E14), which cannot say which piece cost what, so
+    every piece logs its own [step] line.
+
+    mkfs.btrfs TRIMs the entire device before it formats (mkfs.btrfs(8), -K
+    to skip). On a virtual disk that is instant; on a 1 TB laptop SSD behind
+    dm-crypt it takes seconds, and much longer on a DRAM-less drive. When a
+    root image is about to be written over that filesystem the TRIM only
+    delays the install: the image lands two seconds later, the installed
+    system keeps fstrim.timer enabled, and btrfs discards freed space on its
+    own. Nothing else about the step changes.
+
+    Everything here is best effort. If archinstall moves one of these names
+    the step runs exactly as before, untimed and with the TRIM."""
+    try:
+        import archinstall.lib.disk.device_handler as dh_module
+        import archinstall.lib.disk.filesystem as fs_module
+        from archinstall.lib.disk.luks import Luks2
+        from archinstall.lib.models.device import FilesystemType
+        from .phases_impl import _time_step
+        device_handler = dh_module.device_handler
+    except Exception as exc:  # pragma: no cover - depends on the archinstall release
+        info(f"› filesystem step runs untimed ({exc})")
+        yield
+        return
+
+    instance_patches: list[str] = []
+    luks_originals: dict[str, object] = {}
+    settle = {"calls": 0, "seconds": 0.0}
+    settle_originals: dict[object, object] = {}
+
+    def timed(original, label):
+        def wrapper(*args, **kwargs):
+            with _time_step(label):
+                return original(*args, **kwargs)
+        return wrapper
+
+    def format_wrapper(original):
+        takes_options = _method_accepts(original, "additional_parted_options")
+
+        def wrapper(fs_type, path, additional_parted_options=None, *args, **kwargs):
+            options = list(additional_parted_options or [])
+            if throwaway_root_fs and takes_options and fs_type == FilesystemType.BTRFS and "-K" not in options:
+                options.append("-K")
+            label = f"FS.mkfs.{getattr(fs_type, 'value', fs_type)}" + (" -K (no whole-device TRIM)" if "-K" in options else "")
+            with _time_step(label):
+                if takes_options:
+                    return original(fs_type, path, options, *args, **kwargs)
+                return original(fs_type, path, *args, **kwargs)
+        return wrapper
+
+    def luks_wrapper(function, label):
+        def wrapper(self, *args, **kwargs):
+            with _time_step(label):
+                return function(self, *args, **kwargs)
+        return wrapper
+
+    def settle_wrapper(original):
+        def wrapper(*args, **kwargs):
+            started = time.monotonic()
+            try:
+                return original(*args, **kwargs)
+            finally:
+                settle["calls"] += 1
+                settle["seconds"] += time.monotonic() - started
+        return wrapper
+
+    try:
+        for name, label in (("partition", "FS.partition"), ("create_btrfs_volumes", "FS.create_btrfs_subvolumes")):
+            original = getattr(device_handler, name, None)
+            if callable(original):
+                setattr(device_handler, name, timed(original, label))  # instance attribute shadows the method
+                instance_patches.append(name)
+        original_format = getattr(device_handler, "format", None)
+        if callable(original_format):
+            device_handler.format = format_wrapper(original_format)
+            instance_patches.append("format")
+        for name, label in (("encrypt", "FS.luksFormat"), ("unlock", "FS.luks_open")):
+            function = Luks2.__dict__.get(name)
+            if callable(function):
+                luks_originals[name] = function
+                setattr(Luks2, name, luks_wrapper(function, label))
+        for module in (dh_module, fs_module):
+            if callable(getattr(module, "udev_sync", None)):
+                settle_originals[module] = module.udev_sync
+                module.udev_sync = settle_wrapper(module.udev_sync)
+        yield
+    finally:
+        for name in instance_patches:
+            try:
+                delattr(device_handler, name)
+            except AttributeError:
+                pass
+        for name, function in luks_originals.items():
+            setattr(Luks2, name, function)
+        for module, function in settle_originals.items():
+            module.udev_sync = function
+        if settle["seconds"] >= 0.05:
+            info(f"[step] FS.udevadm settle ({settle['calls']} calls): {settle['seconds']:.3f}s")
+
+
+def perform_filesystem_operations(arch_config: ArchConfig, throwaway_root_fs: bool = False) -> None:
     """Partition, format, encrypt. archinstall's FilesystemHandler is its own
     object (separate from Installer) so we run it before opening the
     Installer context manager.
@@ -112,15 +227,16 @@ def perform_filesystem_operations(arch_config: ArchConfig) -> None:
     )
 
     attempts = 3
-    for attempt in range(1, attempts + 1):
-        udev_sync()
-        try:
-            handler.perform_filesystem_operations(**fs_kwargs)
-            return
-        except Exception as exc:
-            if attempt == attempts or "unable to inform the kernel" not in str(exc):
-                raise
-            info(f"› partition commit lost a udev race (attempt {attempt}/{attempts}); retrying")
+    with _filesystem_step_tweaks(throwaway_root_fs):
+        for attempt in range(1, attempts + 1):
+            udev_sync()
+            try:
+                handler.perform_filesystem_operations(**fs_kwargs)
+                return
+            except Exception as exc:
+                if attempt == attempts or "unable to inform the kernel" not in str(exc):
+                    raise
+                info(f"› partition commit lost a udev race (attempt {attempt}/{attempts}); retrying")
 
 
 @contextmanager
@@ -140,6 +256,114 @@ def open_installer(
         silent=silent,
     ) as installer:
         yield installer
+
+
+def target_has_package(target: Path, name: str) -> bool:
+    """Whether pacman's local db in the target records `name` as installed."""
+    local_db = target / "var" / "lib" / "pacman" / "local"
+    for entry in local_db.glob(f"{name}-*"):
+        desc = entry / "desc"
+        if not desc.is_file():
+            continue
+        lines = desc.read_text(errors="ignore").splitlines()
+        try:
+            if lines[lines.index("%NAME%") + 1] == name:
+                return True
+        except (ValueError, IndexError):
+            continue
+    return False
+
+
+def install_base_delta(
+    installer: Installer,
+    arch_config: ArchConfig,
+    *,
+    hostname: str | None,
+    locale_config,
+) -> None:
+    """Installer.minimal_installation for a target that already holds the root
+    image: everything it does around its base pacstrap, with the pacstrap
+    reduced to the base packages the image does not carry (the kernel and the
+    CPU microcode).
+
+    Mirrors archinstall 4.4's minimal_installation step for step so the target
+    ends up as that call would leave it: filesystem/encryption preparation
+    (which also decides the mkinitcpio hooks), microcode detection, pacman.conf
+    handling, vconsole, hostname, locale, and the helper flags later Installer
+    methods look at. LVM layouts are not supported by the image path."""
+    disk_config = installer._disk_config
+    if disk_config.lvm_config:
+        raise RuntimeError("root image install does not support LVM layouts")
+
+    # Each framework call below has its own [step] timer: the function takes
+    # 0.8 s with no package to install, and the timers show where.
+    from .phases_impl import _time_step
+
+    with _time_step("DELTA.prepare_fs_and_encrypt"):
+        for mod in disk_config.device_modifications:
+            for part in mod.partitions:
+                if part.fs_type is None:
+                    continue
+                installer._prepare_fs_type(part.fs_type, part.mountpoint)
+                if part in installer._disk_encryption.partitions:
+                    installer._prepare_encrypt()
+
+    with _time_step("DELTA.microcode"):
+        if ucode := installer._get_microcode():
+            (installer.target / "boot" / ucode).unlink(missing_ok=True)
+            installer._base_packages.append(ucode.stem)
+
+    with _time_step("DELTA.pacman_conf"):
+        mirror_config = arch_config.mirror_config
+        pacman_conf = PacmanConfig(installer.target)
+        pacman_conf.enable(mirror_config.optional_repositories if mirror_config else [])
+        pacman_conf.apply()
+
+    with _time_step("DELTA.vconsole"):
+        if locale_config:
+            installer.set_vconsole(locale_config)
+
+    with _time_step("DELTA.package_delta"):
+        delta = [pkg for pkg in installer._base_packages if not target_has_package(installer.target, pkg)]
+        if delta:
+            installer.pacman.strap(delta)
+        installer._helper_flags["base-strapped"] = True
+
+    with _time_step("DELTA.pacman_conf_persist"):
+        pacman_conf.persist()
+        if arch_config.pacman_config:
+            pacman_conf.configure(arch_config.pacman_config)
+
+    with _time_step("DELTA.fstrim"):
+        if not installer._disable_fstrim:
+            installer.enable_periodic_trim()
+
+    with _time_step("DELTA.hostname"):
+        if hostname:
+            installer.set_hostname(hostname)
+
+    with _time_step("DELTA.locale_and_keyboard"):
+        if locale_config:
+            installer.set_locale(locale_config)
+            installer.set_keyboard_language(locale_config.kb_layout)
+
+    installer._helper_flags["base"] = True
+
+    with _time_step("DELTA.post_base_install"):
+        for function in installer.post_base_install:
+            function(installer)
+
+
+def setup_zram_swap(installer: Installer) -> None:
+    """Installer.setup_swap without its pacman.strap('zram-generator'): the
+    root image carries the package. Enables the zram unit and records that
+    zram is on, as archinstall 4.4 does. Its /etc zram-generator.conf is not
+    reproduced: omarchy-settings ships the tuning as a vendor drop-in and the
+    orchestrator removed archinstall's copy anyway."""
+    if not target_has_package(installer.target, "zram-generator"):
+        installer.pacman.strap("zram-generator")
+    installer.enable_service("systemd-zram-setup@zram0.service")
+    installer._zram_enabled = True
 
 
 def is_encrypted(arch_config: ArchConfig) -> bool:
@@ -233,10 +457,30 @@ def install_applications(installer: Installer, arch_config: ArchConfig) -> None:
     users = arch_config.auth_config.users if arch_config.auth_config else None
     handler = _application_handler()
     install_applications_method = handler.install_applications
-    if _method_accepts_users(install_applications_method):
-        install_applications_method(installer, app_config, users)
-    else:
-        install_applications_method(installer, app_config)
+
+    # The application installers strap their package sets unconditionally.
+    # The root image already carries those (PipeWire and friends) and the
+    # offline mirror no longer does, and pacstrap --needed still has to
+    # resolve every target before it can skip it. Strap only what the target
+    # lacks (the hardware-detected firmware), through the installer instance
+    # the handlers call into.
+    original_strap = installer.add_additional_packages
+
+    def strap_missing(packages: str | list[str]) -> None:
+        if isinstance(packages, str):
+            packages = [packages]
+        missing = [pkg for pkg in packages if not target_has_package(installer.target, pkg)]
+        if missing:
+            original_strap(missing)
+
+    installer.add_additional_packages = strap_missing  # type: ignore[method-assign]
+    try:
+        if _method_accepts_users(install_applications_method):
+            install_applications_method(installer, app_config, users)
+        else:
+            install_applications_method(installer, app_config)
+    finally:
+        del installer.add_additional_packages
 
 
 def root_user(arch_config: ArchConfig) -> User | None:

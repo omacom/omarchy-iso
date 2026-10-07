@@ -1,0 +1,124 @@
+#!/bin/bash
+#
+# Release the install target: deactivate every swap area under it,
+# recursively unmount it, and close the LUKS mappers that backed it. The one
+# source of truth for letting go of the target — the dashboard runs it
+# before offering the install medium's removal, and the orchestrator's
+# protected-failure cleanup runs it naming the mapper it may have opened.
+#
+# The swapoff comes first because active swap is an invisible holder: the
+# hibernation setup's swapon in the chroot lands in the shared kernel, fuser
+# then shows no process and the submounts unmount fine, yet the filesystem
+# reports busy until the swap is off. The mappers to close are read off the
+# mount table before the unmount empties it, and each one's device-mapper
+# UUID must carry the CRYPT- prefix before the close is attempted —
+# cryptsetup close happily removes a non-crypt mapping (LVM, linear), so the
+# sweep is bounded by that check, not by trust in a refusal. A busy crypt
+# mapper still fails its close, and the failure is reported.
+#
+# Extra arguments name mappers to close beyond what the mount table shows:
+# a failure between luksOpen and mount leaves a mapper open with nothing
+# mounted from it, which the table sweep cannot see.
+#
+# Idempotent: a target with nothing mounted and no mapper left open exits 0.
+# Exits nonzero when the tree stayed mounted (umount -R failed) or a crypt
+# mapper stayed open — either way the target is not fully let go, and the
+# dashboard's removal offer and immediate-reboot choice key on exactly that.
+
+set -uo pipefail
+
+# device-mapper's word on a mapper: prints its UUID and returns 0 when it
+# exists, 1 when it provably does not ("Device does not exist." is the
+# driver's own answer for ENXIO), and 2 when dmsetup could not answer at all
+# (control node unreachable, driver not responding) — the same rc 1 as a
+# missing mapper, told apart only by the message. The distinction matters
+# because 1 is the idempotent no-op and 2 must never pass for it: a mapper
+# that cannot be proven gone has to fail the release, and this exit status
+# is what stands between the user and pulling the medium.
+dm_err=$(mktemp)
+trap 'rm -f "$dm_err"' EXIT
+mapper_uuid() {
+  local uuid
+  if uuid=$(dmsetup info -c --noheadings -o uuid "$1" 2>"$dm_err"); then
+    printf '%s\n' "$uuid"
+    return 0
+  fi
+  grep -q "Device does not exist" "$dm_err" && return 1
+  echo "could not query mapper $1:" >&2
+  cat "$dm_err" >&2
+  return 2
+}
+
+target="${1:?usage: omarchy-release-install-target <mountpoint> [mapper ...]}"
+shift
+mappers=("$@")
+
+sync
+
+while IFS=' ' read -r swap_path _; do
+  [[ $swap_path == "$target"/* ]] && swapoff "$swap_path" 2>/dev/null
+done < <(tail -n +2 /proc/swaps 2>/dev/null)
+
+while IFS= read -r source; do
+  source="${source%%\[*}"
+  [[ $source == /dev/mapper/* ]] && mappers+=("${source#/dev/mapper/}")
+done < <(findmnt -rn -o SOURCE -R "$target" 2>/dev/null | sort -u)
+
+# On failure, name the holders on stderr: this is the diagnosis the swapfile
+# hunt needed once, done by the machine. fuser over lsof because the live
+# ISO ships psmisc and not lsof, and the holder table is what gets acted on.
+if mountpoint -q "$target"; then
+  if ! umount -R "$target"; then
+    {
+      echo "could not unmount $target; holders:"
+      fuser -vm "$target" 2>&1
+      echo "still mounted under it:"
+      findmnt -rn -R "$target"
+      echo "active swap:"
+      tail -n +2 /proc/swaps
+    } >&2
+    exit 1
+  fi
+fi
+
+# A mapper can be mounted outside the target tree too: the orchestrator
+# stage-mounts the same filesystem under /run/omarchy-install during some
+# phases, and a mid-phase failure can leave one behind — the close would
+# then fail silently on a device the target-tree unmount never saw.
+close_failed=0
+for mapper in "${mappers[@]}"; do
+  while IFS= read -r mountpoint; do
+    umount -R "$mountpoint" 2>/dev/null
+  done < <(findmnt -rn -o TARGET -S "/dev/mapper/$mapper" 2>/dev/null)
+  # Crypt mappings only — a foreign mapper under the target (or a stale name
+  # passed as an argument) is not ours to tear down, and cryptsetup would
+  # remove it without complaint. A missing mapper falls out here too, which
+  # keeps the no-op run silent the way idempotency wants — but only on the
+  # driver's word for missing: an unanswerable query fails the release.
+  uuid=$(mapper_uuid "$mapper")
+  case $? in
+    1) continue ;;
+    2) close_failed=1; continue ;;
+  esac
+  [[ $uuid == CRYPT-* ]] || continue
+  # dmsetup, not the /dev/mapper node, decides whether the close took: the
+  # node is udev's and lags in both directions — still there for a moment
+  # after a good close (which would withhold the offer on a machine that is
+  # fine), and never there at all when device-mapper runs with udev disabled
+  # (which would hide a mapper that really did stay open). Only its provable
+  # absence counts as closed; an unanswerable probe fails like a held one.
+  if ! cryptsetup close "$mapper" 2>/dev/null; then
+    mapper_uuid "$mapper" >/dev/null
+    if (( $? != 1 )); then
+      {
+        echo "could not close mapper $mapper; holders:"
+        fuser -vm "/dev/mapper/$mapper" 2>&1
+        dmsetup info "$mapper" 2>&1
+      } >&2
+      close_failed=1
+    fi
+  fi
+done
+
+sync
+exit $close_failed

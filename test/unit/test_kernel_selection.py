@@ -87,12 +87,19 @@ class KernelSelectionTest(unittest.TestCase):
                 self.assertEqual(json.loads(ctx.arch_config_path.read_text())["kernels"], expected)
 
     def test_headers_install_before_dkms_packages(self):
+        # The image-based install has no pacstrap of the runtime to order the
+        # headers against: DKMS packages arrive later, from the hardware
+        # scripts. What has to hold here is that every selected kernel has its
+        # headers once this phase is over. The root image carries the default
+        # kernel's, so only a kernel the image lacks (linux-t2) costs a pacman
+        # run, straight after the base delta; and a failure there must still
+        # restore the pacman hooks and release the package cache.
+        in_image = {"linux-omarchy-headers"}
         for kernels in (["linux-omarchy"], ["linux-t2"], ["linux-omarchy", "linux-lts"]):
             for fail_headers in (False, True):
                 with self.subTest(kernels=kernels, fail_headers=fail_headers), ExitStack() as stack:
                     events = []
                     installer = mock.MagicMock()
-                    installer.minimal_installation.side_effect = lambda **kwargs: events.append("base")
 
                     def install_packages(packages):
                         events.append(packages)
@@ -107,29 +114,32 @@ class KernelSelectionTest(unittest.TestCase):
                     )
                     ctx = types.SimpleNamespace(
                         state={"arch_config_handler": types.SimpleNamespace(config=config), "mirror_handler": None},
-                        target=Path("/unused"), tailscale_authkey_path=None,
+                        target=Path("/unused"), tailscale_authkey_path=None, defer_provisioning=False,
                     )
                     for name in ("_mount_offline_package_cache", "_mask_mkinitcpio_pacman_hooks",
-                                 "_configure_limine_boot", "_write_pre_mounted_fstab"):
+                                 "_configure_limine_boot", "_write_pre_mounted_fstab", "_install_root_image"):
                         stack.enter_context(mock.patch.object(phases_impl, name))
                     unmask = stack.enter_context(mock.patch.object(phases_impl, "_unmask_mkinitcpio_pacman_hooks"))
                     unmount = stack.enter_context(mock.patch.object(phases_impl, "_unmount_offline_package_cache"))
                     stack.enter_context(mock.patch.object(phases_impl, "configure_keyboard", return_value=True))
-                    stack.enter_context(mock.patch.object(phases_impl, "_install_early_packages", side_effect=lambda inst: events.append("early")))
-                    stack.enter_context(mock.patch.object(phases_impl, "_runtime_package_list", return_value=["omarchy"]))
                     stack.enter_context(mock.patch.object(phases_impl.arch, "is_pre_mount", return_value=True, create=True))
                     stack.enter_context(mock.patch.object(phases_impl.arch, "root_user", return_value=None, create=True))
+                    stack.enter_context(mock.patch.object(
+                        phases_impl.arch, "install_base_delta", create=True,
+                        side_effect=lambda *args, **kwargs: events.append("base")))
+                    stack.enter_context(mock.patch.object(
+                        phases_impl.arch, "target_has_package", create=True,
+                        side_effect=lambda target, name: name in in_image))
                     opened = stack.enter_context(mock.patch.object(phases_impl.arch, "open_installer", create=True))
                     opened.return_value.__enter__.return_value = installer
-                    if fail_headers:
+
+                    missing = [f"{kernel}-headers" for kernel in kernels if f"{kernel}-headers" not in in_image]
+                    if fail_headers and missing:
                         with self.assertRaisesRegex(RuntimeError, "header install failed"):
                             phases_impl.arch_install_system(ctx)
                     else:
                         phases_impl.arch_install_system(ctx)
-                    expected = ["base", [f"{kernel}-headers" for kernel in kernels]]
-                    if not fail_headers:
-                        expected += ["early", ["omarchy"]]
-                    self.assertEqual(events, expected)
+                    self.assertEqual(events, ["base"] + ([missing] if missing else []))
                     unmask.assert_called_once_with(ctx)
                     unmount.assert_called_once_with(ctx)
 

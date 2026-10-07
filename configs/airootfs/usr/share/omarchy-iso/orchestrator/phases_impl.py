@@ -274,7 +274,11 @@ def arch_install_system(ctx: InstallContext) -> None:
             # use the target kernel instead of the live ISO's kernel.
             installer.add_additional_packages([f"{kernel}-headers" for kernel in config.kernels])
 
-            if not configure_keyboard(installer.target, kb_layout):
+            if not configure_keyboard(
+                installer.target, kb_layout,
+                ctx.omarchy_install.get("input_method"),
+                ctx.omarchy_install.get("input_xkb_layout", ""),
+            ):
                 error(f"Invalid keyboard language specified: {kb_layout}")
 
             if config.mirror_config:

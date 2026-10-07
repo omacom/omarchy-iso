@@ -800,6 +800,8 @@ run_partition_execute() {
     "bootloader_config": { "bootloader": "Limine", "uki": false, "removable": false },
     "custom_commands": [],
     "omarchy_install": {
+        "input_method": "${keyboard_input_method:-none}",
+        "input_xkb_layout": "${keyboard_xkb_layout:-}",
         "mode": "protected",
         "target_mount": "/mnt",
         "boot": {
@@ -1056,6 +1058,8 @@ if $defer_provisioning; then
   # their real layout in the OOBE, which re-keys the console and, on encrypted
   # installs, rebuilds the initramfs so the LUKS prompt matches.
   keyboard="us"
+  keyboard_input_method="none"
+  keyboard_xkb_layout=""
   username=""
   password=""
   password_hash=""
@@ -1138,6 +1142,8 @@ cat <<-_EOF_ >user_configuration.json
     "bootloader_config": { "bootloader": "Limine", "uki": false, "removable": false },
     "custom_commands": [],
     "omarchy_install": {
+        "input_method": "${keyboard_input_method:-none}",
+        "input_xkb_layout": "${keyboard_xkb_layout:-}",
         "mode": "full_disk",
         "defer_provisioning": $defer_provisioning,
         "target_mount": "/mnt",

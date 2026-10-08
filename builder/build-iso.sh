@@ -549,9 +549,9 @@ printf '%s\n' "${required_package_files[@]}" |
 
 # Rebuild the offline repo db from scratch so size/checksum/depends entries
 # always reflect only the package files selected for this build.
-rm -f "$offline_mirror_dir"/offline.db* "$offline_mirror_dir"/offline.files*
-# The bundle ships .pkg.tar.xz archives alongside the .zst ones pacman downloads.
-repo-add "$offline_mirror_dir/offline.db.tar.gz" $(find "$offline_mirror_dir" -maxdepth 1 -name '*.pkg.tar.*' ! -name '*.sig' | sort)
+# Every package archive in the mirror, .xz and .zst alike, indexed by one
+# repo-add per CPU: one alone spent a third of an aarch64 build here.
+bash /builder/index-offline-mirror.sh "$offline_mirror_dir"
 
 # mkarchiso expects the mirror at /var/cache/omarchy/mirror/offline inside the
 # container (the airootfs path); symlink rather than duplicate.

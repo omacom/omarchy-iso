@@ -1,0 +1,158 @@
+#!/bin/bash
+#
+# Installs an aarch64 Omarchy ISO unattended in a VM, reboots into what it
+# installed and checks the result over SSH: the whole path a machine takes,
+# with nobody at the keyboard.
+#
+#   test/arm64-install <omarchy.iso> <evidence_dir>
+#
+# The answers are the ones the x86_64 integration harness gives its installs
+# (build_cidata in test/integration.d/base-test.sh), changed where the
+# architecture shows: Limine's binary, the kernel, the mirror.
+#
+# Needs an arm64 host with a usable /dev/kvm, qemu-system-aarch64, the AAVMF
+# firmware, mtools, dosfstools, jq, openssl and tesseract. evidence_dir gets
+# the serial log, screenshots, the installer's log and the checks' output.
+#
+# Env: TIMEOUT (seconds for install and first boot, default 1500), SMP (8),
+#      MEM (12G), MACHINE (see test/arm64-live-boot), KERNEL (linux-aarch64),
+#      MIRROR (the Arch Linux ARM mirror the installed system is pointed at).
+set -euo pipefail
+[[ $# -eq 2 ]] || { sed -n '2,20p' "$0" >&2; exit 2; }
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+iso=$(realpath "$1")
+out=$(realpath -m "$2")
+mkdir -p "$out/shots"
+
+[[ $(uname -m) == aarch64 ]] || { echo "arm64-install: this needs an arm64 host" >&2; exit 1; }
+[[ -r /dev/kvm && -w /dev/kvm ]] || { echo "arm64-install: /dev/kvm is not usable" >&2; exit 1; }
+for firmware in /usr/share/AAVMF/AAVMF_CODE.fd:/usr/share/AAVMF/AAVMF_VARS.fd \
+  /usr/share/edk2/aarch64/QEMU_CODE.fd:/usr/share/edk2/aarch64/QEMU_VARS.fd; do
+  [[ -f ${firmware%%:*} && -f ${firmware##*:} ]] && { code=${firmware%%:*}; vars=${firmware##*:}; break; }
+done
+: "${code:?no aarch64 UEFI firmware found}"
+
+state=$(mktemp -d /var/tmp/arm64-install.XXXXXX)
+cleanup() {
+  local status=$? pid
+  if [[ -f $state/qemu.pid ]]; then
+    pid=$(cat "$state/qemu.pid")
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+  fi
+  rm -rf "$state"
+  exit "$status"
+}
+trap cleanup EXIT
+
+# --- answers ---------------------------------------------------------------
+GUEST_USER=omarchy GUEST_PASSWORD=omarchy GUEST_HOSTNAME=omarchy-arm64
+BASE_DIR=$state SSH_KEY=$state/id_ed25519 CIDATA_IMG=$state/cidata.img
+RUNTIME_PACKAGE=omarchy-dev SETTINGS_PACKAGE=omarchy-settings-dev
+ssh-keygen -q -t ed25519 -N '' -C arm64-install -f "$SSH_KEY"
+# The harness's own function, so the two cannot drift apart. It ends by
+# writing the image; the architecture's answers are changed and it is redone.
+eval "$(sed -n '/^build_cidata() {$/,/^  mcopy -i "\$CIDATA_IMG"/p' "$ROOT/test/integration.d/base-test.sh"; echo '}')"
+build_cidata
+answers=$state/cidata/user_configuration.json
+jq --arg kernel "${KERNEL:-linux-aarch64}" --arg mirror "${MIRROR:-http://mirror.archlinuxarm.org/\$arch/\$repo}" '
+  .omarchy_install.boot.efi_binary = "limine_aa64.efi"
+  | .omarchy_install.storage.kernel = $kernel
+  | .kernels = [$kernel]
+  | .mirror_config.custom_servers = [{url: $mirror}]' "$answers" >"$answers.new"
+mv "$answers.new" "$answers"
+rm -f "$CIDATA_IMG"
+truncate -s 4M "$CIDATA_IMG"
+mkfs.vfat -n CIDATA "$CIDATA_IMG" >/dev/null
+mcopy -i "$CIDATA_IMG" "$state"/cidata/* ::/
+cp "$answers" "$out/user_configuration.json"
+
+# --- machine ---------------------------------------------------------------
+port=$(( 20000 + RANDOM % 10000 ))
+qemu-img create -q -f qcow2 "$state/target.qcow2" 40G
+cp "$vars" "$state/vars.fd"
+: >"$out/serial.log"
+# The empty disk is first in the boot order: the firmware falls through to the
+# ISO now and finds Limine there after the install.
+qemu-system-aarch64 -machine "${MACHINE:-virt,gic-version=3,its=off,acpi=off}" -accel kvm -cpu host \
+  -smp "${SMP:-8}" -m "${MEM:-12G}" \
+  -drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$state/vars.fd" \
+  -drive "file=$state/target.qcow2,format=qcow2,if=none,id=target" -device virtio-blk-pci,drive=target,bootindex=0 \
+  -device virtio-scsi-pci -drive "file=$iso,format=raw,if=none,id=iso,media=cdrom,readonly=on" \
+  -device scsi-cd,drive=iso,bootindex=1 \
+  -device qemu-xhci -device usb-kbd -device usb-tablet \
+  -drive "file=$CIDATA_IMG,format=raw,if=none,id=cidata" -device usb-storage,drive=cidata \
+  -device virtio-gpu-pci -device virtio-rng-pci \
+  -netdev "user,id=net,hostfwd=tcp:127.0.0.1:$port-:22" -device virtio-net-pci,netdev=net \
+  -serial "file:$out/serial.log" -display none \
+  -qmp "unix:$state/qmp.sock,server,nowait" -pidfile "$state/qemu.pid" -daemonize
+
+qmp() { # one QMP command, as JSON
+  python3 - "$state/qmp.sock" "$1" <<'PY'
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(20); s.connect(sys.argv[1]); f = s.makefile("rw")
+f.readline()
+for command in ({"execute": "qmp_capabilities"}, json.loads(sys.argv[2])):
+    f.write(json.dumps(command) + "\n"); f.flush()
+    while "return" not in (reply := json.loads(f.readline())):
+        if "error" in reply: sys.exit(reply["error"]["desc"])
+PY
+}
+screen() { # file -> the text on the screen
+  qmp "{\"execute\":\"screendump\",\"arguments\":{\"filename\":\"$1\",\"format\":\"png\"}}" 2>/dev/null || return 0
+  tesseract "$1" - 2>/dev/null | grep -v '^\s*$' || true
+}
+guest() {
+  ssh -i "$SSH_KEY" -p "$port" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 -o LogLevel=ERROR "$GUEST_USER@127.0.0.1" "$@"
+}
+
+# --- install and first boot ------------------------------------------------
+# The live ISO runs sshd too, but only the installed system has this user.
+start=$(date +%s) timeout=${TIMEOUT:-1500} tick=0
+until guest true 2>/dev/null; do
+  elapsed=$(( $(date +%s) - start ))
+  if ! kill -0 "$(cat "$state/qemu.pid")" 2>/dev/null; then
+    echo "arm64-install: qemu exited after $elapsed s" >&2; exit 1
+  fi
+  if (( elapsed > timeout )); then
+    screen "$out/shots/timeout.png" | tail -n 12 >&2
+    echo "arm64-install: no installed system on SSH after $timeout s" >&2; exit 1
+  fi
+  if (( ++tick % 2 == 0 )); then
+    text=$(screen "$out/shots/$(printf '%04d' "$elapsed").png")
+    echo "  $elapsed s: $(tail -n 2 <<<"$text" | tr '\n' ' ' | cut -c1-120)"
+    if grep -qi 'Reboot Now' <<<"$text"; then
+      echo "  $elapsed s: the installer is done; rebooting"
+      qmp '{"execute":"send-key","arguments":{"keys":[{"type":"qcode","data":"ret"}]}}'
+    elif grep -qi 'Failed: ' <<<"$text"; then
+      grep -i -A2 'Failed: ' <<<"$text" | head -n 6 >&2
+      echo "arm64-install: the installer stopped after $elapsed s" >&2; exit 1
+    fi
+  fi
+  sleep 10
+done
+echo "installed_system_seconds=$(( $(date +%s) - start ))" | tee "$out/timing"
+
+# --- checks ----------------------------------------------------------------
+failures=0
+check() { # description, then a command run in the guest that must succeed
+  local what=$1; shift
+  if guest "$@" >/dev/null 2>&1; then echo "ok - $what"; else echo "not ok - $what"; failures=$((failures + 1)); fi
+}
+{
+  check "the system reaches running or degraded" \
+    's=$(timeout 180 systemctl is-system-running --wait); [ "$s" = running ] || [ "$s" = degraded ]'
+  check "it runs the kernel it was told to install" \
+    "pacman -Qo /usr/lib/modules/\$(uname -r) | grep -q ' ${KERNEL:-linux-aarch64} '"
+  check "it booted through Limine's unified kernel image" 'ls /boot/EFI/Linux/omarchy_*.efi'
+  check "the Omarchy runtime is installed" "pacman -Q $RUNTIME_PACKAGE"
+  check "Node came from the ISO, for this architecture" 'ls ~/.local/share/mise/installs/node/*/bin/node && ~/.local/share/mise/installs/node/*/bin/node -e "process.exit(process.arch === \"arm64\" ? 0 : 1)"'
+  check "the user can use sudo" "echo $GUEST_PASSWORD | sudo -S -p '' true"
+} | tee "$out/checks"
+failures=$(grep -c '^not ok' "$out/checks" || true)
+guest 'uname -r; cat /proc/cmdline; systemctl --failed --no-legend; grep -E "^Server" /etc/pacman.d/mirrorlist' >"$out/facts" 2>&1 || true
+guest "echo $GUEST_PASSWORD | sudo -S -p '' cat /var/log/omarchy-install.log" >"$out/omarchy-install.log" 2>/dev/null || true
+screen "$out/shots/installed.png" >/dev/null
+(( failures == 0 )) || { echo "arm64-install: $failures checks failed" >&2; exit 1; }
+echo "arm64-install: installed, rebooted and checked in $(cut -d= -f2 "$out/timing") s"

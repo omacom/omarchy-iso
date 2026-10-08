@@ -124,3 +124,48 @@ jobs:
           compression-level: 0
           retention-days: 3
           if-no-files-found: error
+
+  # The image through its own boot path: firmware, GRUB, the live kernel and
+  # initramfs, the live root. Apple-backed runners are the ARM ones with KVM.
+  boot:
+    name: Boot the live ISO under KVM
+    needs: build
+    runs-on: namespace-profile-arm64-linux-apple-12x32
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          persist-credentials: false
+
+      - name: Runner
+        run: |
+          uname -srm
+          echo "$(nproc) CPUs, $(free -h | awk 'NR==2 {print $2}') memory, $(df -h --output=avail . | tail -1 | tr -d ' ') free disk"
+          grep -m2 -E 'CPU implementer|CPU part' /proc/cpuinfo || true
+          ls -l /dev/kvm
+          [[ -r /dev/kvm && -w /dev/kvm ]] || sudo chmod 666 /dev/kvm
+
+      - name: QEMU and firmware
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-arm qemu-efi-aarch64 >/dev/null
+          qemu-system-aarch64 --version | head -1
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: omarchy-arm64-generic-${{ github.run_number }}
+          path: iso
+
+      - name: Boot it
+        run: |
+          (cd iso && sha256sum -c ./*.sha256)
+          ./test/arm64-live-boot iso/*.iso evidence
+          echo "The live system offered a login after $(cut -d= -f2 evidence/timing) s." >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: arm64-live-boot-${{ github.run_number }}
+          path: evidence
+          retention-days: 7
+          if-no-files-found: warn

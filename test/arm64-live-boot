@@ -1,0 +1,89 @@
+#!/bin/bash
+#
+# Boots an aarch64 Omarchy ISO the way a machine would: UEFI firmware, GRUB
+# from the ISO, the live kernel and initramfs, the live root. It passes when
+# the live system offers a login on its serial port.
+#
+#   test/arm64-live-boot <omarchy.iso> <evidence_dir>
+#
+# Needs an arm64 host with a usable /dev/kvm, qemu-system-aarch64 and the
+# AAVMF/edk2 firmware. evidence_dir gets serial.log, screen.png and timing.
+#
+# Env: TIMEOUT (seconds to wait for the login prompt, default 600), SMP (4),
+#      MEM (8G), MACHINE. The default machine is the one that works under
+#      nested KVM on Namespace's Apple-backed runners: with the interrupt
+#      translation service on, MSIs are lost and virtio disks hang.
+set -euo pipefail
+[[ $# -eq 2 ]] || { sed -n '2,16p' "$0" >&2; exit 2; }
+iso=$(realpath "$1")
+out=$(realpath -m "$2")
+mkdir -p "$out"
+
+[[ $(uname -m) == aarch64 ]] || { echo "arm64-live-boot: this needs an arm64 host" >&2; exit 1; }
+[[ -r /dev/kvm && -w /dev/kvm ]] || { echo "arm64-live-boot: /dev/kvm is not usable" >&2; exit 1; }
+for firmware in /usr/share/AAVMF/AAVMF_CODE.fd:/usr/share/AAVMF/AAVMF_VARS.fd \
+  /usr/share/edk2/aarch64/QEMU_CODE.fd:/usr/share/edk2/aarch64/QEMU_VARS.fd; do
+  [[ -f ${firmware%%:*} && -f ${firmware##*:} ]] && { code=${firmware%%:*}; vars=${firmware##*:}; break; }
+done
+: "${code:?no aarch64 UEFI firmware found}"
+
+state=$(mktemp -d /var/tmp/arm64-live.XXXXXX)
+cleanup() {
+  local status=$? pid
+  if [[ -f $state/qemu.pid ]]; then
+    pid=$(cat "$state/qemu.pid")
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+  fi
+  rm -rf "$state"
+  exit "$status"
+}
+trap cleanup EXIT
+cp "$vars" "$state/vars.fd"
+: >"$out/serial.log"
+
+screenshot() {
+  python3 - "$state/qmp.sock" "$out/screen.png" <<'PY' || echo "arm64-live-boot: no screenshot" >&2
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(20); s.connect(sys.argv[1]); f = s.makefile("rw")
+f.readline()
+for command in ({"execute": "qmp_capabilities"},
+                {"execute": "screendump", "arguments": {"filename": sys.argv[2], "format": "png"}}):
+    f.write(json.dumps(command) + "\n"); f.flush()
+    while "return" not in (reply := json.loads(f.readline())):
+        if "error" in reply: sys.exit(reply["error"]["desc"])
+PY
+}
+
+start=$(date +%s)
+qemu-system-aarch64 -machine "${MACHINE:-virt,gic-version=3,its=off,acpi=off}" -accel kvm -cpu host \
+  -smp "${SMP:-4}" -m "${MEM:-8G}" \
+  -drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$state/vars.fd" \
+  -device virtio-scsi-pci -drive "file=$iso,format=raw,if=none,id=iso,media=cdrom,readonly=on" \
+  -device scsi-cd,drive=iso,bootindex=0 \
+  -device virtio-gpu-pci -device qemu-xhci -device usb-kbd -device usb-tablet \
+  -netdev user,id=net -device virtio-net-pci,netdev=net -device virtio-rng-pci \
+  -serial "file:$out/serial.log" -display none \
+  -qmp "unix:$state/qmp.sock,server,nowait" -pidfile "$state/qemu.pid" -daemonize
+
+timeout=${TIMEOUT:-600}
+until grep -aq 'login:' "$out/serial.log"; do
+  elapsed=$(( $(date +%s) - start ))
+  if ! kill -0 "$(cat "$state/qemu.pid")" 2>/dev/null; then
+    echo "arm64-live-boot: qemu exited after $elapsed s without a login prompt" >&2
+    exit 1
+  fi
+  if (( elapsed > timeout )); then
+    screenshot
+    echo "arm64-live-boot: no login prompt on the serial port after $timeout s; the last lines it wrote:" >&2
+    tail -n 30 "$out/serial.log" | tr -d '\r' >&2
+    exit 1
+  fi
+  sleep 1
+done
+elapsed=$(( $(date +%s) - start ))
+# Give the installer a moment to draw before the picture is taken.
+sleep 15
+screenshot
+echo "login_prompt_seconds=$elapsed" | tee "$out/timing"
+echo "arm64-live-boot: the live system offered a login after $elapsed s"

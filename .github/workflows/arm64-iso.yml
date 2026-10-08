@@ -19,8 +19,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # On x86, where quattro runs them: the installer tests stage a Node tarball
-  # named for x64, and the code under test looks for the host's architecture.
+  # As quattro's unit-test.yml runs them: on x86, in an Arch container. The
+  # installer tests stage a Node tarball named for x64 and the code looks for
+  # the host's architecture, so they fail on an aarch64 host. The container
+  # boots systemd because the keyboard tests ask the real localectl for its
+  # keymaps, and the tests run as an ordinary user because some of them check
+  # what happens when a file cannot be written.
+  #
+  # A privileged container shares the host's consoles and devices, so the
+  # units that would claim them are masked before systemd starts.
   unit:
     name: Unit tests
     runs-on: ubuntu-24.04
@@ -30,12 +37,30 @@ jobs:
         with:
           submodules: recursive
           persist-credentials: false
-      # test/all's steps, with the Python tests found from their own directory:
-      # Ubuntu's Python ships a "test" package, which hides test/unit when
-      # discovery starts from the repository root.
-      - run: |
-          for t in test/unit/*-test.sh; do echo "==> $t"; bash "$t"; done
-          python3 -m unittest discover -s test/unit
+      - name: Run ./test/all in an Arch container
+        run: |
+          docker run -d --name unit --privileged --cgroupns=host \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /tmp:exec \
+            -v "$PWD:/src:ro" archlinux:latest bash -c '
+              systemctl mask getty.target console-getty.service \
+                systemd-udev-trigger.service systemd-udevd.service \
+                systemd-vconsole-setup.service
+              exec /usr/lib/systemd/systemd
+            '
+          docker exec unit bash -euo pipefail -c '
+            for i in $(seq 1 60); do
+              state=$(systemctl is-system-running 2>/dev/null || true)
+              case $state in running | degraded) break ;; esac
+              sleep 1
+            done
+            echo "systemd: $state"
+            pacman -Syu --noconfirm --needed python parted openssh patch git >/dev/null
+            useradd -m tester
+            cp -r /src /home/tester/omarchy-iso
+            chown -R tester /home/tester/omarchy-iso
+            cd /home/tester/omarchy-iso
+            setpriv --reuid=tester --regid=tester --init-groups ./test/all
+          '
 
   build:
     name: Build the generic ISO

@@ -83,6 +83,19 @@ esac
 : "${OMARCHY_NVIM_PACKAGE:=omarchy-nvim}"
 export OMARCHY_RUNTIME_PACKAGE OMARCHY_SETTINGS_PACKAGE OMARCHY_NVIM_PACKAGE
 
+# pacman 7 sandboxes its downloads with Landlock and fails every sync on a
+# kernel without it (Namespace's AmpereOne arm64 machines): "restricting
+# filesystem access failed because Landlock is not supported by the kernel".
+# There, every pacman in this container (pacstrap's too) runs with
+# --disable-sandbox, which pacman provides for exactly this. A wrapper rather
+# than DisableSandbox in a config: pacman-offline.conf ships on the ISO.
+if ! grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then
+  echo "No Landlock in this kernel: pacman runs with --disable-sandbox in this container"
+  printf '#!/bin/sh\nexec /usr/bin/pacman --disable-sandbox "$@"\n' >/usr/local/bin/pacman
+  chmod +x /usr/local/bin/pacman
+  hash -r
+fi
+
 # Packages installed into the Arch container used to build the ISO.
 pacman-key --init
 if [[ $OMARCHY_ARCH == aarch64 ]]; then

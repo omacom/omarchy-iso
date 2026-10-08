@@ -7,7 +7,8 @@ OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
 OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
 OMARCHY_ARM_PLATFORM="${OMARCHY_ARM_PLATFORM:-}"
 OMARCHY_KERNEL="${OMARCHY_KERNEL:-linux-t2}"
-export OMARCHY_ARCH
+# profiledef.sh reads both in the mkarchiso environment.
+export OMARCHY_ARCH OMARCHY_KERNEL
 
 source /builder/node-release.sh
 source /builder/arm64-kernel-image.sh

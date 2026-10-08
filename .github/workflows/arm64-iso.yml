@@ -28,7 +28,12 @@ jobs:
         with:
           submodules: recursive
           persist-credentials: false
-      - run: ./test/all
+      # test/all's steps, with the Python tests found from their own directory:
+      # the runner's Python ships a "test" package, which hides test/unit when
+      # discovery starts from the repository root.
+      - run: |
+          for t in test/unit/*-test.sh; do echo "==> $t"; bash "$t"; done
+          python3 -m unittest discover -s test/unit
 
   build:
     name: Build the generic ISO

@@ -1328,6 +1328,58 @@ def _stage_provisioning_luks_unlock(ctx: InstallContext, provisioning_dir) -> No
     files_dropin.write_text("FILES+=(/etc/omarchy/provisioning.key)\n")
 
 
+INITRAMFS_MODULES_CONF = "zz-omarchy-kernel-modules.conf"
+
+
+def _drop_initramfs_modules_the_kernel_lacks(ctx: InstallContext) -> None:
+    """Keep mkinitcpio from failing on a module the installed kernel was built
+    without.
+
+    The Omarchy settings name modules for the kernels Omarchy ships, thunderbolt
+    among them. mkinitcpio reports a name it cannot find as an error, and
+    limine-mkinitcpio-hook then builds the unified kernel image but does not
+    install it: Arch Linux ARM's linux-aarch64 has no thunderbolt module, and
+    the machine was left with no kernel to boot. A drop-in that sorts last takes
+    the names this kernel lacks back out of MODULES.
+    """
+    conf_dir = ctx.target / "etc" / "mkinitcpio.conf.d"
+    drop_in = conf_dir / INITRAMFS_MODULES_CONF
+    listed: list[str] = []
+    for conf in sorted(conf_dir.glob("*.conf")) if conf_dir.is_dir() else []:
+        if conf.name == INITRAMFS_MODULES_CONF:
+            continue
+        for match in re.finditer(r"^\s*MODULES\+?=\(([^)]*)\)", conf.read_text(), re.M):
+            listed += [name.strip("\"'") for name in match.group(1).split()]
+
+    missing: list[str] = []
+    for directory, _ in _kernel_directories(ctx):
+        for module in listed:
+            if module in missing or not re.fullmatch(r"[A-Za-z0-9_-]+", module):
+                continue
+            found = subprocess.run(
+                ["modinfo", "--basedir", str(ctx.target), "-k", directory.name, module],
+                capture_output=True,
+            )
+            if found.returncode != 0:
+                missing.append(module)
+
+    if not missing:
+        drop_in.unlink(missing_ok=True)
+        return
+    info(f"› leaving out of the initramfs, not in this kernel: {' '.join(missing)}")
+    drop_in.write_text(
+        "# Written by the Omarchy installer. The installed kernel has no such\n"
+        "# modules, and mkinitcpio fails on a module it cannot find.\n"
+        f"_omarchy_absent=({' '.join(missing)})\n"
+        "_omarchy_kept=()\n"
+        'for _omarchy_module in "${MODULES[@]}"; do\n'
+        '  [[ " ${_omarchy_absent[*]} " == *" $_omarchy_module "* ]] || _omarchy_kept+=("$_omarchy_module")\n'
+        "done\n"
+        'MODULES=("${_omarchy_kept[@]}")\n'
+        "unset _omarchy_absent _omarchy_kept _omarchy_module\n"
+    )
+
+
 def finalize_limine_boot(ctx: InstallContext) -> None:
     """Finalize Limine after target system setup has written all dynamic
     boot drop-ins (hibernation, hardware quirks, protected-mode ESP settings).
@@ -1363,6 +1415,7 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     if not limine_conf.exists():
         raise RuntimeError(f"{limine_conf} missing")
 
+    _drop_initramfs_modules_the_kernel_lacks(ctx)
     subprocess.run(["arch-chroot", str(ctx.target), "limine-update"], check=True)
 
     subprocess.run(

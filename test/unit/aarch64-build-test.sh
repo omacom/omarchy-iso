@@ -103,6 +103,19 @@ grep -Fq 'pacman -Qqp "$archive"' "$ROOT/builder/build-iso.sh" \
 grep -Fq 'libva-nvidia-driver limine limine-mkinitcpio-hook limine-snapper-sync snapper pciutils' "$ROOT/builder/build-iso.sh" \
   || fail "the offline mirror lacks the Limine/Snapper stack the installer adds"
 
+# --- package sources ---------------------------------------------------------------
+# Arch Linux ARM's packages come from Omarchy's own mirror of them: for the
+# offline mirror, for the build container, and for the installed system.
+servers=$(grep -E '^Server' "$ROOT/configs/pacman-online-aarch64.conf" | grep -v 'file:///packages' | sort -u)
+grep -vq 'omarchy\.org/' <<<"$servers" && fail "an aarch64 build downloads from outside Omarchy: $(grep -v 'omarchy\.org/' <<<"$servers")"
+grep -Fq 'Server = https://arm-mirror.omarchy.org/$arch/$repo' <<<"$servers" || fail "aarch64 builds do not use Omarchy's Arch Linux ARM mirror"
+grep -Fq '>/etc/pacman.d/mirrorlist' "$ROOT/builder/build-iso.sh" || fail "the build container keeps the mirror its image came with"
+grep -Fq '{"url": "https://arm-mirror.omarchy.org/$arch/$repo"}' "$ROOT/configs/airootfs/root/configurator" \
+  || fail "an installed aarch64 system is not pointed at Omarchy's mirror"
+if grep -rn 'mirror\.archlinuxarm\.org' "$ROOT/bin" "$ROOT/builder" "$ROOT/configs" >/dev/null; then
+  fail "something still names Arch Linux ARM's own mirror"
+fi
+
 # --- recovery entry --------------------------------------------------------------
 grep -Fq "grep -qw 'omarchy.n1x_recovery=1' /proc/cmdline" "$ROOT/configs/airootfs/root/.automated_script.sh" \
   || fail "the N1x recovery entry would start the installer"

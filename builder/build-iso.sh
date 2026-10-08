@@ -86,6 +86,13 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   online_pacman_conf=/tmp/pacman-online-aarch64.conf
   sed "s|^Server = file:///packages$|Server = file://$bundle_index|" /configs/pacman-online-aarch64.conf > "$online_pacman_conf"
 
+  # The container image arrives pointed at Arch Linux ARM's own mirrors. Its
+  # packages come from the same place the ISO's do: Omarchy's mirror of them.
+  awk '/^\[core\]$/ { getline server; print server; exit }' "$online_pacman_conf" >/etc/pacman.d/mirrorlist
+  grep -q '^Server = https://[a-z-]*mirror\.omarchy\.org/' /etc/pacman.d/mirrorlist || {
+    echo "ERROR: no Omarchy mirror for [core] in $online_pacman_conf" >&2
+    exit 1
+  }
   pacman --noconfirm -Sy archlinuxarm-keyring
   pacman-key --populate archlinuxarm
   # Arch Linux ARM does not publish archiso. Install its runtime dependencies

@@ -111,7 +111,7 @@ class ConfiguratorMirrorsTest(unittest.TestCase):
         configurator = (ROOT / "configs/airootfs/root/configurator").read_text()
         block = re.search(r"^if \[\[ \$iso_arch == aarch64 \]\]; then\n  limine_efi_binary=.*?^fi$", configurator, re.M | re.S)
         self.assertIsNotNone(block)
-        for arch, first_url in [("aarch64", "http://mirror.archlinuxarm.org/$arch/$repo"),
+        for arch, first_url in [("aarch64", "https://arm-mirror.omarchy.org/$arch/$repo"),
                                 ("x86_64", "https://mirror.omarchy.org/$repo/os/$arch")]:
             with self.subTest(arch=arch):
                 script = (f"iso_arch={arch}\n" + block.group()

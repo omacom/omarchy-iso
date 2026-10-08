@@ -12,8 +12,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      # - name: Set up Docker Buildx
+      #   uses: docker/setup-buildx-action@v3
 
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@v1.3.1
@@ -33,3 +33,4 @@ jobs:
           name: omarchy-iso-${{ github.run_number }}
           path: ./release/*.iso
           retention-days: 1
+          compression-level: 0

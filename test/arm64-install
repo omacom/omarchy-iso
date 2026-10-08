@@ -16,7 +16,8 @@
 #
 # Env: TIMEOUT (seconds for install and first boot, default 1500), SMP (8),
 #      MEM (12G), MACHINE (see test/arm64-live-boot), KERNEL (linux-aarch64),
-#      MIRROR (the Arch Linux ARM mirror the installed system is pointed at).
+#      MIRROR (where the installed system gets Arch Linux ARM's packages:
+#      Omarchy's own mirror of them).
 set -euo pipefail
 [[ $# -eq 2 ]] || { sed -n '2,20p' "$0" >&2; exit 2; }
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -55,12 +56,16 @@ ssh-keygen -q -t ed25519 -N '' -C arm64-install -f "$SSH_KEY"
 eval "$(sed -n '/^build_cidata() {$/,/^  mcopy -i "\$CIDATA_IMG"/p' "$ROOT/test/integration.d/base-test.sh"; echo '}')"
 build_cidata
 answers=$state/cidata/user_configuration.json
-jq --arg kernel "${KERNEL:-linux-aarch64}" --arg mirror "${MIRROR:-http://mirror.archlinuxarm.org/\$arch/\$repo}" '
+jq --arg kernel "${KERNEL:-linux-aarch64}" --arg mirror "${MIRROR:-https://arm-mirror.omarchy.org/\$arch/\$repo}" '
   .omarchy_install.boot.efi_binary = "limine_aa64.efi"
   | .omarchy_install.storage.kernel = $kernel
   | .kernels = [$kernel]
   | .mirror_config.custom_servers = [{url: $mirror}]' "$answers" >"$answers.new"
 mv "$answers.new" "$answers"
+# The live ISO runs cloud-init, and a CIDATA volume is where it looks. This
+# gives the test a way in to the live system, to see why an install stopped.
+printf 'instance-id: arm64-install\nlocal-hostname: archiso\n' >"$state/cidata/meta-data"
+printf '#cloud-config\nusers:\n  - name: root\n    ssh_authorized_keys:\n      - %s\n' "$(cat "$SSH_KEY.pub")" >"$state/cidata/user-data"
 rm -f "$CIDATA_IMG"
 truncate -s 4M "$CIDATA_IMG"
 mkfs.vfat -n CIDATA "$CIDATA_IMG" >/dev/null
@@ -102,9 +107,21 @@ screen() { # file -> the text on the screen
   qmp "{\"execute\":\"screendump\",\"arguments\":{\"filename\":\"$1\",\"format\":\"png\"}}" 2>/dev/null || return 0
   tesseract "$1" - 2>/dev/null | grep -v '^\s*$' || true
 }
-guest() {
-  ssh -i "$SSH_KEY" -p "$port" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 -o LogLevel=ERROR "$GUEST_USER@127.0.0.1" "$@"
+login() { # user, then a command: the live system as root, the installed one as the user
+  ssh -n -i "$SSH_KEY" -p "$port" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 -o LogLevel=ERROR "$1@127.0.0.1" "${@:2}"
+}
+guest() { login "$GUEST_USER" "$@"; }
+live() { login root "$@"; }
+# Why an install stopped: the installer's own log, kept and shown.
+installer_log() {
+  live 'cat /var/log/omarchy-install.log' 2>/dev/null | sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g' >"$out/omarchy-install.log" || true
+  if [[ -s $out/omarchy-install.log ]]; then
+    echo "arm64-install: the installer's log ends:" >&2
+    grep -av '^\s*$' "$out/omarchy-install.log" | tail -n 25 | cut -c1-200 >&2
+  else
+    echo "arm64-install: the live system gave no installer log" >&2
+  fi
 }
 
 # --- install and first boot ------------------------------------------------
@@ -117,7 +134,15 @@ until guest true 2>/dev/null; do
   fi
   if (( elapsed > timeout )); then
     screen "$out/shots/timeout.png" | tail -n 12 >&2
+    installer_log
     echo "arm64-install: no installed system on SSH after $timeout s" >&2; exit 1
+  fi
+  # The installer says so in its log when it stops, and it leaves the live
+  # system up. Without this the wait above runs to its timeout on a dead install.
+  if halted=$(live 'grep -a -m1 -E "Installation halted|installer child exited with status [1-9]" /var/log/omarchy-install.log' 2>/dev/null); then
+    screen "$out/shots/halted.png" >/dev/null
+    installer_log
+    echo "arm64-install: the installer stopped after $elapsed s: $halted" >&2; exit 1
   fi
   if (( ++tick % 2 == 0 )); then
     text=$(screen "$out/shots/$(printf '%04d' "$elapsed").png")
@@ -125,9 +150,6 @@ until guest true 2>/dev/null; do
     if grep -qi 'Reboot Now' <<<"$text"; then
       echo "  $elapsed s: the installer is done; rebooting"
       qmp '{"execute":"send-key","arguments":{"keys":[{"type":"qcode","data":"ret"}]}}'
-    elif grep -qi 'Failed: ' <<<"$text"; then
-      grep -i -A2 'Failed: ' <<<"$text" | head -n 6 >&2
-      echo "arm64-install: the installer stopped after $elapsed s" >&2; exit 1
     fi
   fi
   sleep 10
@@ -143,16 +165,24 @@ check() { # description, then a command run in the guest that must succeed
 {
   check "the system reaches running or degraded" \
     's=$(timeout 180 systemctl is-system-running --wait); [ "$s" = running ] || [ "$s" = degraded ]'
+  check "no unit failed" '[ -z "$(systemctl --failed --no-legend)" ]'
+  check "the desktop is up: Hyprland is running" 'for i in $(seq 1 60); do pgrep -x Hyprland && exit 0; sleep 1; done; exit 1'
   check "it runs the kernel it was told to install" \
     "pacman -Qo /usr/lib/modules/\$(uname -r) | grep -q ' ${KERNEL:-linux-aarch64} '"
-  check "it booted through Limine's unified kernel image" 'ls /boot/EFI/Linux/omarchy_*.efi'
-  check "the Omarchy runtime is installed" "pacman -Q $RUNTIME_PACKAGE"
-  check "Node came from the ISO, for this architecture" 'ls ~/.local/share/mise/installs/node/*/bin/node && ~/.local/share/mise/installs/node/*/bin/node -e "process.exit(process.arch === \"arm64\" ? 0 : 1)"'
   check "the user can use sudo" "echo $GUEST_PASSWORD | sudo -S -p '' true"
+  check "it booted through Limine's unified kernel image" \
+    "echo $GUEST_PASSWORD | sudo -S -p '' sh -c 'ls /boot/EFI/Linux/omarchy_*.efi'"
+  check "the Omarchy runtime is installed" "pacman -Q $RUNTIME_PACKAGE"
+  check "Node came from the ISO, for this architecture" \
+    'node=$(ls ~/.local/share/mise/installs/node/*/bin/node | head -n 1); file -bL "$node" | grep -q aarch64'
+  check "packages come from Omarchy's mirror and nowhere else" \
+    "grep -q '^Server.*omarchy\.org' /etc/pacman.d/mirrorlist && ! grep '^Server' /etc/pacman.d/mirrorlist | grep -vq 'omarchy\.org'"
 } | tee "$out/checks"
 failures=$(grep -c '^not ok' "$out/checks" || true)
 guest 'uname -r; cat /proc/cmdline; systemctl --failed --no-legend; grep -E "^Server" /etc/pacman.d/mirrorlist' >"$out/facts" 2>&1 || true
-guest "echo $GUEST_PASSWORD | sudo -S -p '' cat /var/log/omarchy-install.log" >"$out/omarchy-install.log" 2>/dev/null || true
+ssh -i "$SSH_KEY" -p "$port" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$GUEST_USER@127.0.0.1" "sudo -S -p '' cat /var/log/omarchy-install.log" \
+  <<<"$GUEST_PASSWORD" >"$out/omarchy-install.log" 2>/dev/null || true
 screen "$out/shots/installed.png" >/dev/null
 (( failures == 0 )) || { echo "arm64-install: $failures checks failed" >&2; exit 1; }
 echo "arm64-install: installed, rebooted and checked in $(cut -d= -f2 "$out/timing") s"

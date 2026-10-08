@@ -80,6 +80,15 @@ jobs:
           echo "KVM: $([[ -e /dev/kvm ]] && echo present || echo absent)"
           docker version --format 'docker {{.Server.Version}}' || sudo docker version --format 'docker {{.Server.Version}}'
 
+      # The packages the offline mirror is built from: 3.3 GB that otherwise
+      # come down again on every run. The build prunes what it no longer needs.
+      # Skipped, not failed, on a runner profile without a cache volume.
+      - name: Package cache (Namespace)
+        continue-on-error: true
+        uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1.6.1
+        with:
+          path: ~/.cache/omarchy
+
       - name: Build the ISO
         run: |
           start=$(date +%s)

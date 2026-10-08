@@ -1,0 +1,85 @@
+name: ARM64 ISO
+
+# Builds the generic aarch64 ISO on a native ARM runner: Arch Linux ARM's
+# kernel, the published edge packages, nothing board-specific. This is the
+# image a VM can boot, so it is the one CI can go on to install and test.
+#
+# The push trigger exists while this lives on a branch: a manual run needs the
+# workflow on the default branch first.
+on:
+  push:
+    branches: [arm64-generic]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arm64-iso-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit tests
+    runs-on: namespace-profile-linux-arm64-16x32
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - run: ./test/all
+
+  build:
+    name: Build the generic ISO
+    runs-on: namespace-profile-linux-arm64-16x32
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Runner
+        run: |
+          uname -srm
+          echo "$(nproc) CPUs, $(free -h | awk 'NR==2 {print $2}') memory, $(df -h --output=avail . | tail -1 | tr -d ' ') free disk"
+          echo "LSMs: $(cat /sys/kernel/security/lsm 2>/dev/null || echo unreadable)"
+          echo "KVM: $([[ -e /dev/kvm ]] && echo present || echo absent)"
+          docker version --format 'docker {{.Server.Version}}' || sudo docker version --format 'docker {{.Server.Version}}'
+
+      - name: Build the ISO
+        run: |
+          start=$(date +%s)
+          ./bin/omarchy-iso-make --arch aarch64 --platform generic --edge --no-boot-offer
+          echo "Built in $(( $(date +%s) - start )) s" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Inspect the ISO
+        run: |
+          set -euo pipefail
+          command -v bsdtar >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq libarchive-tools >/dev/null; }
+          iso=$(ls release/*.iso)
+          (cd release && sha256sum "$(basename "$iso")" | tee "$(basename "$iso").sha256")
+          bsdtar -tvf "$iso" >listing.txt
+          # What the firmware starts, what GRUB loads and what the installer installs from.
+          for want in EFI/BOOT/BOOTAA64.EFI arch/boot/aarch64/vmlinuz-linux-aarch64 \
+            arch/boot/aarch64/initramfs-linux-aarch64.img arch/aarch64/airootfs.sfs; do
+            grep -Eiq " $want\$" listing.txt || { echo "::error::$iso has no $want"; exit 1; }
+          done
+          {
+            echo "\`$(basename "$iso")\`, $(( $(stat -c %s "$iso") / 1048576 )) MiB"
+            echo
+            echo '```'
+            grep -E ' (arch/boot/aarch64|EFI/BOOT|arch/aarch64)/[^/]+$' listing.txt | awk '{print $5, $NF}'
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: omarchy-arm64-generic-${{ github.run_number }}
+          path: |
+            release/*.iso
+            release/*.sha256
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error

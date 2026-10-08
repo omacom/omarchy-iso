@@ -1932,26 +1932,44 @@ def _assert_boot_hooks_restored(ctx: InstallContext) -> None:
             raise RuntimeError(f"{path} is missing — future kernel updates would ship no UKI")
 
 
+# Arch's kernel packages leave their pkgbase next to their modules, which is
+# also the name limine-mkinitcpio-hook builds the UKI under. Arch Linux ARM's
+# linux-aarch64 leaves none, so a kernel's module directory without one is
+# named by the kernel this image was built to install. modules.builtin marks
+# a kernel's own directory: a leftover of out-of-tree modules has none.
+def _kernel_directories(ctx: InstallContext) -> list[tuple[Path, str]]:
+    found = []
+    modules = ctx.target / "usr" / "lib" / "modules"
+    for directory in sorted(modules.iterdir()) if modules.is_dir() else []:
+        pkgbase = directory / "pkgbase"
+        if pkgbase.is_file():
+            name = pkgbase.read_text().strip()
+        elif (directory / "modules.builtin").is_file():
+            name = iso_kernel()
+        else:
+            continue
+        if name:
+            found.append((directory, name))
+    return found
+
+
 def _validate_kernel_headers(ctx: InstallContext) -> None:
-    kernels = sorted((ctx.target / "usr/lib/modules").glob("*/pkgbase"))
+    kernels = _kernel_directories(ctx)
     if not kernels:
         raise RuntimeError("no installed kernel found in target")
-    for pkgbase in kernels:
-        release = pkgbase.parent.name
-        header_release = pkgbase.parent / "build/include/config/kernel.release"
+    for directory, name in kernels:
+        release = directory.name
+        header_release = directory / "build/include/config/kernel.release"
         if not header_release.is_file():
-            raise RuntimeError(f"{pkgbase.read_text().strip()} ({release}) has no kernel headers")
+            raise RuntimeError(f"{name} ({release}) has no kernel headers")
         if header_release.read_text().strip() != release:
-            raise RuntimeError(f"{pkgbase.read_text().strip()} headers do not match kernel {release}")
+            raise RuntimeError(f"{name} headers do not match kernel {release}")
 
 
-# Every kernel package leaves its pkgbase next to its modules, which is also
-# the name limine-mkinitcpio-hook builds the UKI under.
 def _installed_kernels(ctx: InstallContext) -> list[str]:
     names = []
-    for pkgbase in sorted((ctx.target / "usr" / "lib" / "modules").glob("*/pkgbase")):
-        name = pkgbase.read_text().strip()
-        if name and name not in names:
+    for _, name in _kernel_directories(ctx):
+        if name not in names:
             names.append(name)
     return names
 

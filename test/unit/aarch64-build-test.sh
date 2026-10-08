@@ -57,7 +57,7 @@ for cfg in grub.cfg loopback.cfg; do
   grep -Fq -- "--id 'n1x-recovery'" "$src" || fail "$cfg lacks the N1x recovery entry"
   grep -Fq 'omarchy.n1x_recovery=1 acpi=nospcr' "$src" || fail "$cfg recovery entry lacks acpi=nospcr"
   source "$ROOT/builder/grub-platform.sh"
-  for platform in "" n1x; do
+  for platform in "" n1x generic; do
     cp "$src" "$fixture/$platform-$cfg"
     configure_grub_platform "$fixture/$platform-$cfg" "$platform"
     sed -i -e 's|%KERNEL%|linux-omarchy-n1x|g' -e 's|%BOOT_SPLASH_KERNEL_OPTIONS%|quiet splash |g' -e 's|%KERNEL_OPTIONS%|console=tty0|g' \
@@ -100,8 +100,42 @@ grep -Fq 'depend = limine-mkinitcpio-hook' "$ROOT/builder/build-iso.sh" \
   && fail "N1x builds still require the aarch64 runtime to depend on Limine"
 grep -Fq 'pacman -Qqp "$archive"' "$ROOT/builder/build-iso.sh" \
   || fail "the offline mirror does not carry every package in the platform bundle"
-grep -Fq 'libva-nvidia-driver limine limine-mkinitcpio-hook limine-snapper-sync snapper pciutils' "$ROOT/builder/build-iso.sh" \
+grep -Fq 'archlinuxarm-keyring limine limine-mkinitcpio-hook limine-snapper-sync snapper pciutils' "$ROOT/builder/build-iso.sh" \
   || fail "the offline mirror lacks the Limine/Snapper stack the installer adds"
+grep -Fq 'platform_packages+=(nvidia-open-dkms nvidia-utils libva-nvidia-driver)' "$ROOT/builder/build-iso.sh" \
+  || fail "the N1x offline mirror lacks the NVIDIA stack the runtime's platform script installs"
+
+# --- generic platform ------------------------------------------------------------
+# The same build without anything board-specific: Arch Linux ARM's kernel, the
+# published packages, no bundle and no NVIDIA stack.
+live="$ROOT/builder/linux-aarch64-live.sh"
+bash -n "$live"
+[[ -x $live ]] || fail "the generic live-kernel script is not executable"
+grep -Fq 'generic) OMARCHY_KERNEL=linux-aarch64 ;;' "$ROOT/bin/omarchy-iso-make" || fail "the generic image does not boot linux-aarch64"
+grep -Fq -- '--package-dir and --dev-ssh are only valid with --platform n1x' "$ROOT/bin/omarchy-iso-make" \
+  || fail "a generic build would accept the N1x bundle or dev key"
+grep -Fq 'install -Dm0755 /builder/linux-aarch64-live.sh "$build_cache_dir/airootfs/root/customize_airootfs.sh"' "$ROOT/builder/build-iso.sh" \
+  || fail "generic builds do not make linux-aarch64 the live kernel"
+grep -Fq 'kernel_options="console=ttyAMA0,115200 console=tty0 initramfs_async=0"' "$ROOT/builder/build-iso.sh" \
+  || fail "a generic image cannot be watched over its serial port"
+grep -Fq "cp -a \"\$image\" /boot/vmlinuz-linux-aarch64" "$live" || fail "mkarchiso would find no kernel to copy"
+grep -Fq "archiso_image='/boot/initramfs-linux-aarch64.img'" "$live" || fail "GRUB would find no live initramfs"
+# Without a bundle the [platform] repo must go: pacman refuses a repo it cannot sync.
+strip=$(grep -F "awk '/^\\[platform\\]$/" "$ROOT/builder/build-iso.sh" | sed -E "s/.*awk '([^']*)'.*/\1/")
+[[ -n $strip ]] || fail "generic builds keep the [platform] repo"
+stripped=$(awk "$strip" "$ROOT/configs/pacman-online-aarch64.conf" | grep -E '^\[' | paste -sd' ')
+[[ $stripped == '[options] [omarchy] [core] [extra] [alarm] [aur]' ]] || fail "generic repositories are wrong: $stripped"
+# The entrypoint's contract, checked by running it up to its first refusal.
+make_refuses() { # expected message, then arguments
+  local want=$1 out; shift
+  out=$(cd "$ROOT" && bash bin/omarchy-iso-make "$@" 2>&1) && fail "omarchy-iso-make $* was accepted"
+  grep -Fq -- "$want" <<<"$out" || fail "omarchy-iso-make $*: expected '$want', got: $out"
+}
+make_refuses 'requires --platform n1x or --platform generic' --arch aarch64 --edge
+make_refuses '--platform must be n1x or generic' --arch aarch64 --platform pi
+make_refuses 'only valid with --platform n1x' --arch aarch64 --platform generic --edge --package-dir "$fixture"
+make_refuses 'builds use the edge channel' --arch aarch64 --platform generic
+make_refuses 'requires --package-dir DIR' --arch aarch64 --platform n1x --edge
 
 # --- package sources ---------------------------------------------------------------
 # Arch Linux ARM's packages come from Omarchy's own mirror of them: for the

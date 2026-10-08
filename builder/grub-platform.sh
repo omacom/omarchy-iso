@@ -12,7 +12,7 @@ configure_grub_platform() {
         -e '/^%NON_N1X_ONLY_BEGIN%$/,/^%NON_N1X_ONLY_END%$/d' \
         "$config"
       ;;
-    "")
+    ""|generic)
       sed -i \
         -e '/^%N1X_ONLY_BEGIN%$/,/^%N1X_ONLY_END%$/d' \
         -e '/^%NON_N1X_ONLY_BEGIN%$/d' \

@@ -19,9 +19,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # On x86, where quattro runs them: the installer tests stage a Node tarball
+  # named for x64, and the code under test looks for the host's architecture.
   unit:
     name: Unit tests
-    runs-on: namespace-profile-linux-arm64-16x32
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
@@ -29,7 +31,7 @@ jobs:
           submodules: recursive
           persist-credentials: false
       # test/all's steps, with the Python tests found from their own directory:
-      # the runner's Python ships a "test" package, which hides test/unit when
+      # Ubuntu's Python ships a "test" package, which hides test/unit when
       # discovery starts from the repository root.
       - run: |
           for t in test/unit/*-test.sh; do echo "==> $t"; bash "$t"; done

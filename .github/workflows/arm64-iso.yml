@@ -89,14 +89,16 @@ jobs:
         with:
           path: ~/.cache/omarchy
 
-      # The Omarchy packages are built from the n1x branches, as the N1x image
-      # builds them: quattro's installer still looks for an x64 Node tarball on
-      # every architecture (install/user/mise-work.sh), so an install from the
-      # published packages stops at "bundled Node.js tarball missing".
+      # The Omarchy packages are built from source, as the N1x image builds
+      # them: the published ones carry no aarch64 pacman configuration, and
+      # until omarchy#14637 reaches edge their installer looks for an x64 Node
+      # tarball on every architecture. omarchy's arm64-generic branch is n1x
+      # plus one line, the installed system's mirrorlist pointed at Omarchy's
+      # own mirror; it goes back to n1x when that line lands there.
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
         with:
           repository: omacom/omarchy
-          ref: n1x
+          ref: arm64-generic
           path: src/omarchy
           fetch-depth: 0
           persist-credentials: false

@@ -1,0 +1,43 @@
+#!/bin/bash
+
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+  echo "Usage: omarchy-iso-torrent <iso-path>" >&2
+  exit 1
+fi
+
+iso=$(realpath -- "$1")
+if [[ ! -f $iso || ! -s $iso || ! -r $iso ]]; then
+  echo "ISO must be a readable, nonempty file: $iso" >&2
+  exit 1
+fi
+
+if ! command -v mktorrent >/dev/null; then
+  echo "mktorrent is required. Install it with: sudo pacman -S mktorrent" >&2
+  exit 1
+fi
+
+name=${iso##*/}
+# Release filenames are URL-safe. Reject other names rather than embedding
+# a URL that requests different bytes from the public host.
+if [[ ! $name =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*\.iso$ ]]; then
+  echo "ISO filename must be URL-safe and end in .iso: $name" >&2
+  exit 1
+fi
+
+# Hash the final release filename, and only replace a previous torrent once
+# generation succeeds. Keep the temporary output on the same filesystem.
+work=$(mktemp -d "${iso}.torrent.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+
+# Follow Arch's trackerless distribution: clients use DHT for peer discovery
+# and the existing HTTPS download as a web seed. Do not mark it private.
+mktorrent -l 21 \
+  -w "https://iso.omarchy.org/$name" \
+  -o "$work/release.torrent" \
+  "$iso"
+
+chmod 644 "$work/release.torrent"
+mv -f -- "$work/release.torrent" "$iso.torrent"
+echo "Torrent: $iso.torrent"

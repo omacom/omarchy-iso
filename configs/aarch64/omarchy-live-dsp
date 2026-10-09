@@ -19,7 +19,7 @@ grep -Fqw 'omarchy.live_dsp=0' /proc/cmdline && skip "disabled on the kernel com
 
 # Keep automatic startup limited to hardware tested with this live sequence.
 [[ -r /proc/device-tree/compatible ]] || skip "no device tree"
-tr '\0' '\n' < /proc/device-tree/compatible | grep -Fxq 'lenovo,yoga-slim7x' ||
+tr '\0' '\n' < /proc/device-tree/compatible | grep -Eq '^(lenovo,yoga-slim7x|asus,zenbook-a16-ux3607oa|qcom,glymur)$' ||
   skip "hardware has not been validated"
 
 [[ $(findmnt -rn -M / -o SOURCE,FSTYPE) == 'airootfs overlay' ]] ||

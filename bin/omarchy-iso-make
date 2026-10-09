@@ -198,8 +198,18 @@ fi
 # purpose. When the socket refuses the calling user, run the client through
 # sudo instead of requiring group membership.
 DOCKER=(docker)
-if ! docker version &>/dev/null; then
-  DOCKER=(sudo docker)
+if command -v docker &>/dev/null; then
+  if ! docker version &>/dev/null; then
+    DOCKER=(sudo docker)
+  fi
+elif command -v podman &>/dev/null; then
+  DOCKER=(podman)
+  if command -v sudo &>/dev/null && sudo -n podman version &>/dev/null; then
+    DOCKER=(sudo podman)
+  fi
+  if [[ $BUILD_IMAGE != */*/* ]]; then
+    BUILD_IMAGE="docker.io/$BUILD_IMAGE"
+  fi
 fi
 
 "${DOCKER[@]}" run "${DOCKER_ARGS[@]}" "$BUILD_IMAGE" /$BUILD_SCRIPT

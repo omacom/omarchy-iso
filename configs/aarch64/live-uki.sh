@@ -47,10 +47,14 @@ for dtb in "${dtbs[@]}"; do
 done
 
 echo "live-uki: wrapping $kernel and $initrd with ${#dtbs[@]} device trees"
+iso_label="OMARCHY_$(date +%Y%m)"
+live_cmdline="archisobasedir=arch archisolabel=${iso_label} initramfs_async=0 clk_ignore_unused pd_ignore_unused cma=128M glymur_pci_skip=5 console=tty0 quiet loglevel=3 audit=0 systemd.mask=dev-tpm0.device systemd.mask=dev-tpmrm0.device modprobe.blacklist=qcom_q6v5_pas plymouth.enable=0"
+
 ukify build \
   --linux="$kernel" \
   --initrd="$initrd" \
   --hwids="$hwids" \
+  --cmdline="$live_cmdline" \
   "${args[@]}" \
   --output="$uki"
 

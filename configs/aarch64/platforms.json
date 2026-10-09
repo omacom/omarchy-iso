@@ -12,6 +12,27 @@
       "kernel_cmdline": []
     },
     {
+      "id": "asus-zenbook-a16",
+      "name": "ASUS Zenbook A16",
+      "media_target": "aarch64/snapdragon",
+      "match": [
+        { "sys_vendor": "ASUS", "product_name": "Zenbook A16 UX3607OA" },
+        { "sys_vendor": "ASUSTeK COMPUTER INC.", "product_name": "Zenbook A16 UX3607OA" }
+      ],
+      "packages": ["linux-firmware-qcom"],
+      "kernel_cmdline": [
+        "clk_ignore_unused",
+        "pd_ignore_unused",
+        "cma=128M",
+        "glymur_pci_skip=5",
+        "console=tty0",
+        "panic=10",
+        "plymouth.enable=0",
+        "systemd.show_status=true",
+        "vt.global_cursor_default=1"
+      ]
+    },
+    {
       "id": "nvidia-dgx-spark",
       "name": "NVIDIA DGX Spark",
       "media_target": "aarch64/generic",

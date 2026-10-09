@@ -147,6 +147,17 @@ class HardwarePlatformsTest(unittest.TestCase):
             hardware.configure_boot(target, entry)
             self.assertFalse(target.exists())
 
+    def test_zenbook_a16_writes_kernel_cmdline_dropin(self):
+        zenbook = next(entry for entry in self.platforms if entry["id"] == "asus-zenbook-a16")
+        target = self.root / "target"
+        hardware.configure_boot(target, zenbook)
+        config_path = target / hardware.BOOT_CONFIG
+        self.assertTrue(config_path.exists())
+        content = config_path.read_text()
+        self.assertIn("clk_ignore_unused", content)
+        self.assertIn("glymur_pci_skip=5", content)
+
+
 
 if __name__ == "__main__":
     unittest.main()

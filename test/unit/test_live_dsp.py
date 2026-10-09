@@ -107,6 +107,12 @@ exit "${DSP_TEST_MODPROBE_STATUS:-0}"
         (self.root / "proc/device-tree/compatible").unlink()
         self.assert_skipped("no device tree")
 
+    def test_zenbook_a16_is_validated(self):
+        self.write("proc/device-tree/compatible", "asus,zenbook-a16-ux3607oa\0qcom,glymur\0")
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "modprobe.calls").read_text(), "-v qcom_q6v5_pas\n")
+
     def test_command_line_can_disable_startup(self):
         self.write("proc/cmdline", "archisobasedir=arch omarchy.live_dsp=0\n")
         self.assert_skipped("disabled on the kernel command line")

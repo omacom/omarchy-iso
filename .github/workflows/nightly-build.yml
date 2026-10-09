@@ -4,7 +4,8 @@ name: Nightly ISO Build
 # installed (the install test), turns that installed disk into a VM image, and
 # publishes it with a latest.json saying what is in it.
 #
-#   edge    the ISO is built here, from quattro and the edge packages
+#   edge    the ISO is built here, from the edge channel: its packages, its
+#           mirrors and the edge builds of Omarchy (omarchy-dev)
 #   stable  the ISO is the last release: omacom/omarchy's latest release names
 #           the version, iso.omarchy.org has the ISO, its signature is checked.
 #           Done once for each release, skipped on the nights after.

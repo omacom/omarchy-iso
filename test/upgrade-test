@@ -192,6 +192,9 @@ check "No migration was skipped ($(a migrations_skipped) skipped)" test "$(a mig
 check "The system came back from the reboot by itself (came back: $rebooted)" test "$rebooted" = yes
 check "It is a new boot (boot ID $(b boot_id) → $(a boot_id))" test -n "$(a boot_id)" -a "$(a boot_id)" != "$(b boot_id)"
 check "It is on the $channel channel (got: $(a channel))" test "$(a channel)" = "$channel"
+# A channel that holds what the machine already had upgrades nothing, and
+# every other check would pass on a machine that was only rebooted.
+check "Omarchy itself changed ($(b omarchy) → $(a omarchy))" test -n "$(a omarchy)" -a "$(a omarchy)" != "$(b omarchy)"
 check "The running kernel is an installed one ($(a kernel))" test "$(a kernel_is_installed)" = yes
 check "systemd reports the system running (got: $(a system_state))" test "$(a system_state)" = running
 failed="$(a failed_units) $(a failed_user_units)"

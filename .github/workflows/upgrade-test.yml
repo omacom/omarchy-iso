@@ -155,20 +155,28 @@ jobs:
           set -euo pipefail
           [ -s evidence/before.png ] || [ -s evidence/after.png ] || { echo "no pictures to commit"; exit 0; }
           url=https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git
+          dir=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT
           git init -q shots && cd shots
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git fetch -q --depth 1 "$url" "$SHOTS_BRANCH" 2>/dev/null; then
-            git checkout -q -b "$SHOTS_BRANCH" FETCH_HEAD
-          else
-            git checkout -q --orphan "$SHOTS_BRANCH"
-          fi
-          dir=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT
-          mkdir -p "$dir"
-          cp ../evidence/*.png "$dir/"
-          git add "$dir"
-          git commit -q -m "Upgrade test $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT: $FROM to $TO"
-          git push -q "$url" "$SHOTS_BRANCH"
+          # Runs on other branches push here too. A push that loses the race
+          # is made again on top of whatever won: the folder is this run's own,
+          # so there is never anything to merge.
+          for attempt in 1 2 3 4 5; do
+            if git fetch -q --depth 1 "$url" "$SHOTS_BRANCH" 2>/dev/null; then
+              git checkout -q -B "$SHOTS_BRANCH" FETCH_HEAD
+            else
+              git checkout -q --orphan "$SHOTS_BRANCH" 2>/dev/null || true
+            fi
+            mkdir -p "$dir"
+            cp ../evidence/*.png "$dir/"
+            git add "$dir"
+            git commit -q -m "Upgrade test $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT: $FROM to $TO"
+            if git push -q "$url" "HEAD:refs/heads/$SHOTS_BRANCH"; then break; fi
+            [ "$attempt" -lt 5 ] || { echo "::error::could not push the pictures after 5 tries"; exit 1; }
+            echo "The push lost a race, trying again"
+            sleep $((attempt * 2))
+          done
           echo "base=https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$(git rev-parse HEAD)/$dir" >>"$GITHUB_OUTPUT"
 
       - name: Write the comment

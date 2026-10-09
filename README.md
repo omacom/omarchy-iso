@@ -6,15 +6,21 @@ The Omarchy ISO is the only supported way to install Omarchy. It ships the Omarc
 
 ## Get Omarchy
 
-Download the ISO from [omarchy.org](https://omarchy.org), write it to a USB stick and boot from it.
+[Download the ISO](https://omarchy.org) and put it on a USB stick, with [balenaEtcher](https://etcher.balena.io/) on Mac or Windows or [caligula](https://github.com/ifd3f/caligula) on Linux. Turn off Secure Boot and/or TPM in the BIOS, boot off the stick, answer the configuration questions and select a drive. The install can be done in under a minute on the fastest modern machines and shouldn't take more than 5 minutes even on an older computer.
 
-Check the download first. Every release ISO has a `.sha256` beside it at the same URL; put both in one directory:
+Check the download before writing it to the stick. Every release ISO has a `.sha256` beside it at the same URL, linked next to the download; put both in one directory:
 
 ```bash
 sha256sum -c omarchy-4.0.4.iso.sha256
 ```
 
 A damaged download otherwise shows up minutes into the install, as a pacman "invalid or corrupted package" error. There is a `.sig` beside the ISO too, for verifying it against the Omarchy signing key.
+
+The manual has the rest:
+
+- [Getting started](https://omarchy.org/manual/getting-started/): the install step by step, installing for another owner, installing without encryption.
+- [Dual-boot install](https://omarchy.org/manual/dual-boot-install/): Omarchy in the free space of a drive, beside Windows or another OS.
+- [Unattended installs](https://omarchy.org/manual/unattended-installs/): the ISO installs itself, with no keyboard and no wizard, from a configuration on a second drive.
 
 ## Try it in a VM
 
@@ -40,68 +46,6 @@ The edge ISO itself is published every night as well:
 ```bash
 curl -fsSL https://nightly.omarchy.org/edge/latest.json | jq -r .url
 ```
-
-## Autoinstall
-
-The shipped ISO installs itself with no keyboard when it finds its configuration on a second drive. Attach a drive labeled `cidata` alongside the ISO and the installer copies the config off it and skips the configurator; with no such drive, nothing changes and the wizard runs as usual. No rebuild, no extra boot entry.
-
-`cidata` is the cloud-init `NoCloud` label, so Proxmox, libvirt, and Packer already know how to attach one.
-
-### Configuration files
-
-These are the configurator's own output files, so the way to get a starting set is to run one interactive install and copy what it wrote into `/root`.
-
-| File | Required | Purpose |
-|------|----------|---------|
-| `user_configuration.json` | Yes | archinstall config: disk, hostname, timezone, keyboard |
-| `user_credentials.json` | Yes | Username and password hash |
-| `user_full_name.txt` | No | Git full name |
-| `user_email_address.txt` | No | Git email |
-| `user_encrypt_installation.txt` | No | `true` when `user_configuration.json` carries a `disk_encryption` block; defaults to false |
-| `authorized_keys` | No | SSH public keys in sshd's own format, one per line |
-| `tailscale_authkey` | No | Tailscale auth key; the machine joins your tailnet on first boot |
-
-Both required files must be present or the installer falls back to the configurator. (A `defer-provisioning` marker file can stand in for `user_credentials.json`: user creation is then deferred to first boot.) Generate the password hash for `user_credentials.json` with `openssl passwd -6 "yourpassword"`.
-
-Encryption itself is configured by the `disk_encryption` block inside `user_configuration.json` — which carries the passphrase in plaintext, so treat a drive built from an encrypted install accordingly. The flag file must match it: it drives the encrypted install's SDDM autologin and the final boot validation, not the encryption.
-
-`authorized_keys` is the same file sshd reads — copy your own or write one key per line:
-
-```
-ssh-ed25519 AAAA... you@host
-```
-
-When `authorized_keys` is present, autoinstall installs it as the user's `~/.ssh/authorized_keys`, enables `sshd`, and adds a `ufw allow ssh` rule — a stock Omarchy install ships openssh with the service disabled and its firewall opens neither port 22 nor anything else beyond LocalSend and Docker's DNS. Networking needs nothing extra; NetworkManager is already enabled with DHCP. Password SSH authentication is left at the distro default. An `authorized_keys` with no keys in it fails the install rather than producing a machine nobody can reach.
-
-When `tailscale_authkey` is present (one key, blank lines and `#` comments ignored), the install adds the `tailscale` package from the ISO's bundled mirror — nothing is fetched from the network at install or boot — and stages the join for first boot: the key lands at `/etc/tailscale/authkey` (root-only), `tailscaled` is enabled, ufw allows traffic in on `tailscale0`, and a background unit runs `tailscale up` once the network is actually up, retrying until it succeeds without holding up the boot. After a successful join the key is deleted and the unit disables itself; until then both survive reboots, so a machine installed offline joins whenever it first gets connectivity. The node appears on the tailnet under the configured hostname. Use a reusable, pre-authorized (tagged) key so one drive image serves many machines — or an ephemeral key for disposable VMs.
-
-### Building the drive
-
-```bash
-mkdir cidata
-cp user_configuration.json user_credentials.json authorized_keys cidata/
-genisoimage -output cidata.iso -volid cidata -joliet -rock cidata/
-```
-
-### Proxmox example
-
-```bash
-qm create 101 --name my-omarchy \
-  --bios ovmf --machine q35 --cpu host --cores 4 --memory 8192 \
-  --ostype l26 --scsihw virtio-scsi-single \
-  --efidisk0 local-lvm:0,efitype=4m,pre-enrolled-keys=0 \
-  --scsi0 local-lvm:40,discard=on,iothread=1 \
-  --net0 virtio,bridge=vmbr0 --vga virtio --serial0 socket \
-  --ide2 local:iso/omarchy.iso,media=cdrom \
-  --ide3 local:iso/cidata.iso,media=cdrom \
-  --boot order='scsi0;ide2'
-
-qm start 101
-```
-
-Boot order is disk first: the empty disk falls through to the ISO on the first boot, and the installed system boots from disk afterwards. The machine reboots into Omarchy on its own when the install finishes.
-
-Encrypted autoinstalls are not fully unattended — the LUKS passphrase prompt still needs someone at the first boot.
 
 ## For maintainers
 
@@ -163,6 +107,70 @@ The version is also in the edge ISO's file name.
 | `vm-boot` | A script that boots the image with QEMU. |
 | `SHA256SUMS` | Checksums of the files above. |
 
+
+### Autoinstall
+
+The [manual's page](https://omarchy.org/manual/unattended-installs/) is the one for users; this is the same feature in full.
+
+The shipped ISO installs itself with no keyboard when it finds its configuration on a second drive. Attach a drive labeled `cidata` alongside the ISO and the installer copies the config off it and skips the configurator; with no such drive, nothing changes and the wizard runs as usual. No rebuild, no extra boot entry.
+
+`cidata` is the cloud-init `NoCloud` label, so Proxmox, libvirt, and Packer already know how to attach one.
+
+#### Configuration files
+
+These are the configurator's own output files, so the way to get a starting set is to run one interactive install and copy what it wrote into `/root`.
+
+| File | Required | Purpose |
+|------|----------|---------|
+| `user_configuration.json` | Yes | archinstall config: disk, hostname, timezone, keyboard |
+| `user_credentials.json` | Yes | Username and password hash |
+| `user_full_name.txt` | No | Git full name |
+| `user_email_address.txt` | No | Git email |
+| `user_encrypt_installation.txt` | No | `true` when `user_configuration.json` carries a `disk_encryption` block; defaults to false |
+| `authorized_keys` | No | SSH public keys in sshd's own format, one per line |
+| `tailscale_authkey` | No | Tailscale auth key; the machine joins your tailnet on first boot |
+
+Both required files must be present or the installer falls back to the configurator. (A `defer-provisioning` marker file can stand in for `user_credentials.json`: user creation is then deferred to first boot.) Generate the password hash for `user_credentials.json` with `openssl passwd -6 "yourpassword"`.
+
+Encryption itself is configured by the `disk_encryption` block inside `user_configuration.json` — which carries the passphrase in plaintext, so treat a drive built from an encrypted install accordingly. The flag file must match it: it drives the encrypted install's SDDM autologin and the final boot validation, not the encryption.
+
+`authorized_keys` is the same file sshd reads — copy your own or write one key per line:
+
+```
+ssh-ed25519 AAAA... you@host
+```
+
+When `authorized_keys` is present, autoinstall installs it as the user's `~/.ssh/authorized_keys`, enables `sshd`, and adds a `ufw allow ssh` rule — a stock Omarchy install ships openssh with the service disabled and its firewall opens neither port 22 nor anything else beyond LocalSend and Docker's DNS. Networking needs nothing extra; NetworkManager is already enabled with DHCP. Password SSH authentication is left at the distro default. An `authorized_keys` with no keys in it fails the install rather than producing a machine nobody can reach.
+
+When `tailscale_authkey` is present (one key, blank lines and `#` comments ignored), the install adds the `tailscale` package from the ISO's bundled mirror — nothing is fetched from the network at install or boot — and stages the join for first boot: the key lands at `/etc/tailscale/authkey` (root-only), `tailscaled` is enabled, ufw allows traffic in on `tailscale0`, and a background unit runs `tailscale up` once the network is actually up, retrying until it succeeds without holding up the boot. After a successful join the key is deleted and the unit disables itself; until then both survive reboots, so a machine installed offline joins whenever it first gets connectivity. The node appears on the tailnet under the configured hostname. Use a reusable, pre-authorized (tagged) key so one drive image serves many machines — or an ephemeral key for disposable VMs.
+
+#### Building the drive
+
+```bash
+mkdir cidata
+cp user_configuration.json user_credentials.json authorized_keys cidata/
+genisoimage -output cidata.iso -volid cidata -joliet -rock cidata/
+```
+
+#### Proxmox example
+
+```bash
+qm create 101 --name my-omarchy \
+  --bios ovmf --machine q35 --cpu host --cores 4 --memory 8192 \
+  --ostype l26 --scsihw virtio-scsi-single \
+  --efidisk0 local-lvm:0,efitype=4m,pre-enrolled-keys=0 \
+  --scsi0 local-lvm:40,discard=on,iothread=1 \
+  --net0 virtio,bridge=vmbr0 --vga virtio --serial0 socket \
+  --ide2 local:iso/omarchy.iso,media=cdrom \
+  --ide3 local:iso/cidata.iso,media=cdrom \
+  --boot order='scsi0;ide2'
+
+qm start 101
+```
+
+Boot order is disk first: the empty disk falls through to the ISO on the first boot, and the installed system boots from disk afterwards. The machine reboots into Omarchy on its own when the install finishes.
+
+Encrypted autoinstalls are not fully unattended — the LUKS passphrase prompt still needs someone at the first boot.
 
 ### Creating the ISO
 

@@ -4,17 +4,85 @@
 
 The Omarchy ISO is the only supported way to install Omarchy. It ships the Omarchy Configurator, installs Arch Linux, installs the Omarchy packages from the bundled mirror, runs target system setup in the chroot, creates the user, and runs `omarchy-setup-user` for that user.
 
-## Downloading the latest ISO
+## What is published, and where
 
-See the ISO link on [omarchy.org](https://omarchy.org).
+| What | Where | When |
+| --- | --- | --- |
+| Release ISO | `https://iso.omarchy.org/omarchy-<version>.iso`, linked from [omarchy.org](https://omarchy.org) | Each release |
+| Edge ISO | `https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.iso` | Every night |
+| VM image of edge | `https://nightly.omarchy.org/edge/<version>/vm/` | Every night |
+| VM image of the last release | `https://nightly.omarchy.org/stable/<version>/<run>/vm/` | Once per release |
 
-Every published ISO has a `.sha256` beside it at the same URL. Download both into the same directory and check the ISO before writing it to a USB stick:
+Nobody has to build those paths: each channel has a `latest.json` that names the newest version and gives the full URLs.
 
-```bash
-sha256sum -c omarchy-3.0.iso.sha256
+```
+https://nightly.omarchy.org/edge/latest.json
+https://nightly.omarchy.org/stable/latest.json
 ```
 
-Corruption anywhere in the ISO is worth catching before the write, and corruption in the bundled package mirror is worth catching most: the mirror lives inside the ISO and the installer reads it straight off the medium, so those bytes surface minutes into the install as a pacman "invalid or corrupted package" error rather than as anything that names the download. Corruption elsewhere is louder and earlier — it stops the medium booting or mounting. There is a `.sig` beside the ISO too for anyone who wants to verify it against the Omarchy signing key.
+A published file is never replaced. Only `latest.json` changes, and it is written last, after everything it points at has been fetched back and compared.
+
+### Release ISO
+
+Every release ISO has a `.sha256` and a `.sig` beside it at the same URL. Download the ISO and its `.sha256` into the same directory and check the ISO before writing it to a USB stick:
+
+```bash
+sha256sum -c omarchy-4.0.4.iso.sha256
+```
+
+Corruption anywhere in the ISO is worth catching before the write, and corruption in the bundled package mirror is worth catching most: the mirror lives inside the ISO and the installer reads it straight off the medium, so those bytes surface minutes into the install as a pacman "invalid or corrupted package" error rather than as anything that names the download. Corruption elsewhere is louder and earlier — it stops the medium booting or mounting. The `.sig` is for anyone who wants to verify the ISO against the Omarchy signing key.
+
+### Nightly builds
+
+The nightly (`.github/workflows/nightly-build.yml`) builds the edge ISO from `quattro` and the edge packages, installs it unattended, boots what it installed, and turns that installed disk into a VM image. It does the same once for each release, from the release ISO. Nothing is published unless the install and the image's checks passed.
+
+### latest.json
+
+| Field | What it is |
+| --- | --- |
+| `version` | Edge: the build's date and run number, `2026.10.09.431`. Stable: the release, `4.0.4`. |
+| `channel` | `edge` or `stable`. |
+| `built_at` | When the image was made, UTC, `2026-10-09T18:02:35Z`. |
+| `url` | The ISO that was installed. Edge: on nightly.omarchy.org. Stable: the release ISO on iso.omarchy.org. |
+| `sha256`, `size` | The ISO's SHA-256 and its size in bytes. |
+| `iso_commit` | The omarchy-iso commit the nightly ran from. |
+| `omarchy_version` | The version of the Omarchy package in the image. |
+| `omarchy_commit` | Edge: the omarchy commit that package was built from. Stable: empty, the version names it. |
+| `kernel` | The kernel release the image boots, as `uname -r` gives it. |
+| `vm.url` | The folder the image's files are in, ending in `/`. |
+| `vm.disk`, `vm.disk_sha256`, `vm.disk_size` | The disk image, `base.qcow2`: its URL, SHA-256 and size in bytes. |
+| `vm.files` | Every file in `vm.url`. |
+| `vm.user`, `vm.password` | The account for the desktop and `sudo`. |
+| `vm.ssh` | How SSH gets in: keys only, never the password. |
+
+The version is also in the edge ISO's file name, for a consumer that reads it from there.
+
+### VM image
+
+A VM image is Omarchy already installed: it boots to the desktop in a few seconds, with no installer to go through. `vm.url` holds:
+
+| File | What it is |
+| --- | --- |
+| `base.qcow2` | The disk, a zstd-compressed qcow2. |
+| `vmlinuz`, `initrd`, `cmdline` | The image's own kernel, initramfs and kernel arguments, for booting it directly without firmware or boot loader. |
+| `OVMF_VARS.4m.fd` | The firmware variables with the installer's boot entry, for booting it through UEFI instead. |
+| `vm-boot` | A script that boots the image with QEMU. |
+| `SHA256SUMS` | Checksums of the files above. |
+
+Every boot is its own machine: a new machine ID and new SSH host keys, and nothing of the build left in the image. To get one and run it, on a machine with QEMU and KVM:
+
+```bash
+latest=https://nightly.omarchy.org/edge/latest.json
+vm=$(curl -fsSL "$latest" | jq -r .vm.url)
+for file in $(curl -fsSL "$latest" | jq -r '.vm.files[]'); do curl -fsSLO "$vm$file"; done
+sha256sum -c SHA256SUMS
+chmod +x vm-boot
+
+./vm-boot .             # boots, prints how to log in, runs until Ctrl-C
+./vm-boot . uname -r    # boots, runs the command over SSH, powers off
+```
+
+`vm-boot` runs the machine on a throwaway overlay, so the downloaded image is never written to, and makes an SSH key for each boot. Its header lists what it needs and the settings it takes.
 
 ## Creating the ISO
 

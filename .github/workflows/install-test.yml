@@ -57,8 +57,16 @@ jobs:
                 printf "#!/bin/sh\nexec /usr/bin/pacman --disable-sandbox \"\$@\"\n" >/usr/local/bin/pacman
                 chmod 0755 /usr/local/bin/pacman
               fi
-              pacman -Syu --noconfirm --needed qemu-system-x86 qemu-hw-display-virtio-gpu qemu-hw-display-virtio-vga qemu-img edk2-ovmf socat \
-                imagemagick tesseract tesseract-data-eng mtools dosfstools jq openssh openssl python curl >/dev/null
+              # The tools come from our own Arch mirror first, the public ones
+              # after it. A mirror that drops one file must not fail the test:
+              # try again.
+              sed -i "1i Server = https://mirror.omarchy.org/\$repo/os/\$arch" /etc/pacman.d/mirrorlist
+              for attempt in 1 2 3; do
+                pacman -Syu --noconfirm --needed qemu-system-x86 qemu-hw-display-virtio-gpu qemu-hw-display-virtio-vga qemu-img edk2-ovmf socat \
+                  imagemagick tesseract tesseract-data-eng mtools dosfstools jq openssh openssl python curl >/dev/null && break
+                [ "$attempt" -lt 3 ] || { echo "::error::the test container could not install its tools"; exit 1; }
+                echo "pacman failed, attempt $attempt of 3; trying again in 15 s"; sleep 15
+              done
               # test/integration installs its tools through Omarchy'"'"'s helper; they are installed above.
               printf "#!/bin/sh\nexit 0\n" >/usr/local/bin/omarchy-pkg-add
               chmod 0755 /usr/local/bin/omarchy-pkg-add

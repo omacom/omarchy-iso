@@ -1,6 +1,7 @@
 #!/bin/bash
-# Single source of truth for validating the root image on the install medium
-# before anything formats a disk.
+# Single source of truth for validating the install medium before anything
+# formats a disk: the offline package mirror the install pacstraps its
+# per-machine packages from, then the root image.
 #
 # The root image is streamed from the boot medium (copytoram is off), so a bad
 # medium must be caught before the full-disk orchestrator hands off to
@@ -19,6 +20,9 @@
 set -uo pipefail
 
 UNIT=omarchy-root-image-verify.service
+MIRROR_UNIT=omarchy-mirror-verify.service
+MIRROR_SUMS=/usr/share/omarchy-iso/offline-mirror.sha256
+MIRROR_DIR=/var/cache/omarchy/mirror/offline
 BOOT_MEDIUM_MOUNT=/run/archiso/bootmnt
 STREAM="$BOOT_MEDIUM_MOUNT/arch/x86_64/omarchy-root.img.zst"
 CHECKSUM="$STREAM.sha256"
@@ -43,23 +47,41 @@ unit_prop() {
   printf '%s\n' "$value"
 }
 
-# How far the hasher has read, as an integer percent: the unit's MainPID is
-# sha256sum while it runs, and its fdinfo pos on the stream is the byte
-# offset (the same source the orchestrator mirrors into the dashboard).
-# Fails silently between opens or once the unit is done; callers just skip
-# that sample.
-hash_pct() {
-  local pid fd pos size
+# Where the unit's hasher is: the file it has open on the medium (the image,
+# or a mirror package) and its byte offset in it, from the fdinfo of the
+# unit's MainPID (sha256sum while it runs; the same source the orchestrator
+# mirrors into the dashboard). Fails silently between opens or once the unit
+# is done; callers just skip that sample.
+hash_where() {
+  local pid fd path pos
   pid=$(systemctl show "$UNIT" -p MainPID --value 2>/dev/null)
   [[ $pid =~ ^[0-9]+$ && $pid -gt 0 ]] || return 1
-  size=$(stat -c %s "$STREAM" 2>/dev/null) || return 1
-  ((size > 0)) || return 1
   for fd in /proc/"$pid"/fd/*; do
-    [[ $(readlink "$fd" 2>/dev/null) == "$STREAM" ]] || continue
+    path=$(readlink "$fd" 2>/dev/null) || continue
+    [[ $path == "$STREAM" || $path == "$MIRROR_DIR"/* ]] || continue
     pos=$(awk '/^pos:/ {print $2; exit}' "/proc/$pid/fdinfo/${fd##*/}" 2>/dev/null)
-    [[ -n $pos ]] && { echo $((pos * 100 / size)); return 0; }
+    [[ -n $pos ]] && { printf '%s\t%s\n' "$path" "$pos"; return 0; }
   done
   return 1
+}
+
+# How far the hasher is, as an integer percent: of the image's bytes, or for
+# the mirror (one package after another, in the sums file's order) the place
+# of the package it has open in that list.
+hash_pct() {
+  local where path pos size line total
+  where=$(hash_where) || return 1
+  path=${where%$'\t'*} pos=${where##*$'\t'}
+  if [[ $path == "$STREAM" ]]; then
+    size=$(stat -c %s "$STREAM" 2>/dev/null) || return 1
+    ((size > 0)) || return 1
+    echo $((pos * 100 / size))
+    return 0
+  fi
+  total=$(grep -c . "$MIRROR_SUMS" 2>/dev/null) || return 1
+  line=$(grep -n -F -- "  ${path##*/}" "$MIRROR_SUMS" | head -n1 | cut -d: -f1)
+  [[ -n $line ]] || return 1
+  echo $(((line - 1) * 100 / total))
 }
 
 # --- boot medium + scheduler (absorbed from omarchy-iso-boot-medium) ---
@@ -81,113 +103,151 @@ if [[ ! -f $STREAM ]]; then
 fi
 [[ -f $CHECKSUM ]] || fail "root image checksum missing: $CHECKSUM"
 
-load_state=$(unit_prop LoadState)
-[[ -n $load_state ]] || fail "systemd is not answering about $UNIT; cannot verify the root image"
-[[ $load_state == loaded ]] || fail "$UNIT is not on this live system; cannot verify the root image"
-
-# inactive -> never started; `systemctl start` blocks until the oneshot exits.
-[[ "$(unit_prop ActiveState)" == inactive ]] &&
-  systemctl start "$UNIT" >/dev/null 2>&1
-
-reported=false
-progress_drawn=false
-settling=0
-unanswered=0
 # The \r progress line needs terminating before anything else writes to the
 # terminal. Only a verified image gets the cosmetic 100%; a failure (which
-# includes a timed-out, unfinished read) just ends the line.
+# includes a timed-out, unfinished read) just ends the line. progress_drawn is
+# await_verdict's.
 finish_progress() {
   [[ $progress_drawn == true ]] || return 0
   [[ ${1:-} == full ]] &&
-    printf '\rverifying the install medium: 100%%' >>"$OMARCHY_VERIFY_PROGRESS" 2>/dev/null
+    printf '\r%s: 100%%' "$label" >>"$OMARCHY_VERIFY_PROGRESS" 2>/dev/null
   printf '\n' >>"$OMARCHY_VERIFY_PROGRESS" 2>/dev/null || true
 }
-while :; do
-  state=$(systemctl show "$UNIT" -p ActiveState --value 2>/dev/null)
-  # An empty answer is systemctl failing, not a unit state: PID 1 did not
-  # reply within D-Bus's 25 s (it can stall on the same dying medium while
-  # it stops the hasher) or the call was interrupted. That is transient, so
-  # ask again rather than report a unit that is mid-stop as never started;
-  # give up only after the wait has clearly outlived any stop.
-  if [[ -z $state ]]; then
-    if ((unanswered < 12)); then
-      unanswered=$((unanswered + 1))
-      sleep 5
-      continue
-    fi
-    finish_progress
-    fail "systemd is not answering about $UNIT; cannot verify the root image"
-  fi
-  unanswered=0
-  case "$state" in
-    active)
-      finish_progress full
-      exit 0
-      ;;
-    failed)
-      finish_progress
-      # Result=timeout: systemd killed the hash at the size-based
-      # TimeoutStartSec the build wrote into the unit (2 MiB/s floor over the
-      # image size). The medium is stalling reads, not returning bad data, so
-      # re-flashing the same stick is not the advice.
-      if [[ "$(unit_prop Result)" == timeout ]]; then
-        fail "install medium is too slow: try another USB stick or port"$'\n'"reading the root image did not finish within its size-based timeout"
-      fi
-      # The dashboard centres each line in ~80 columns, so the action comes
-      # first and on its own line; the journal tail (the hasher's own output)
-      # follows for debugging.
-      msg="install medium is corrupt: re-flash it"$'\n'"sha256 mismatch on the root image"
-      # sha256sum's lines reach the journal through journald's stream and can
-      # land a moment after systemd reports the unit failed. Its last line is
-      # the "WARNING: ..." summary (did NOT match, could not be read), so read
-      # again for up to 2 s until that is there.
-      journalctl --sync >/dev/null 2>&1 || true
-      for _ in {1..10}; do
-        tail=$(journalctl -b -u "$UNIT" _COMM=sha256sum --no-pager -o cat 2>/dev/null)
-        [[ $tail == *"WARNING:"* ]] && break
-        sleep 0.2
-      done
-      [[ -n $tail ]] && msg+=$'\n'"$tail"
-      fail "$msg"
-      ;;
-    activating)
-      if [[ $reported == false ]]; then
-        echo "waiting for $UNIT to finish hashing the root image..."
-        reported=true
-      fi
-      # Opt-in live progress for interactive callers (the free-space
-      # configurator gate): a \r-updating percent line written to the path in
-      # OMARCHY_VERIFY_PROGRESS (normally /dev/tty). Kept out of stdout, which
-      # the orchestrator logs line by line, and stderr, whose first line
-      # headlines the dashboard on failure.
-      if [[ -n ${OMARCHY_VERIFY_PROGRESS:-} ]] && pct=$(hash_pct); then
-        printf '\rverifying the install medium: %3d%%' "$pct" >>"$OMARCHY_VERIFY_PROGRESS" 2>/dev/null || true
-        progress_drawn=true
-      fi
-      sleep 0.5
-      ;;
-    deactivating)
-      # A start timeout stops the unit before it settles into failed, and the
-      # stop is what the medium makes slow: SIGTERM does not land on a read
-      # stuck in the driver. Classifying this state now would answer "did not
-      # run" for the one case the size-based TimeoutStartSec exists to name,
-      # so wait for the terminal state -- bounded past DefaultTimeoutStopSec,
-      # because a read on a dead medium may never be reaped at all.
-      if ((settling < 240)); then
-        settling=$((settling + 1))
-        sleep 0.5
+
+# Wait for one verify unit's verdict: return when it passed, fail() otherwise.
+# $UNIT is global because unit_prop and hash_pct read it.
+await_verdict() {
+  UNIT=$1
+  local what=$2 load_state state tail msg pct
+  local reported=false progress_drawn=false settling=0 unanswered=0
+  local where last_where="" last_move=$SECONDS
+  local label="verifying the install medium"
+  [[ $UNIT == "$MIRROR_UNIT" ]] && label="verifying the install medium's packages"
+  load_state=$(unit_prop LoadState)
+  [[ -n $load_state ]] || fail "systemd is not answering about $UNIT; cannot verify $what"
+  [[ $load_state == loaded ]] || fail "$UNIT is not on this live system; cannot verify $what"
+
+  # inactive -> never started; `systemctl start` blocks until the oneshot exits.
+  [[ "$(unit_prop ActiveState)" == inactive ]] &&
+    systemctl start "$UNIT" >/dev/null 2>&1
+
+  while :; do
+    state=$(systemctl show "$UNIT" -p ActiveState --value 2>/dev/null)
+    # An empty answer is systemctl failing, not a unit state: PID 1 did not
+    # reply within D-Bus's 25 s (it can stall on the same dying medium while
+    # it stops the hasher) or the call was interrupted. That is transient, so
+    # ask again rather than report a unit that is mid-stop as never started;
+    # give up only after the wait has clearly outlived any stop.
+    if [[ -z $state ]]; then
+      if ((unanswered < 12)); then
+        unanswered=$((unanswered + 1))
+        sleep 5
         continue
       fi
       finish_progress
-      fail "install medium is too slow: try another USB stick or port"$'\n'"the root image read could not be stopped after its size-based timeout"
-      ;;
-    reloading|refreshing|maintenance)
-      sleep 0.5
-      ;;
-    *)
-      # inactive after the start above: a condition kept it from running
-      # (the stream or its checksum is not where the unit expects them).
-      fail "$UNIT did not run ($state); cannot verify the root image"
-      ;;
-  esac
-done
+      fail "systemd is not answering about $UNIT; cannot verify $what"
+    fi
+    unanswered=0
+    case "$state" in
+      active)
+        finish_progress full
+        return 0
+        ;;
+      failed)
+        finish_progress
+        # Result=timeout: systemd killed the hash at the size-based
+        # TimeoutStartSec the build wrote into the unit (2 MiB/s floor over the
+        # image size). The medium is stalling reads, not returning bad data, so
+        # re-flashing the same stick is not the advice.
+        if [[ "$(unit_prop Result)" == timeout ]]; then
+          fail "install medium is too slow: try another USB stick or port"$'\n'"reading $what did not finish within its size-based timeout"
+        fi
+        # The dashboard centres each line in ~80 columns, so the action comes
+        # first and on its own line; the journal tail (the hasher's own output)
+        # follows for debugging.
+        msg="install medium is corrupt: re-flash it"$'\n'"sha256 mismatch on $what"
+        # sha256sum's lines reach the journal through journald's stream and can
+        # land a moment after systemd reports the unit failed. Its last line is
+        # the "WARNING: ..." summary (did NOT match, could not be read), so read
+        # again until that is there: for up to 10 s, which only a failed
+        # install waits, because journald can be slow when the hash has filled
+        # a small machine's memory with page cache. The lines are matched by
+        # the unit's cgroup, not by _COMM=sha256sum: journald fills _COMM from
+        # its cached view of the stream's writer, which can be the pre-exec
+        # "(sha256sum)".
+        journalctl --sync >/dev/null 2>&1 || true
+        for _ in {1..50}; do
+          tail=$(journalctl -b _SYSTEMD_UNIT="$UNIT" --no-pager -o cat 2>/dev/null)
+          [[ $tail == *"WARNING:"* ]] && break
+          sleep 0.2
+        done
+        [[ -n $tail ]] && msg+=$'\n'"$tail"
+        fail "$msg"
+        ;;
+      activating)
+        if [[ $reported == false ]]; then
+          echo "waiting for $UNIT to finish hashing $what..."
+          reported=true
+        fi
+        # Opt-in live progress for interactive callers (the free-space
+        # configurator gate): a \r-updating percent line written to the path in
+        # OMARCHY_VERIFY_PROGRESS (normally /dev/tty). Kept out of stdout, which
+        # the orchestrator logs line by line, and stderr, whose first line
+        # headlines the dashboard on failure.
+        if [[ -n ${OMARCHY_VERIFY_PROGRESS:-} ]] && pct=$(hash_pct); then
+          printf '\r%s: %3d%%' "$label" "$pct" >>"$OMARCHY_VERIFY_PROGRESS" 2>/dev/null || true
+          progress_drawn=true
+        fi
+        # A medium that stopped answering stalls the read without failing it,
+        # and the size-based timeout behind it is minutes away: tens of them
+        # for a 4 GB image. When the hasher's offset has not moved for a
+        # minute while an install waits on it, say so now. A slow medium moves
+        # (the slow-medium scenario's 64 KB/s does); a read hung in the driver
+        # does not. No offset to read (between files, /proc gone) is not a
+        # stall: the timeout still stands behind it.
+        if where=$(hash_where); then
+          if [[ $where != "$last_where" ]]; then
+            last_where=$where last_move=$SECONDS
+          elif ((SECONDS - last_move >= ${OMARCHY_VERIFY_STALL_SECONDS:-60})); then
+            finish_progress
+            fail "install medium stopped responding: try another USB stick or port"$'\n'"reading $what made no progress for $((SECONDS - last_move)) s"
+          fi
+        fi
+        sleep 0.5
+        ;;
+      deactivating)
+        # A start timeout stops the unit before it settles into failed, and the
+        # stop is what the medium makes slow: SIGTERM does not land on a read
+        # stuck in the driver. Classifying this state now would answer "did not
+        # run" for the one case the size-based TimeoutStartSec exists to name,
+        # so wait for the terminal state -- bounded past DefaultTimeoutStopSec,
+        # because a read on a dead medium may never be reaped at all.
+        if ((settling < 240)); then
+          settling=$((settling + 1))
+          sleep 0.5
+          continue
+        fi
+        finish_progress
+        fail "install medium is too slow: try another USB stick or port"$'\n'"$what read could not be stopped after its size-based timeout"
+        ;;
+      reloading|refreshing|maintenance)
+        sleep 0.5
+        ;;
+      *)
+        # inactive after the start above: a condition kept it from running
+        # (the stream or its checksum is not where the unit expects them).
+        fail "$UNIT did not run ($state); cannot verify $what"
+        ;;
+    esac
+  done
+}
+
+# The mirror is hashed first (its unit is ordered Before= the image's, so the
+# image is the last thing read before the install writes it); its verdict comes
+# first too. Without the mirror's sums file there is nothing to verify.
+IMAGE_UNIT=$UNIT
+if [[ -f $MIRROR_SUMS ]]; then
+  await_verdict "$MIRROR_UNIT" "the package mirror"
+fi
+await_verdict "$IMAGE_UNIT" "the root image"
+exit 0

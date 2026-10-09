@@ -195,6 +195,11 @@ ROOT_IMAGE_SUBVOLUME = "omarchy-root"
 # waits for the unit if it is still hashing, and starts it if it never ran.
 ROOT_IMAGE_VERIFY_HELPER = "/usr/local/bin/omarchy-wait-root-image-verify"
 ROOT_IMAGE_VERIFY_UNIT = "omarchy-root-image-verify.service"
+# The other half of the medium check: the shipped package mirror, hashed by
+# its own unit (build-iso.sh writes the sums).
+MIRROR_VERIFY_UNIT = "omarchy-mirror-verify.service"
+MIRROR_SUMS = Path("/usr/share/omarchy-iso/offline-mirror.sha256")
+OFFLINE_MIRROR = Path("/var/cache/omarchy/mirror/offline")
 
 
 BOOT_MEDIUM_MOUNT = Path("/run/archiso/bootmnt")
@@ -351,50 +356,117 @@ def verify_root_image_stream(ctx: InstallContext) -> None:
 
 
 def _publish_verify_progress(ctx: InstallContext) -> None:
-    """While the boot-time hasher is still reading the stream, mirror its read
-    position into phase_progress so the dashboard bar tracks the actual hash
-    instead of the phase's time-driven band. Best effort throughout: the
-    helper is the authority on the verdict, and any hiccup here (unit already
-    done, hasher between opens, /proc gone) just skips a sample."""
+    """While the boot-time hashers are still reading the medium, mirror how far
+    they are into phase_progress so the dashboard tracks the actual hash
+    instead of the phase's time-driven band: the package mirror first, then the
+    root image (the order their units run in), as one fraction of the bytes
+    both read. Best effort throughout: the helper is the authority on the
+    verdict, and any hiccup here (unit already done, hasher between opens,
+    /proc gone) just skips a sample."""
     try:
-        total = _root_image_verified().stat().st_size
+        image = _root_image_verified().stat().st_size
     except OSError:
         return
-    while total and _verify_unit_property("ActiveState") == "activating":
+    mirror = _mirror_files()
+    mirror_total = sum(size for _, size in mirror)
+    total = image + mirror_total
+    if mirror:
+        state = _verify_state_when_started(MIRROR_VERIFY_UNIT)
+        while state == "activating":
+            done = _mirror_bytes_hashed(mirror)
+            if done is not None:
+                _write_phase_progress(ctx, done / total)
+            time.sleep(0.5)
+            state = _verify_unit_property("ActiveState", MIRROR_VERIFY_UNIT)
+        # The image's unit starts once the mirror's is done (the mirror's is
+        # ordered Before= it).
+        image_state = _verify_state_when_started(ROOT_IMAGE_VERIFY_UNIT)
+    else:
+        image_state = _verify_unit_property("ActiveState")
+    while image and image_state == "activating":
         pos = _hasher_read_pos()
         if pos is not None:
-            _write_phase_progress(ctx, pos / total)
+            _write_phase_progress(ctx, (mirror_total + pos) / total)
         time.sleep(0.5)
+        image_state = _verify_unit_property("ActiveState")
 
 
-def _verify_unit_property(prop: str) -> str:
+def _verify_state_when_started(unit: str) -> str:
+    """A verify unit's ActiveState, given a moment to leave inactive: one
+    ordered after another sits there until systemd starts its queued job."""
+    for _ in range(10):
+        state = _verify_unit_property("ActiveState", unit)
+        if state != "inactive":
+            return state
+        time.sleep(0.2)
+    return state
+
+
+def _verify_unit_property(prop: str, unit: str = ROOT_IMAGE_VERIFY_UNIT) -> str:
     res = subprocess.run(
-        ["systemctl", "show", ROOT_IMAGE_VERIFY_UNIT, "-p", prop, "--value"],
+        ["systemctl", "show", unit, "-p", prop, "--value"],
         capture_output=True, text=True, check=False,
     )
     return res.stdout.strip()
 
 
-def _hasher_read_pos() -> int | None:
-    """Byte offset of the hasher's open fd on the stream: the unit's MainPID
-    is sha256sum while it runs, and fdinfo's pos is how far it has read."""
-    pid = _verify_unit_property("MainPID")
+def _hasher_positions(unit: str = ROOT_IMAGE_VERIFY_UNIT) -> dict[Path, int]:
+    """Read offset of every file the unit's hasher has open: its MainPID is
+    sha256sum while it runs, and fdinfo's pos is how far it has read."""
+    pid = _verify_unit_property("MainPID", unit)
+    positions: dict[Path, int] = {}
     if not pid.isdigit() or pid == "0":
-        return None
+        return positions
     fd_dir = Path("/proc") / pid / "fd"
     try:
         for fd in fd_dir.iterdir():
             try:
-                if fd.resolve() != _root_image_verified():
-                    continue
+                path = fd.resolve()
                 fdinfo = (fd_dir.parent / "fdinfo" / fd.name).read_text()
             except OSError:
                 continue
             for line in fdinfo.splitlines():
                 if line.startswith("pos:"):
-                    return int(line.split()[1])
+                    positions[path] = int(line.split()[1])
     except OSError:
         pass
+    return positions
+
+
+def _hasher_read_pos() -> int | None:
+    """How far the root image hasher has read the image."""
+    return _hasher_positions().get(_root_image_verified())
+
+
+def _mirror_files() -> list[tuple[Path, int]]:
+    """The files omarchy-mirror-verify.service hashes, in the order it hashes
+    them (the sums file's), with their sizes; empty without a sums file."""
+    files = []
+    try:
+        lines = MIRROR_SUMS.read_text().splitlines()
+    except OSError:
+        return files
+    for line in lines:
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        path = OFFLINE_MIRROR / parts[1].lstrip("*")
+        try:
+            files.append((path.resolve(), path.stat().st_size))
+        except OSError:
+            continue
+    return files
+
+
+def _mirror_bytes_hashed(mirror: list[tuple[Path, int]]) -> int | None:
+    """Bytes of the mirror hashed so far: every file before the one the hasher
+    has open, plus how far into that one it is."""
+    positions = _hasher_positions(MIRROR_VERIFY_UNIT)
+    done = 0
+    for path, size in mirror:
+        if path in positions:
+            return done + positions[path]
+        done += size
     return None
 
 
@@ -612,6 +684,23 @@ def _wait_for_blkid_uuid(device: str, attempts: int = 50) -> None:
     raise RuntimeError(f"blkid still reports an old UUID for {device} after the fsid change (want {want})")
 
 
+SYSFS_BLOCK = Path("/sys/class/block")
+
+
+def _medium_bytes_read() -> int | None:
+    """Bytes the kernel has read from the boot medium's block device so far
+    (sectors read, from /sys/class/block/<dev>/stat), or None when there is no
+    block device to ask (a netboot over NFS, a dev tree)."""
+    source = _findmnt_value(BOOT_MEDIUM_MOUNT, "SOURCE")
+    if not source or not source.startswith("/dev/"):
+        return None
+    try:
+        fields = (SYSFS_BLOCK / Path(source).resolve().name / "stat").read_text().split()
+        return int(fields[2]) * 512
+    except (OSError, IndexError, ValueError):
+        return None
+
+
 def _write_root_image_frames(image: Path, device: str) -> bool:
     """Write the image with omarchy-image-write (builder/omarchy-image-write.c):
     the ISO packs it as independent 256 KiB zstd frames with a seek table,
@@ -703,6 +792,10 @@ def _install_root_image_dd(ctx: InstallContext) -> None:
     with _time_step("F1.umount_target_tree"):
         _umount_tree(target)
 
+    # How much of the image the write had to read off the medium rather than
+    # the page cache: near zero when the verify left it all cached, up to the
+    # whole image on a machine whose RAM could not hold it.
+    medium_before = _medium_bytes_read()
     if ROOT_IMAGE_RAW_ZST.is_file():
         if not _write_root_image_frames(ROOT_IMAGE_RAW_ZST, device):
             _write_root_image_pipe(ROOT_IMAGE_RAW_ZST, device)
@@ -713,6 +806,10 @@ def _install_root_image_dd(ctx: InstallContext) -> None:
                  "conv=sparse,fsync", "oflag=direct", "status=none"],
                 check=True,
             )
+    medium_after = _medium_bytes_read()
+    if medium_before is not None and medium_after is not None:
+        info(f"› read {(medium_after - medium_before) / 1048576:.0f} MiB of the "
+             f"{raw_image.stat().st_size / 1048576:.0f} MiB image off the install medium while writing it")
 
     # -m sets a fresh fsid via the METADATA_UUID feature (kernel 5.0+) by
     # writing the superblocks only; -u rewrites every metadata block of the

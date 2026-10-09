@@ -68,7 +68,8 @@ struct frame {
 
 static const uint8_t *image;
 static struct frame *frames;
-static size_t nframes, max_dsize;
+static size_t *order;		/* the frames in the order they are written */
+static size_t nframes, max_dsize, cached_frames;
 static int target_fd;
 static uint8_t *zero_frame;
 static size_t zero_frame_size;
@@ -142,9 +143,15 @@ static ZSTD_CCtx *pack_cctx(void)
 	return cctx;
 }
 
+/* All zero: the first byte is 0 and every byte equals the next one. */
+static int all_zero(const uint8_t *p, size_t n)
+{
+	return p[0] == 0 && memcmp(p, p + 1, n - 1) == 0;
+}
+
 static int pack(const char *raw, const char *out)
 {
-	size_t size, n, i, tsize, bound = ZSTD_compressBound(FRAME_SIZE);
+	size_t size, n, i, tsize, zeros = 0, packed = 0, bound = ZSTD_compressBound(FRAME_SIZE);
 	const uint8_t *in = map_file(raw, &size, FAILED);
 	ZSTD_CCtx *cctx = pack_cctx();
 	uint8_t *buf = malloc(bound), *table;
@@ -168,6 +175,8 @@ static int pack(const char *raw, const char *out)
 
 		if (ZSTD_isError(c))
 			die(FAILED, "frame %zu: %s", i, ZSTD_getErrorName(c));
+		zeros += all_zero(in + pos, len);
+		packed += c;
 		if (fwrite(buf, 1, c, f) != c)
 			die(FAILED, "%s: %s", out, strerror(errno));
 		put_le32(table + SKIP_HEADER + i * ENTRY, c);
@@ -181,6 +190,8 @@ static int pack(const char *raw, const char *out)
 	put_le32(table + SKIP_HEADER + n * ENTRY + 5, SEEKABLE_MAGIC);
 	if (fwrite(table, 1, tsize, f) != tsize || fclose(f))
 		die(FAILED, "%s: %s", out, strerror(errno));
+	fprintf(stderr, "omarchy-image-write: packed %.2f GiB as %zu frames (%zu zero) into %.2f GiB\n",
+		size / 1073741824.0, n, zeros, (packed + tsize) / 1073741824.0);
 
 	ZSTD_freeCCtx(cctx);
 	free(buf);
@@ -264,12 +275,6 @@ static int is_zero_frame(const struct frame *f)
 	       memcmp(image + f->src, zero_frame, zero_frame_size) == 0;
 }
 
-/* All zero: the first byte is 0 and every byte equals the next one. */
-static int all_zero(const uint8_t *p, size_t n)
-{
-	return p[0] == 0 && memcmp(p, p + 1, n - 1) == 0;
-}
-
 static int pwrite_all(int fd, const uint8_t *p, size_t n, off_t off)
 {
 	while (n) {
@@ -317,6 +322,7 @@ static void *worker(void *arg)
 
 		if (k >= nframes)
 			break;
+		k = order[k];
 		f = &frames[k];
 		if (is_zero_frame(f)) {
 			atomic_fetch_add(&zero_frames, 1);
@@ -360,18 +366,78 @@ static uint64_t target_size(int fd, const char *path)
 	return 0;
 }
 
+/*
+ * The order to write the frames in: the ones whose compressed bytes the page
+ * cache already holds first, then the rest in file order. On a machine whose
+ * RAM cannot hold the whole image, the boot-time verify leaves only part of it
+ * cached; written in file order, the reads of the uncached frames would evict
+ * those pages before their turn came, and the medium would be read twice over.
+ * The uncached frames are then read sequentially, so the kernel reads ahead
+ * and drops each page once it has been decoded.
+ */
+static int frame_cached(const unsigned char *vec, const struct frame *f, size_t page)
+{
+	size_t p = f->src / page, end = (f->src + f->csize + page - 1) / page;
+
+	while (p < end && (vec[p] & 1))
+		p++;
+	return p == end;
+}
+
+/*
+ * Which pages of the image the page cache holds, taken before this tool reads
+ * any of it: reading the seek table faults in its surroundings too (btrfs
+ * reads ahead at least 4 MiB), which says nothing about what the verify left.
+ */
+static unsigned char *cache_snapshot(size_t size)
+{
+	size_t page = sysconf(_SC_PAGESIZE);
+	unsigned char *vec = malloc((size + page - 1) / page);
+
+	if (vec && mincore((void *)image, size, vec) == 0)
+		return vec;
+	free(vec);
+	return NULL;
+}
+
+static void plan_order(size_t size, unsigned char *vec)
+{
+	size_t page = sysconf(_SC_PAGESIZE), k, n = 0;
+
+	order = malloc(nframes * sizeof(*order));
+	if (!order)
+		die(REFUSED, "out of memory");
+	if (vec) {
+		for (k = 0; k < nframes; k++)
+			if (frame_cached(vec, &frames[k], page))
+				order[n++] = k;
+		cached_frames = n;
+		for (k = 0; k < nframes; k++)
+			if (!frame_cached(vec, &frames[k], page))
+				order[n++] = k;
+		madvise((void *)image, size, MADV_SEQUENTIAL);
+	} else {
+		for (k = 0; k < nframes; k++)
+			order[k] = k;
+	}
+	free(vec);
+}
+
 static int write_image(const char *path, const char *target, int threads)
 {
 	pthread_t tid[MAX_THREADS];
 	struct timespec t0, t1;
+	unsigned char *cached;
 	size_t size;
 	off_t total;
 	int i;
 
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	image = map_file(path, &size, REFUSED);
+	cached = cache_snapshot(size);
 	total = read_seek_table(size);
 	encode_zero_frame();
+	plan_order(size, cached);
 
 	/*
 	 * O_DIRECT, so the data goes straight to the drive instead of piling up
@@ -398,9 +464,9 @@ static int write_image(const char *path, const char *target, int threads)
 		die(FAILED, "%s: %s", target, strerror(errno));
 
 	clock_gettime(CLOCK_MONOTONIC, &t1);
-	fprintf(stderr, "omarchy-image-write: wrote %.2f of %.2f GiB (%zu frames, %zu zero, %d threads) in %.2f s\n",
+	fprintf(stderr, "omarchy-image-write: wrote %.2f of %.2f GiB (%zu frames, %zu zero, %zu cached, %d threads) in %.2f s\n",
 		atomic_load(&bytes_written) / 1073741824.0, total / 1073741824.0, nframes,
-		atomic_load(&zero_frames), threads,
+		atomic_load(&zero_frames), cached_frames, threads,
 		(t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9);
 	return 0;
 }

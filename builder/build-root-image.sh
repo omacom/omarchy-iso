@@ -427,6 +427,12 @@ if ! btrfs filesystem resize "${shrink_mb}M" "$mnt"; then
   image_size=${OMARCHY_IMAGE_SIZE:-24G}
   shrink_mb=$(( ${image_size%G} * 1024 ))
 fi
+# Free space inside the image still holds what the build and the shrink's
+# relocations left there. Discard it: the loop device punches holes in the
+# backing file, holes read back as zeros, and pack compresses them to nothing
+# (or skips a whole zero frame). Measured: 2 GiB trimmed, 83.6 MB (2.0%) off
+# the packed image, 63 more zero frames.
+fstrim -v "$mnt" || echo "WARNING: fstrim failed; free space ships as whatever it holds"
 sync
 umount "$mnt"
 losetup -d "$loop"

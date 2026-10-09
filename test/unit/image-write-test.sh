@@ -114,9 +114,42 @@ for threads in 1 3 8; do
   pass "write with $threads threads reproduces the raw image"
 done
 
-grep -q "(11 frames, 2 zero, 8 threads)" "$work/stderr" ||
+grep -q "(11 frames, 2 zero, 11 cached, 8 threads)" "$work/stderr" ||
   fail "write reports what it did" "$(cat "$work/stderr")"
 pass "write reports what it did"
+
+# Frames whose bytes the page cache holds are written first, the rest after.
+# The order must never change what lands on the target, and the count must
+# follow the cache. On a disk-backed directory: tmpfs pages cannot be dropped.
+disk=$(mktemp -d -p /var/tmp)
+trap 'rm -rf "$work" "$disk"' EXIT
+cp "$image" "$disk/image.zst"
+cache() {
+  python3 - "$disk/image.zst" "$1" <<'PY'
+import os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+os.fsync(fd)
+os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+size = os.fstat(fd).st_size
+keep = {"none": 0, "half": size // 2, "all": size}[sys.argv[2]]
+os.pread(fd, keep, size - keep) if keep else None
+PY
+}
+for state in none half all; do
+  cache "$state"
+  target "$work/target" 0
+  run write "$disk/image.zst" "$work/target" 3
+  [[ $status == 0 ]] || fail "write with $state of the image cached succeeds" "$(cat "$work/stderr")"
+  cmp -s "$work/target" "$raw" || fail "write with $state of the image cached reproduces the raw image"
+  cached=$(sed -n 's/.* \([0-9]*\) cached,.*/\1/p' "$work/stderr")
+  case $state in
+    none) ok=$((cached == 0)) ;;
+    half) ok=$((cached > 0 && cached < 11)) ;;
+    all) ok=$((cached == 11)) ;;
+  esac
+  ((ok)) || fail "with $state of the image cached, write counts $cached frames as cached" "$(cat "$work/stderr")"
+  pass "with $state of the image cached, write reproduces the image and counts $cached cached"
+done
 
 # Frames 4-5 decode to zeros and are never written, like dd conv=sparse:
 # whatever the target held there survives. Everything else must match.

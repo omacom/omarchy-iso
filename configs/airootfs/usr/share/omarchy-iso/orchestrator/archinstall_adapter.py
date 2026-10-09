@@ -1,3 +1,7 @@
+# Integration with archinstall (https://github.com/archlinux/archinstall,
+# GPL-3.0-only, by the archinstall contributors): this module subclasses its
+# Installer, patches private methods of it, and follows its guided installer
+# (archinstall/scripts/guided.py). Attribution as omacom/omarchy-iso#202 asks.
 """Thin compatibility wall around the archinstall Python library.
 
 ONLY this module imports from archinstall. Everything else uses these helpers.

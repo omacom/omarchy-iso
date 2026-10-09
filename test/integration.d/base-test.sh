@@ -905,6 +905,18 @@ install_phase() {
     return 1
   fi
 
+  # Everything the boot and the install read off the install medium, as QEMU
+  # counted it at the ISO drive: the number a slow USB stick turns into time.
+  # Read before the VM stops; nothing reads the ISO after the reboot.
+  local medium_bytes
+  medium_bytes=$(qmp '"query-blockstats"' |
+    jq -rs '[.[] | .return? // empty | .[] | select(.device == "cdrom0" or .qdev == "cdrom0")
+             | .stats.rd_bytes] | first // empty' 2>/dev/null)
+  if [[ $medium_bytes =~ ^[0-9]+$ ]]; then
+    echo "$medium_bytes" >"$BASE_DIR/medium-read-bytes.txt"
+    log "Read $((medium_bytes >> 20)) MiB off the install medium during boot and install"
+  fi
+
   log "Installed system is up. Saving base image."
   stop_vm
   mv "$BASE_DISK.building" "$BASE_DISK"

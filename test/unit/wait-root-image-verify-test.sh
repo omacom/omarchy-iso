@@ -28,6 +28,9 @@ check() { # desc, expected_rc, actual_rc, [needle in output], [output]
 # newline-separated ActiveState values `systemctl show ... ActiveState` returns
 # on successive calls (last one repeats); LOADSTATE, START_RC and RESULT (the
 # unit's Result property, exit-code unless overridden) tune the rest.
+# MIRROR_SEQ, when set, ships the mirror's sums file and gives
+# omarchy-mirror-verify.service its own ActiveState sequence (MIRROR_RESULT its
+# Result); without it the sandbox is an ISO without the mirror's sums file.
 run_helper() { # loadstate, active_seq, start_rc, [result]  ->  sets RC and OUT
   local loadstate=$1 active_seq=$2 start_rc=$3 result=${4:-exit-code}
   local box; box=$(mktemp -d)
@@ -49,6 +52,19 @@ run_helper() { # loadstate, active_seq, start_rc, [result]  ->  sets RC and OUT
   echo "none mq-deadline kyber [bfq]" >"$box/sys/block/sdz/queue/scheduler"
   printf '%s\n' "$active_seq" >"$box/active_seq"
   printf '%s\n' "$loadstate" >"$box/load_seq"
+  printf '%s\n' "${MIRROR_SEQ:-inactive}" >"$box/mirror_seq"
+  [[ -n ${MIRROR_SEQ:-} ]] && printf '%s\n' "0000  a.pkg.tar.zst" "0000  b.pkg.tar.zst" \
+    "0000  linux-t2.pkg.tar.zst" "0000  offline.db.tar.gz" >"$box/sums"
+  # WITH_MIRROR_HASHER=1: the mirror hasher (pid 4343) has the third of the
+  # four files open, so the packages line reads 50%.
+  local mirror_pid=0
+  if [[ -n ${WITH_MIRROR_HASHER:-} ]]; then
+    mirror_pid=4343
+    mkdir -p "$box/mirror" "$box/proc/4343/fd" "$box/proc/4343/fdinfo"
+    : >"$box/mirror/linux-t2.pkg.tar.zst"
+    ln -s "$box/mirror/linux-t2.pkg.tar.zst" "$box/proc/4343/fd/5"
+    printf 'pos:\t100\nflags:\t0100000\n' >"$box/proc/4343/fdinfo/5"
+  fi
 
   cat >"$box/bin/findmnt" <<EOF
 #!/bin/bash
@@ -65,6 +81,11 @@ EOF
 #!/bin/bash
 [[ \$1 == --sync ]] && exit 0
 late=\$(cat "$box/journal_late")
+if [[ \$* == *omarchy-mirror-verify* ]]; then
+  echo "linux-t2.pkg.tar.zst: FAILED"
+  echo "sha256sum: WARNING: 1 computed checksum did NOT match"
+  exit 0
+fi
 echo "omarchy-root.img.zst: FAILED"
 if ((late > 0)); then echo \$((late - 1)) >"$box/journal_late"; exit 0; fi
 echo "sha256sum: WARNING: 1 computed checksum did NOT match"
@@ -73,6 +94,19 @@ EOF
   cat >"$box/bin/systemctl" <<EOF
 #!/bin/bash
 box="$box"; start_rc=$start_rc; loadstate="$loadstate"; result="$result"; mainpid=$mainpid
+if [[ \$1 == show && \$* == *omarchy-mirror-verify* ]]; then
+  case "\$*" in
+    *LoadState*)  echo loaded ;;
+    *Result*)     echo "${MIRROR_RESULT:-exit-code}" ;;
+    *MainPID*)    echo $mirror_pid ;;
+    *ActiveState*)
+      mapfile -t seq <"\$box/mirror_seq"
+      echo "\${seq[0]}"
+      if ((\${#seq[@]} > 1)); then printf '%s\n' "\${seq[@]:1}" >"\$box/mirror_seq"; fi
+      ;;
+  esac
+  exit 0
+fi
 if [[ \$1 == show ]]; then
   case "\$*" in
     *LoadState*)
@@ -102,14 +136,17 @@ EOF
   sed -e "s#/run/archiso/bootmnt#$box/medium#g" \
       -e "s#/sys/block#$box/sys/block#g" \
       -e "s#/proc/#$box/proc/#g" \
+      -e "s#/usr/share/omarchy-iso/offline-mirror.sha256#$box/sums#g" \
+      -e "s#/var/cache/omarchy/mirror/offline#$box/mirror#g" \
       "$HELPER" >"$shim"
   chmod +x "$shim"
 
   local progress_env=()
-  [[ -n ${WITH_HASHER_PROC:-} ]] && progress_env=(OMARCHY_VERIFY_PROGRESS="$box/progress")
+  [[ -n ${WITH_HASHER_PROC:-}${WITH_MIRROR_HASHER:-} ]] && progress_env=(OMARCHY_VERIFY_PROGRESS="$box/progress")
 
   set +e
-  OUT=$(PATH="$box/bin:$PATH" OMARCHY_VERIFY_RETRY_SECONDS=0 env "${progress_env[@]}" bash "$shim" 2>&1)
+  OUT=$(PATH="$box/bin:$PATH" OMARCHY_VERIFY_RETRY_SECONDS=0 OMARCHY_VERIFY_STALL_SECONDS="${STALL:-60}" \
+    env "${progress_env[@]}" timeout 120 bash "$shim" 2>&1)
   RC=$?
   set -e
   PROGRESS_OUT=$(cat "$box/progress" 2>/dev/null || true)
@@ -184,6 +221,54 @@ check "unit that will not run fails" 1 "$RC" "did not run" "$OUT"
 # Unit not on this system.
 run_helper not-found "inactive" 0
 check "missing unit fails" 1 "$RC" "not on this live system" "$OUT"
+
+# --- the package mirror -----------------------------------------------------
+
+# Both verified: pass.
+MIRROR_SEQ=active run_helper loaded "active" 0
+check "image and mirror verified passes" 0 "$RC" "" "$OUT"
+
+# The mirror is still hashing when the image is done: wait for it too.
+MIRROR_SEQ=$'activating\nactivating\nactive' run_helper loaded "active" 0
+check "waits for the mirror hash" 0 "$RC" \
+  "waiting for omarchy-mirror-verify.service to finish hashing the package mirror" "$OUT"
+
+# A corrupt package fails the gate before any disk is touched, and says which.
+MIRROR_SEQ=failed run_helper loaded "active" 0
+check "a corrupt mirror package is a corrupt medium" 1 "$RC" "sha256 mismatch on the package mirror" "$OUT"
+[[ $OUT == *"linux-t2.pkg.tar.zst: FAILED"* ]] && echo "ok: the failing package is named" ||
+  { echo "FAIL: the failing package is not named: $OUT"; fails=1; }
+
+# The mirror's own size-based timeout is a slow medium, like the image's.
+MIRROR_SEQ=failed MIRROR_RESULT=timeout run_helper loaded "active" 0
+check "a timed-out mirror hash is a slow medium" 1 "$RC" \
+  "reading the package mirror did not finish within its size-based timeout" "$OUT"
+
+# A mirror unit that will not run fails the gate: the sums are there to be checked.
+MIRROR_SEQ=inactive run_helper loaded "active" 0
+check "a mirror unit that will not run fails" 1 "$RC" "cannot verify the package mirror" "$OUT"
+
+# The free-space gate's progress line names the packages stage on its own.
+WITH_MIRROR_HASHER=1 MIRROR_SEQ=$'activating\nactivating\nactive' run_helper loaded "active" 0
+check "mirror hash with a progress line passes" 0 "$RC" "" "$OUT"
+[[ $PROGRESS_OUT == *"packages:  50%"* && $PROGRESS_OUT == *"packages: 100%"* ]] &&
+  echo "ok: the packages progress shows 50% then 100%" ||
+  { echo "FAIL: packages progress wrong: $(printf '%q' "$PROGRESS_OUT")"; fails=1; }
+
+# A hasher whose offset stops moving while the install waits on it is a medium
+# that stopped answering: say so, rather than wait out the size-based timeout.
+# (The fixture's hasher sits at byte 512 for good.)
+STALL=1 WITH_HASHER_PROC=1 run_helper loaded "activating" 0
+check "a stalled hash is reported" 1 "$RC" "install medium stopped responding" "$OUT"
+
+# The mirror's verdict comes first: a corrupt package fails the gate before
+# the image's verdict is waited for (the image unit here never finishes).
+MIRROR_SEQ=failed run_helper loaded "activating" 0
+check "a corrupt mirror fails before the image is waited for" 1 "$RC" "sha256 mismatch on the package mirror" "$OUT"
+
+# Mirror verified, image corrupt: the image's verdict.
+MIRROR_SEQ=active run_helper loaded "failed" 0
+check "a verified mirror and a corrupt image is a corrupt image" 1 "$RC" "sha256 mismatch on the root image" "$OUT"
 
 [[ $fails -eq 0 ]] && echo "ok: omarchy-wait-root-image-verify gate behaves"
 exit "$fails"

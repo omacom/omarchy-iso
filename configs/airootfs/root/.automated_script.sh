@@ -58,9 +58,9 @@ if [[ ${OMARCHY_INSTALL_DEBUG:-} == "1" ]]; then
 fi
 
 # Warm the page cache for the root image and bundled packages while the user
-# works through the wizard. The install streams a multi-GB root image into
-# btrfs receive and then pacstraps a few packages out of the offline mirror; on media
-# slower than the unpack the install is read-bound and every byte cached here
+# works through the wizard. The install writes a multi-GB root image to the
+# target and then pacstraps a few packages out of the offline mirror; on media
+# slower than the target the install is read-bound and every byte cached here
 # is a byte it never waits for. On faster media this costs nothing but
 # otherwise-idle bandwidth: the medium is untouched while the user types, and
 # the target disk it writes to later is a different device.
@@ -88,12 +88,16 @@ warm_offline_mirror() {
     sleep 1
   done
 
-  # The image first, and only as much of it as fits: btrfs receive reads it
-  # front to back, so the leading bytes are the ones worth having cached.
+  # The image first, and only when all of it fits: a second read of pages
+  # the verify just cached keeps them cached through the install. When it does
+  # not fit, leave the cache alone. omarchy-image-write writes whatever part
+  # of the image is still cached first and reads the rest once; re-reading
+  # the head here, or the mirror after it, would only evict the part the
+  # verify left behind (on a 4 GB machine, most of what was cached).
   if [[ -f $image ]]; then
     size_kb=$(du -k -- "$image" | cut -f1)
-    ((size_kb > budget_kb)) && size_kb=$budget_kb
-    head -c "$((size_kb * 1024))" -- "$image" >/dev/null 2>&1 || true
+    ((size_kb > budget_kb)) && return 0
+    cat -- "$image" >/dev/null 2>&1 || true
     spent_kb=$size_kb
   fi
 

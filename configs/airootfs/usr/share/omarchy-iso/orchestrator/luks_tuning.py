@@ -1,3 +1,6 @@
+# Integration with archinstall (https://github.com/archlinux/archinstall,
+# GPL-3.0-only, by the archinstall contributors): this module patches its Luks2
+# (archinstall/lib/disk/luks.py). Attribution as omacom/omarchy-iso#202 asks.
 """LUKS open tuning for the unattended install, applied to archinstall's
 Luks2 before any encryption happens.
 

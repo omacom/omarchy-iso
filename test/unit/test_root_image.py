@@ -149,7 +149,7 @@ class PublishVerifyProgressTest(unittest.TestCase):
             stream.write_bytes(b"\0" * 4096)
             states = iter(["activating", "active"])
 
-            def unit_property(prop):
+            def unit_property(prop, unit=None):
                 return next(states) if prop == "ActiveState" else str(os.getpid())
 
             fractions = []
@@ -166,6 +166,50 @@ class PublishVerifyProgressTest(unittest.TestCase):
             finally:
                 os.close(fd)
             self.assertEqual(fractions, [0.25])
+
+    def test_mirror_then_image_as_one_fraction(self):
+        # Two 1000-byte packages hashed first (the hasher 500 bytes into the
+        # second), then a 4096-byte image (1024 bytes in): 1500 and then
+        # 2000 + 1024 of 6096 bytes.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp).resolve()
+            stream = tmp / "omarchy-root.img.zst"
+            stream.write_bytes(b"\0" * 4096)
+            mirror = tmp / "mirror"
+            mirror.mkdir()
+            for name in ("a.pkg.tar.zst", "b.pkg.tar.zst"):
+                (mirror / name).write_bytes(b"\1" * 1000)
+            sums = tmp / "offline-mirror.sha256"
+            sums.write_text("00  a.pkg.tar.zst\n00  b.pkg.tar.zst\n")
+            mirror_states = iter(["activating", "active"])
+            image_states = iter(["inactive", "activating", "active"])
+            stage = {"unit": None}
+
+            def unit_property(prop, unit=phases_impl.ROOT_IMAGE_VERIFY_UNIT):
+                if prop == "MainPID":
+                    stage["unit"] = unit
+                    return str(os.getpid())
+                return next(mirror_states if unit == phases_impl.MIRROR_VERIFY_UNIT else image_states)
+
+            fractions = []
+            package = os.open(mirror / "b.pkg.tar.zst", os.O_RDONLY)
+            image = os.open(stream, os.O_RDONLY)
+            try:
+                os.read(package, 500)
+                os.read(image, 1024)
+                with mock.patch.object(phases_impl, "ROOT_IMAGE_RAW_ZST", stream), \
+                     mock.patch.object(phases_impl, "MIRROR_SUMS", sums), \
+                     mock.patch.object(phases_impl, "OFFLINE_MIRROR", mirror), \
+                     mock.patch.object(phases_impl, "_verify_unit_property",
+                                       side_effect=unit_property), \
+                     mock.patch.object(phases_impl, "_write_phase_progress",
+                                       side_effect=lambda ctx, f: fractions.append(f)), \
+                     mock.patch.object(phases_impl.time, "sleep"):
+                    phases_impl._publish_verify_progress(ctx=None)
+            finally:
+                os.close(package)
+                os.close(image)
+            self.assertEqual(fractions, [1500 / 6096, 3024 / 6096])
 
     def test_missing_stream_is_a_no_op(self):
         with mock.patch.object(phases_impl, "ROOT_IMAGE_STREAM",

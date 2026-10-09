@@ -99,6 +99,20 @@ install_from_slow_medium() {
     ((gated += 2))
   done
 
+  # The package mirror is hashed first (its unit runs Before= the image's), so
+  # the gate can be reached while the image's hash has not started yet. Choke
+  # once it has: the timeout under test is the image unit's, counted from its
+  # start; at the boot throttle the mirror takes ~35 s and the image 90+ s.
+  local started=0
+  until [[ $(ssh_live_root "systemctl show -p ActiveState --value $VERIFY_UNIT" 2>/dev/null) == activating ]]; do
+    if ((started >= 120)); then
+      echo "The image's verify unit never started hashing" >&2
+      break
+    fi
+    sleep 1
+    ((started += 1))
+  done
+
   # If the hash already finished, the gate passes legitimately and nothing
   # below tests the timeout; the throttle above is sized to prevent this.
   check "verify unit is still hashing when the medium dies" \

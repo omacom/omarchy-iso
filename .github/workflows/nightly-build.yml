@@ -40,7 +40,7 @@ env:
 jobs:
   build:
     name: Build, install, seal
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-linux-amd64-16x32
     timeout-minutes: 90
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -51,6 +51,14 @@ jobs:
       # a published name is never reused.
       - id: version
         run: echo "version=$(date -u +%Y.%m.%d).${{ github.run_number }}" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Runner
+        run: |
+          uname -srm
+          echo "$(nproc) CPUs, $(free -h | awk 'NR==2 {print $2}') memory"
+          grep -m1 'model name' /proc/cpuinfo || true
+          echo "LSMs: $(cat /sys/kernel/security/lsm 2>/dev/null || echo unreadable)"
+          ls -l /dev/kvm
 
       - name: Check disk space
         run: |
@@ -71,6 +79,12 @@ jobs:
           docker run --rm --device /dev/kvm -v "$PWD:/w" -w /w \
             -e OMARCHY_INTEGRATION_DISK_CACHE=none \
             archlinux:latest bash -euo pipefail -c '
+              # pacman 7 fails every sync on a kernel without Landlock, which
+              # these runners have; builder/build-iso.sh does the same.
+              if ! grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then
+                printf "#!/bin/sh\nexec /usr/bin/pacman --disable-sandbox \"\$@\"\n" >/usr/local/bin/pacman
+                chmod 0755 /usr/local/bin/pacman
+              fi
               pacman -Syu --noconfirm --needed qemu-system-x86 qemu-hw-display-virtio-gpu qemu-hw-display-virtio-vga qemu-img edk2-ovmf socat \
                 imagemagick tesseract tesseract-data-eng mtools dosfstools jq openssh openssl python curl binutils >/dev/null
               # test/integration installs its tools through Omarchy'"'"'s helper; they are installed above.

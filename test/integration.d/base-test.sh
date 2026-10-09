@@ -514,6 +514,12 @@ detect_packages() {
   fi
 }
 
+# The firmware names what it starts on the serial port: the ISO's medium while
+# the installer runs, the installed disk's Limine once the install is over.
+installed_system_started() {
+  grep -aq 'starting Boot.*"Limine"' "$1" 2>/dev/null
+}
+
 install_phase() {
   log "Installing $(basename "$ISO") unattended via cidata (headless)"
 
@@ -576,11 +582,10 @@ install_phase() {
       printf -v progress_name 'success-install-progress-%04ds' "$waited"
       capture_console "$progress_name"
     fi
-    # The firmware names what it starts on the serial port. Once that is the
-    # installed disk's Limine, the install is over and what is being waited
-    # for is the first boot: say so, or a hung first boot reads as a slow
-    # install.
-    if [[ -z $first_boot_at ]] && grep -aq 'starting Boot.*"Limine"' "$RUN_DIR/install-serial.log" 2>/dev/null; then
+    # Once the installed system has started, the install is over and what is
+    # being waited for is the first boot: say so, or a hung first boot reads
+    # as a slow install.
+    if [[ -z $first_boot_at ]] && installed_system_started "$RUN_DIR/install-serial.log"; then
       first_boot_at=$waited
       log "Install finished after about ${waited}s. Waiting for the installed system's first boot."
     fi

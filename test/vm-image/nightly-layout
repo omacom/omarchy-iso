@@ -1,0 +1,98 @@
+#!/bin/bash
+# Lays out what one channel of a nightly run publishes and writes the
+# latest.json that describes it.
+#
+#   nightly-layout <channel> <version> <release> <iso> <sealed_dir> <vm_packages> <out_dir>
+#
+#   release      the path under the site, from nightly-plan
+#   iso          the ISO that was installed
+#   sealed_dir   what vm-seal made
+#   vm_packages  what the sealed image answered to: pacman -Q of its Omarchy
+#                package, pacman -Qo of its kernel's pkgbase, uname -r
+#
+# Env: SITE (https://nightly.omarchy.org), ISO_SITE (https://iso.omarchy.org),
+#      ISO_COMMIT (the omarchy-iso commit, default: HEAD of this checkout).
+#
+# out_dir gets <release>/vm/ with the image, its checksums and vm-boot, and
+# <channel>/latest.json. The edge ISO is published too, next to the image.
+# The released one already has its place: latest.json points there and the
+# ISO stays where it is.
+#
+# The ISO and the image are moved, not copied: they are gigabytes.
+set -euo pipefail
+[[ $# -eq 7 ]] || { sed -n '2,13p' "$0" >&2; exit 2; }
+channel=$1 version=$2 release=$3 iso_file=$4 sealed=$5 packages=$6 out=$7
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+site=${SITE:-https://nightly.omarchy.org}
+iso_site=${ISO_SITE:-https://iso.omarchy.org}
+iso_commit=${ISO_COMMIT:-$(git -C "$here" rev-parse HEAD)}
+fail() { echo "nightly-layout: $*" >&2; exit 1; }
+
+[[ $channel == edge || $channel == stable ]] || fail "'$channel' is not a channel"
+[[ -f $iso_file ]] || fail "no ISO at $iso_file"
+files=(base.qcow2 OVMF_VARS.4m.fd vmlinuz initrd cmdline)
+for file in "${files[@]}"; do
+  [[ -s $sealed/$file ]] || fail "the sealed image has no $file"
+done
+
+omarchy=$(awk '$1 == "omarchy" || $1 == "omarchy-dev" { print $2; exit }' "$packages")
+kernel=$(tail -n 1 "$packages")
+[[ -n $omarchy ]] || fail "$packages names no omarchy package"
+[[ $kernel =~ ^[0-9]+\.[0-9] ]] || fail "$packages does not end with a kernel release"
+# An edge package's version carries the commit it was built from.
+omarchy_commit=$(sed -nE 's/.*\.g([0-9a-f]+)-.*/\1/p' <<<"$omarchy")
+
+dir=$out/$release
+mkdir -p "$dir/vm" "$out/$channel"
+if [[ $channel == edge ]]; then
+  iso=omarchy-$channel-$version.iso
+  iso_url=$site/$release/$iso
+  mv "$iso_file" "$dir/$iso"
+  (cd "$dir" && sha256sum "$iso" >"$iso.sha256")
+  iso_sha256=$(cut -d' ' -f1 "$dir/$iso.sha256") iso_size=$(stat -c %s "$dir/$iso")
+else
+  iso=omarchy-$version.iso
+  [[ ${iso_file##*/} == "$iso" ]] || fail "the released ISO is $iso, not ${iso_file##*/}"
+  iso_url=$iso_site/$iso
+  iso_sha256=$(sha256sum "$iso_file" | cut -d' ' -f1) iso_size=$(stat -c %s "$iso_file")
+fi
+
+for file in "${files[@]}"; do mv "$sealed/$file" "$dir/vm/$file"; done
+cp "$here/vm-boot" "$dir/vm/vm-boot"
+files+=(vm-boot)
+(cd "$dir/vm" && sha256sum "${files[@]}" >SHA256SUMS)
+
+latest=$out/$channel/latest.json
+jq -n \
+  --arg version "$version" --arg channel "$channel" --arg vm "$site/$release/vm" \
+  --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg url "$iso_url" --arg sha256 "$iso_sha256" --argjson size "$iso_size" \
+  --arg iso_commit "$iso_commit" --arg omarchy_version "$omarchy" --arg omarchy_commit "$omarchy_commit" \
+  --arg kernel "$kernel" \
+  --arg disk_sha256 "$(awk '$2 == "base.qcow2" { print $1 }' "$dir/vm/SHA256SUMS")" \
+  --argjson disk_size "$(stat -c %s "$dir/vm/base.qcow2")" \
+  --args '{
+    version: $version, channel: $channel, built_at: $built_at,
+    url: $url, sha256: $sha256, size: $size,
+    iso_commit: $iso_commit, omarchy_version: $omarchy_version, omarchy_commit: $omarchy_commit,
+    kernel: $kernel,
+    vm: {
+      url: "\($vm)/", disk: "\($vm)/base.qcow2", disk_sha256: $disk_sha256, disk_size: $disk_size,
+      files: ($ARGS.positional + ["SHA256SUMS"]),
+      user: "omarchy", password: "omarchy",
+      ssh: "keys only; vm-boot makes one for each boot"
+    }
+  }' "${files[@]}" >"$latest"
+
+# What is about to be published has to say what it should: one value in every
+# field, and checksums that are checksums.
+jq -e --arg channel "$channel" '
+  def one_line: type == "string" and test("^[^\n]+$");
+  def sha: type == "string" and test("^[0-9a-f]{64}$");
+  (.version | one_line) and .channel == $channel
+  and (.url | test("^https://[^\n ]+\\.iso$")) and (.sha256 | sha) and .size > 0
+  and (.iso_commit | test("^[0-9a-f]{40}$"))
+  and (.omarchy_version | one_line) and (.omarchy_commit | test("^[0-9a-f]*$")) and (.kernel | one_line)
+  and (.vm.disk | test("^https://[^\n ]+/vm/base\\.qcow2$")) and (.vm.disk_sha256 | sha) and .vm.disk_size > 0
+' "$latest" >/dev/null || { cat "$latest" >&2; fail "latest.json does not say what it should"; }
+cat "$latest"

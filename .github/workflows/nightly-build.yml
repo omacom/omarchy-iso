@@ -43,12 +43,8 @@ env:
   SITE: https://nightly.omarchy.org
 
 jobs:
-  # Which channels this run makes, under which version, and where each goes.
-  # An edge version is the date and the run number. A stable version is the
-  # release's own, and a release already published is left out of a scheduled
-  # run. Two builds of one release are not the same bytes, so a stable image
-  # also has the run number in its path: a published path is never reused, and
-  # a publish that stopped halfway is simply made again.
+  # Which channels this run makes, under which version, and where each goes:
+  # test/vm-image/nightly-plan decides, from what is fetched here.
   plan:
     name: Plan
     runs-on: ubuntu-24.04
@@ -56,27 +52,17 @@ jobs:
     outputs:
       channels: ${{ steps.plan.outputs.channels }}
     steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+
       - id: plan
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # A run that is started again makes its images again, and they are
-          # not the same bytes: it gets its own number too.
-          build=${{ github.run_number }}
-          [[ ${{ github.run_attempt }} == 1 ]] || build+=.${{ github.run_attempt }}
-          edge=$(date -u +%Y.%m.%d).$build
-          stable=$(gh api repos/omacom/omarchy/releases/latest --jq .tag_name)
-          stable=${stable#v}
-          [[ $stable =~ ^[0-9]+(\.[0-9]+)+$ ]] || { echo "::error::omacom/omarchy's latest release is '$stable', not a version"; exit 1; }
+          release=$(gh api repos/omacom/omarchy/releases/latest --jq .tag_name)
           published=$(curl -fsL "$SITE/stable/latest.json?run=$GITHUB_RUN_ID" | jq -r .version || true)
-          channels=$(jq -cn --arg edge "$edge" '[{channel: "edge", version: $edge, release: "edge/\($edge)"}]')
-          if [[ $GITHUB_EVENT_NAME == schedule && $published == "$stable" ]]; then
-            echo "stable $stable is already published"
-          else
-            channels=$(jq -c --arg stable "$stable" --arg run "$build" \
-              '. + [{channel: "stable", version: $stable, release: "stable/\($stable)/\($run)"}]' <<<"$channels")
-          fi
+          channels=$(./test/vm-image/nightly-plan "$(date -u +%Y.%m.%d)" "${{ github.run_number }}" "${{ github.run_attempt }}" \
+            "$GITHUB_EVENT_NAME" "$release" "$published")
           echo "channels=$channels" | tee -a "$GITHUB_OUTPUT"
 
   build:
@@ -184,47 +170,12 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" test-runs sealed release vm-*.txt 2>/dev/null || true
 
       - name: Lay out the release and describe it
+        env:
+          ISO_COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
+          ./test/vm-image/nightly-layout "$CHANNEL" "$VERSION" "$RELEASE" release/*.iso sealed vm-packages.txt out
           dir=out/$RELEASE
-          mkdir -p "$dir/vm"
-          # The edge ISO is published here. The released one already has its
-          # place, so latest.json points there and it is not uploaded again.
-          if [[ $CHANNEL == edge ]]; then
-            iso=omarchy-$CHANNEL-$VERSION.iso iso_url=$SITE/$RELEASE/$iso
-            mv release/*.iso "$dir/$iso"
-            (cd "$dir" && sha256sum "$iso" >"$iso.sha256")
-            iso_sha256=$(cut -d" " -f1 "$dir/$iso.sha256") iso_size=$(stat -c %s "$dir/$iso")
-          else
-            iso=omarchy-$VERSION.iso iso_url=https://iso.omarchy.org/$iso
-            iso_sha256=$(sha256sum "release/$iso" | cut -d" " -f1) iso_size=$(stat -c %s "release/$iso")
-          fi
-          mv sealed/* "$dir/vm/"
-          cp test/vm-image/vm-boot "$dir/vm/vm-boot"
-          (cd "$dir/vm" && sha256sum base.qcow2 OVMF_VARS.4m.fd vmlinuz initrd cmdline vm-boot >SHA256SUMS)
-
-          omarchy=$(awk '$1 == "omarchy" || $1 == "omarchy-dev" { print $2; exit }' vm-packages.txt)
-          jq -n \
-            --arg version "$VERSION" --arg channel "$CHANNEL" --arg site "$SITE/$RELEASE" --arg iso_url "$iso_url" \
-            --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg sha256 "$iso_sha256" --argjson size "$iso_size" \
-            --arg iso_commit "$GITHUB_SHA" \
-            --arg omarchy_version "$omarchy" --arg omarchy_commit "$(sed -nE "s/.*\.g([0-9a-f]+)-.*/\1/p" <<<"$omarchy")" \
-            --arg kernel "$(tail -n 1 vm-packages.txt)" \
-            --arg disk_sha256 "$(awk '$2 == "base.qcow2" { print $1 }' "$dir/vm/SHA256SUMS")" \
-            --argjson disk_size "$(stat -c %s "$dir/vm/base.qcow2")" \
-            '{
-              version: $version, channel: $channel, built_at: $built_at,
-              url: $iso_url, sha256: $sha256, size: $size,
-              iso_commit: $iso_commit, omarchy_version: $omarchy_version, omarchy_commit: $omarchy_commit,
-              kernel: $kernel,
-              vm: {
-                url: "\($site)/vm/", disk: "\($site)/vm/base.qcow2", disk_sha256: $disk_sha256, disk_size: $disk_size,
-                files: ["base.qcow2", "OVMF_VARS.4m.fd", "vmlinuz", "initrd", "cmdline", "vm-boot", "SHA256SUMS"],
-                user: "omarchy", password: "omarchy",
-                ssh: "keys only; vm-boot makes one for each boot"
-              }
-            }' | tee "out/$CHANNEL/latest.json"
 
           {
             echo "## Nightly $CHANNEL $VERSION"

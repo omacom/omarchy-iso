@@ -535,7 +535,7 @@ install_phase() {
     -device usb-storage,drive=cidata
 
   log "Waiting for the unattended install to finish (timeout ${INSTALL_TIMEOUT}s)"
-  local waited=0 text progress_name
+  local waited=0 text progress_name first_boot_at=""
   while true; do
     # An unattended install reboots on its own; SSH answering means the
     # installed system is up (cidata's authorized_keys enables sshd).
@@ -576,7 +576,21 @@ install_phase() {
       printf -v progress_name 'success-install-progress-%04ds' "$waited"
       capture_console "$progress_name"
     fi
-    ((waited % 30 == 0)) && echo "    ... installing (${waited}s)"
+    # The firmware names what it starts on the serial port. Once that is the
+    # installed disk's Limine, the install is over and what is being waited
+    # for is the first boot: say so, or a hung first boot reads as a slow
+    # install.
+    if [[ -z $first_boot_at ]] && grep -aq 'starting Boot.*"Limine"' "$RUN_DIR/install-serial.log" 2>/dev/null; then
+      first_boot_at=$waited
+      log "Install finished after about ${waited}s. Waiting for the installed system's first boot."
+    fi
+    if ((waited % 30 == 0)); then
+      if [[ -n $first_boot_at ]]; then
+        echo "    ... first boot ($((waited - first_boot_at))s, install took about ${first_boot_at}s)"
+      else
+        echo "    ... installing (${waited}s)"
+      fi
+    fi
 
     sleep 10
     ((waited += 10))

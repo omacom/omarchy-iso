@@ -1,35 +1,320 @@
 name: Nightly ISO Build
 
+# Every night, for two channels: installs an ISO unattended and boots what it
+# installed (the install test), turns that installed disk into a VM image, and
+# publishes it with a latest.json saying what is in it.
+#
+#   edge    the ISO is built here, from the edge channel: its packages, its
+#           mirrors and the edge builds of Omarchy (omarchy-dev)
+#   stable  the ISO is the last release: omacom/omarchy's latest release names
+#           the version, iso.omarchy.org has the ISO, its signature is checked.
+#           Done once for each release, skipped on the nights after.
+#
+#   https://nightly.omarchy.org/<channel>/latest.json
+#   https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.iso
+#   https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.qcow2
+#   https://nightly.omarchy.org/edge/<version>/unpacked/    kernel, initramfs, vm-boot
+#   https://nightly.omarchy.org/stable/<version>/<run>/omarchy-<version>.qcow2
+#   https://nightly.omarchy.org/stable/<version>/<run>/unpacked/
+#
+# Nothing is published unless the ISO installed and the image passed its
+# checks. A version's files are written once and never replaced: the CDN keeps
+# them for a year. Only latest.json changes, and it is written last.
+#
+# No pull_request trigger: this workflow holds the key to the bucket, so it
+# never runs for a fork. To try a change, run it by hand on a branch; that
+# builds and checks everything and publishes nothing.
+
 on:
   schedule:
     - cron: "1 0 * * *" # Daily at 00:01 UTC
-  workflow_dispatch: # Allow manual triggering
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to nightly.omarchy.org (only from quattro)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SITE: https://nightly.omarchy.org
 
 jobs:
-  build-iso:
-    runs-on: ubuntu-latest
+  # Which channels this run makes, under which version, and where each goes:
+  # test/vm-image/nightly-plan decides, from what is fetched here.
+  plan:
+    name: Plan
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      channels: ${{ steps.plan.outputs.channels }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release=$(gh api repos/omacom/omarchy/releases/latest --jq .tag_name)
+          published=$(curl -fsL "$SITE/stable/latest.json?run=$GITHUB_RUN_ID" | jq -r .version || true)
+          channels=$(./test/vm-image/nightly-plan "$(date -u +%Y.%m.%d)" "${{ github.run_number }}" "${{ github.run_attempt }}" \
+            "$GITHUB_EVENT_NAME" "$release" "$published")
+          echo "channels=$channels" | tee -a "$GITHUB_OUTPUT"
 
-      - name: Free Disk Space
-        uses: jlumbroso/free-disk-space@v1.3.1
+  build:
+    name: ${{ matrix.channel }} ${{ matrix.version }}
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.channels) }}
+    runs-on: namespace-profile-linux-amd64-16x32
+    timeout-minutes: 90
+    env:
+      CHANNEL: ${{ matrix.channel }}
+      VERSION: ${{ matrix.version }}
+      RELEASE: ${{ matrix.release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Build ISO
-        run: NO_BOOT_OFFER=1 ./bin/omarchy-iso-make
+      - name: Runner
+        run: |
+          uname -srm
+          echo "$(nproc) CPUs, $(free -h | awk 'NR==2 {print $2}') memory"
+          grep -m1 'model name' /proc/cpuinfo || true
+          echo "LSMs: $(cat /sys/kernel/security/lsm 2>/dev/null || echo unreadable)"
+          ls -l /dev/kvm
 
-      - name: Delete previously uploaded ISO artifact
-        uses: philips-labs/action-delete-artifacts@v1.0.0
+      - name: Check disk space
+        run: |
+          df -h /
+          avail_gb=$(df -BG --output=avail / | tail -1 | tr -dc 0-9)
+          [ "$avail_gb" -ge 50 ] || { echo "::error::only ${avail_gb} GB free, the build, the install test and the image need ~50 GB"; exit 1; }
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: matrix.channel == 'edge'
+
+      # No package cache, on purpose: every package the ISO is made of is
+      # fetched from the mirrors again each night, so one that has gone
+      # missing there fails this build instead of being served from a cache.
+      - name: Build the edge ISO
+        if: matrix.channel == 'edge'
+        run: NO_BOOT_OFFER=1 ./bin/omarchy-iso-make --edge
+
+      # Good only if the signature is the release key's, the one in this repo.
+      - name: Download the released ISO and check its signature
+        if: matrix.channel == 'stable'
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          iso=omarchy-$VERSION.iso
+          curl -fSL --retry 3 -o "release/$iso" "https://iso.omarchy.org/$iso"
+          curl -fsSL --retry 3 -o "release/$iso.sig" "https://iso.omarchy.org/$iso.sig"
+          home=$(mktemp -d)
+          gpg --homedir "$home" --quiet --batch --import builder/omarchy.gpg
+          key=$(gpg --homedir "$home" --batch --with-colons --list-keys | awk -F: '$1 == "fpr" { print $10; exit }')
+          gpg --homedir "$home" --batch --status-fd 1 --verify "release/$iso.sig" "release/$iso" 2>/dev/null |
+            grep -q "^\[GNUPG:\] VALIDSIG $key " || { echo "::error::$iso is not signed by $key"; exit 1; }
+          echo "$iso is signed by $key"
+          rm -rf "$home" "release/$iso.sig"
+
+      # The same install test a pull request gets (install-test.yml), then the
+      # image: the installed disk that test leaves behind, sealed and checked.
+      - name: Install unattended, boot the installed system, seal it
+        run: |
+          sudo chmod 0666 /dev/kvm
+          docker run --rm --device /dev/kvm -v "$PWD:/w" -w /w \
+            -e OMARCHY_INTEGRATION_DISK_CACHE=none \
+            ghcr.io/archlinux/archlinux:latest bash -euo pipefail -c '
+              # pacman 7 fails every sync on a kernel without Landlock, which
+              # these runners have; builder/build-iso.sh does the same.
+              if ! grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then
+                printf "#!/bin/sh\nexec /usr/bin/pacman --disable-sandbox \"\$@\"\n" >/usr/local/bin/pacman
+                chmod 0755 /usr/local/bin/pacman
+              fi
+              # The tools come from our own Arch mirror first, the public ones
+              # after it. A mirror that drops one file must not fail the test:
+              # try again.
+              sed -i "1i Server = https://mirror.omarchy.org/\$repo/os/\$arch" /etc/pacman.d/mirrorlist
+              for attempt in 1 2 3; do
+                pacman -Syu --noconfirm --needed qemu-system-x86 qemu-hw-display-virtio-gpu qemu-hw-display-virtio-vga qemu-img edk2-ovmf socat \
+                  imagemagick tesseract tesseract-data-eng mtools dosfstools jq openssh openssl python curl binutils >/dev/null && break
+                [ "$attempt" -lt 3 ] || { echo "::error::the test container could not install its tools"; exit 1; }
+                echo "pacman failed, attempt $attempt of 3; trying again in 15 s"; sleep 15
+              done
+              # test/integration installs its tools through Omarchy'"'"'s helper; they are installed above.
+              printf "#!/bin/sh\nexit 0\n" >/usr/local/bin/omarchy-pkg-add
+              chmod 0755 /usr/local/bin/omarchy-pkg-add
+              qemu-system-x86_64 --version | head -1
+              ./test/integration release/*.iso boot --no-preview --memory 8192 --timeout 1800
+
+              base=$(ls -d test-runs/*-integration)
+              ./test/vm-image/vm-seal "$base" sealed
+              ./test/vm-image/vm-verify sealed | tee vm-verify.txt
+              ./test/vm-image/vm-boot sealed "pacman -Qq omarchy omarchy-dev 2>/dev/null | xargs pacman -Q; pacman -Qo /usr/lib/modules/\$(uname -r)/pkgbase; uname -r" >vm-packages.txt
+              cat vm-packages.txt
+            '
+
+      # The container ran as root; what it wrote belongs to root until here.
+      - name: Hand the results to the runner's user
+        if: always()
+        run: |
+          mkdir -p test-runs sealed
+          sudo chown -R "$(id -u):$(id -g)" test-runs sealed release vm-*.txt 2>/dev/null || true
+
+      - name: Lay out the release and describe it
+        env:
+          ISO_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ./test/vm-image/nightly-layout "$CHANNEL" "$VERSION" "$RELEASE" release/*.iso sealed vm-packages.txt out
+          dir=out/$RELEASE
+
+          {
+            echo "## Nightly $CHANNEL $VERSION"
+            echo
+            echo "| File | Size |"
+            echo "| --- | ---: |"
+            (cd "$dir" && find . -type f -printf '| `%P` | %s |\n' | sort) | awk -F'|' '{ printf "|%s| %.0f MiB |\n", $2, $3 / 1048576 }'
+            echo
+            echo '```'
+            cat vm-verify.txt
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the release for the publish job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          workflow: nightly-build.yml
-        continue-on-error: true
+          name: nightly-${{ matrix.channel }}-${{ github.run_id }}
+          path: out/
+          compression-level: 0
+          retention-days: 2
+          if-no-files-found: error
 
-      - name: Upload newly built ISO artifact
-        uses: actions/upload-artifact@v4
+      - name: Keep the install test's logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: omarchy-iso-${{ github.run_number }}
-          path: ./release/*.iso
-          retention-days: 1
+          name: nightly-install-test-${{ matrix.channel }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-runs/*/omarchy-install-timing.json
+            test-runs/*/omarchy-install.log
+            test-runs/*/first-boot-systemd-analyze.txt
+            test-runs/*/runs/**/*.png
+            test-runs/*/runs/**/*.txt
+            test-runs/*/runs/**/*.json
+            test-runs/*/runs/**/*.log
+            vm-verify.txt
+            vm-packages.txt
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # The only job that holds the bucket's key, and it builds nothing: it copies
+  # what the job above made, checks what the CDN then serves, and only then
+  # points latest.json at it.
+  # One channel failing does not hold back the other: each is published if
+  # its own build left a release behind.
+  publish:
+    name: Publish ${{ matrix.channel }}
+    needs: [plan, build]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/quattro' && (github.event_name == 'schedule' || inputs.publish) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.channels) }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    environment: nightly
+    # actions: read is for finding and fetching the build job's artifact.
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CHANNEL: ${{ matrix.channel }}
+      VERSION: ${{ matrix.version }}
+      RELEASE: ${{ matrix.release }}
+      RCLONE_CONFIG_R2_TYPE: s3
+      RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+      RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      RCLONE_CONFIG_R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      BUCKET: omarchy-nightly
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: test/vm-image
+          persist-credentials: false
+
+      # Not the download action: GitHub's storage limits each connection to a
+      # few megabytes a second, and the action took 10 minutes over 4.6 GB.
+      # nightly-fetch takes the same artifact over 16 connections.
+      - name: Fetch the release from the build job
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Not /tmp: on Ubuntu 26.04 it is held in memory, and the zip is
+          # gigabytes.
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          df -h "$TMPDIR" .
+          command -v aria2c unzip >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq aria2 unzip >/dev/null; }
+          ./test/vm-image/nightly-fetch "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "nightly-$CHANNEL-$GITHUB_RUN_ID" out
+
+      # A current rclone, by version and checksum. Ubuntu's is 1.60 from 2022:
+      # with it R2 answered every first upload "501 Not Implemented", though
+      # it had stored the file, and the publish only passed on rclone's retry.
+      # 1.60 sends "x-amz-acl: private" with each upload; current rclone does
+      # not send it to Cloudflare.
+      - name: rclone
+        env:
+          RCLONE_VERSION: v1.75.2
+          RCLONE_SHA256: efbfe852181f7191eb3c9043ed1ab49c9b2d0ba045c61c926a5da111c939ec5c
+        run: |
+          set -euo pipefail
+          [ -n "$RCLONE_CONFIG_R2_ACCESS_KEY_ID" ] || { echo "::error::the nightly environment has no bucket key"; exit 1; }
+          curl -fsSL --retry 3 -o rclone.deb "https://github.com/rclone/rclone/releases/download/$RCLONE_VERSION/rclone-$RCLONE_VERSION-linux-amd64.deb"
+          echo "$RCLONE_SHA256  rclone.deb" | sha256sum -c -
+          sudo dpkg -i rclone.deb >/dev/null
+          rclone version | head -1
+
+      # --immutable: a name that exists with other bytes is an error, not an
+      # overwrite.
+      # nightly-rclone is rclone, with a warning on the run's page when an
+      # upload only passed on a retry: the files are compared afterwards either
+      # way, but it should not go unnoticed again.
+      - name: Upload this version
+        run: |
+          ./test/vm-image/nightly-rclone copy "out/$RELEASE" "r2:$BUCKET/$RELEASE" \
+            --immutable --s3-no-check-bucket --transfers 8 --s3-upload-concurrency 8 --s3-chunk-size 64M --stats 30s --stats-one-line
+
+      # Fetched the way a user fetches them. It proves what is served, and it
+      # is the first request the CDN sees for each file.
+      - name: Check what the CDN serves
+        run: |
+          set -euo pipefail
+          dir=out/$RELEASE
+          check() { # url, expected sha256
+            got=$(curl -fsSL --retry 3 "$1" | sha256sum | cut -d" " -f1)
+            [ "$got" = "$2" ] || { echo "::error::$1 serves $got, expected $2"; exit 1; }
+            echo "ok $1"
+          }
+          # Every file of the version, the checksum files too.
+          (cd "$dir" && find . -type f -printf '%P\n' | sort) >files.txt
+          [ -s files.txt ] || { echo "::error::nothing to check under $dir"; exit 1; }
+          while read -r file; do
+            check "$SITE/$RELEASE/$file" "$(sha256sum "$dir/$file" | cut -d" " -f1)"
+          done <files.txt
+          echo "$(wc -l <files.txt) files published and checked"
+
+      - name: Point latest.json at it
+        run: |
+          ./test/vm-image/nightly-rclone copyto "out/$CHANNEL/latest.json" "r2:$BUCKET/$CHANNEL/latest.json" --s3-no-check-bucket
+          served=$(curl -fsSL "$SITE/$CHANNEL/latest.json?run=$GITHUB_RUN_ID" | jq -r .version)
+          [ "$served" = "$VERSION" ] || { echo "::error::latest.json serves version $served, expected $VERSION"; exit 1; }
+          echo "Published [$VERSION]($SITE/$CHANNEL/latest.json)" >>"$GITHUB_STEP_SUMMARY"

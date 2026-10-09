@@ -166,7 +166,7 @@ if ! docker version &>/dev/null; then
   DOCKER=(sudo docker)
 fi
 
-"${DOCKER[@]}" run "${DOCKER_ARGS[@]}" archlinux/archlinux:latest /$BUILD_SCRIPT
+"${DOCKER[@]}" run "${DOCKER_ARGS[@]}" ghcr.io/archlinux/archlinux:latest /$BUILD_SCRIPT
 
 latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*.iso | head -n1)
 iso_ref="${latest_iso%.*}-$OMARCHY_ISO_REF.iso"

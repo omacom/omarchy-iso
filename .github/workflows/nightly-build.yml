@@ -61,7 +61,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          edge=$(date -u +%Y.%m.%d).${{ github.run_number }}
+          # A run that is started again makes its images again, and they are
+          # not the same bytes: it gets its own number too.
+          build=${{ github.run_number }}
+          [[ ${{ github.run_attempt }} == 1 ]] || build+=.${{ github.run_attempt }}
+          edge=$(date -u +%Y.%m.%d).$build
           stable=$(gh api repos/omacom/omarchy/releases/latest --jq .tag_name)
           stable=${stable#v}
           [[ $stable =~ ^[0-9]+(\.[0-9]+)+$ ]] || { echo "::error::omacom/omarchy's latest release is '$stable', not a version"; exit 1; }
@@ -70,7 +74,7 @@ jobs:
           if [[ $GITHUB_EVENT_NAME == schedule && $published == "$stable" ]]; then
             echo "stable $stable is already published"
           else
-            channels=$(jq -c --arg stable "$stable" --arg run "${{ github.run_number }}" \
+            channels=$(jq -c --arg stable "$stable" --arg run "$build" \
               '. + [{channel: "stable", version: $stable, release: "stable/\($stable)/\($run)"}]' <<<"$channels")
           fi
           echo "channels=$channels" | tee -a "$GITHUB_OUTPUT"

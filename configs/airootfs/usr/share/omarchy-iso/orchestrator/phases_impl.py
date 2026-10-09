@@ -235,11 +235,7 @@ def arch_install_system(ctx: InstallContext) -> None:
         if not pre_mounted:
             installer.mount_ordered_layout()
 
-        installer.sanity_check(
-            offline=True,
-            skip_ntp=True,
-            skip_wkd=True,
-        )
+        arch.sanity_check(installer)
 
         if not pre_mounted and arch.is_encrypted(config):
             installer.generate_key_files()
@@ -269,7 +265,16 @@ def arch_install_system(ctx: InstallContext) -> None:
                 pacman_config=config.pacman_config,
             )
 
-            if not configure_keyboard(installer.target, kb_layout):
+            # Headers are optional kernel dependencies. Install them before any
+            # DKMS package so generic installs have them too, and module builds
+            # use the target kernel instead of the live ISO's kernel.
+            installer.add_additional_packages([f"{kernel}-headers" for kernel in config.kernels])
+
+            if not configure_keyboard(
+                installer.target, kb_layout,
+                ctx.omarchy_install.get("input_method"),
+                ctx.omarchy_install.get("input_xkb_layout", ""),
+            ):
                 error(f"Invalid keyboard language specified: {kb_layout}")
 
             if config.mirror_config:
@@ -868,7 +873,7 @@ def verify_protected_mounts(ctx: InstallContext) -> None:
         esp_mp.mkdir(parents=True, exist_ok=True)
         subprocess.run(["mount", esp_dev, str(esp_mp)], check=True)
 
-    info(f"› protected target verified: kernel={storage.get('kernel', 'linux')} esp={boot['esp_mount']}")
+    info(f"› protected target verified: kernel={storage.get('kernel', 'linux-omarchy')} esp={boot['esp_mount']}")
 
 
 def _is_mountpoint(path: Path) -> bool:
@@ -1724,6 +1729,7 @@ def _tailscale_authkey(path: Path) -> str:
 
 def validate_boot(ctx: InstallContext) -> None:
     _assert_boot_hooks_restored(ctx)
+    _validate_kernel_headers(ctx)
 
     boot = _boot_intent(ctx)
     storage = _storage_intent(ctx)
@@ -1746,7 +1752,7 @@ def validate_boot(ctx: InstallContext) -> None:
     default_limine = ctx.target / "etc" / "default" / "limine"
     config_text = _limine_combined_config_text(ctx, default_limine.read_text())
     uki_prefix = _limine_setting(config_text, "CUSTOM_UKI_NAME", "omarchy") or "omarchy"
-    kernel = storage.get("kernel") or (ctx.user_configuration.get("kernels") or ["linux"])[0]
+    kernel = storage.get("kernel") or (ctx.user_configuration.get("kernels") or ["linux-omarchy"])[0]
 
     if arch.has_uefi():
         limine_binary = esp_mount / boot.get("esp_path", "/EFI/limine").lstrip("/") / boot.get("efi_binary", "limine_x64.efi")
@@ -1820,6 +1826,19 @@ def _assert_boot_hooks_restored(ctx: InstallContext) -> None:
         # must be on disk again now.
         if not path.is_file():
             raise RuntimeError(f"{path} is missing — future kernel updates would ship no UKI")
+
+
+def _validate_kernel_headers(ctx: InstallContext) -> None:
+    kernels = sorted((ctx.target / "usr/lib/modules").glob("*/pkgbase"))
+    if not kernels:
+        raise RuntimeError("no installed kernel found in target")
+    for pkgbase in kernels:
+        release = pkgbase.parent.name
+        header_release = pkgbase.parent / "build/include/config/kernel.release"
+        if not header_release.is_file():
+            raise RuntimeError(f"{pkgbase.read_text().strip()} ({release}) has no kernel headers")
+        if header_release.read_text().strip() != release:
+            raise RuntimeError(f"{pkgbase.read_text().strip()} headers do not match kernel {release}")
 
 
 # Every kernel package leaves its pkgbase next to its modules, which is also

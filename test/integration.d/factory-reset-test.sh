@@ -165,7 +165,7 @@ drive_first_boot() {
   # first-boot greeter on its own. A numeric default_entry pointing at a
   # moved entry parks Limine at the menu instead — catch that explicitly,
   # then boot the Omarchy entry by hand so the rest of the flow still runs.
-  if wait_for_screen "Opinionated" 120 2>/dev/null; then
+  if wait_for_screen "Linux by DHH" 120 2>/dev/null; then
     printf 'ok - %s\n' "the machine boots into first-boot setup unattended"
   else
     if ocr_screen | grep -qi "Omarchy Bootloader"; then
@@ -175,7 +175,7 @@ drive_first_boot() {
       log "Selecting the Omarchy entry manually to continue the run"
       press down; sleep 1; press down; sleep 1; press down; sleep 1
       press ret
-      wait_for_screen "Opinionated" 600
+      wait_for_screen "Linux by DHH" 600
     else
       echo "Neither the greeter nor the Limine menu appeared" >&2
       return 1

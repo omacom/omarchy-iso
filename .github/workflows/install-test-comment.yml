@@ -1,0 +1,118 @@
+name: Install test comment
+
+# Posts the install test's numbers on the pull request as one comment, kept
+# up to date on every run, next to quattro's latest numbers. GitHub runs
+# workflow_run workflows from the default branch, with write access even for
+# pull requests from forks, so this job never checks out or runs pull request
+# code: it only reads the finished run's artifact, as data.
+
+on:
+  workflow_run:
+    workflows: ["Install test"]
+    types: [completed]
+
+permissions:
+  actions: read
+  pull-requests: write
+
+jobs:
+  comment:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+    steps:
+      # A rerun keeps earlier attempts' artifacts under the same run, so take
+      # exactly the attempt that finished (and the baseline's latest attempt).
+      - name: Fetch this run's numbers and quattro's latest
+        env:
+          ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          gh run download "$RUN_ID" -R "$REPO" -n "install-test-$RUN_ID-$ATTEMPT" -D pr || true
+          base=$(gh run list -R "$REPO" --workflow install-test.yml --branch quattro --event push \
+            --status success -L 1 --json databaseId -q '.[0].databaseId')
+          if [ -n "$base" ]; then
+            base_attempt=$(gh api "repos/$REPO/actions/runs/$base" -q .run_attempt)
+            gh run download "$base" -R "$REPO" -n "install-test-$base-$base_attempt" -D base || true
+          fi
+
+      - name: Comment on the pull request
+        run: |
+          set -euo pipefail
+          marker='<!-- omarchy-install-test -->'
+
+          # The number comes from the pull request's own run, so trust it only
+          # when that pull request's head is the commit this run tested.
+          pr=$({ find pr -name pr-number -exec cat {} + 2>/dev/null || true; } | head -1 | tr -dc 0-9)
+          [ -n "$pr" ] || { echo "No pull request number in the artifact"; exit 0; }
+          [ "$(gh api "repos/$REPO/pulls/$pr" -q .head.sha)" = "$HEAD_SHA" ] ||
+            { echo "PR #$pr has moved past $HEAD_SHA; not commenting"; exit 0; }
+
+          # Every lookup prints nothing rather than failing, so a missing baseline (none
+          # yet, or expired) shows as "–" instead of ending the script under set -e.
+          timing() { { find "$1" -name omarchy-install-timing.json 2>/dev/null || true; } | head -1; }
+          install_s() { [ -n "$1" ] || return 0; jq -r '.finished_at - .started_at' "$1" 2>/dev/null || true; }
+          # "Startup finished in … = 1min 2.3s" or "= 12.104s" -> seconds
+          boot_s() {
+            local f
+            f=$({ find "$1" -path "$2" 2>/dev/null || true; } | head -1)
+            [ -n "$f" ] || return 0
+            head -1 "$f" | sed -n 's/.*= *//p' |
+              awk '{t=0; for (i=1;i<=NF;i++) { if ($i ~ /min$/) t+=60*$i; else if ($i ~ /ms$/) t+=$i/1000; else t+=$i } printf "%.3f", t}'
+          }
+          cell() { [ -n "$1" ] && awk -v x="$1" 'BEGIN{printf "%.1f s", x}' || echo "–"; }
+          change() {
+            [ -n "$1" ] && [ -n "$2" ] || { echo "–"; return; }
+            awk -v a="$1" -v b="$2" 'BEGIN{d=a-b; printf "%s%.1f s", (d>=0?"+":"−"), (d<0?-d:d)}'
+          }
+
+          pt=$(timing pr); bt=$(timing base)
+          rows=(
+            "Install|$(install_s "$pt")|$(install_s "$bt")"
+            "First boot|$(boot_s pr '*/first-boot-systemd-analyze.txt')|$(boot_s base '*/first-boot-systemd-analyze.txt')"
+            "Everyday boot|$(boot_s pr '*-boot/systemd-analyze.txt')|$(boot_s base '*-boot/systemd-analyze.txt')"
+          )
+
+          status="passed"; [ "$CONCLUSION" = success ] || status="**${CONCLUSION}**"
+          {
+            echo "$marker"
+            echo "### Install test $status"
+            echo
+            echo "| | This PR | quattro | Change |"
+            echo "| --- | ---: | ---: | ---: |"
+            for row in "${rows[@]}"; do
+              IFS='|' read -r name this base_v <<<"$row"
+              echo "| $name | $(cell "$this") | $(cell "$base_v") | $(change "$this" "$base_v") |"
+            done
+            if [ -n "$pt" ]; then
+              echo
+              echo "<details><summary>Install phases</summary>"
+              echo
+              echo "| Phase | This PR | quattro |"
+              echo "| --- | ---: | ---: |"
+              # Phase names come from the pull request's installer: keep them to plain text.
+              jq -r --slurpfile b <( [ -n "$bt" ] && cat "$bt" || echo '{"phases":[]}' ) '
+                ($b[0].phases | map({key: .name, value: .elapsed}) | from_entries) as $base
+                | .phases[]
+                | "| \(.name | gsub("[^A-Za-z0-9 +&/().-]"; "") | .[0:60]) | \(.elapsed * 10 | round / 10) s | \(($base[.name] // null) | if . == null then "–" else "\(. * 10 | round / 10) s" end) |"
+              ' "$pt"
+              echo
+              echo "</details>"
+            fi
+            echo
+            echo "[Run]($RUN_URL) · ${HEAD_SHA:0:8}"
+          } > comment.md
+
+          existing=$(gh api "repos/$REPO/issues/$pr/comments" --paginate \
+            -q ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" | head -1)
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$existing" -F body=@comment.md >/dev/null
+          else
+            gh api "repos/$REPO/issues/$pr/comments" -F body=@comment.md >/dev/null
+          fi
+          cat comment.md

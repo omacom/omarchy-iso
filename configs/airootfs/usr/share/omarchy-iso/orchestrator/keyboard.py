@@ -16,21 +16,31 @@ from pathlib import Path
 from .command import capture
 
 
-def configure_keyboard(target: Path, language: str) -> bool:
+def configure_keyboard(target: Path, language: str, input_method: str | None = None, xkb_layout: str = "") -> bool:
     """Write the console keymap into a mounted target without booting it.
 
     Returns False for layouts localectl doesn't know, matching archinstall:
     warn and keep the default. Every layout the configurator offers is known;
     the guard is for the kb_layout an autoinstall drive can name freely.
     """
+    validate_input_selection(input_method, xkb_layout)
     if not language.strip():
-        return True
+        if input_method is None:
+            return True
+        language = "us"
+
+    # Input engines are separate from real console keymaps. The shared picker
+    # uses US for Chinese/Korean and carries its preference in omarchy_install.
+    if input_method is None:
+        input_method = "mozc" if language == "jp106" else "none"
 
     result = capture(["localectl", "--no-pager", "list-keymaps"])
     if result.returncode != 0:
         detail = result.stderr.strip() or "localectl returned an error"
         raise RuntimeError(f"Unable to list keyboard layouts: {detail}")
     if language.lower() not in {layout.lower() for layout in result.stdout.splitlines()}:
+        if input_method != "none":
+            raise ValueError(f"Unknown keyboard language: {language}")
         return False
 
     # systemd-firstboot --force rewrites vconsole.conf wholesale, dropping the
@@ -51,4 +61,15 @@ def configure_keyboard(target: Path, language: str) -> bool:
     if font:
         vconsole_path.write_text(vconsole_path.read_text() + font + "\n")
 
+    preference = target / "etc/omarchy/input-method"
+    preference.parent.mkdir(parents=True, exist_ok=True)
+    preference.write_text(f"INPUT_METHOD={input_method}\nXKB_LAYOUT={xkb_layout}\n")
+
     return True
+
+
+def validate_input_selection(input_method: str | None, xkb_layout: str) -> None:
+    if input_method is not None and input_method not in {"none", "mozc", "hangul", "pinyin", "chewing"}:
+        raise ValueError(f"Unknown input method: {input_method}")
+    if xkb_layout not in {"", "kr"}:
+        raise ValueError(f"Unknown input keyboard layout: {xkb_layout}")

@@ -41,11 +41,14 @@ pacman-key --lsign-key 40DFB630FF42BCFFB047046CF0134EE680CAC571
 pacman --config /configs/pacman-online-${OMARCHY_MIRROR}.conf --noconfirm -Sy omarchy-keyring
 pacman-key --populate omarchy
 
-# Append the [omarchy] repo to the container's /etc/pacman.conf so subsequent
-# tools (notably makepkg in build-omarchy-packages.sh) can resolve omarchy-
-# only build deps like limine-snapper-sync and limine-mkinitcpio-hook.
+# Put OPR first in the container too so makepkg resolves the same overrides
+# as the online installer configuration.
 if ! grep -q '^\[omarchy\]' /etc/pacman.conf; then
-  awk '/^\[omarchy\]/,/^$/' /configs/pacman-online-${OMARCHY_MIRROR}.conf >> /etc/pacman.conf
+  opr_section=$(awk '/^\[omarchy\]/,/^$/' /configs/pacman-online-${OMARCHY_MIRROR}.conf)
+  awk -v opr="$opr_section" '/^\[core\]/ { print opr; print "" } { print }' \
+    /etc/pacman.conf >/tmp/pacman-opr-first.conf
+  install -m 644 /tmp/pacman-opr-first.conf /etc/pacman.conf
+  rm -f /tmp/pacman-opr-first.conf
 fi
 
 # Build locations
@@ -216,6 +219,23 @@ mapfile -t all_packages < <(
     # find the runtime and companion packages in the offline mirror.
     printf '%s\n' "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"
   } | sort -u
+)
+
+# Arch dropped the prebuilt broadcom-wl on 2026-09-02 and rebuilt broadcom-wl-dkms
+# with replaces=(broadcom-wl). A replaces entry only helps upgrades of an already
+# installed package; as an explicit pacman target the old name now fails with
+# "target not found". Published Omarchy runtime packages that predate the rename
+# still list it in omarchy-other.packages, so map it here until every channel
+# ships a runtime that names broadcom-wl-dkms itself.
+# arch-mact2 dropped apple-bcm-firmware on 2026-09-16 in favour of
+# apple-bcm-firmware-fetcher, which does the same job (pull the T2 Wi-Fi and
+# Bluetooth firmware off the macOS volume) but only conflicts with the old name
+# rather than replacing it, so pacman cannot follow the rename on its own.
+mapfile -t all_packages < <(
+  printf '%s\n' "${all_packages[@]}" |
+    sed -e 's/^broadcom-wl$/broadcom-wl-dkms/' \
+      -e 's/^apple-bcm-firmware$/apple-bcm-firmware-fetcher/' |
+    sort -u
 )
 
 # With --local-source we already built these omarchy* packages directly into

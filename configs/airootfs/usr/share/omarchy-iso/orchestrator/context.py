@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .keyboard import validate_input_selection
+
 
 PROFILES = frozenset({"default", "child"})
 
@@ -56,6 +58,15 @@ class InstallContext:
         creds_path = Path(creds_str)
         user_configuration = json.loads(config_path.read_text())
         omarchy_install = user_configuration.get("omarchy_install") or _default_omarchy_install(user_configuration)
+
+        # Autoinstall configs may omit kernels, which makes archinstall default
+        # to stock linux. Apply the same hardware default as the configurator,
+        # while honoring an explicit selection (including storage-only configs).
+        if not user_configuration.get("kernels"):
+            kernel = (omarchy_install.get("storage") or {}).get("kernel") or _default_kernel()
+            user_configuration["kernels"] = [kernel]
+
+        validate_input_selection(omarchy_install.get("input_method"), omarchy_install.get("input_xkb_layout", ""))
 
         # Deferred provisioning: the whole system installs but user creation is deferred to
         # first boot. Selected by the configurator (omarchy_install.defer_provisioning) or by
@@ -186,6 +197,18 @@ def _inject_provisioning_encryption_password(arch_configuration: dict, user_cred
 
     disk_encryption["encryption_password"] = password
     user_credentials["encryption_password"] = password
+
+
+def _default_kernel(pci_devices: Path = Path("/sys/bus/pci/devices")) -> str:
+    for device in pci_devices.glob("*"):
+        try:
+            vendor = (device / "vendor").read_text().strip().lower()
+            device_id = (device / "device").read_text().strip().lower()
+        except OSError:
+            continue
+        if vendor == "0x106b" and device_id in {"0x1801", "0x1802"}:
+            return "linux-t2"
+    return "linux-omarchy"
 
 
 def _default_omarchy_install(user_configuration: dict) -> dict[str, Any]:

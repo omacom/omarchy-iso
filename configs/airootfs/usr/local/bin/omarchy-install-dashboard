@@ -38,9 +38,7 @@ CLEAR="${CSI}2J${CSI}H"
 CLEAR_LINE="${CSI}2K"
 CLEAR_TO_END="${CSI}J"
 GREEN="${CSI}32m"
-WHITE="${CSI}37m"
 RED="${CSI}31m"
-DARK="${CSI}90m"
 
 # The dashboard owns the final reboot prompt now, so keep the gum confirm
 # styling that used to come from install/helpers/presentation.sh.
@@ -52,6 +50,22 @@ export GUM_CONFIRM_UNSELECTED_BACKGROUND="${GUM_CONFIRM_UNSELECTED_BACKGROUND:-0
 
 child_pid=""
 child_pgid=""
+
+whimsy=(
+  "delivering delightful defaults"
+  "saving setup struggles"
+  "picking polished packages"
+  "curating cohesive colors"
+  "preparing pleasant pixels"
+  "hyping happy hyprland"
+  "integrating intuitive interfaces"
+  "bootstrapping beautiful boxes"
+  "crafting cozy commands"
+  "making machines marvelous"
+  "polishing pretty pixels"
+  "tuning tasteful terminals"
+  "weaving wonderful workflows"
+)
 
 tips=(
   "Super + Space opens the Omarchy menu for apps, settings, and more"
@@ -115,10 +129,58 @@ trap 'interrupt 143' TERM
 term_size() { stty size 2>/dev/null <"$TTY_PATH" || printf '24 80\n'; }
 term_cols() { local size; size="$(term_size)"; printf '%s\n' "${size#* }"; }
 
-repeat() {
-  local char="$1" count="$2" out="" i
-  for ((i=0; i<count; i++)); do out+="$char"; done
-  printf '%s' "$out"
+# Read the actual character dimensions instead of assuming an 8 x 16 font.
+# Linux VTs expose the font through KDFONTOP; desktop terminals may expose
+# pixels in their window size or answer the standard cell-size query.
+term_cell_size() {
+  python3 - "$TTY_PATH" <<'PY'
+import fcntl
+import os
+import re
+import select
+import struct
+import sys
+import termios
+import time
+import tty
+
+with open(sys.argv[1], "r+b", buffering=0) as terminal:
+    fd = terminal.fileno()
+    rows, cols, width, height = struct.unpack(
+        "HHHH", fcntl.ioctl(fd, termios.TIOCGWINSZ, bytes(8)))
+    if rows and cols and width and height:
+        print(round(width / cols), round(height / rows))
+        sys.exit()
+    try:
+        font = bytearray(struct.pack("@5IP", 1, 0, 0, 0, 0, 0))
+        fcntl.ioctl(fd, 0x4B72, font)  # KDFONTOP / KD_FONT_OP_GET, no glyph data
+        _, _, width, height, _ = struct.unpack_from("@5I", font)
+        if width and height:
+            print(width, height)
+            sys.exit()
+    except OSError:
+        pass
+
+    settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd, termios.TCSANOW)
+        os.write(fd, b"\x1b[16t")
+        response = b""
+        deadline = time.monotonic() + 0.15
+        while select.select([fd], [], [], max(0, deadline - time.monotonic()))[0]:
+            response += os.read(fd, 64)
+            match = re.search(rb"\x1b\[6;(\d+);(\d+)t", response)
+            if match:
+                height, width = map(int, match.groups())
+                if width and height:
+                    print(width, height)
+                    sys.exit()
+            if time.monotonic() >= deadline:
+                break
+    finally:
+        termios.tcsetattr(fd, termios.TCSANOW, settings)
+    print(8, 16)  # Conventional console font when dimensions aren't available.
+PY
 }
 
 logo_width() {
@@ -151,22 +213,16 @@ LOGO_HEIGHT="$(logo_height)"
 (( LOGO_WIDTH > 0 )) || LOGO_WIDTH=81
 (( LOGO_HEIGHT > 0 )) || LOGO_HEIGHT=1
 CONTENT_WIDTH="$LOGO_WIDTH"
-# Rows the progress screen occupies: logo, blank, title, blank, bar, blank, tip.
-PROGRESS_HEIGHT=$((LOGO_HEIGHT + 6))
 TOP_ROW=1
-DYNAMIC_ROW=$((LOGO_HEIGHT + 3))
 LAST_SIZE=""
 LAST_PM=10
-# The finish screen mirrors the greeter's frame — logo, blank, one line, gap,
-# one button — so the last thing the installer shows matches the first. It runs
-# one row taller: `gum confirm` always paints prompt/blank/button and clears all
-# three, so the button cannot sit closer than two rows under a title we drew.
+# Wordmark, blank, title, and the three rows gum confirm uses.
 FINISH_HEIGHT=$((LOGO_HEIGHT + 5))
 FINISH_TOP_ROW=2
 
 # ── Install progress ─────────────────────────────────────────────────────────
 #
-# Position = max(floor, work), both non-decreasing, in per-mille of the bar.
+# Position = max(floor, work), both non-decreasing, in per-mille of the drawing.
 #
 #   floor  lo + (span-1) * t / (t+tau), on time since this process saw the
 #          phase. Asymptotic, so it approaches the band end without reaching it.
@@ -189,8 +245,8 @@ fi
 # A wrong denominator is worse than none: it never triggers the fallback.
 (( PKG_TOTAL < 300 || PKG_TOTAL > 5000 )) && PKG_TOTAL=0
 
-PKG_BONUS_MAX_PM=100   # cap on how far the bar may run ahead of the count
-PKG_TAIL_PM=40         # band held back so a stalled bar has somewhere to go
+PKG_BONUS_MAX_PM=100   # cap on how far progress may run ahead of the count
+PKG_TAIL_PM=40         # band held back so stalled progress has somewhere to go
 PKG_FLOOR_TAU=900      # with a work signal, time is only a backstop until the
                        # first package, so slow it until it cannot outrun data
 
@@ -263,13 +319,161 @@ render_logo() {
   fi
 }
 
-progress_bar() {
-  local pm="$1" width="${2:-34}" filled empty
-  (( pm < 0 )) && pm=0
-  (( pm > 1000 )) && pm=1000
-  filled=$(( pm * width / 1000 ))
-  empty=$(( width - filled ))
-  printf '%s%s%s%s%s' "$WHITE" "$(repeat █ "$filled")" "$DARK" "$(repeat ░ "$empty")" "$RESET"
+# The icon uses half-block glyphs, scaled to the terminal's actual cell aspect
+# ratio so its square silhouette stays square. No graphics protocol is needed.
+# Coordinates follow the 15 x 15 grid of Omarchy's icon.svg. Each segment
+# paints the full stroke width, starting at the bottom middle of the outer ring.
+ICON_WIDTH=30
+ICON_HEIGHT=15
+CELL_WIDTH=8
+CELL_HEIGHT=16
+ICON_LEFT=1
+ICON_STEPS=0
+ICON_DRAWN=0
+DISPLAY_PM=0
+ICON_FRAME=""
+declare -a ICON_ORDER=() ICON_TRACE=() ICON_FILL=()
+
+icon_segment() {
+  local scale="$1" x1="$2" y1="$3" x2="$4" y2="$5"
+  local x y from to
+  if (( y1 == y2 )); then
+    from=$(( (x1 * ICON_WIDTH + 14) / 15 ))
+    to=$(( ((x2 + 1) * ICON_WIDTH + 14) / 15 ))
+    if (( x2 < x1 )); then
+      from=$(( ((x1 + 1) * ICON_WIDTH + 14) / 15 - 1 ))
+      to=$(( (x2 * ICON_WIDTH + 14) / 15 - 1 ))
+    fi
+    for ((x=from; x!=to; x+=(x2 >= x1 ? 1 : -1))); do
+      for ((y=y1 * scale; y<(y1 + 1) * scale; y++)); do
+        icon_pixel "$((y * ICON_WIDTH + x))"
+      done
+    done
+  else
+    from=$(( y1 * scale ))
+    to=$(( (y2 + 1) * scale ))
+    if (( y2 < y1 )); then
+      from=$(( (y1 + 1) * scale - 1 ))
+      to=$(( y2 * scale - 1 ))
+    fi
+    for ((y=from; y!=to; y+=(y2 >= y1 ? 1 : -1))); do
+      for ((x=(x1 * ICON_WIDTH + 14) / 15; x<((x1 + 1) * ICON_WIDTH + 14) / 15; x++)); do
+        icon_pixel "$((y * ICON_WIDTH + x))"
+      done
+    done
+  fi
+}
+
+icon_pixel() {
+  local pixel="$1"
+  if [[ ! -v ICON_TRACE[pixel] ]]; then
+    ICON_ORDER+=("$pixel")
+    ICON_TRACE[pixel]=${#ICON_ORDER[@]}
+  fi
+}
+
+build_icon() {
+  local scale="$1" x y row
+  local -a mask=(
+    111111111111111
+    100000010000001
+    101111110001101
+    101000000000101
+    101000000000101
+    101000000000101
+    101000000000101
+    111000000000101
+    101000000000101
+    101000000000101
+    101000000000101
+    101000000000101
+    101111111111101
+    100000010000001
+    111111110111111
+  )
+  ICON_WIDTH=$(( (15 * scale * CELL_HEIGHT + CELL_WIDTH) / (2 * CELL_WIDTH) ))
+  ICON_HEIGHT=$(((15 * scale + 1) / 2))
+  ICON_ORDER=() ICON_TRACE=() ICON_FILL=()
+  ICON_DRAWN=0
+  # Start at the bottom middle, follow the outer left edge to the top cross,
+  # then descend into the inner shape. Fill its two bridges as we reach them.
+  icon_segment "$scale" 7 14 0 14
+  icon_segment "$scale" 0 14 0 0
+  icon_segment "$scale" 0 0 7 0
+  icon_segment "$scale" 7 0 7 2
+  icon_segment "$scale" 7 2 2 2
+  icon_segment "$scale" 2 2 2 7
+  icon_segment "$scale" 2 7 0 7
+  icon_segment "$scale" 2 7 2 12
+  icon_segment "$scale" 2 12 7 12
+  icon_segment "$scale" 7 12 7 14
+  icon_segment "$scale" 7 12 12 12
+  icon_segment "$scale" 12 12 12 2
+  icon_segment "$scale" 12 2 11 2
+  # Finish from the top cross: right along the outside, down, then left.
+  icon_segment "$scale" 7 0 14 0
+  icon_segment "$scale" 14 0 14 14
+  icon_segment "$scale" 14 14 9 14
+  ICON_STEPS=${#ICON_ORDER[@]}
+  for ((y=0; y<15 * scale; y++)); do
+    row=${mask[y / scale]}
+    for ((x=0; x<ICON_WIDTH; x++)); do
+      ICON_FILL[y * ICON_WIDTH + x]=${row:x * 15 / ICON_WIDTH:1}
+    done
+  done
+}
+
+# Append one cell with independently colored upper/lower pixels. This also
+# handles a green tracing tip sharing a cell with the still-dark outline.
+icon_cell() {
+  local pixel="$1" drawn="$2" solid="$3" upper=0 lower=0 step
+  if (( solid )); then
+    (( ICON_FILL[pixel] )) && upper=32
+    (( ${ICON_FILL[pixel + ICON_WIDTH]:-0} )) && lower=32
+  else
+    step=${ICON_TRACE[pixel]:-0}
+    (( step > 0 )) && upper=90
+    (( step > 0 && step <= drawn )) && upper=32
+    step=${ICON_TRACE[pixel + ICON_WIDTH]:-0}
+    (( step > 0 )) && lower=90
+    (( step > 0 && step <= drawn )) && lower=32
+  fi
+  if (( upper == 0 && lower == 0 )); then
+    ICON_FRAME+="${RESET} "
+  elif (( upper == lower )); then
+    ICON_FRAME+="${CSI}${upper};49m█"
+  elif (( lower == 0 )); then
+    ICON_FRAME+="${CSI}${upper};49m▀"
+  elif (( upper == 0 )); then
+    ICON_FRAME+="${CSI}${lower};49m▄"
+  else
+    ICON_FRAME+="${CSI}${upper};$((lower + 10))m▀"
+  fi
+}
+
+render_icon() {
+  local pm="$1" full="${2:-0}" drawn i pixel row col
+  drawn=$((pm * ICON_STEPS / 1000))
+  ICON_FRAME=""
+  if (( full || pm == 1000 )); then
+    for ((row=0; row<ICON_HEIGHT; row++)); do
+      ICON_FRAME+="${CSI}$((TOP_ROW + row));${ICON_LEFT}H"
+      for ((col=0; col<ICON_WIDTH; col++)); do
+        icon_cell "$((row * 2 * ICON_WIDTH + col))" "$drawn" "$((pm == 1000))"
+      done
+    done
+  else
+    # Between layout changes, repaint only newly traced pixels. This keeps the
+    # animation cheap even while pacstrap saturates the disk.
+    for ((i=ICON_DRAWN; i<drawn; i++)); do
+      pixel=${ICON_ORDER[i]}
+      row=$((pixel / ICON_WIDTH / 2)) col=$((pixel % ICON_WIDTH))
+      ICON_FRAME+="${CSI}$((TOP_ROW + row));$((ICON_LEFT + col))H"
+      icon_cell "$((row * 2 * ICON_WIDTH + col))" "$drawn" 0
+    done
+  fi
+  printf '%s%s' "$ICON_FRAME" "$RESET"
+  ICON_DRAWN=$drawn
 }
 
 # Packages libalpm has finished installing. local/ holds one directory per
@@ -290,7 +494,7 @@ count_packages() {
 
 # Sets PROGRESS_PM. Never call in a command substitution: POS, the phase timer
 # and the package counters must survive between frames. Print nothing — output
-# here would land on the TTY between the cursor escape and the bar.
+# here would land on the TTY between the cursor escape and the drawing.
 install_progress() {
   local phase finished index total target
   local lo hi tau span t pos work gap n pkg_signal=0
@@ -377,7 +581,7 @@ install_progress() {
     PKG_DB_DIR="$target/var/lib/pacman/local"
     count_packages
     # Baseline on first sight: a target that already holds packages would
-    # otherwise pin the bar at the band ceiling for the whole phase.
+    # otherwise pin progress at the band ceiling for the whole phase.
     (( PKG_BASE < 0 )) && PKG_BASE=$PKG_COUNT
     n=$(( PKG_COUNT - PKG_BASE ))
     (( n < 0 )) && n=0
@@ -401,17 +605,20 @@ install_progress() {
   return 0
 }
 
-# One tip per 8 seconds, in order. On elapsed time, not a frame counter: a frame
-# is 0.5s of sleep plus a render, which stretches under pacstrap I/O — on the
-# machine where the tips, not the bar, are carrying liveness.
+# Keep the original loading messages on their own clock, so progress jumps
+# cannot skip phrases and animation frame rate does not change their cadence.
+current_whimsy() {
+  printf '%s' "${whimsy[$(( (NOW - DASH_T0) / 4 % ${#whimsy[@]} ))]}"
+}
+
+# One tip per 8 seconds, in order. Use elapsed time, since rendering can stretch
+# under pacstrap I/O, when the tips may be the most visible sign of activity.
 current_tip() {
   printf '%s' "${tips[$(( (NOW - DASH_T0) / 8 % ${#tips[@]} ))]}"
 }
 
 # Vertically center a block of the given height, echoing the row it starts on.
-# Both screens here center the way the configurator's greeter centers its
-# welcome, so the install opens, runs, and closes on the same composition
-# rather than stacking each frame from row one.
+# Center both the progress icon and the final wordmark on the console.
 centered_top_row() {
   local height="$1" rows top
   rows="$(term_size)"
@@ -423,42 +630,60 @@ centered_top_row() {
 }
 
 measure_progress_layout() {
+  local rows cols scale=1
   LAST_SIZE="$(term_size)"
-  TOP_ROW="$(centered_top_row "$PROGRESS_HEIGHT")"
-  DYNAMIC_ROW=$(( TOP_ROW + LOGO_HEIGHT + 1 ))
+  read -r rows cols <<<"$LAST_SIZE"
+  read -r CELL_WIDTH CELL_HEIGHT < <(term_cell_size 2>/dev/null || printf '8 16\n')
+  (( rows >= 34 && cols >= 49 )) && scale=2
+  (( rows >= 50 && cols >= 64 )) && scale=3
+  while (( scale > 1 && (15 * scale * CELL_HEIGHT + CELL_WIDTH) / (2 * CELL_WIDTH) > cols - 4 )); do
+    scale=$((scale - 1))
+  done
+  build_icon "$scale"
+  TOP_ROW="$(centered_top_row "$((ICON_HEIGHT + 6))")"
+  ICON_LEFT=$(( (cols - ICON_WIDTH) / 2 + 1 ))
+  (( ICON_LEFT < 1 )) && ICON_LEFT=1
+  PROGRESS_TEXT_WIDTH=$((cols - 2))
+  (( PROGRESS_TEXT_WIDTH > CONTENT_WIDTH )) && PROGRESS_TEXT_WIDTH=$CONTENT_WIDTH
+  return 0
 }
 
 render_static() {
   measure_progress_layout
-  printf '%s%s%d;1H' "$CLEAR" "$CSI" "$TOP_ROW"
-  render_logo
-  blank_line
+  printf '%s' "$CLEAR"
+  render_icon "$DISPLAY_PM" 1
 }
 
-render_dynamic() {
-  local pm
-  # The console can still resize under us (the framebuffer settles late in VMs).
-  # Horizontal padding is recomputed every frame anyway, but the logo is drawn
-  # once, so redraw the static half at the new center rather than leave the
-  # centered layout stranded against a stale geometry.
-  [[ "$(term_size)" == "$LAST_SIZE" ]] || render_static
+update_progress() {
   set_now
   install_progress
-  pm=$PROGRESS_PM
+  local pm=$PROGRESS_PM
   [[ $pm =~ ^[0-9]+$ ]] || pm=$LAST_PM
-  (( pm > 1000 )) && pm=1000
+  # Only the child's successful exit can complete the drawing.
+  (( pm > 999 )) && pm=999
   # POS is monotone by construction; this is a guard, not the mechanism.
   (( pm < LAST_PM )) && pm=$LAST_PM
   LAST_PM=$pm
+}
 
-  printf '%s%d;1H' "$CSI" "$DYNAMIC_ROW"
-  center "Installing Omarchy" "$CONTENT_WIDTH"
+render_dynamic() {
+  local step message tip
+  # The framebuffer can settle late in VMs. Rebuild at the new size, preserving
+  # progress, instead of leaving the drawing at the old screen coordinates.
+  [[ "$(term_size)" == "$LAST_SIZE" ]] || render_static
+  # Ease phase jumps over several frames, with the percentage following the
+  # same position as the trace. The measured progress still never goes back.
+  step=$(( (LAST_PM - DISPLAY_PM + 3) / 4 ))
+  DISPLAY_PM=$((DISPLAY_PM + step))
+  render_icon "$DISPLAY_PM"
+
+  message="$(truncate_for_width "$(current_whimsy)" "$PROGRESS_TEXT_WIDTH")"
+  tip="$(truncate_for_width "Tip: $(current_tip)" "$PROGRESS_TEXT_WIDTH")"
+  printf '%s%d;1H' "$CSI" "$((TOP_ROW + ICON_HEIGHT + 1))"
+  center "${GREEN}$((DISPLAY_PM / 10))%${RESET}" "$PROGRESS_TEXT_WIDTH"
+  center "${GREEN}${message}${RESET}" "$PROGRESS_TEXT_WIDTH"
   blank_line
-  line_at "$CONTENT_WIDTH" $(( (CONTENT_WIDTH - 34) / 2 )) ""
-  progress_bar "$pm" 34
-  printf '\n'
-  blank_line
-  center "${DIM}Tip:${RESET} ${GREEN}$(current_tip)${RESET}" "$CONTENT_WIDTH"
+  center "${DIM}${tip}${RESET}" "$PROGRESS_TEXT_WIDTH"
   printf '%s' "$CLEAR_TO_END"
 }
 
@@ -493,13 +718,11 @@ install_duration() {
 }
 
 render_finish() {
-  local duration effect_canvas_width
+  local duration effect_canvas_width title="Installed Omarchy"
   duration="$(install_duration || true)"
-  duration="${duration:-Complete}"
-  # ttfx centers its text two columns right of plain centering, so hand it a
-  # canvas two columns narrower and the animated logo lands exactly on the
-  # static one left_padding already drew. Otherwise the logo jumps a column
-  # sideways when the effect starts and again when it ends.
+  [[ -n $duration ]] && title+=" in ${duration}"
+  # ttfx centers its text two columns right of plain centering. A canvas two
+  # columns narrower aligns the animation with the title and fallback logo.
   effect_canvas_width="$(term_cols)"
   (( effect_canvas_width > 2 )) && effect_canvas_width=$((effect_canvas_width - 2))
 
@@ -508,23 +731,21 @@ render_finish() {
   FINISH_TOP_ROW="$(centered_top_row "$FINISH_HEIGHT")"
 
   {
-    printf '%s%s%s%d;1H' "$SHOW_CURSOR" "$CLEAR" "$CSI" "$FINISH_TOP_ROW"
-    render_logo
-    blank_line
-    center "Installed Omarchy in ${duration}" "$CONTENT_WIDTH"
+    # Leave the wordmark area blank: laseretch reveals it for the first time.
+    printf '%s%s%s%d;1H' "$HIDE_CURSOR" "$CLEAR" "$CSI" "$((FINISH_TOP_ROW + LOGO_HEIGHT + 1))"
+    center "$title" "$CONTENT_WIDTH"
     blank_line
   } >"$TTY_PATH"
 
   if [[ -f $LOGO_PATH ]]; then
     # Reuse mode restores a saved cursor before moving up over its input. Save
-    # this anchor so the effect redraws the same logo rows shown above.
+    # this anchor so the effect occupies the reserved wordmark rows.
     printf '%s%d;1H\0337' "$CSI" "$((FINISH_TOP_ROW + LOGO_HEIGHT))" >"$TTY_PATH"
     # Laseretch runs ~4s at 260fps, so the 8s cap is a stuck-process guard rather
     # than a trim. --xterm-colors keeps the whole effect in the 256-index palette
     # the way the greeter does, since the console reduces indexed codes well and
-    # truecolor ones badly, and it settles on indexed 2 — the green gum already
-    # drew the logo in above, so the send-off ends on the frame it started from
-    # instead of recoloring it. The laser and sparks keep their own hot palette.
+    # truecolor ones badly. It settles on indexed 2, the Tokyo Night green used
+    # throughout the installer. The laser and sparks keep their own hot palette.
     timeout 8s ttfx -i "$LOGO_PATH" \
       --canvas-width "$effect_canvas_width" \
       --anchor-text c \
@@ -533,9 +754,14 @@ render_finish() {
       --xterm-colors \
       laseretch \
       --final-gradient-stops 2 \
-      >"$TTY_PATH" 2>/dev/null || dashboard_log "logo effect skipped (ttfx exited $?)"
-    printf '%s%d;1H' "$CSI" "$((FINISH_TOP_ROW + LOGO_HEIGHT + 5))" >"$TTY_PATH"
+      >"$TTY_PATH" 2>/dev/null || {
+        dashboard_log "logo effect skipped (ttfx exited $?)"
+        { printf '%s%d;1H' "$CSI" "$FINISH_TOP_ROW"; render_logo; } >"$TTY_PATH"
+      }
+  else
+    { printf '%s%d;1H' "$CSI" "$FINISH_TOP_ROW"; render_logo; } >"$TTY_PATH"
   fi
+  printf '%s%s%d;1H' "$SHOW_CURSOR" "$CSI" "$((FINISH_TOP_ROW + LOGO_HEIGHT + 5))" >"$TTY_PATH"
 }
 
 reboot_prompt() {
@@ -805,9 +1031,13 @@ PHASE_T0=$NOW
 PKG_LAST_CHANGE=$NOW
 launch_child
 
+frame=0
 while jobs -pr | grep -qx "$child_pid"; do
+  # Keep package counting/state reads at 2 Hz; animate the trace at 10 Hz.
+  (( frame % 5 == 0 )) && update_progress
   render_dynamic >"$TTY_PATH" 2>/dev/null || true
-  sleep 0.5
+  frame=$((frame + 1))
+  sleep 0.1
 done
 
 set +e
@@ -820,8 +1050,14 @@ child_pgid=""
 dashboard_log "installer child exited with status $status"
 
 if (( status == 0 )); then
-  # finished_at lands microseconds before the child exits, so the 0.5s poll
-  # rarely renders a full bar before the finish screen replaces it.
+  # Finish the trace even when a short-lived child exits between state polls.
+  LAST_PM=1000
+  PHASE_NAME="Installation complete"
+  while (( DISPLAY_PM < 999 )); do
+    render_dynamic >"$TTY_PATH" 2>/dev/null || true
+    sleep 0.05
+  done
+  DISPLAY_PM=1000
   render_dynamic >"$TTY_PATH" 2>/dev/null || true
   sleep 0.4
 fi

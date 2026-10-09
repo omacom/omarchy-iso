@@ -14,6 +14,9 @@ ISO="$OMARCHY_INTEGRATION_ISO"
 SSH_PORT="${OMARCHY_INTEGRATION_SSH_PORT:-2322}"
 MEMORY="${OMARCHY_INTEGRATION_MEMORY:-8192}"
 INSTALL_TIMEOUT="${OMARCHY_INTEGRATION_INSTALL_TIMEOUT:-2400}"
+# cache=none keeps the host page cache out of the guest's disk writes, so
+# install times measure the installer rather than the host (CI sets it).
+DISK_CACHE="${OMARCHY_INTEGRATION_DISK_CACHE:-}"
 NO_PREVIEW="${OMARCHY_INTEGRATION_NO_PREVIEW:-false}"
 BOOT_TIMEOUT=600
 
@@ -166,7 +169,7 @@ start_vm() {
     -m "$MEMORY" \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -drive if=pflash,format=raw,file="$ACTIVE_OVMF" \
-    -drive file="$disk",format=qcow2,if=none,id=drive0 \
+    -drive file="$disk",format=qcow2,if=none,id=drive0${DISK_CACHE:+,cache=$DISK_CACHE} \
     -device virtio-blk-pci,drive=drive0,bootindex=1 \
     -device virtio-vga \
     -display none \
@@ -282,8 +285,12 @@ ssh_sudo() {
   ssh_guest "echo $GUEST_PASSWORD | sudo -S -p '' bash -c $(printf %q "$1")"
 }
 
+# The deadline is wall-clock: under QEMU user networking every attempt can
+# spend its whole ConnectTimeout waiting for a banner, so counting only the
+# sleeps let a "300 s" wait run for ten minutes or more, silently.
 wait_for_ssh() {
-  local timeout="$1" failure_name="${2:-failure-ssh-timeout}" waited=0
+  local timeout="$1" failure_name="${2:-failure-ssh-timeout}"
+  local started=$SECONDS next_note=30 progress_name
 
   while ! ssh_guest true 2>/dev/null; do
     if ! vm_running; then
@@ -291,14 +298,20 @@ wait_for_ssh() {
       return 1
     fi
 
-    if ((waited >= timeout)); then
+    if ((SECONDS - started >= timeout)); then
       capture_console "$failure_name"
       echo "Timed out after ${timeout}s waiting for SSH" >&2
       return 1
     fi
 
-    sleep 5
-    ((waited += 5))
+    if ((SECONDS - started >= next_note)); then
+      printf -v progress_name 'waiting-ssh-%04ds' "$((SECONDS - started))"
+      capture_console "$progress_name"
+      echo "    ... waiting for SSH ($((SECONDS - started))s)"
+      ((next_note += 30))
+    fi
+
+    sleep 2
   done
 }
 
@@ -403,7 +416,7 @@ EOF
             "efi_binary": "limine_x64.efi",
             "enable_fallback": true
         },
-        "storage": { "kernel": "linux" }
+        "storage": { "kernel": "linux-omarchy" }
     },
     "disk_config": {
         "config_type": "default_layout",
@@ -448,7 +461,7 @@ EOF
         ]
     },
     "hostname": "$GUEST_HOSTNAME",
-    "kernels": [ "linux" ],
+    "kernels": [ "linux-omarchy" ],
     "network_config": { "type": "iso" },
     "ntp": true,
     "parallel_downloads": 8,
@@ -556,15 +569,27 @@ install_phase() {
       return 1
     fi
 
+    # A line every 30 s so a slow runner never looks hung; a screenshot of
+    # the installer's dashboard every 2 min, which is enough to see progress.
     if ((waited % 120 == 0)); then
       printf -v progress_name 'success-install-progress-%04ds' "$waited"
       capture_console "$progress_name"
-      echo "    ... installing (${waited}s)"
     fi
+    ((waited % 30 == 0)) && echo "    ... installing (${waited}s)"
 
     sleep 10
     ((waited += 10))
   done
+
+  # Keep the installer's own clock, its log and the first boot's numbers next
+  # to the base image while the system is reachable, so CI can report them
+  # without attaching the disk.
+  ssh_sudo "cat /var/log/omarchy-install-timing.json" >"$BASE_DIR/omarchy-install-timing.json" 2>/dev/null || true
+  ssh_sudo "cat /var/log/omarchy-install.log" >"$BASE_DIR/omarchy-install.log" 2>/dev/null || true
+  # SSH can answer before startup finishes, and systemd-analyze refuses until
+  # it has; wait (bounded) so the first-boot numbers are final.
+  ssh_guest "timeout 120 systemctl is-system-running --wait >/dev/null; systemd-analyze" \
+    >"$BASE_DIR/first-boot-systemd-analyze.txt" 2>/dev/null || true
 
   log "Installed system is up. Saving base image."
   stop_vm

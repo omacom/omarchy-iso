@@ -1,0 +1,55 @@
+name: Unit tests
+
+# The fast, VM-free tests under test/unit/: cidata autoinstall loading and the
+# orchestrator's phases. Seconds per run, no ISO build; the install test
+# covers the rest.
+
+on:
+  pull_request:
+  push:
+    branches: [quattro]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+
+      # The tests run where the code they cover runs: on Arch, the same as
+      # the live ISO and an Omarchy workstation. The container boots systemd
+      # because the keyboard tests ask the real localectl for its keymaps, and
+      # the tests run as an ordinary user because some of them check what
+      # happens when a file cannot be written.
+      #
+      # A privileged container shares the host's consoles and devices, so the
+      # units that would claim them are masked before systemd starts: without
+      # that, its getty, udev and vconsole setup take over the host's.
+      - name: Run ./test/all in an Arch container
+        run: |
+          docker run -d --name unit --privileged --cgroupns=host \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /tmp:exec \
+            -v "$PWD:/src:ro" archlinux:latest bash -c '
+              systemctl mask getty.target console-getty.service \
+                systemd-udev-trigger.service systemd-udevd.service \
+                systemd-vconsole-setup.service
+              exec /usr/lib/systemd/systemd
+            '
+          docker exec unit bash -euo pipefail -c '
+            for i in $(seq 1 60); do
+              state=$(systemctl is-system-running 2>/dev/null || true)
+              case $state in running | degraded) break ;; esac
+              sleep 1
+            done
+            echo "systemd: $state"
+            pacman -Syu --noconfirm --needed python parted >/dev/null
+            useradd -m tester
+            cp -r /src /home/tester/omarchy-iso
+            chown -R tester /home/tester/omarchy-iso
+            cd /home/tester/omarchy-iso
+            setpriv --reuid=tester --regid=tester --init-groups ./test/all
+          '

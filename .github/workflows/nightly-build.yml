@@ -110,7 +110,7 @@ jobs:
               base=$(ls -d test-runs/*-integration)
               ./test/vm-image/vm-seal "$base" sealed
               ./test/vm-image/vm-verify sealed | tee vm-verify.txt
-              ./test/vm-image/vm-boot sealed "pacman -Q omarchy-dev omarchy-settings-dev linux-omarchy; uname -r" >vm-packages.txt
+              ./test/vm-image/vm-boot sealed "pacman -Q omarchy-dev omarchy-settings-dev; pacman -Qo /usr/lib/modules/\$(uname -r)/pkgbase; uname -r" >vm-packages.txt
               cat vm-packages.txt
             '
 

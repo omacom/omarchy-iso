@@ -66,7 +66,12 @@ done
 ssh_vm 'timeout 180 systemctl is-system-running --wait >/dev/null 2>&1 || true'
 
 mkdir -p "$out"
-root 'cat /boot/EFI/Linux/omarchy_linux-omarchy.efi' >"$state/uki.efi"
+# The kernel that is running: edge installs linux-omarchy-bore where stable
+# installs linux-omarchy, and the boot entry, not the UKI, may hold the
+# command line.
+kernel=$(ssh_vm 'cat "/usr/lib/modules/$(uname -r)/pkgbase"')
+root "cat /boot/EFI/Linux/omarchy_$kernel.efi" >"$state/uki.efi"
+ssh_vm 'cat /proc/cmdline' >"$state/cmdline"
 
 root '
   # The ISO writes autologin only for encrypted installs; a test has nobody at
@@ -135,7 +140,6 @@ rm -f "$state/qemu.pid"
 # and hashing the UKI. resume= points at the image's own swap, so drop it.
 objcopy -O binary --only-section=.linux "$state/uki.efi" "$out/vmlinuz"
 objcopy -O binary --only-section=.initrd "$state/uki.efi" "$out/initrd"
-objcopy -O binary --only-section=.cmdline "$state/uki.efi" "$state/cmdline"
 tr -d '\0' <"$state/cmdline" | tr ' ' '\n' | { grep -vE '^(resume|resume_offset)=|^$' || true; } | paste -sd' ' >"$out/cmdline"
 [[ -s $out/vmlinuz && -s $out/initrd && -s $out/cmdline ]] || { echo "vm-seal: the UKI gave no kernel, initrd or cmdline" >&2; exit 1; }
 

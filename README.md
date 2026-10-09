@@ -123,7 +123,7 @@ On nightly.omarchy.org a published file is never replaced. Only `latest.json` ch
 
 `.github/workflows/nightly-build.yml` runs every night and for two channels:
 
-- `edge`: builds the ISO from the branch the run is on, which is `quattro` for the nightly, with the edge packages.
+- `edge`: builds the ISO from the edge channel: the edge packages and mirrors, and the edge builds of Omarchy (`omarchy-dev`).
 - `stable`: takes the last release. The latest release of omacom/omarchy names the version, iso.omarchy.org has the ISO, and it is used only if its signature is the release key's. A release already published is skipped on the nightly run; a run started by hand makes it again.
 
 Each ISO is installed unattended and the installed system booted, by the same install test a pull request gets. `test/vm-image/vm-seal` then turns the installed disk into a VM image and `test/vm-image/vm-verify` boots that image and checks it. Nothing is published unless all of it passed.

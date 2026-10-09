@@ -1930,6 +1930,25 @@ def _stage_provisioning_luks_unlock(ctx: InstallContext, provisioning_dir) -> No
     files_dropin.write_text("FILES+=(/etc/omarchy/provisioning.key)\n")
 
 
+def _initramfs_module_lines(target: Path) -> set[str]:
+    """The MODULES+= lines mkinitcpio will honour on this target."""
+    lines = set()
+    for conf in sorted((target / "etc" / "mkinitcpio.conf.d").glob("*.conf")):
+        for line in conf.read_text(errors="ignore").splitlines():
+            if re.match(r"\s*MODULES\s*\+?=", line):
+                lines.add(" ".join(line.split()))
+    return lines
+
+
+def _prebuilt_module_lines(target: Path) -> set[str]:
+    """The same lines as they were when the image's UKI was built
+    (build-root-image.sh records them next to it)."""
+    recorded = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki.modules"
+    if not recorded.is_file():
+        return set()
+    return {line for line in recorded.read_text().splitlines() if line}
+
+
 def _is_apple_t2_hardware() -> bool:
     """Only Apple T2 Macs need the linux-t2 kernel. Everywhere else its
     mkinitcpio preset is dropped, so the boot step does not build and register
@@ -1951,8 +1970,9 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     if not (ctx.target / "usr" / "bin" / "limine-update").exists():
         raise RuntimeError("/usr/bin/limine-update missing in target")
 
-    # Skip the linux-t2 mkinitcpio work on non-Apple hardware.
-    if not _is_apple_t2_hardware():
+    # Skip the linux-t2 mkinitcpio work on machines that did not select it.
+    selected_kernels = ctx.user_configuration.get("kernels") or []
+    if "linux-t2" not in selected_kernels and not _is_apple_t2_hardware():
         for preset in ("linux-t2.preset",):
             path = ctx.target / "etc" / "mkinitcpio.d" / preset
             if path.exists():
@@ -2011,7 +2031,28 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     prebuilt_kernel = prebuilt_kernel_file.read_text().strip() if prebuilt_kernel_file.is_file() else "linux"
     esp_uki = ctx.target / "boot" / "EFI" / "Linux" / f"omarchy_{prebuilt_kernel}.efi"
     used_prebuilt_uki = False
-    if prebuilt_uki.is_file():
+
+    # The pre-built UKI was made before any hardware script ran. nvidia.sh and
+    # fix-t2.sh add early-loading modules (MODULES+= in mkinitcpio.conf.d), and
+    # a UKI without them is not what omarchy configured: on an NVIDIA machine
+    # it carries nouveau, no nvidia module and none of nvidia-utils' nouveau
+    # blacklist. Such a machine gets its UKIs built here, the way upstream
+    # builds them for everyone; the pre-built one stays the fast path for
+    # every machine that adds nothing.
+    added_modules = sorted(_initramfs_module_lines(ctx.target) - _prebuilt_module_lines(ctx.target))
+    if prebuilt_uki.is_file() and added_modules:
+        info(f"› hardware setup added initramfs modules ({'; '.join(added_modules)}); "
+             "building the UKI on this machine instead of using the pre-built one")
+
+    # A selected kernel other than the image's boots first, as in omarchy's own
+    # kernel migration. Written before any UKI is built so the entries sort by it.
+    selected = next((k for k in selected_kernels if k != prebuilt_kernel and k in _installed_kernels(ctx)), None)
+    if selected:
+        text = "\n".join(l for l in default_limine.read_text().splitlines() if not re.match(r"\s*BOOT_ORDER\s*=", l))
+        default_limine.write_text(f'{text}\nBOOT_ORDER="{selected}, {selected}-*, *, *fallback, Snapshots"\n')
+        info(f"› {selected} boots first; the pre-built UKI is for {prebuilt_kernel}")
+
+    if prebuilt_uki.is_file() and not added_modules:
         used_prebuilt_uki = True
         with _time_step("LIMINE.deploy_prebuilt_uki (copy from image)"):
             esp_uki.parent.mkdir(parents=True, exist_ok=True)
@@ -2036,8 +2077,19 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
                  "--no-mutex", "--no-hooks"],
                 check=True,
             )
+        # The pre-built UKI covers one kernel, the one the image was built
+        # with. A machine that selected another (linux-t2 on a T2 Mac; the base
+        # delta installed it) has the package on disk and every T2 setting
+        # written, but no UKI or boot entry for it: it would boot the image's
+        # kernel, which has no driver for the T2's keyboard. Build those the
+        # normal way; the selected kernel is put first, as omarchy's own
+        # kernel migration does.
+        extra_kernels = [k for k in _installed_kernels(ctx) if k != prebuilt_kernel]
+        for kernel in extra_kernels:
+            with _time_step(f"LIMINE.limine-mkinitcpio {kernel} (not covered by the pre-built UKI)"):
+                subprocess.run(["arch-chroot", str(ctx.target), "limine-mkinitcpio", kernel], check=True)
     else:
-        with _time_step("LIMINE.limine-mkinitcpio (fallback — no pre-built UKI)"):
+        with _time_step("LIMINE.limine-mkinitcpio (built on this machine)"):
             subprocess.run(
                 ["arch-chroot", str(ctx.target), "limine-mkinitcpio"],
                 check=True,

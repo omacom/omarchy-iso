@@ -262,6 +262,10 @@ else
   # and its Limine entry after it.
   image_kernel=$(<"$root/usr/lib/modules/${image_kver}/pkgbase")
   echo "$image_kernel" >"$root/var/lib/omarchy-iso/prebuilt-uki.kernel"
+  # The early-loading modules configured when this UKI is built. A machine whose
+  # hardware scripts add to them (nvidia.sh, fix-t2.sh) builds its own UKI.
+  { grep -hE '^\s*MODULES\s*\+?=' "$root"/etc/mkinitcpio.conf.d/*.conf 2>/dev/null || true; } |
+    sed -E 's/\s+/ /g; s/^ //; s/ $//' | sort -u >"$root/var/lib/omarchy-iso/prebuilt-uki.modules"
   cat >"$root/etc/mkinitcpio.d/${image_kernel}.preset" <<PRESET
 ALL_config="/etc/mkinitcpio.conf"
 ALL_kver="/usr/lib/modules/${image_kver}/vmlinuz"

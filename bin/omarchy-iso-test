@@ -55,6 +55,36 @@ SYNC_DIR=""
 SYNC_ALL=false
 
 KEYBOARD_LABEL="English (US)"
+# --fake-pci VENDOR:DEVICE:CLASS (hex, repeatable): hardware the VM should claim
+# to have, e.g. 10de:2684:030000 (an RTX 4090) or 106b:1802:088000 (an Apple
+# T2). Each is a vfio-user device whose IDs QEMU overrides: a real PCI function
+# in the guest (lspci, sysfs, udev, modalias) that no driver can drive. What it
+# exercises is everything that keys off the hardware being there: detection,
+# the packages and kernel the install picks, DKMS builds, boot configuration.
+# Needs QEMU 10.1 and a vfio-user server ($VFIO_USER_SERVER, by default
+# libvfio-user's gpio-pci-idio-16 sample); see test/fake-pci.md.
+FAKE_PCI=()
+FAKE_PCI_PIDS=()
+# --smbios TYPE-1-FIELDS (repeatable, QEMU syntax, a literal comma is ",,"):
+# the DMI identity omarchy's hardware scripts match on, e.g.
+#   --smbios "manufacturer=Framework,product=Laptop 16 (AMD Ryzen 7040 Series)"
+#   --smbios "manufacturer=ASUSTeK COMPUTER INC.,family=ROG Flow Z13"
+SMBIOS=()
+# --cpu-id vendor=GenuineIntel,model=170: what /proc/cpuinfo reports (CPUID
+# leaf values; KVM lets a guest claim any vendor and model). omarchy picks
+# microcode by vendor and thermald/intel-lpmd by model number.
+# --battery: an ACPI battery (BAT0, present, discharging) and a lid switch, as
+# an SSDT compiled at run time (iasl). omarchy-battery-present and
+# omarchy-hw-laptop read exactly these.
+# --acpi-hid HID: an ACPI device with that _HID, e.g. OVTI08F4 (the IPU7
+# camera sensor omarchy keys the camera package on).
+# --no-network: no NIC at all. The harness then cannot reach the guest over
+# SSH, so it stops after the install finished and first boot unlocked.
+CPU_ID=""
+BATTERY=false
+ACPI_HIDS=()
+NO_NETWORK=false
+
 GUEST_USER="omarchy"
 GUEST_PASSWORD="omarchy"
 GUEST_HOSTNAME="omarchy-test"
@@ -74,6 +104,12 @@ while (($#)); do
     --port) SSH_PORT="$2"; shift ;;
     --memory) MEMORY="$2"; shift ;;
     --timeout) INSTALL_TIMEOUT="$2"; shift ;;
+    --fake-pci) FAKE_PCI+=("$2"); shift ;;
+    --smbios) SMBIOS+=("$2"); shift ;;
+    --cpu-id) CPU_ID="$2"; shift ;;
+    --battery) BATTERY=true ;;
+    --acpi-hid) ACPI_HIDS+=("$2"); shift ;;
+    --no-network) NO_NETWORK=true ;;
     -*) echo "Unknown option: $1" >&2; exit 1 ;;
     *) ISO="$1" ;;
   esac
@@ -226,10 +262,62 @@ start_vm() {
   # virtio-gpu before the system comes up.
   log "Watch (do not resize): vncviewer -RemoteResize=0 127.0.0.1:5905"
 
+  # vfio-user maps guest memory into the device process, so it has to be a
+  # shareable memfd; only when a fake device is asked for.
+  local fake_args=() spec sock vendor device class index=0
+  for pid in "${FAKE_PCI_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
+  FAKE_PCI_PIDS=()
+  for spec in "${FAKE_PCI[@]}"; do
+    IFS=: read -r vendor device class <<<"$spec"
+    sock="${QMP_SOCK%.sock}.fakepci$index.sock"
+    rm -f "$sock"
+    "${VFIO_USER_SERVER:-gpio-pci-idio-16}" "$sock" 2>>"$RUN_DIR/fakepci.log" &
+    FAKE_PCI_PIDS+=($!)
+    for _ in $(seq 1 50); do [[ -S $sock ]] && break; sleep 0.1; done
+    [[ -S $sock ]] || { echo "the vfio-user server did not come up for $spec (see test/fake-pci.md)" >&2; return 1; }
+    fake_args+=(-device "{\"driver\":\"vfio-user-pci\",\"socket\":{\"path\":\"$sock\",\"type\":\"unix\"},\"x-pci-vendor-id\":$((16#$vendor)),\"x-pci-device-id\":$((16#$device)),\"x-pci-class-code\":$((16#$class))}")
+    index=$((index + 1))
+  done
+  for spec in "${SMBIOS[@]}"; do
+    fake_args+=(-smbios "type=1,$spec")
+  done
+  if $BATTERY || ((${#ACPI_HIDS[@]})); then
+    local dsl="$RUN_DIR/fake-acpi.dsl" i=0
+    {
+      echo 'DefinitionBlock ("", "SSDT", 2, "OMARCH", "FAKEHW", 1) { Scope (\_SB) {'
+      if $BATTERY; then cat <<'DSL'
+  Device (BAT0) { Name (_HID, EisaId ("PNP0C0A")) Name (_UID, One)
+    Method (_STA, 0) { Return (0x1F) }
+    Method (_BIF, 0) { Return (Package () { 1, 60000, 60000, 1, 12000, 3000, 300, 100, 100, "FAKE-BAT", "0001", "LION", "Omarchy" }) }
+    Method (_BST, 0) { Return (Package () { 0, 10000, 48000, 12000 }) }
+    Method (_PCL, 0) { Return (Package () { \_SB }) } }
+  Device (LID0) { Name (_HID, EisaId ("PNP0C0D")) Method (_LID, 0) { Return (One) } Method (_STA, 0) { Return (0x0F) } }
+DSL
+      fi
+      for hid in "${ACPI_HIDS[@]}"; do
+        printf '  Device (FHD%d) { Name (_HID, "%s") Name (_UID, Zero) Method (_STA, 0) { Return (0x0F) } }\n' "$i" "$hid"; i=$((i + 1))
+      done
+      echo "} }"
+    } >"$dsl"
+    iasl -p "${dsl%.dsl}" "$dsl" >/dev/null 2>&1 || { echo "iasl could not compile $dsl" >&2; return 1; }
+    fake_args+=(-acpitable "file=${dsl%.dsl}.aml")
+    log "Fake ACPI: battery=$BATTERY hids=${ACPI_HIDS[*]:-none}"
+  fi
+  [[ -n $CPU_ID ]] && log "Fake CPU identity: $CPU_ID"
+  ((${#SMBIOS[@]})) && log "Fake DMI identity: ${SMBIOS[*]}"
+  if ((${#FAKE_PCI[@]})); then
+    fake_args+=(-object "memory-backend-memfd,id=fakepcimem,size=${MEMORY}M,share=on" -numa node,memdev=fakepcimem)
+    log "Fake PCI hardware: ${FAKE_PCI[*]}"
+  fi
+
+  local net_args=(-netdev "user,id=net0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22" -device virtio-net-pci,netdev=net0)
+  $NO_NETWORK && net_args=(-nic none)
+
   qemu-system-x86_64 \
-    -cpu host -enable-kvm -machine q35,accel=kvm \
+    -cpu "host${CPU_ID:+,$CPU_ID}" -enable-kvm -machine q35,accel=kvm \
     -smp "$(nproc)" \
     -m "$MEMORY" \
+    "${fake_args[@]}" \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -drive if=pflash,format=raw,file="$BASE_OVMF" \
     -drive file="$disk",format=qcow2,if=none,id=drive0 \
@@ -238,8 +326,7 @@ start_vm() {
     -display none \
     -vnc 127.0.0.1:5 \
     -usb -device usb-tablet \
-    -netdev user,id=net0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22 \
-    -device virtio-net-pci,netdev=net0 \
+    "${net_args[@]}" \
     -qmp "unix:$QMP_SOCK,server,nowait" \
     -serial "file:$serial" \
     -pidfile "$PIDFILE" \
@@ -1149,6 +1236,13 @@ install_phase() {
     drive_provision_owner
   elif $ENCRYPT; then
     unlock_luks
+  fi
+  if $NO_NETWORK; then
+    # Nothing to SSH through. The install finished and the first boot got past
+    # the passphrase; that is what a machine with no NIC has to show.
+    log "No network: the installed system unlocked; stopping here."
+    capture_console "success-first-boot-no-network"
+    return 0
   fi
   bootstrap_ssh
   $FREE_SPACE && verify_preserved_partitions

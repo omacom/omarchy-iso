@@ -156,7 +156,7 @@ reset_phase() {
   check "foreign boot directory survives staging" \
     ssh_sudo "grep -q foreign-payload /boot/$FOREIGN_ID/marker"
   check "foreign UKI survives staging" \
-    ssh_sudo "test -f /boot/EFI/Linux/foreign_linux.efi"
+    ssh_sudo "ls /boot/EFI/Linux/foreign_*.efi >/dev/null 2>&1"
   check "old omarchy entry is removed by staging" \
     ssh_sudo "! grep -q 'machine-id=$OLD_ID' /boot/limine.conf"
   check "old omarchy boot directory is removed by staging" \
@@ -298,7 +298,7 @@ first_boot_phase() {
   check "foreign boot directory survives the first boot" \
     ssh_sudo "grep -q foreign-payload /boot/$FOREIGN_ID/marker"
   check "foreign UKI survives the first boot" \
-    ssh_sudo "test -f /boot/EFI/Linux/foreign_linux.efi"
+    ssh_sudo "ls /boot/EFI/Linux/foreign_*.efi >/dev/null 2>&1"
   check "old omarchy identity never returns" \
     ssh_sudo "! grep -q 'machine-id=$OLD_ID' /boot/limine.conf"
   check "the new identity owns a boot entry" \

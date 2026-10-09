@@ -304,8 +304,9 @@ printf '%s\n' "${required_package_files[@]}" |
 
 # Rebuild the offline repo db from scratch so size/checksum/depends entries
 # always reflect only the package files selected for this build.
-rm -f "$offline_mirror_dir"/offline.db* "$offline_mirror_dir"/offline.files*
-repo-add "$offline_mirror_dir/offline.db.tar.gz" "$offline_mirror_dir/"*.pkg.tar.zst
+# Every package archive in the mirror, indexed by one repo-add per CPU: one
+# alone hashes and lists a thousand packages one after another.
+bash /builder/index-offline-mirror.sh "$offline_mirror_dir"
 
 # mkarchiso expects the mirror at /var/cache/omarchy/mirror/offline inside the
 # container (the airootfs path); symlink rather than duplicate.

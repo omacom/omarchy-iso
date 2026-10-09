@@ -2,13 +2,23 @@
 
 [![Nightly ISO Build](https://github.com/omacom/omarchy-iso/actions/workflows/nightly-build.yml/badge.svg?branch=quattro&event=schedule)](https://github.com/omacom/omarchy-iso/actions/workflows/nightly-build.yml?query=branch%3Aquattro+event%3Aschedule)
 
-The Omarchy ISO is the only supported way to install Omarchy. It ships the Omarchy Configurator, installs Arch Linux, installs the Omarchy packages from the bundled mirror, runs target system setup in the chroot, creates the user, and runs `omarchy-provision-user` for that user.
+The Omarchy ISO is the only supported way to install Omarchy. It includes the Omarchy Configurator and installs Arch Linux and the Omarchy packages from the bundled mirror. It then runs target system setup in the chroot, creates the user, and runs `omarchy-provision-user` for that user.
 
 ## Get Omarchy
 
-[Download the ISO](https://omarchy.org) and put it on a USB stick, with [balenaEtcher](https://etcher.balena.io/) on Mac or Windows or [caligula](https://github.com/ifd3f/caligula) on Linux. Turn off Secure Boot and/or TPM in the BIOS, boot off the stick, answer the configuration questions and select a drive. The install can be done in under a minute on the fastest modern machines and shouldn't take more than 5 minutes even on an older computer.
+1. [Download the ISO](https://omarchy.org).
+2. Write it to a USB stick. Use [balenaEtcher](https://etcher.balena.io/) on Mac or Windows, or [caligula](https://github.com/ifd3f/caligula) on Linux.
+3. Turn off Secure Boot and/or TPM in the BIOS.
+4. Boot from the stick.
+5. Answer the configuration questions and select a drive.
 
-Check the download before writing it to the stick. Every release ISO has a `.sha256` beside it at the same URL, linked next to the download. From a terminal, this fetches the latest release and checks it; the version is the latest release of [omacom/omarchy](https://github.com/omacom/omarchy/releases):
+The install takes under a minute on the fastest machines and up to 5 minutes on an older computer.
+
+### Verify the download
+
+Verify the ISO before you write it to the stick. Otherwise, a corrupted download causes a pacman "invalid or corrupted package" error several minutes into the install.
+
+Every release ISO has a `.sha256` file and a `.sig` file next to it. Run these commands to download and verify the ISO of the latest release of [omacom/omarchy](https://github.com/omacom/omarchy/releases):
 
 ```bash
 version=$(curl -fsSL https://api.github.com/repos/omacom/omarchy/releases/latest | jq -r .tag_name)
@@ -18,17 +28,17 @@ curl -fsSLO "https://iso.omarchy.org/omarchy-$version.iso.sha256"
 sha256sum -c "omarchy-$version.iso.sha256"
 ```
 
-A damaged download otherwise shows up minutes into the install, as a pacman "invalid or corrupted package" error. There is a `.sig` beside the ISO too, for verifying it against the Omarchy signing key.
+Use the `.sig` file to verify the ISO against the Omarchy signing key.
 
-The manual has the rest:
+### More in the manual
 
-- [Getting started](https://omarchy.org/manual/getting-started/): the install step by step, installing for another owner, installing without encryption.
-- [Dual-boot install](https://omarchy.org/manual/dual-boot-install/): Omarchy in the free space of a drive, beside Windows or another OS.
-- [Unattended installs](https://omarchy.org/manual/unattended-installs/): the ISO installs itself, with no keyboard and no wizard, from a configuration on a second drive.
+- [Getting started](https://omarchy.org/manual/getting-started/): the install step by step, installing for another owner, and installing without encryption.
+- [Dual-boot install](https://omarchy.org/manual/dual-boot-install/): install Omarchy in the free space of a drive, beside Windows or another OS.
+- [Unattended installs](https://omarchy.org/manual/unattended-installs/): let the ISO install itself from a configuration on a second drive, with no keyboard and no wizard.
 
 ## For maintainers
 
-Everything from here on is about building, testing and publishing the ISO.
+The rest of this file covers building, testing and publishing the ISO.
 
 ### What is published, and where
 
@@ -37,23 +47,23 @@ Everything from here on is about building, testing and publishing the ISO.
 | Release ISO, with `.sha256` and `.sig` | `https://iso.omarchy.org/omarchy-<version>.iso` | Each release |
 | Edge ISO, with `.sha256` | `https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.iso` | Every night |
 | VM image of edge | `https://nightly.omarchy.org/edge/<version>/vm/` | Every night |
-| VM image of the last release | `https://nightly.omarchy.org/stable/<version>/<run>/vm/` | Once per release |
+| VM image of the latest release | `https://nightly.omarchy.org/stable/<version>/<run>/vm/` | Once per release |
 | `latest.json` | `https://nightly.omarchy.org/edge/latest.json` and `.../stable/latest.json` | With each of the three above |
 
-On nightly.omarchy.org a published file is never replaced. Only `latest.json` changes, and it is written last, after every file of the version has been fetched back through the CDN and compared.
+On nightly.omarchy.org, a published file is never replaced. Only `latest.json` changes. It is written last, after every file of the version has been fetched back through the CDN and compared.
 
-### The nightly
+### The nightly build
 
-`.github/workflows/nightly-build.yml` runs every night and for two channels:
+`.github/workflows/nightly-build.yml` runs every night for two channels:
 
 - `edge`: builds the ISO from the edge channel: the edge packages and mirrors, and the edge builds of Omarchy (`omarchy-dev`).
-- `stable`: takes the last release. The latest release of omacom/omarchy names the version, iso.omarchy.org has the ISO, and it is used only if its signature is the release key's. A release already published is skipped on the nightly run; a run started by hand makes it again.
+- `stable`: uses the latest release. The latest release of omacom/omarchy determines the version. The ISO comes from iso.omarchy.org and is used only if its signature matches the release key. A scheduled run skips a release that is already published. A manual run builds it again.
 
-Each ISO is installed unattended and the installed system booted, by the same install test a pull request gets. `test/vm-image/vm-seal` then turns the installed disk into a VM image and `test/vm-image/vm-verify` boots that image and checks it. Nothing is published unless all of it passed.
+Each ISO goes through the same install test that runs for pull requests: an unattended install, then a boot of the installed system. `test/vm-image/vm-seal` then turns the installed disk into a VM image, and `test/vm-image/vm-verify` boots that image and checks it. Nothing is published unless every check passes.
 
-Publishing is a job of its own, the only one with the bucket's key, and it runs on `quattro` only. To try a change, run the workflow by hand on a branch: that builds and checks everything and publishes nothing.
+A separate job publishes. It is the only job with the bucket's key, and it runs only on `quattro`. To try a change, run the workflow manually on a branch. That run builds and checks everything and publishes nothing.
 
-Which channels a run makes and where they go is decided by `test/vm-image/nightly-plan`; what is laid out and what `latest.json` says by `test/vm-image/nightly-layout`. Both are covered by `test/unit/nightly-test.sh`.
+`test/vm-image/nightly-plan` decides which channels a run builds and where they are published. `test/vm-image/nightly-layout` lays out the files and writes `latest.json`. `test/unit/nightly-test.sh` tests both.
 
 ### latest.json
 
@@ -61,18 +71,18 @@ Which channels a run makes and where they go is decided by `test/vm-image/nightl
 | --- | --- |
 | `version` | Edge: the build's date and run number, `2026.10.09.431`. Stable: the release, `4.0.4`. |
 | `channel` | `edge` or `stable`. |
-| `built_at` | When this file was written, once the image had passed its checks. UTC, `2026-10-09T18:02:35Z`. |
+| `built_at` | When this file was written, after the image passed its checks. UTC, `2026-10-09T18:02:35Z`. |
 | `url` | The ISO that was installed. Edge: on nightly.omarchy.org. Stable: the release ISO on iso.omarchy.org. |
 | `sha256`, `size` | The ISO's SHA-256 and its size in bytes. |
-| `iso_commit` | The omarchy-iso commit the nightly ran from. |
+| `iso_commit` | The omarchy-iso commit the nightly build ran from. |
 | `omarchy_version` | The version of the Omarchy package in the image. |
-| `omarchy_commit` | Edge: the omarchy commit that package was built from. Stable: empty, the version names it. |
-| `kernel` | The kernel release the image boots, as `uname -r` gives it. |
+| `omarchy_commit` | Edge: the omarchy commit that package was built from. Stable: empty. |
+| `kernel` | The image's kernel release, as reported by `uname -r`. |
 | `vm.url` | The folder the image's files are in, ending in `/`. |
 | `vm.disk`, `vm.disk_sha256`, `vm.disk_size` | The disk image, `base.qcow2`: its URL, SHA-256 and size in bytes. |
 | `vm.files` | Every file in `vm.url`. |
 | `vm.user`, `vm.password` | The account for the desktop and `sudo`. |
-| `vm.ssh` | How SSH gets in: keys only, never the password. |
+| `vm.ssh` | SSH authentication: keys only. Password authentication is off. |
 
 The version is also in the edge ISO's file name.
 
@@ -89,9 +99,11 @@ The version is also in the edge ISO's file name.
 
 ### Using a VM image
 
-For testing, not for users: users get the release ISO from iso.omarchy.org. A VM image is Omarchy already installed, with no installer to go through, and it boots in seconds. There is one of edge, rebuilt every night, and one of the last release.
+VM images are for testing. Users download the release ISO from iso.omarchy.org.
 
-On a Linux machine with QEMU (`qemu-system-x86_64` and `qemu-img`), a `/dev/kvm` you can read and write, `ssh`, `curl` and `jq`:
+A VM image is Omarchy already installed. It boots in seconds, with no installer to go through. There is an image of the edge channel, rebuilt every night, and an image of the latest release.
+
+Run these commands on a Linux machine with QEMU (`qemu-system-x86_64` and `qemu-img`), read and write access to `/dev/kvm`, and `ssh`, `curl` and `jq`:
 
 ```bash
 latest=https://nightly.omarchy.org/edge/latest.json    # or .../stable/latest.json
@@ -104,9 +116,11 @@ chmod +x vm-boot
 ./vm-boot . uname -r    # boots, runs the command over SSH, powers off
 ```
 
-The user is `omarchy` with password `omarchy`. SSH takes keys only, and `vm-boot` makes one for each boot. Every boot is a new machine, and the downloaded image is never written to: the machine runs on an overlay under `/var/tmp` (`VM_STATE_DIR` moves it) that is deleted on exit. The disk is a download of 4 to 5 GB.
+The user is `omarchy` and the password is `omarchy`. SSH takes keys only, and `vm-boot` makes a new key for each boot.
 
-The nightly's edge ISO is `jq -r .url` of the same `latest.json`.
+Each boot starts a new machine on an overlay under `/var/tmp`, so the downloaded image is never changed. The overlay is deleted on exit. Set `VM_STATE_DIR` to put it somewhere else. The disk image is a 4 to 5 GB download.
+
+To get the URL of the edge ISO, run `jq -r .url` on the same `latest.json`.
 
 ### Autoinstall
 

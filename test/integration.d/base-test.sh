@@ -419,37 +419,50 @@ EOF
   (cd "$BASE_DIR/www" && exec python3 -m http.server "$HTTP_PORT" --bind 127.0.0.1 >/dev/null 2>&1) &
   HTTP_PID=$!
 
-  local waited=0
-  while true; do
-    press ctrl-alt-f3
-    sleep 4
-    ocr_screen | grep -qi "login:" && break
-    ((waited += 8))
+  # The typing below races whatever else owns the console: on a factory
+  # first boot, provisioning finishing mid-command starts the graphical
+  # session and switches the VT, and the rest of the line lands in Hyprland,
+  # so the bootstrap never runs. Each attempt uses a fresh getty (tty3, tty4,
+  # tty5) so a half-typed session on the previous one cannot get in the way.
+  local attempt waited
+  for attempt in 1 2 3; do
+    waited=0
+    while true; do
+      press "ctrl-alt-f$((attempt + 2))"
+      sleep 4
+      ocr_screen | grep -qi "login:" && break
+      ((waited += 8))
 
-    if ((waited >= 300)); then
-      capture_console "failure-console-timeout"
-      echo "Timed out waiting for a console login prompt" >&2
-      return 1
+      if ((waited >= 300)); then
+        capture_console "failure-console-timeout"
+        echo "Timed out waiting for a console login prompt" >&2
+        return 1
+      fi
+      sleep 4
+    done
+
+    type_text "$GUEST_USER"
+    press ret
+    wait_for_screen "Password" 60
+    type_text "$GUEST_PASSWORD"
+    press ret
+    sleep 3
+
+    type_text "curl -fsS http://10.0.2.2:$HTTP_PORT/bootstrap -o /tmp/bs && bash /tmp/bs"
+    press ret
+
+    if wait_for_ssh 120 "failure-bootstrap-ssh-timeout-$attempt"; then
+      capture_console "success-bootstrap-ssh"
+      kill "$HTTP_PID" 2>/dev/null || true
+      HTTP_PID=""
+      press ctrl-alt-f1
+      return 0
     fi
-    sleep 4
+    log "SSH did not come up after the console login (attempt $attempt); retrying on the next VT"
   done
 
-  type_text "$GUEST_USER"
-  press ret
-  wait_for_screen "Password" 60
-  type_text "$GUEST_PASSWORD"
-  press ret
-  sleep 3
-
-  type_text "curl -fsS http://10.0.2.2:$HTTP_PORT/bootstrap -o /tmp/bs && bash /tmp/bs"
-  press ret
-
-  wait_for_ssh 360 "failure-bootstrap-ssh-timeout"
-  capture_console "success-bootstrap-ssh"
-
-  kill "$HTTP_PID" 2>/dev/null || true
-  HTTP_PID=""
-  press ctrl-alt-f1
+  echo "SSH bootstrap failed after 3 console logins" >&2
+  return 1
 }
 
 # Root SSH into the live ISO itself (not the installed system). The live root
@@ -722,7 +735,7 @@ installed_system_started() {
 # first boot is what is being waited for.
 wait_for_unattended_install() {
   local prefix="$1" serial_log="${2:-}"
-  local waited=0 text progress_name first_boot_at=""
+  local waited=0 text progress_name blank_screens=0 first_boot_at=""
 
   log "Waiting for the unattended install to finish (timeout ${INSTALL_TIMEOUT}s)"
   while true; do
@@ -745,6 +758,28 @@ wait_for_unattended_install() {
       press ret
       sleep 10
       continue
+    fi
+
+    # A BIOS install boots the mkinitcpio initramfs, whose LUKS prompt is
+    # Plymouth's lock field under the logo: OCR reads the logo ("OMARCHY",
+    # or "OMARCHS" at this size) and nothing else. Once an encrypted run has
+    # shown nothing but the logo for two samples in a row, nothing but that
+    # prompt is listening to the keyboard, so type the passphrase blind. The
+    # installer's dashboard always carries more text ("Installing Omarchy",
+    # the tip line); the splash between the reboot and the prompt discards
+    # keystrokes.
+    local screen_words=${text//[^[:alpha:]]/}
+    if [[ $ENCRYPT == true && ${screen_words,,} =~ ^(omarch[a-z]{0,2})?$ ]]; then
+      if ((++blank_screens >= 2)); then
+        capture_console "success-install-luks-prompt-blind"
+        type_text "$GUEST_PASSWORD"
+        press ret
+        blank_screens=0
+        sleep 10
+        continue
+      fi
+    else
+      blank_screens=0
     fi
 
     if grep -qi "Reboot Now" <<<"$text"; then

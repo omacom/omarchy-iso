@@ -1,35 +1,231 @@
 name: Nightly ISO Build
 
+# Every night: builds the edge ISO, installs it unattended and boots what it
+# installed (the install test), turns that installed disk into a VM image, and
+# publishes all of it with a latest.json saying what is in it.
+#
+#   https://nightly.omarchy.org/edge/latest.json
+#   https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.iso
+#   https://nightly.omarchy.org/edge/<version>/vm/   base.qcow2 and what boots it
+#
+# Nothing is published unless the ISO installed and the image passed its
+# checks. A version's files are written once and never replaced: the CDN keeps
+# them for a year. Only latest.json changes, and it is written last.
+#
+# No pull_request trigger: this workflow holds the key to the bucket, so it
+# never runs for a fork. To try a change, run it by hand on a branch; that
+# builds and checks everything and publishes nothing.
+
 on:
   schedule:
     - cron: "1 0 * * *" # Daily at 00:01 UTC
-  workflow_dispatch: # Allow manual triggering
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to nightly.omarchy.org (only from quattro)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CHANNEL: edge
+  SITE: https://nightly.omarchy.org
 
 jobs:
-  build-iso:
-    runs-on: ubuntu-latest
+  build:
+    name: Build, install, seal
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      # The date says when, the run number keeps two builds of one day apart:
+      # a published name is never reused.
+      - id: version
+        run: echo "version=$(date -u +%Y.%m.%d).${{ github.run_number }}" | tee -a "$GITHUB_OUTPUT"
 
-      - name: Free Disk Space
-        uses: jlumbroso/free-disk-space@v1.3.1
+      - name: Check disk space
+        run: |
+          df -h /
+          avail_gb=$(df -BG --output=avail / | tail -1 | tr -dc 0-9)
+          [ "$avail_gb" -ge 50 ] || { echo "::error::only ${avail_gb} GB free, the build, the install test and the image need ~50 GB"; exit 1; }
 
-      - name: Build ISO
-        run: NO_BOOT_OFFER=1 ./bin/omarchy-iso-make
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
-      - name: Delete previously uploaded ISO artifact
-        uses: philips-labs/action-delete-artifacts@v1.0.0
+      - name: Build the edge ISO
+        run: NO_BOOT_OFFER=1 ./bin/omarchy-iso-make --edge
+
+      # The same install test a pull request gets (install-test.yml), then the
+      # image: the installed disk that test leaves behind, sealed and checked.
+      - name: Install unattended, boot the installed system, seal it
+        run: |
+          sudo chmod 0666 /dev/kvm
+          docker run --rm --device /dev/kvm -v "$PWD:/w" -w /w \
+            -e OMARCHY_INTEGRATION_DISK_CACHE=none \
+            archlinux:latest bash -euo pipefail -c '
+              pacman -Syu --noconfirm --needed qemu-system-x86 qemu-hw-display-virtio-gpu qemu-hw-display-virtio-vga qemu-img edk2-ovmf socat \
+                imagemagick tesseract tesseract-data-eng mtools dosfstools jq openssh openssl python curl binutils >/dev/null
+              # test/integration installs its tools through Omarchy'"'"'s helper; they are installed above.
+              printf "#!/bin/sh\nexit 0\n" >/usr/local/bin/omarchy-pkg-add
+              chmod 0755 /usr/local/bin/omarchy-pkg-add
+              qemu-system-x86_64 --version | head -1
+              ./test/integration release/*.iso boot --no-preview --memory 8192 --timeout 1800
+
+              base=$(ls -d test-runs/*-integration)
+              ./test/vm-image/vm-seal "$base" sealed
+              ./test/vm-image/vm-verify sealed | tee vm-verify.txt
+              ./test/vm-image/vm-boot sealed "pacman -Q omarchy-dev omarchy-settings-dev linux-omarchy; uname -r" >vm-packages.txt
+              cat vm-packages.txt
+            '
+
+      # The container ran as root; what it wrote belongs to root until here.
+      - name: Hand the results to the runner's user
+        if: always()
+        run: |
+          mkdir -p test-runs sealed
+          sudo chown -R "$(id -u):$(id -g)" test-runs sealed release vm-*.txt 2>/dev/null || true
+
+      - name: Lay out the release and describe it
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          dir=out/$CHANNEL/$VERSION
+          iso=omarchy-$CHANNEL-$VERSION.iso
+          mkdir -p "$dir/vm"
+          mv release/*.iso "$dir/$iso"
+          (cd "$dir" && sha256sum "$iso" >"$iso.sha256")
+          mv sealed/* "$dir/vm/"
+          cp test/vm-image/vm-boot "$dir/vm/vm-boot"
+          (cd "$dir/vm" && sha256sum base.qcow2 OVMF_VARS.4m.fd vmlinuz initrd cmdline vm-boot >SHA256SUMS)
+
+          omarchy=$(awk '$1 == "omarchy-dev" { print $2 }' vm-packages.txt)
+          jq -n \
+            --arg version "$VERSION" --arg channel "$CHANNEL" --arg site "$SITE/$CHANNEL/$VERSION" --arg iso "$iso" \
+            --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg sha256 "$(cut -d" " -f1 "$dir/$iso.sha256")" --argjson size "$(stat -c %s "$dir/$iso")" \
+            --arg iso_commit "$GITHUB_SHA" \
+            --arg omarchy_version "$omarchy" --arg omarchy_commit "$(sed -nE "s/.*\.g([0-9a-f]+)-.*/\1/p" <<<"$omarchy")" \
+            --arg kernel "$(tail -n 1 vm-packages.txt)" \
+            --arg disk_sha256 "$(awk '$2 == "base.qcow2" { print $1 }' "$dir/vm/SHA256SUMS")" \
+            --argjson disk_size "$(stat -c %s "$dir/vm/base.qcow2")" \
+            '{
+              version: $version, channel: $channel, built_at: $built_at,
+              url: "\($site)/\($iso)", sha256: $sha256, size: $size,
+              iso_commit: $iso_commit, omarchy_version: $omarchy_version, omarchy_commit: $omarchy_commit,
+              kernel: $kernel,
+              vm: {
+                url: "\($site)/vm/", disk: "\($site)/vm/base.qcow2", disk_sha256: $disk_sha256, disk_size: $disk_size,
+                files: ["base.qcow2", "OVMF_VARS.4m.fd", "vmlinuz", "initrd", "cmdline", "vm-boot", "SHA256SUMS"],
+                user: "omarchy", password: "omarchy",
+                ssh: "keys only; vm-boot makes one for each boot"
+              }
+            }' | tee "out/$CHANNEL/latest.json"
+
+          {
+            echo "## Nightly $CHANNEL $VERSION"
+            echo
+            echo "| File | Size |"
+            echo "| --- | ---: |"
+            (cd "$dir" && find . -type f -printf '| `%P` | %s |\n' | sort) | awk -F'|' '{ printf "|%s| %.0f MiB |\n", $2, $3 / 1048576 }'
+            echo
+            echo '```'
+            cat vm-verify.txt
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the release for the publish job
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          workflow: nightly-build.yml
-        continue-on-error: true
+          name: nightly-${{ steps.version.outputs.version }}
+          path: out/
+          compression-level: 0
+          retention-days: 2
+          if-no-files-found: error
 
-      - name: Upload newly built ISO artifact
-        uses: actions/upload-artifact@v4
+      - name: Keep the install test's logs
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: omarchy-iso-${{ github.run_number }}
-          path: ./release/*.iso
-          retention-days: 1
+          name: nightly-install-test-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-runs/*/omarchy-install-timing.json
+            test-runs/*/omarchy-install.log
+            test-runs/*/first-boot-systemd-analyze.txt
+            test-runs/*/runs/**/*.png
+            test-runs/*/runs/**/*.txt
+            test-runs/*/runs/**/*.json
+            test-runs/*/runs/**/*.log
+            vm-verify.txt
+            vm-packages.txt
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # The only job that holds the bucket's key, and it builds nothing: it copies
+  # what the job above made, checks what the CDN then serves, and only then
+  # points latest.json at it.
+  publish:
+    name: Publish
+    needs: build
+    if: github.ref == 'refs/heads/quattro' && (github.event_name == 'schedule' || inputs.publish)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: nightly
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      RCLONE_CONFIG_R2_TYPE: s3
+      RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+      RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      RCLONE_CONFIG_R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      BUCKET: omarchy-nightly
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: nightly-${{ needs.build.outputs.version }}
+          path: out
+
+      - name: rclone
+        run: |
+          [ -n "$RCLONE_CONFIG_R2_ACCESS_KEY_ID" ] || { echo "::error::the nightly environment has no bucket key"; exit 1; }
+          sudo apt-get update -qq && sudo apt-get install -y -qq rclone >/dev/null
+          rclone version | head -1
+
+      # --immutable: a name that exists with other bytes is an error, not an
+      # overwrite.
+      - name: Upload this version
+        run: |
+          rclone copy "out/$CHANNEL/$VERSION" "r2:$BUCKET/$CHANNEL/$VERSION" \
+            --immutable --s3-no-check-bucket --transfers 8 --s3-upload-concurrency 8 --s3-chunk-size 64M --stats 30s --stats-one-line
+
+      # Fetched the way a user fetches them. It proves what is served, and it
+      # is the first request the CDN sees for each file.
+      - name: Check what the CDN serves
+        run: |
+          set -euo pipefail
+          dir=out/$CHANNEL/$VERSION
+          check() { # url, expected sha256
+            got=$(curl -fsSL --retry 3 "$1" | sha256sum | cut -d" " -f1)
+            [ "$got" = "$2" ] || { echo "::error::$1 serves $got, expected $2"; exit 1; }
+            echo "ok $1"
+          }
+          iso=$(basename "$dir"/*.iso)
+          check "$SITE/$CHANNEL/$VERSION/$iso" "$(cut -d" " -f1 "$dir/$iso.sha256")"
+          while read -r sum name; do
+            check "$SITE/$CHANNEL/$VERSION/vm/$name" "$sum"
+          done <"$dir/vm/SHA256SUMS"
+
+      - name: Point latest.json at it
+        run: |
+          rclone copyto "out/$CHANNEL/latest.json" "r2:$BUCKET/$CHANNEL/latest.json" --s3-no-check-bucket
+          served=$(curl -fsSL "$SITE/$CHANNEL/latest.json?run=$GITHUB_RUN_ID" | jq -r .version)
+          [ "$served" = "$VERSION" ] || { echo "::error::latest.json serves version $served, expected $VERSION"; exit 1; }
+          echo "Published [$VERSION]($SITE/$CHANNEL/latest.json)" >>"$GITHUB_STEP_SUMMARY"

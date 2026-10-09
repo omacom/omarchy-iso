@@ -1,0 +1,227 @@
+name: Upgrade test
+
+# What an existing user gets: installs a release from its ISO, moves it to
+# another channel the way a user would (omarchy-channel-set), reboots it, and
+# checks what came back. test/upgrade-test does the work and says what it
+# checks.
+#
+# Started by hand: from the latest release to edge unless told otherwise. It
+# also runs for a pull request that changes the test itself.
+#
+# When there is a pull request for the branch it ran on, the result goes there
+# as one comment, updated in place on later runs, with a picture of the desktop
+# before and after. The pictures are committed to the upgrade-test-screenshots
+# branch, which is what lets a comment show them.
+
+on:
+  workflow_dispatch:
+    inputs:
+      to:
+        description: "Channel to move to"
+        type: choice
+        options: [edge, rc]
+        default: edge
+      from:
+        description: "Release to start from, like 4.0.4 (default: the latest)"
+        type: string
+        default: ""
+  pull_request:
+    paths:
+      - test/upgrade-test
+      - .github/workflows/upgrade-test.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upgrade-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  TO: ${{ inputs.to || 'edge' }}
+
+jobs:
+  upgrade:
+    name: Install, upgrade, reboot
+    # Our own branches run on Namespace; a pull request from a fork stays on
+    # GitHub's runner.
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-26.04' || 'namespace-profile-linux-amd64-16x32' }}
+    timeout-minutes: 60
+    outputs:
+      from: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FROM: ${{ inputs.from }}
+        run: |
+          set -euo pipefail
+          version=${FROM:-$(gh api repos/omacom/omarchy/releases/latest --jq .tag_name)}
+          version=${version#v}
+          [[ $version =~ ^[0-9]+(\.[0-9]+)+$ ]] || { echo "::error::'$version' is not a release version"; exit 1; }
+          echo "version=$version" | tee -a "$GITHUB_OUTPUT"
+
+      # Good only if the signature is the release key's, the one in this repo.
+      - name: Download the released ISO and check its signature
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          iso=omarchy-$VERSION.iso
+          curl -fSL --retry 3 -o "release/$iso" "https://iso.omarchy.org/$iso"
+          curl -fsSL --retry 3 -o "release/$iso.sig" "https://iso.omarchy.org/$iso.sig"
+          home=$(mktemp -d)
+          gpg --homedir "$home" --quiet --batch --import builder/omarchy.gpg
+          key=$(gpg --homedir "$home" --batch --with-colons --list-keys | awk -F: '$1 == "fpr" { print $10; exit }')
+          gpg --homedir "$home" --batch --status-fd 1 --verify "release/$iso.sig" "release/$iso" 2>/dev/null |
+            grep -q "^\[GNUPG:\] VALIDSIG $key " || { echo "::error::$iso is not signed by $key"; exit 1; }
+          echo "$iso is signed by $key"
+          rm -rf "$home" "release/$iso.sig"
+
+      # The install test's own install, which leaves the installed disk behind;
+      # the upgrade then starts from that disk. A failed upgrade does not stop
+      # here: the evidence is kept first, and the last step fails the job.
+      - name: Install the release, then upgrade it
+        run: |
+          sudo chmod 0666 /dev/kvm
+          docker run --rm --device /dev/kvm -v "$PWD:/w" -w /w \
+            -e OMARCHY_INTEGRATION_DISK_CACHE=none -e TO \
+            ghcr.io/archlinux/archlinux:latest bash -euo pipefail -c '
+              if ! grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then
+                printf "#!/bin/sh\nexec /usr/bin/pacman --disable-sandbox \"\$@\"\n" >/usr/local/bin/pacman
+                chmod 0755 /usr/local/bin/pacman
+              fi
+              sed -i "1i Server = https://mirror.omarchy.org/\$repo/os/\$arch" /etc/pacman.d/mirrorlist
+              for attempt in 1 2 3; do
+                pacman -Syu --noconfirm --needed qemu-system-x86 qemu-hw-display-virtio-gpu qemu-hw-display-virtio-vga qemu-img edk2-ovmf socat \
+                  imagemagick tesseract tesseract-data-eng mtools dosfstools jq openssh openssl python curl >/dev/null && break
+                [ "$attempt" -lt 3 ] || { echo "::error::the test container could not install its tools"; exit 1; }
+                echo "pacman failed, attempt $attempt of 3; trying again in 15 s"; sleep 15
+              done
+              printf "#!/bin/sh\nexit 0\n" >/usr/local/bin/omarchy-pkg-add
+              chmod 0755 /usr/local/bin/omarchy-pkg-add
+              ./test/integration release/*.iso boot --no-preview --memory 8192 --timeout 1800
+
+              status=0
+              VM_STATE_DIR=/w ./test/upgrade-test "$(ls -d test-runs/*-integration)" "$TO" upgrade-evidence || status=$?
+              echo "$status" >upgrade-evidence/status
+            '
+
+      - name: Hand the results to the runner's user
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" upgrade-evidence test-runs 2>/dev/null || true
+
+      - name: Keep the evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: upgrade-test-${{ github.run_id }}-${{ github.run_attempt }}
+          path: upgrade-evidence/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: The upgrade's result
+        run: |
+          cat upgrade-evidence/report.md >>"$GITHUB_STEP_SUMMARY"
+          [ "$(cat upgrade-evidence/status)" = 0 ] || { echo "::error::the upgrade test failed, see the summary"; exit 1; }
+
+  # The only job that can write: it commits the two pictures and writes the
+  # comment. It runs nothing from the test; it handles two PNG files and a
+  # Markdown report.
+  report:
+    name: Report
+    needs: upgrade
+    if: ${{ !cancelled() && !github.event.pull_request.head.repo.fork }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      FROM: ${{ needs.upgrade.outputs.from }}
+      PR: ${{ github.event.pull_request.number }}
+      BRANCH: ${{ github.head_ref || github.ref_name }}
+      SHOTS_BRANCH: upgrade-test-screenshots
+    steps:
+      # No evidence at all still gets a comment saying so.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          name: upgrade-test-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+
+      # A comment can only show a picture that has a public address. A commit
+      # on a branch of this repository gives it one, and the address of a
+      # commit never changes.
+      - name: Commit the pictures
+        id: pictures
+        run: |
+          set -euo pipefail
+          [ -s evidence/before.png ] || [ -s evidence/after.png ] || { echo "no pictures to commit"; exit 0; }
+          url=https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git
+          git init -q shots && cd shots
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git fetch -q --depth 1 "$url" "$SHOTS_BRANCH" 2>/dev/null; then
+            git checkout -q -b "$SHOTS_BRANCH" FETCH_HEAD
+          else
+            git checkout -q --orphan "$SHOTS_BRANCH"
+          fi
+          dir=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT
+          mkdir -p "$dir"
+          cp ../evidence/*.png "$dir/"
+          git add "$dir"
+          git commit -q -m "Upgrade test $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT: $FROM to $TO"
+          git push -q "$url" "$SHOTS_BRANCH"
+          echo "base=https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$(git rev-parse HEAD)/$dir" >>"$GITHUB_OUTPUT"
+
+      - name: Write the comment
+        env:
+          PICTURES: ${{ steps.pictures.outputs.base }}
+          RESULT: ${{ needs.upgrade.result }}
+        run: |
+          set -euo pipefail
+          marker="<!-- upgrade-test -->"
+          {
+            echo "$marker"
+            echo "## Upgrade test: $FROM → $TO"
+            echo
+            if [ -s evidence/report.md ]; then
+              cat evidence/report.md
+            else
+              echo "**The test did not get as far as a report** (job result: $RESULT)."
+            fi
+            if [ -n "$PICTURES" ]; then
+              echo
+              echo "| Before, $FROM | After, on $TO |"
+              echo "| --- | --- |"
+              echo "| ![before]($PICTURES/before.png) | ![after]($PICTURES/after.png) |"
+              if [ -s evidence/stuck.png ]; then
+                echo
+                echo "The reboot did not come back by itself. This is what the screen showed:"
+                echo
+                echo "![stuck]($PICTURES/stuck.png)"
+              fi
+            fi
+            echo
+            echo "[Run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID), attempt $GITHUB_RUN_ATTEMPT, at \`${GITHUB_SHA:0:7}\`."
+          } >comment.md
+          cat comment.md >>"$GITHUB_STEP_SUMMARY"
+
+          # A run started by hand has no pull request of its own: use the open
+          # one for its branch, if there is one.
+          pr=${PR:-$(gh pr list -R "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')}
+          [ -n "$pr" ] || { echo "No pull request for $BRANCH: the result is on this run's page."; exit 0; }
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/issues/$pr/comments" --paginate \
+            --jq "[.[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\")))][0].id // empty")
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$existing" -F body=@comment.md >/dev/null
+            echo "Updated the comment on #$pr"
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$pr/comments" -F body=@comment.md >/dev/null
+            echo "Commented on #$pr"
+          fi

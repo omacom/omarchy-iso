@@ -263,6 +263,25 @@ The first scenario is `factory-reset`: it proves `omarchy-system-factory-reset` 
 
 Artifacts — screenshots, the fixtured/staged/final `limine.conf`, the reset typescript, and the factory-reset log — land under `test-runs/<iso>-integration/runs/<timestamp>-<scenario>/`, and `--no-preview` skips the `imv` review just like the acceptance harness.
 
+## Upgrade testing
+
+`test/upgrade-test` checks what an existing user gets. It takes an installed system, moves it to another channel with `omarchy-channel-set`, reboots it, and checks what came back: the update's exit status, skipped migrations, that the reboot comes back by itself into an installed kernel, failed units, the desktop, the user's wallpaper and the boot menu.
+
+```bash
+./test/integration release/omarchy.iso boot                                # installs once, leaves the installed disk
+./test/upgrade-test test-runs/omarchy-integration edge upgrade-evidence    # edge or rc
+```
+
+The evidence folder gets `report.md`, the update's output, and a picture of the desktop before and after.
+
+The "Upgrade test" workflow does both steps from a release's ISO. Start it by hand, from the latest release to edge by default:
+
+```bash
+gh workflow run upgrade-test.yml -f to=edge
+```
+
+When the branch it ran on has a pull request, the result is posted there as one comment and updated in place on later runs.
+
 ## Signing the ISO
 
 Run `./bin/omarchy-iso-sign [release/omarchy.iso]`. The signing key is retrieved from the shared Omarchy vault with the 1Password CLI.

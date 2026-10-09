@@ -181,6 +181,8 @@ STUB
   refused "an artifact that does not exist" env FETCH_IDS=" " PATH="$stubs:$PATH" TMPDIR="$tmp" FETCH_LOG="$tmp/fetch.log" "$fetch" omacom/omarchy-iso 7 nightly-edge-7 "$tmp/f3"
   refused "a download of the wrong size" env FETCH_SIZE=1 PATH="$stubs:$PATH" TMPDIR="$tmp" FETCH_LOG="$tmp/fetch.log" "$fetch" omacom/omarchy-iso 7 nightly-edge-7 "$tmp/f4"
   [[ ! -e $tmp/f4/edge ]] || fail "fetch: a download of the wrong size was unpacked"
+  refused "an artifact larger than the free space" env FETCH_SIZE=9000000000000000 PATH="$stubs:$PATH" TMPDIR="$tmp" FETCH_LOG="$tmp/fetch.log" "$fetch" omacom/omarchy-iso 7 nightly-edge-7 "$tmp/f5"
+  grep -q "MiB free" "$tmp/refused.err" || fail "fetch: too little room is not what was reported"
 else
   echo "nightly-fetch tests skipped: no zip or unzip here"
 fi

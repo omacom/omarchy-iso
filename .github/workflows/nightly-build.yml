@@ -285,17 +285,13 @@ jobs:
 
       # --immutable: a name that exists with other bytes is an error, not an
       # overwrite.
-      # An upload that only passes on a retry is said so on the run's page:
-      # the files are compared afterwards either way, but it should not go
-      # unnoticed again.
+      # nightly-rclone is rclone, with a warning on the run's page when an
+      # upload only passed on a retry: the files are compared afterwards either
+      # way, but it should not go unnoticed again.
       - name: Upload this version
         run: |
-          set -euo pipefail
-          rclone copy "out/$RELEASE" "r2:$BUCKET/$RELEASE" \
-            --immutable --s3-no-check-bucket --transfers 8 --s3-upload-concurrency 8 --s3-chunk-size 64M --stats 30s --stats-one-line 2>&1 | tee upload.log
-          if grep -q "Failed to copy" upload.log; then
-            echo "::warning::rclone needed a retry: $(grep -c "Failed to copy" upload.log) uploads failed on an earlier attempt"
-          fi
+          ./test/vm-image/nightly-rclone copy "out/$RELEASE" "r2:$BUCKET/$RELEASE" \
+            --immutable --s3-no-check-bucket --transfers 8 --s3-upload-concurrency 8 --s3-chunk-size 64M --stats 30s --stats-one-line
 
       # Fetched the way a user fetches them. It proves what is served, and it
       # is the first request the CDN sees for each file.
@@ -318,7 +314,7 @@ jobs:
 
       - name: Point latest.json at it
         run: |
-          rclone copyto "out/$CHANNEL/latest.json" "r2:$BUCKET/$CHANNEL/latest.json" --s3-no-check-bucket
+          ./test/vm-image/nightly-rclone copyto "out/$CHANNEL/latest.json" "r2:$BUCKET/$CHANNEL/latest.json" --s3-no-check-bucket
           served=$(curl -fsSL "$SITE/$CHANNEL/latest.json?run=$GITHUB_RUN_ID" | jq -r .version)
           [ "$served" = "$VERSION" ] || { echo "::error::latest.json serves version $served, expected $VERSION"; exit 1; }
           echo "Published [$VERSION]($SITE/$CHANNEL/latest.json)" >>"$GITHUB_STEP_SUMMARY"

@@ -187,6 +187,33 @@ else
   echo "nightly-fetch tests skipped: no zip or unzip here"
 fi
 
+# -------------------------------------------------------------- nightly-rclone
+wrapped="$ROOT/test/vm-image/nightly-rclone"
+bash -n "$wrapped"
+mkdir -p "$tmp/rc"
+rclone_says() { # exit status, output lines...: a stand-in rclone
+  local status=$1; shift
+  { echo '#!/bin/bash'; printf 'echo %q >&2\n' "$@"; echo "exit $status"; } >"$tmp/rc/rclone"
+  chmod +x "$tmp/rc/rclone"
+}
+rclone_says 0 "Transferred: 3 / 3, 100%"
+out=$(PATH="$tmp/rc:$PATH" "$wrapped" copy a b)
+[[ $out != *::warning::* ]] || fail "rclone: a clean upload was reported as a retry"
+[[ $out == *"Transferred: 3 / 3"* ]] || fail "rclone: its output was not passed through"
+
+rclone_says 0 "<3>ERROR : a.qcow2: Failed to copy: NotImplemented: Not Implemented" \
+  "<3>ERROR : a.qcow2: Failed to copy: NotImplemented: Not Implemented" \
+  "<3>ERROR : unpacked/vmlinuz: Failed to copy: NotImplemented: Not Implemented" \
+  "<3>ERROR : Attempt 2/3 failed with 2 errors" "<3>ERROR : Attempt 3/3 succeeded"
+out=$(PATH="$tmp/rc:$PATH" "$wrapped" copy a b)
+[[ $out == *"::warning::rclone needed a retry for 2 file(s): a.qcow2 unpacked/vmlinuz"* ]] ||
+  fail "rclone: a file that failed twice is not counted once: $(grep warning <<<"$out")"
+
+rclone_says 3 "<3>ERROR : a.qcow2: Failed to copy: AccessDenied"
+if PATH="$tmp/rc:$PATH" "$wrapped" copy a b >"$tmp/rc/out" 2>&1; then fail "rclone: a failed upload passed"; fi
+equal "rclone: its exit status is kept" "$(PATH="$tmp/rc:$PATH" "$wrapped" copy a b >/dev/null 2>&1; echo $?)" "3"
+if grep -q '::warning::' "$tmp/rc/out"; then fail "rclone: a failed upload was reported as a retry"; fi
+
 # ------------------------------------------------------------ the install test
 # The harness is a script that starts a VM when it is read; take the two
 # functions out of it.

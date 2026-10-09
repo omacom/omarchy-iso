@@ -34,6 +34,18 @@ airootfs_image_tool_options=(
   '-b' '1M'
   '-action' 'uncompressed@subpathname(var/cache/omarchy/mirror/offline)'
 )
+# Arch Linux ARM builds linux-aarch64's squashfs without zstd: the live root
+# fails to mount with 'Filesystem uses "zstd" compression. This is not
+# supported'. Of what that kernel reads, lz4 keeps the reason for zstd above,
+# fast decompression on the page-fault path, at the cost of a larger image.
+if [[ ${OMARCHY_KERNEL:-} == linux-aarch64 ]]; then
+  airootfs_image_tool_options=(
+    '-comp' 'lz4'
+    '-Xhc'
+    '-b' '1M'
+    '-action' 'uncompressed@subpathname(var/cache/omarchy/mirror/offline)'
+  )
+fi
 bootstrap_tarball_compression=('zstd' '-c' '-T0' '--auto-threads=logical' '--long' '-19')
 file_permissions=(
   ["/etc/shadow"]="0:0:400"

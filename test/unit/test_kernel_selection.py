@@ -154,6 +154,31 @@ class KernelSelectionTest(unittest.TestCase):
                 header_release.write_text("7.2-test\n")
                 phases_impl._validate_kernel_headers(ctx)
 
+    def test_a_kernel_without_a_pkgbase_is_the_one_the_image_installs(self):
+        # Arch Linux ARM's linux-aarch64 records no pkgbase next to its modules.
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            ctx = types.SimpleNamespace(target=target)
+            modules = target / "usr/lib/modules/7.2.9-1-aarch64-ARCH"
+            modules.mkdir(parents=True)
+            (modules / "modules.builtin").write_text("kernel/fs/ext4/ext4.ko\n")
+            # Out-of-tree leftovers are not a kernel.
+            (target / "usr/lib/modules/7.2.8-gone/updates/dkms").mkdir(parents=True)
+
+            with mock.patch.object(phases_impl, "iso_kernel", return_value=""):
+                self.assertEqual(phases_impl._installed_kernels(ctx), [])
+                with self.assertRaisesRegex(RuntimeError, "no installed kernel"):
+                    phases_impl._validate_kernel_headers(ctx)
+
+            with mock.patch.object(phases_impl, "iso_kernel", return_value="linux-aarch64"):
+                self.assertEqual(phases_impl._installed_kernels(ctx), ["linux-aarch64"])
+                with self.assertRaisesRegex(RuntimeError, r"linux-aarch64 \(7\.2\.9-1-aarch64-ARCH\) has no kernel headers"):
+                    phases_impl._validate_kernel_headers(ctx)
+                header_release = modules / "build/include/config/kernel.release"
+                header_release.parent.mkdir(parents=True)
+                header_release.write_text("7.2.9-1-aarch64-ARCH\n")
+                phases_impl._validate_kernel_headers(ctx)
+
     def test_boot_validation_uses_default_or_explicit_kernel(self):
         for storage, configuration, expected in [
             ({}, {}, "linux-omarchy"),

@@ -7,7 +7,8 @@ OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
 OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
 OMARCHY_ARM_PLATFORM="${OMARCHY_ARM_PLATFORM:-}"
 OMARCHY_KERNEL="${OMARCHY_KERNEL:-linux-t2}"
-export OMARCHY_ARCH
+# profiledef.sh reads both in the mkarchiso environment.
+export OMARCHY_ARCH OMARCHY_KERNEL
 
 source /builder/node-release.sh
 source /builder/arm64-kernel-image.sh
@@ -15,26 +16,45 @@ source /builder/archiso-aarch64-mkinitcpio.sh
 source /builder/grub-platform.sh
 
 # The online pacman configuration drives every package download below. On
-# aarch64 it points at the platform bundle mounted at /packages, Omarchy's edge
-# aarch64 repository and Arch Linux ARM.
+# aarch64 it points at Omarchy's edge aarch64 repository and Arch Linux ARM,
+# and for an N1x image at the platform bundle mounted at /packages first.
 case "$OMARCHY_ARCH" in
   x86_64)
     online_pacman_conf="/configs/pacman-online-${OMARCHY_MIRROR}.conf"
     ;;
   aarch64)
     online_pacman_conf=/configs/pacman-online-aarch64.conf
-    if [[ $OMARCHY_ARM_PLATFORM != n1x || -z $OMARCHY_KERNEL || ! -f /builder/$OMARCHY_KERNEL.preset ]]; then
-      echo "ERROR: aarch64 builds need OMARCHY_ARM_PLATFORM=n1x and a platform kernel with a live preset (got '$OMARCHY_ARM_PLATFORM'/'$OMARCHY_KERNEL')" >&2
-      exit 1
-    fi
-    if [[ ! -d /packages || ! -f /packages/SHA256SUMS ]]; then
-      echo "ERROR: aarch64 builds require the platform package bundle mounted at /packages with SHA256SUMS" >&2
-      exit 1
-    fi
-    if [[ ! -d /omarchy-source || ! -d /omarchy-pkgs ]]; then
-      echo "ERROR: aarch64 builds require --local-source; the platform support is not in the published omarchy packages" >&2
-      exit 1
-    fi
+    case "$OMARCHY_ARM_PLATFORM" in
+      n1x)
+        if [[ -z $OMARCHY_KERNEL || ! -f /builder/$OMARCHY_KERNEL.preset ]]; then
+          echo "ERROR: N1x builds need a platform kernel with a live preset (got '$OMARCHY_KERNEL')" >&2
+          exit 1
+        fi
+        if [[ ! -d /packages || ! -f /packages/SHA256SUMS ]]; then
+          echo "ERROR: N1x builds require the platform package bundle mounted at /packages with SHA256SUMS" >&2
+          exit 1
+        fi
+        if [[ ! -d /omarchy-source || ! -d /omarchy-pkgs ]]; then
+          echo "ERROR: N1x builds require --local-source; the platform support is not in the published omarchy packages" >&2
+          exit 1
+        fi
+        ;;
+      generic)
+        # Arch Linux ARM's kernel, the published packages, no bundle.
+        if [[ $OMARCHY_KERNEL != linux-aarch64 ]]; then
+          echo "ERROR: generic aarch64 builds boot linux-aarch64 (got '$OMARCHY_KERNEL')" >&2
+          exit 1
+        fi
+        if [[ -d /packages ]]; then
+          echo "ERROR: generic aarch64 builds take no platform package bundle" >&2
+          exit 1
+        fi
+        ;;
+      *)
+        echo "ERROR: aarch64 builds need OMARCHY_ARM_PLATFORM=n1x or generic (got '$OMARCHY_ARM_PLATFORM')" >&2
+        exit 1
+        ;;
+    esac
     if [[ $OMARCHY_MIRROR != edge ]]; then
       echo "ERROR: aarch64 builds use the edge channel, the only one Omarchy publishes for aarch64 (got '$OMARCHY_MIRROR')" >&2
       exit 1
@@ -64,27 +84,46 @@ esac
 : "${OMARCHY_NVIM_PACKAGE:=omarchy-nvim}"
 export OMARCHY_RUNTIME_PACKAGE OMARCHY_SETTINGS_PACKAGE OMARCHY_NVIM_PACKAGE
 
+# pacman 7 sandboxes its downloads with Landlock and fails every sync on a
+# kernel without it (Namespace's AmpereOne arm64 machines): "restricting
+# filesystem access failed because Landlock is not supported by the kernel".
+# There, every pacman in this container (pacstrap's too) runs with
+# --disable-sandbox, which pacman provides for exactly this. A wrapper rather
+# than DisableSandbox in a config: pacman-offline.conf ships on the ISO.
+if ! grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then
+  echo "No Landlock in this kernel: pacman runs with --disable-sandbox in this container"
+  printf '#!/bin/sh\nexec /usr/bin/pacman --disable-sandbox "$@"\n' >/usr/local/bin/pacman
+  chmod +x /usr/local/bin/pacman
+  hash -r
+fi
+
 # Packages installed into the Arch container used to build the ISO.
 pacman-key --init
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
-  # The platform bundle is the [platform] repo for this build. Verify it and
-  # index it before pacman first consults it.
-  if ! (cd /packages && sha256sum --check --strict --quiet SHA256SUMS); then
-    echo "ERROR: package bundle checksum verification failed" >&2
-    exit 1
-  fi
-  bundle_index=/tmp/packages-index
-  rm -rf "$bundle_index"; mkdir -p "$bundle_index"
-  # repo-add writes next to the archives, but /packages is read-only. Index a
-  # symlink farm instead and serve the repo through it.
-  for archive in /packages/*.pkg.tar.*; do
-    [[ $archive == *.sig ]] && continue
-    ln -s "$archive" "$bundle_index/${archive##*/}"
-  done
-  repo-add -q "$bundle_index/platform.db.tar.gz" "$bundle_index"/*.pkg.tar.* 2>/dev/null || \
-    repo-add "$bundle_index/platform.db.tar.gz" "$bundle_index"/*.pkg.tar.*
   online_pacman_conf=/tmp/pacman-online-aarch64.conf
-  sed "s|^Server = file:///packages$|Server = file://$bundle_index|" /configs/pacman-online-aarch64.conf > "$online_pacman_conf"
+  if [[ -d /packages ]]; then
+    # The platform bundle is the [platform] repo for this build. Verify it and
+    # index it before pacman first consults it.
+    if ! (cd /packages && sha256sum --check --strict --quiet SHA256SUMS); then
+      echo "ERROR: package bundle checksum verification failed" >&2
+      exit 1
+    fi
+    bundle_index=/tmp/packages-index
+    rm -rf "$bundle_index"; mkdir -p "$bundle_index"
+    # repo-add writes next to the archives, but /packages is read-only. Index a
+    # symlink farm instead and serve the repo through it.
+    for archive in /packages/*.pkg.tar.*; do
+      [[ $archive == *.sig ]] && continue
+      ln -s "$archive" "$bundle_index/${archive##*/}"
+    done
+    repo-add -q "$bundle_index/platform.db.tar.gz" "$bundle_index"/*.pkg.tar.* 2>/dev/null || \
+      repo-add "$bundle_index/platform.db.tar.gz" "$bundle_index"/*.pkg.tar.*
+    sed "s|^Server = file:///packages$|Server = file://$bundle_index|" /configs/pacman-online-aarch64.conf > "$online_pacman_conf"
+  else
+    # No bundle, so no [platform] repo: pacman refuses a repo it cannot sync.
+    awk '/^\[platform\]$/ { skip = 1; next } /^\[/ { skip = 0 } !skip' \
+      /configs/pacman-online-aarch64.conf > "$online_pacman_conf"
+  fi
 
   # The container image arrives pointed at Arch Linux ARM's own mirrors. Its
   # packages come from the same place the ISO's do: Omarchy's mirror of them.
@@ -174,13 +213,24 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   done
   rm -f "$build_cache_dir/packages.x86_64"
   rm -f "$build_cache_dir/airootfs/etc/mkinitcpio.d/linux.preset" "$build_cache_dir/airootfs/etc/mkinitcpio.d/linux-t2.preset"
-  cp "/builder/${OMARCHY_KERNEL}.preset" "$build_cache_dir/airootfs/etc/mkinitcpio.d/${OMARCHY_KERNEL}.preset"
   # Drops the x86-only microcode/memdisk hooks and adds the Tegra/MediaTek
-  # I2C-HID keyboard modules. The N1x firmware's SPCR serial console would
-  # take the console from the panel, hence console=tty0 acpi=nospcr.
+  # I2C-HID keyboard modules.
   configure_archiso_aarch64_mkinitcpio "$build_cache_dir/airootfs/etc/mkinitcpio.conf.d/archiso.conf"
   boot_splash_kernel_options="quiet splash "
-  kernel_options="console=tty0 acpi=nospcr initramfs_async=0"
+  if [[ $OMARCHY_ARM_PLATFORM == generic ]]; then
+    # linux-aarch64 owns its preset and names its image /boot/Image, so the
+    # live preset, kernel name and initramfs are made after pacstrap, inside
+    # the image.
+    install -Dm0755 /builder/linux-aarch64-live.sh "$build_cache_dir/airootfs/root/customize_airootfs.sh"
+    # Both consoles: a VM or a server is watched over its serial port, a
+    # machine with a panel on the panel. The last one named is /dev/console.
+    kernel_options="console=ttyAMA0,115200 console=tty0 initramfs_async=0"
+  else
+    cp "/builder/${OMARCHY_KERNEL}.preset" "$build_cache_dir/airootfs/etc/mkinitcpio.d/${OMARCHY_KERNEL}.preset"
+    # The N1x firmware's SPCR serial console would take the console from the
+    # panel, hence console=tty0 acpi=nospcr.
+    kernel_options="console=tty0 acpi=nospcr initramfs_async=0"
+  fi
   rm -rf "$build_cache_dir/syslinux" "$build_cache_dir/efiboot"
 else
   boot_splash_kernel_options="quiet splash "
@@ -412,16 +462,20 @@ mapfile -t all_packages < <(
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   source /builder/aarch64-package-filter.sh
   mapfile -t all_packages < <(filter_aarch64_packages "$OMARCHY_KERNEL" "${all_packages[@]}")
-  # The platform kernel pair and everything else in the bundle (the ASUS
-  # ProArt P14's amplifier firmware, say), the NVIDIA stack and pciutils the
-  # runtime's platform script installs, and the Limine/Snapper stack the
-  # installer adds on aarch64.
-  mapfile -t platform_packages < <(
-    for archive in /packages/*.pkg.tar.*; do
-      [[ $archive == *.sig ]] || pacman -Qqp "$archive"
-    done
-  )
-  all_packages+=("$OMARCHY_KERNEL" "$OMARCHY_KERNEL-headers" "${platform_packages[@]}" archlinuxarm-keyring nvidia-open-dkms nvidia-utils libva-nvidia-driver limine limine-mkinitcpio-hook limine-snapper-sync snapper pciutils)
+  # The platform kernel pair and the Limine/Snapper stack the installer adds
+  # on aarch64. An N1x image adds everything else in the bundle (the ASUS
+  # ProArt P14's amplifier firmware, say) and the NVIDIA stack the runtime's
+  # platform script installs.
+  platform_packages=()
+  if [[ $OMARCHY_ARM_PLATFORM == n1x ]]; then
+    mapfile -t platform_packages < <(
+      for archive in /packages/*.pkg.tar.*; do
+        [[ $archive == *.sig ]] || pacman -Qqp "$archive"
+      done
+    )
+    platform_packages+=(nvidia-open-dkms nvidia-utils libva-nvidia-driver)
+  fi
+  all_packages+=("$OMARCHY_KERNEL" "$OMARCHY_KERNEL-headers" "${platform_packages[@]}" archlinuxarm-keyring limine limine-mkinitcpio-hook limine-snapper-sync snapper pciutils)
   mapfile -t all_packages < <(printf '%s\n' "${all_packages[@]}" | sort -u)
 fi
 
@@ -496,9 +550,9 @@ printf '%s\n' "${required_package_files[@]}" |
 
 # Rebuild the offline repo db from scratch so size/checksum/depends entries
 # always reflect only the package files selected for this build.
-rm -f "$offline_mirror_dir"/offline.db* "$offline_mirror_dir"/offline.files*
-# The bundle ships .pkg.tar.xz archives alongside the .zst ones pacman downloads.
-repo-add "$offline_mirror_dir/offline.db.tar.gz" $(find "$offline_mirror_dir" -maxdepth 1 -name '*.pkg.tar.*' ! -name '*.sig' | sort)
+# Every package archive in the mirror, .xz and .zst alike, indexed by one
+# repo-add per CPU: one alone spent a third of an aarch64 build here.
+bash /builder/index-offline-mirror.sh "$offline_mirror_dir"
 
 # mkarchiso expects the mirror at /var/cache/omarchy/mirror/offline inside the
 # container (the airootfs path); symlink rather than duplicate.

@@ -1328,6 +1328,58 @@ def _stage_provisioning_luks_unlock(ctx: InstallContext, provisioning_dir) -> No
     files_dropin.write_text("FILES+=(/etc/omarchy/provisioning.key)\n")
 
 
+INITRAMFS_MODULES_CONF = "zz-omarchy-kernel-modules.conf"
+
+
+def _drop_initramfs_modules_the_kernel_lacks(ctx: InstallContext) -> None:
+    """Keep mkinitcpio from failing on a module the installed kernel was built
+    without.
+
+    The Omarchy settings name modules for the kernels Omarchy ships, thunderbolt
+    among them. mkinitcpio reports a name it cannot find as an error, and
+    limine-mkinitcpio-hook then builds the unified kernel image but does not
+    install it: Arch Linux ARM's linux-aarch64 has no thunderbolt module, and
+    the machine was left with no kernel to boot. A drop-in that sorts last takes
+    the names this kernel lacks back out of MODULES.
+    """
+    conf_dir = ctx.target / "etc" / "mkinitcpio.conf.d"
+    drop_in = conf_dir / INITRAMFS_MODULES_CONF
+    listed: list[str] = []
+    for conf in sorted(conf_dir.glob("*.conf")) if conf_dir.is_dir() else []:
+        if conf.name == INITRAMFS_MODULES_CONF:
+            continue
+        for match in re.finditer(r"^\s*MODULES\+?=\(([^)]*)\)", conf.read_text(), re.M):
+            listed += [name.strip("\"'") for name in match.group(1).split()]
+
+    missing: list[str] = []
+    for directory, _ in _kernel_directories(ctx):
+        for module in listed:
+            if module in missing or not re.fullmatch(r"[A-Za-z0-9_-]+", module):
+                continue
+            found = subprocess.run(
+                ["modinfo", "--basedir", str(ctx.target), "-k", directory.name, module],
+                capture_output=True,
+            )
+            if found.returncode != 0:
+                missing.append(module)
+
+    if not missing:
+        drop_in.unlink(missing_ok=True)
+        return
+    info(f"› leaving out of the initramfs, not in this kernel: {' '.join(missing)}")
+    drop_in.write_text(
+        "# Written by the Omarchy installer. The installed kernel has no such\n"
+        "# modules, and mkinitcpio fails on a module it cannot find.\n"
+        f"_omarchy_absent=({' '.join(missing)})\n"
+        "_omarchy_kept=()\n"
+        'for _omarchy_module in "${MODULES[@]}"; do\n'
+        '  [[ " ${_omarchy_absent[*]} " == *" $_omarchy_module "* ]] || _omarchy_kept+=("$_omarchy_module")\n'
+        "done\n"
+        'MODULES=("${_omarchy_kept[@]}")\n'
+        "unset _omarchy_absent _omarchy_kept _omarchy_module\n"
+    )
+
+
 def finalize_limine_boot(ctx: InstallContext) -> None:
     """Finalize Limine after target system setup has written all dynamic
     boot drop-ins (hibernation, hardware quirks, protected-mode ESP settings).
@@ -1363,6 +1415,7 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     if not limine_conf.exists():
         raise RuntimeError(f"{limine_conf} missing")
 
+    _drop_initramfs_modules_the_kernel_lacks(ctx)
     subprocess.run(["arch-chroot", str(ctx.target), "limine-update"], check=True)
 
     subprocess.run(
@@ -1932,26 +1985,44 @@ def _assert_boot_hooks_restored(ctx: InstallContext) -> None:
             raise RuntimeError(f"{path} is missing — future kernel updates would ship no UKI")
 
 
+# Arch's kernel packages leave their pkgbase next to their modules, which is
+# also the name limine-mkinitcpio-hook builds the UKI under. Arch Linux ARM's
+# linux-aarch64 leaves none, so a kernel's module directory without one is
+# named by the kernel this image was built to install. modules.builtin marks
+# a kernel's own directory: a leftover of out-of-tree modules has none.
+def _kernel_directories(ctx: InstallContext) -> list[tuple[Path, str]]:
+    found = []
+    modules = ctx.target / "usr" / "lib" / "modules"
+    for directory in sorted(modules.iterdir()) if modules.is_dir() else []:
+        pkgbase = directory / "pkgbase"
+        if pkgbase.is_file():
+            name = pkgbase.read_text().strip()
+        elif (directory / "modules.builtin").is_file():
+            name = iso_kernel()
+        else:
+            continue
+        if name:
+            found.append((directory, name))
+    return found
+
+
 def _validate_kernel_headers(ctx: InstallContext) -> None:
-    kernels = sorted((ctx.target / "usr/lib/modules").glob("*/pkgbase"))
+    kernels = _kernel_directories(ctx)
     if not kernels:
         raise RuntimeError("no installed kernel found in target")
-    for pkgbase in kernels:
-        release = pkgbase.parent.name
-        header_release = pkgbase.parent / "build/include/config/kernel.release"
+    for directory, name in kernels:
+        release = directory.name
+        header_release = directory / "build/include/config/kernel.release"
         if not header_release.is_file():
-            raise RuntimeError(f"{pkgbase.read_text().strip()} ({release}) has no kernel headers")
+            raise RuntimeError(f"{name} ({release}) has no kernel headers")
         if header_release.read_text().strip() != release:
-            raise RuntimeError(f"{pkgbase.read_text().strip()} headers do not match kernel {release}")
+            raise RuntimeError(f"{name} headers do not match kernel {release}")
 
 
-# Every kernel package leaves its pkgbase next to its modules, which is also
-# the name limine-mkinitcpio-hook builds the UKI under.
 def _installed_kernels(ctx: InstallContext) -> list[str]:
     names = []
-    for pkgbase in sorted((ctx.target / "usr" / "lib" / "modules").glob("*/pkgbase")):
-        name = pkgbase.read_text().strip()
-        if name and name not in names:
+    for _, name in _kernel_directories(ctx):
+        if name not in names:
             names.append(name)
     return names
 

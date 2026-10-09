@@ -31,9 +31,13 @@ jobs:
       # that, its getty, udev and vconsole setup take over the host's.
       - name: Run ./test/all in an Arch container
         run: |
+          # Docker Hub limits anonymous pulls from GitHub's runners, so the
+          # image comes from Google's copy of it first.
+          image=mirror.gcr.io/library/archlinux:latest
+          docker pull -q "$image" || image=archlinux:latest
           docker run -d --name unit --privileged --cgroupns=host \
             -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /tmp:exec \
-            -v "$PWD:/src:ro" archlinux:latest bash -c '
+            -v "$PWD:/src:ro" "$image" bash -c '
               systemctl mask getty.target console-getty.service \
                 systemd-udev-trigger.service systemd-udevd.service \
                 systemd-vconsole-setup.service
@@ -46,7 +50,7 @@ jobs:
               sleep 1
             done
             echo "systemd: $state"
-            pacman -Syu --noconfirm --needed python parted >/dev/null
+            pacman -Syu --noconfirm --needed python parted openssh patch git diffutils >/dev/null
             useradd -m tester
             cp -r /src /home/tester/omarchy-iso
             chown -R tester /home/tester/omarchy-iso

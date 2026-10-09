@@ -41,6 +41,7 @@ check "no shell history" sh -c '! [ -e ~/.bash_history ]'
 check "the package cache is empty" [ -z "$(ls /var/cache/pacman/pkg)" ]
 root mkdir -p /run/top && root mount -o subvolid=5,ro "$(findmnt -no SOURCE / | sed 's/\[.*//')" /run/top
 check "the factory snapshot has no machine ID" sh -c "! printf '%s\n' '$PW' | sudo -S -p '' test -s /run/top/@factory/etc/machine-id"
+check "the factory snapshot holds no SSH login key" sh -c "! printf '%s\n' '$PW' | sudo -S -p '' sh -c 'ls /run/top/@factory/root/.ssh/authorized_keys /run/top/@factory/home/*/.ssh/authorized_keys' 2>/dev/null | grep -q ."
 check "the factory snapshot has no SSH host keys" sh -c "[ -z \"\$(printf '%s\n' '$PW' | sudo -S -p '' sh -c 'ls /run/top/@factory/etc/ssh/ssh_host_* 2>/dev/null')\" ]"
 check "no snapshots besides the current system" [ -z "$(root ls /.snapshots)" ]
 echo "omarchy $(pacman -Q omarchy 2>/dev/null | cut -d' ' -f2), kernel $(uname -r), $(systemd-analyze | head -1)"

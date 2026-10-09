@@ -19,49 +19,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # As quattro's unit-test.yml runs them: on x86, in an Arch container. The
-  # installer tests stage a Node tarball named for x64 and the code looks for
-  # the host's architecture, so they fail on an aarch64 host. The container
-  # boots systemd because the keyboard tests ask the real localectl for its
-  # keymaps, and the tests run as an ordinary user because some of them check
-  # what happens when a file cannot be written.
-  #
-  # A privileged container shares the host's consoles and devices, so the
-  # units that would claim them are masked before systemd starts.
-  unit:
-    name: Unit tests
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
-        with:
-          submodules: recursive
-          persist-credentials: false
-      - name: Run ./test/all in an Arch container
-        run: |
-          docker run -d --name unit --privileged --cgroupns=host \
-            -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /tmp:exec \
-            -v "$PWD:/src:ro" archlinux:latest bash -c '
-              systemctl mask getty.target console-getty.service \
-                systemd-udev-trigger.service systemd-udevd.service \
-                systemd-vconsole-setup.service
-              exec /usr/lib/systemd/systemd
-            '
-          docker exec unit bash -euo pipefail -c '
-            for i in $(seq 1 60); do
-              state=$(systemctl is-system-running 2>/dev/null || true)
-              case $state in running | degraded) break ;; esac
-              sleep 1
-            done
-            echo "systemd: $state"
-            pacman -Syu --noconfirm --needed python parted openssh patch git diffutils >/dev/null
-            useradd -m tester
-            cp -r /src /home/tester/omarchy-iso
-            chown -R tester /home/tester/omarchy-iso
-            cd /home/tester/omarchy-iso
-            setpriv --reuid=tester --regid=tester --init-groups ./test/all
-          '
-
   build:
     name: Build the generic ISO
     runs-on: namespace-profile-linux-arm64-16x32

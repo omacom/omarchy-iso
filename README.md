@@ -280,7 +280,7 @@ The "Upgrade test" workflow does both steps from a release's ISO. Start it by ha
 gh workflow run upgrade-test.yml -f to=edge
 ```
 
-When the branch it ran on has a pull request, the result is posted there as one comment and updated in place on later runs.
+It only runs when started. When the branch it ran on has a pull request, the result is posted there as one comment and updated in place on later runs.
 
 ## Signing the ISO
 

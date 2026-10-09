@@ -5,8 +5,7 @@ name: Upgrade test
 # checks what came back. test/upgrade-test does the work and says what it
 # checks.
 #
-# Started by hand: from the latest release to edge unless told otherwise. It
-# also runs for a pull request that changes the test itself.
+# Started by hand only: from the latest release to edge unless told otherwise.
 #
 # When there is a pull request for the branch it ran on, the result goes there
 # as one comment, updated in place on later runs, with a picture of the desktop
@@ -25,16 +24,12 @@ on:
         description: "Release to start from, like 4.0.4 (default: the latest)"
         type: string
         default: ""
-  pull_request:
-    paths:
-      - test/upgrade-test
-      - .github/workflows/upgrade-test.yml
 
 permissions:
   contents: read
 
 concurrency:
-  group: upgrade-test-${{ github.event.pull_request.number || github.ref }}
+  group: upgrade-test-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -43,9 +38,7 @@ env:
 jobs:
   upgrade:
     name: Install, upgrade, reboot
-    # Our own branches run on Namespace; a pull request from a fork stays on
-    # GitHub's runner.
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-26.04' || 'namespace-profile-linux-amd64-16x32' }}
+    runs-on: namespace-profile-linux-amd64-16x32
     timeout-minutes: 60
     outputs:
       from: ${{ steps.release.outputs.version }}
@@ -134,7 +127,7 @@ jobs:
   report:
     name: Report
     needs: upgrade
-    if: ${{ !cancelled() && !github.event.pull_request.head.repo.fork }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -143,8 +136,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       FROM: ${{ needs.upgrade.outputs.from }}
-      PR: ${{ github.event.pull_request.number }}
-      BRANCH: ${{ github.head_ref || github.ref_name }}
+      BRANCH: ${{ github.ref_name }}
       SHOTS_BRANCH: upgrade-test-screenshots
     steps:
       # No evidence at all still gets a comment saying so.
@@ -212,9 +204,8 @@ jobs:
           } >comment.md
           cat comment.md >>"$GITHUB_STEP_SUMMARY"
 
-          # A run started by hand has no pull request of its own: use the open
-          # one for its branch, if there is one.
-          pr=${PR:-$(gh pr list -R "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')}
+          # The open pull request for the branch this was started on, if any.
+          pr=$(gh pr list -R "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
           [ -n "$pr" ] || { echo "No pull request for $BRANCH: the result is on this run's page."; exit 0; }
           existing=$(gh api "repos/$GITHUB_REPOSITORY/issues/$pr/comments" --paginate \
             --jq "[.[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\")))][0].id // empty")

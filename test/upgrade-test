@@ -101,8 +101,11 @@ facts() { # file
     echo "systemd=$(systemctl --version | sed -n "1s/^systemd \([0-9.]*\).*/\1/p")"
     echo "hyprland=$(pacman -Q hyprland 2>/dev/null | cut -d" " -f2)"
     echo "system_state=$(systemctl is-system-running 2>/dev/null)"
-    echo "failed_units=$(systemctl --failed --no-legend --plain | awk "{print \$1}" | paste -sd, -)"
-    echo "failed_user_units=$(systemctl --user --failed --no-legend --plain | awk "{print \$1}" | paste -sd, -)"
+    # A manager that cannot be asked is not a manager with nothing failed.
+    units=$(systemctl --failed --no-legend --plain 2>/dev/null) && units=$(awk "{print \$1}" <<<"$units" | paste -sd, -) || units="could not ask systemd"
+    user_units=$(systemctl --user --failed --no-legend --plain 2>/dev/null) && user_units=$(awk "{print \$1}" <<<"$user_units" | paste -sd, -) || user_units="could not ask the user manager"
+    echo "failed_units=$units"
+    echo "failed_user_units=$user_units"
     echo "hyprland_running=$(pgrep -c -x Hyprland)"
     echo "migrations_run=$(find ~/.local/state/omarchy/migrations -maxdepth 1 -name "*.sh" | wc -l)"
     echo "migrations_skipped=$(find ~/.local/state/omarchy/migrations/skipped -name "*.sh" 2>/dev/null | wc -l)"
@@ -192,9 +195,14 @@ check "It is on the $channel channel (got: $(a channel))" test "$(a channel)" = 
 check "The running kernel is an installed one ($(a kernel))" test "$(a kernel_is_installed)" = yes
 check "systemd reports the system running (got: $(a system_state))" test "$(a system_state)" = running
 failed="$(a failed_units) $(a failed_user_units)"
-check "No failed units (${failed// /}${failed:+ })" test -z "${failed// /}"
+failed=$(xargs <<<"$failed")
+check "No failed units (${failed:-none})" test -z "$failed"
 check "The desktop is up (Hyprland processes: $(a hyprland_running))" test "$(a hyprland_running)" = 1
-check "The wallpaper the user had still exists ($(a wallpaper))" test "$(a wallpaper_exists)" = yes
+# The same picture, whatever format it is kept in now: an update may convert
+# the bundled images, and may not swap the one the user chose for another.
+before_wallpaper=$(b wallpaper) after_wallpaper=$(a wallpaper)
+check "The wallpaper is the one the user had, and exists ($before_wallpaper → $after_wallpaper)" \
+  test "$(a wallpaper_exists)" = yes -a -n "$after_wallpaper" -a "${after_wallpaper%.*}" = "${before_wallpaper%.*}"
 check "The boot menu has one Omarchy group ($(a boot_entry_groups))" test "$(a boot_entry_groups)" = 1
 
 row() { printf '| %s | %s | %s |\n' "$1" "$(b "$2")" "$(a "$2")"; }

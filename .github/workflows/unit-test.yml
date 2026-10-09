@@ -46,7 +46,7 @@ jobs:
               sleep 1
             done
             echo "systemd: $state"
-            pacman -Syu --noconfirm --needed python parted >/dev/null
+            pacman -Syu --noconfirm --needed python parted diffutils jq >/dev/null
             useradd -m tester
             cp -r /src /home/tester/omarchy-iso
             chown -R tester /home/tester/omarchy-iso

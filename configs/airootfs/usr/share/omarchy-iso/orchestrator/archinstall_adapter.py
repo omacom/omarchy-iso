@@ -13,7 +13,7 @@ The canonical call sequence (mirrored from archinstall.scripts.guided.py) is:
         # configs do their own mounting before the Installer context opens.
         if disk_config.config_type != DiskLayoutType.Pre_mount:
             inst.mount_ordered_layout()
-        inst.sanity_check(offline=, skip_ntp=, skip_wkd=)
+        sanity_check(inst)
         inst.generate_key_files()                     # encrypted only
         inst.set_mirrors(handler, mirror_config, on_target=False)
         inst.minimal_installation(...)                # base + linux pacstrap
@@ -436,6 +436,14 @@ def _method_accepts(method, name: str) -> bool:
     positional = code.co_varnames[:code.co_argcount]
     kwonly = code.co_varnames[code.co_argcount:code.co_argcount + code.co_kwonlyargcount]
     return name in (*positional, *kwonly)
+
+
+def sanity_check(installer) -> None:
+    """Archinstall 4.5 removed offline; retain it for older releases."""
+    options = {"skip_ntp": True, "skip_wkd": True}
+    if _method_accepts(installer.sanity_check, "offline"):
+        options["offline"] = True
+    installer.sanity_check(**options)
 
 
 def _method_accepts_users(method) -> bool:

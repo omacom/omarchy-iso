@@ -419,11 +419,7 @@ def arch_install_system(ctx: InstallContext) -> None:
                 installer.mount_ordered_layout()
 
         with _time_step("STEP.sanity_check"):
-            installer.sanity_check(
-                offline=True,
-                skip_ntp=True,
-                skip_wkd=True,
-            )
+            arch.sanity_check(installer)
 
         with _time_step("STEP.install_root_image"):
             _install_root_image(ctx)
@@ -464,7 +460,11 @@ def arch_install_system(ctx: InstallContext) -> None:
                     installer.add_additional_packages(missing_headers)
 
             with _time_step("STEP.configure_keyboard"):
-                if not configure_keyboard(installer.target, kb_layout):
+                if not configure_keyboard(
+                    installer.target, kb_layout,
+                    ctx.omarchy_install.get("input_method"),
+                    ctx.omarchy_install.get("input_xkb_layout", ""),
+                ):
                     error(f"Invalid keyboard language specified: {kb_layout}")
 
             if config.mirror_config:

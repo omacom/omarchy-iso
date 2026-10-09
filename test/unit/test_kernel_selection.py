@@ -115,6 +115,7 @@ class KernelSelectionTest(unittest.TestCase):
                     ctx = types.SimpleNamespace(
                         state={"arch_config_handler": types.SimpleNamespace(config=config), "mirror_handler": None},
                         target=Path("/unused"), tailscale_authkey_path=None, defer_provisioning=False,
+                        omarchy_install={},
                     )
                     for name in ("_mount_offline_package_cache", "_mask_mkinitcpio_pacman_hooks",
                                  "_configure_limine_boot", "_write_pre_mounted_fstab", "_install_root_image"):
@@ -130,6 +131,7 @@ class KernelSelectionTest(unittest.TestCase):
                     stack.enter_context(mock.patch.object(
                         phases_impl.arch, "target_has_package", create=True,
                         side_effect=lambda target, name: name in in_image))
+                    stack.enter_context(mock.patch.object(phases_impl.arch, "sanity_check", create=True))
                     opened = stack.enter_context(mock.patch.object(phases_impl.arch, "open_installer", create=True))
                     opened.return_value.__enter__.return_value = installer
 

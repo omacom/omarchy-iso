@@ -23,6 +23,19 @@ esac
 : "${OMARCHY_NVIM_PACKAGE:=omarchy-nvim}"
 export OMARCHY_RUNTIME_PACKAGE OMARCHY_SETTINGS_PACKAGE OMARCHY_NVIM_PACKAGE
 
+# pacman 7 sandboxes its downloads with Landlock and fails every sync on a
+# kernel without it (Namespace's AmpereOne arm64 machines): "restricting
+# filesystem access failed because Landlock is not supported by the kernel".
+# There, every pacman in this container (pacstrap's too) runs with
+# --disable-sandbox, which pacman provides for exactly this. A wrapper rather
+# than DisableSandbox in a config: pacman-offline.conf ships on the ISO.
+if ! grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then
+  echo "No Landlock in this kernel: pacman runs with --disable-sandbox in this container"
+  printf '#!/bin/sh\nexec /usr/bin/pacman --disable-sandbox "$@"\n' >/usr/local/bin/pacman
+  chmod +x /usr/local/bin/pacman
+  hash -r
+fi
+
 # Packages installed into the Arch container used to build the ISO.
 pacman-key --init
 pacman --noconfirm -Sy archlinux-keyring
@@ -41,11 +54,14 @@ pacman-key --lsign-key 40DFB630FF42BCFFB047046CF0134EE680CAC571
 pacman --config /configs/pacman-online-${OMARCHY_MIRROR}.conf --noconfirm -Sy omarchy-keyring
 pacman-key --populate omarchy
 
-# Append the [omarchy] repo to the container's /etc/pacman.conf so subsequent
-# tools (notably makepkg in build-omarchy-packages.sh) can resolve omarchy-
-# only build deps like limine-snapper-sync and limine-mkinitcpio-hook.
+# Put OPR first in the container too so makepkg resolves the same overrides
+# as the online installer configuration.
 if ! grep -q '^\[omarchy\]' /etc/pacman.conf; then
-  awk '/^\[omarchy\]/,/^$/' /configs/pacman-online-${OMARCHY_MIRROR}.conf >> /etc/pacman.conf
+  opr_section=$(awk '/^\[omarchy\]/,/^$/' /configs/pacman-online-${OMARCHY_MIRROR}.conf)
+  awk -v opr="$opr_section" '/^\[core\]/ { print opr; print "" } { print }' \
+    /etc/pacman.conf >/tmp/pacman-opr-first.conf
+  install -m 644 /tmp/pacman-opr-first.conf /etc/pacman.conf
+  rm -f /tmp/pacman-opr-first.conf
 fi
 
 # Build locations
@@ -284,9 +300,10 @@ fi
 mkdir -p /var/cache/omarchy/mirror
 ln -sfn "$offline_mirror_dir" /var/cache/omarchy/mirror/offline
 
+# Every package archive in the mirror, indexed from nothing by one repo-add per
+# CPU: one alone hashes and lists a thousand packages one after another.
 rebuild_offline_repo_db() {
-  rm -f "$offline_mirror_dir"/offline.db* "$offline_mirror_dir"/offline.files*
-  repo-add -q "$offline_mirror_dir/offline.db.tar.gz" "$offline_mirror_dir/"*.pkg.tar.zst
+  bash /builder/index-offline-mirror.sh "$offline_mirror_dir"
 }
 
 # Resolve the exact filenames chosen by the same synced package databases used

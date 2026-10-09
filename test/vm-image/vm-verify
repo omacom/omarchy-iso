@@ -1,0 +1,48 @@
+#!/bin/bash
+# Boots a sealed image once, as a throwaway machine, and checks that it is
+# what vm-seal promises: a desktop that comes up, nothing of the build left
+# in it, and SSH that takes keys only. Exits non-zero on any failed check.
+#
+#   vm-verify <sealed_dir>
+set -euo pipefail
+[[ $# -eq 1 ]] || { echo "Usage: vm-verify <sealed_dir>" >&2; exit 2; }
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+base=$(realpath "$1")
+( cd "$base" && sha256sum --quiet -c SHA256SUMS )
+uuid=$(cat /proc/sys/kernel/random/uuid)
+export VM_UUID=$uuid SSH_PORT=$(( 20000 + RANDOM % 10000 ))
+
+VM_PW=${GUEST_PASSWORD:-omarchy} "$here/vm-boot" "$base" "WANT_ID=${uuid//-/} PW=${GUEST_PASSWORD:-omarchy} bash -s" <<'GUEST'
+fail=0
+check() { # description, then a command that must succeed
+  local what=$1; shift
+  if "$@" >/dev/null 2>&1; then echo "ok    $what"; else echo "FAIL  $what"; fail=1; fi
+}
+root() { printf '%s\n' "$PW" | sudo -S -p '' "$@"; }
+booted=$(( $(date +%s) - $(cut -d. -f1 /proc/uptime) - 5 ))
+newer() { [ "$(root stat -c %Y "$1")" -ge "$booted" ]; } # written by this boot
+
+check "the system reaches running or degraded" \
+  sh -c 's=$(timeout 120 systemctl is-system-running --wait); [ "$s" = running ] || [ "$s" = degraded ]'
+check "no unit failed" sh -c '[ -z "$(systemctl --failed --no-legend)" ]'
+check "a desktop session is logged in" sh -c 'for i in $(seq 1 60); do pgrep -x Hyprland && exit 0; sleep 0.5; done; exit 1'
+check "the machine ID is the one this boot was given" [ "$(cat /etc/machine-id)" = "$WANT_ID" ]
+check "the journal holds this machine only" [ "$(root ls /var/log/journal | tr '\n' ' ')" = "$WANT_ID " ]
+check "SSH refuses passwords" sh -c "printf '%s\n' '$PW' | sudo -S -p '' sshd -T | grep -qix 'passwordauthentication no'"
+check "SSH requires a key" sh -c "printf '%s\n' '$PW' | sudo -S -p '' sshd -T | grep -qix 'authenticationmethods publickey'"
+# Asking with no method makes sshd list the ones it would take.
+check "sshd offers a key as the only way in" \
+  sh -c 'ssh -o PreferredAuthentications=none -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null omarchy@127.0.0.1 true 2>&1 | grep -qF "Permission denied (publickey)."'
+check "authorized_keys holds one key, this boot's" [ "$(grep -c . ~/.ssh/authorized_keys)" = 1 ]
+check "SSH host keys were made by this boot" newer /etc/ssh/ssh_host_ed25519_key
+check "NetworkManager's key was made by this boot" newer /var/lib/NetworkManager/secret_key
+check "one DHCP lease, this boot's" [ "$(root sh -c 'ls /var/lib/NetworkManager/*.lease | wc -l')" = 1 ]
+check "no shell history" sh -c '! [ -e ~/.bash_history ]'
+check "the package cache is empty" [ -z "$(ls /var/cache/pacman/pkg)" ]
+root mkdir -p /run/top && root mount -o subvolid=5,ro "$(findmnt -no SOURCE / | sed 's/\[.*//')" /run/top
+check "the factory snapshot has no machine ID" sh -c "! printf '%s\n' '$PW' | sudo -S -p '' test -s /run/top/@factory/etc/machine-id"
+check "the factory snapshot has no SSH host keys" sh -c "[ -z \"\$(printf '%s\n' '$PW' | sudo -S -p '' sh -c 'ls /run/top/@factory/etc/ssh/ssh_host_* 2>/dev/null')\" ]"
+check "no snapshots besides the current system" [ -z "$(root ls /.snapshots)" ]
+echo "omarchy $(pacman -Q omarchy 2>/dev/null | cut -d' ' -f2), kernel $(uname -r), $(systemd-analyze | head -1)"
+exit $fail
+GUEST

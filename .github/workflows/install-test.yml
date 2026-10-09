@@ -25,7 +25,7 @@ jobs:
     # GitHub's runner: it is somebody else's code, and it has no business on
     # our account's machines. No cache volume either way: what one pull
     # request leaves in a cache the next run would trust.
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'namespace-profile-linux-amd64-16x32' }}
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-26.04' || 'namespace-profile-linux-amd64-16x32' }}
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -43,14 +43,14 @@ jobs:
         run: NO_BOOT_OFFER=1 ./bin/omarchy-iso-make
 
       # The harness runs in an Arch container: Arch's current QEMU and OVMF
-      # (QEMU 11) instead of Ubuntu 24.04's QEMU 8.2, at the paths the
+      # (QEMU 11) instead of the runner's older one, at the paths the
       # harness expects, the same as on an Omarchy workstation.
       - name: Install unattended, then boot the installed system
         run: |
           sudo chmod 0666 /dev/kvm
           docker run --rm --device /dev/kvm -v "$PWD:/w" -w /w \
             -e OMARCHY_INTEGRATION_DISK_CACHE=none \
-            archlinux:latest bash -euo pipefail -c '
+            ghcr.io/archlinux/archlinux:latest bash -euo pipefail -c '
               # pacman 7 fails every sync on a kernel without Landlock, which
               # these runners have; builder/build-iso.sh does the same.
               if ! grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then

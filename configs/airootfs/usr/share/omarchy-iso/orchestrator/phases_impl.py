@@ -2017,6 +2017,13 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
             esp_uki.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(prebuilt_uki, esp_uki)
             info(f"› deployed pre-built UKI ({prebuilt_uki.stat().st_size >> 20} MiB)")
+        # Before --add-uki: the Limine entry pins the UKI's BLAKE2B hash.
+        with _time_step("LIMINE.embed_cmdline (pre-built UKI boots without a loader)"):
+            from .uki_cmdline import embed_cmdline
+            if embed_cmdline(esp_uki, cmdline):
+                info("› UKI carries this install's cmdline; bootable from any loader")
+            else:
+                info("› WARNING: UKI cmdline not embedded; only the Limine entry can boot it")
         # Register the boot entry in limine.conf, which limine-mkinitcpio
         # would have done after building the UKI. Without it limine.conf has
         # no Omarchy entry and the firmware menu comes up instead. Mirrors

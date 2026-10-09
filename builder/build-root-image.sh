@@ -347,12 +347,22 @@ HOOKS=(base systemd plymouth autodetect microcode modconf kms keyboard sd-vconso
 COMPRESSION="zstd"
 CONF
 
+  # Room for the installer to write the real cmdline into the UKI in place
+  # (orchestrator/uki_cmdline.py): one placeholder parameter pads .cmdline to
+  # 1800 bytes, under the kernel's 2048. A dotted name is a module parameter
+  # to the kernel, so until it is overwritten it is ignored without a warning.
+  prebuilt_cmdline=$(tr -s '\n ' ' ' <"$root/etc/kernel/cmdline")
+  prebuilt_cmdline="${prebuilt_cmdline% } omarchy.cmdline_room="
+  printf '%s%s\n' "$prebuilt_cmdline" "$(printf '%*s' $((1800 - ${#prebuilt_cmdline})) '' | tr ' ' 0)" \
+    >"$root/etc/kernel/cmdline.prebuilt-uki"
+
   echo "Pre-building the UKI in the image (kver=$image_kver, generic cmdline, systemd and sd-encrypt hooks, no autodetect)"
   # mkinitcpio is called directly: the preset flow (-P) runs Limine's install
   # hooks, which fail without a mounted ESP.
   if arch-chroot "$root" mkinitcpio \
        -k "/usr/lib/modules/${image_kver}/vmlinuz" \
        -c /etc/mkinitcpio-prebuilt-uki.conf \
+       --cmdline /etc/kernel/cmdline.prebuilt-uki \
        -U /var/lib/omarchy-iso/prebuilt-uki.efi \
        -S autodetect 2>&1 | tail -25 ; then
     if [[ -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
@@ -365,8 +375,8 @@ CONF
     # Clean up any partial output that would upset btrfs shrink downstream.
     rm -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi"
   fi
-  # Only this build uses the config; the installed system has no use for it.
-  rm -f "$root/etc/mkinitcpio-prebuilt-uki.conf"
+  # Only this build uses these; the installed system has no use for them.
+  rm -f "$root/etc/mkinitcpio-prebuilt-uki.conf" "$root/etc/kernel/cmdline.prebuilt-uki"
 fi
 
 # Emit the filesystem image itself, not a send stream. The installer writes

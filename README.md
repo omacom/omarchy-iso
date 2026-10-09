@@ -44,11 +44,13 @@ The rest of this file covers building, testing and publishing the ISO.
 
 | What | Where | When |
 | --- | --- | --- |
-| Release ISO, with `.sha256` and `.sig` | `https://iso.omarchy.org/omarchy-<version>.iso` | Each release |
-| Edge ISO, with `.sha256` | `https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.iso` | Every night |
-| VM image of edge | `https://nightly.omarchy.org/edge/<version>/vm/` | Every night |
-| VM image of the latest release | `https://nightly.omarchy.org/stable/<version>/<run>/vm/` | Once per release |
-| `latest.json` | `https://nightly.omarchy.org/edge/latest.json` and `.../stable/latest.json` | With each of the three above |
+| Release ISO | `https://iso.omarchy.org/omarchy-<version>.iso` | Each release |
+| Edge ISO | `https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.iso` | Every night |
+| VM image of edge | `https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.qcow2` | Every night |
+| VM image of the latest release | `https://nightly.omarchy.org/stable/<version>/<run>/omarchy-<version>.qcow2` | Once per release |
+| `latest.json` | `https://nightly.omarchy.org/edge/latest.json` and `.../stable/latest.json` | With each nightly build |
+
+Every ISO and every VM image has a `.sha256` file next to it. The release ISO also has a `.sig` file. Each VM image has an `unpacked/` folder next to it.
 
 On nightly.omarchy.org, a published file is never replaced. Only `latest.json` changes. It is written last, after every file of the version has been fetched back through the CDN and compared.
 
@@ -78,47 +80,66 @@ A separate job publishes. It is the only job with the bucket's key, and it runs 
 | `omarchy_version` | The version of the Omarchy package in the image. |
 | `omarchy_commit` | Edge: the omarchy commit that package was built from. Stable: empty. |
 | `kernel` | The image's kernel release, as reported by `uname -r`. |
-| `vm.url` | The folder the image's files are in, ending in `/`. |
-| `vm.disk`, `vm.disk_sha256`, `vm.disk_size` | The disk image, `base.qcow2`: its URL, SHA-256 and size in bytes. |
-| `vm.files` | Every file in `vm.url`. |
+| `vm.url`, `vm.sha256`, `vm.size` | The VM image: its URL, SHA-256 and size in bytes. |
+| `vm.unpacked` | The URL of the image's `unpacked/` folder, ending in `/`. |
+| `vm.unpacked_files` | Every file in that folder. |
 | `vm.user`, `vm.password` | The account for the desktop and `sudo`. |
 | `vm.ssh` | SSH authentication: keys only. Password authentication is off. |
 
 The version is also in the edge ISO's file name.
 
-### A VM image's files
-
-| File | What it is |
-| --- | --- |
-| `base.qcow2` | The disk, a zstd-compressed qcow2. |
-| `vmlinuz`, `initrd`, `cmdline` | The image's own kernel, initramfs and kernel arguments, for booting it directly without firmware or boot loader. |
-| `OVMF_VARS.4m.fd` | The firmware variables with the installer's boot entry, for booting it through UEFI instead. |
-| `vm-boot` | A script that boots the image with QEMU. |
-| `SHA256SUMS` | Checksums of the files above. |
-
-
-### Using a VM image
+### VM images
 
 VM images are for testing. Users download the release ISO from iso.omarchy.org.
 
-A VM image is Omarchy already installed. It boots in seconds, with no installer to go through. There is an image of the edge channel, rebuilt every night, and an image of the latest release.
+A VM image is Omarchy already installed, as one `.qcow2` file. There is an image of the edge channel, rebuilt every night, and an image of the latest release. Every boot is a new machine, with a new machine ID and new SSH host keys.
 
-Run these commands on a Linux machine with QEMU (`qemu-system-x86_64` and `qemu-img`), read and write access to `/dev/kvm`, and `ssh`, `curl` and `jq`:
+The user is `omarchy` and the password is `omarchy`. SSH takes keys only.
+
+#### Boot the image by itself
+
+The image boots through UEFI with no other file. Run these commands on a Linux machine with QEMU, read and write access to `/dev/kvm`, `curl` and `jq`:
 
 ```bash
 latest=https://nightly.omarchy.org/edge/latest.json    # or .../stable/latest.json
-vm=$(curl -fsSL "$latest" | jq -r .vm.url)
-for file in $(curl -fsSL "$latest" | jq -r '.vm.files[]'); do curl -fsSLO "$vm$file"; done
+image=$(curl -fsSL "$latest" | jq -r .vm.url)
+curl -fLO "$image"
+curl -fsSLO "$image.sha256"
+sha256sum -c "${image##*/}.sha256"
+
+cp /usr/share/edk2/x64/OVMF_VARS.4m.fd vars.fd
+qemu-system-x86_64 -enable-kvm -cpu host -smp 4 -m 4G \
+  -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.4m.fd \
+  -drive if=pflash,format=raw,file=vars.fd \
+  -drive file="${image##*/}",if=virtio,snapshot=on \
+  -device virtio-vga
+```
+
+The firmware paths are Arch's. `snapshot=on` keeps the downloaded image unchanged. The image is a 4 to 5 GB download.
+
+#### Boot it faster, with SSH
+
+The `unpacked/` folder next to each image holds what a direct boot needs:
+
+| File | What it is |
+| --- | --- |
+| `vmlinuz`, `initrd`, `cmdline` | The image's own kernel, initramfs and kernel arguments. |
+| `vm-boot` | A script that boots the image directly into its kernel and gives it an SSH key. |
+| `SHA256SUMS` | Checksums of the files above. |
+
+A direct boot skips the firmware and the boot loader: SSH answers after about 6 seconds instead of about 20. Download the folder next to the image, then run `vm-boot`. It also needs `qemu-img` and `ssh`:
+
+```bash
+unpacked=$(curl -fsSL "$latest" | jq -r .vm.unpacked)
+for file in $(curl -fsSL "$latest" | jq -r '.vm.unpacked_files[]'); do curl -fsSLO "$unpacked$file"; done
 sha256sum -c SHA256SUMS
 chmod +x vm-boot
 
-./vm-boot .             # boots, prints how to log in, runs until Ctrl-C
-./vm-boot . uname -r    # boots, runs the command over SSH, powers off
+./vm-boot "${image##*/}"             # boots, prints how to log in, runs until Ctrl-C
+./vm-boot "${image##*/}" uname -r    # boots, runs the command over SSH, powers off
 ```
 
-The user is `omarchy` and the password is `omarchy`. SSH takes keys only, and `vm-boot` makes a new key for each boot.
-
-Each boot starts a new machine on an overlay under `/var/tmp`, so the downloaded image is never changed. The overlay is deleted on exit. Set `VM_STATE_DIR` to put it somewhere else. The disk image is a 4 to 5 GB download.
+`vm-boot` makes a new SSH key for each boot. It runs the machine on an overlay under `/var/tmp`, so the downloaded image is never changed, and deletes the overlay on exit. Set `VM_STATE_DIR` to put the overlay somewhere else.
 
 To get the URL of the edge ISO, run `jq -r .url` on the same `latest.json`.
 

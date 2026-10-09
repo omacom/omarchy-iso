@@ -58,7 +58,7 @@ refused "a date in another form" "$plan" 2026-10-09 431 1 schedule v4.0.4 ""
 sealed() { # directory: what vm-seal leaves
   rm -rf "$1"; mkdir -p "$1"
   local file
-  for file in base.qcow2 OVMF_VARS.4m.fd vmlinuz initrd cmdline; do echo "$file of ${1##*/}" >"$1/$file"; done
+  for file in base.qcow2 vmlinuz initrd cmdline; do echo "$file of ${1##*/}" >"$1/$file"; done
   echo "sums of the seal" >"$1/SHA256SUMS"
 }
 export SITE=https://nightly.example ISO_SITE=https://iso.example ISO_COMMIT=0123456789abcdef0123456789abcdef01234567
@@ -77,12 +77,14 @@ dir=$tmp/out/edge/2026.10.09.431
 field() { jq -r "$1" "$json"; }
 
 equal "edge: files published" "$(cd "$tmp/out" && find . -type f | sort | paste -sd' ')" \
-  "./edge/2026.10.09.431/omarchy-edge-2026.10.09.431.iso ./edge/2026.10.09.431/omarchy-edge-2026.10.09.431.iso.sha256 ./edge/2026.10.09.431/vm/OVMF_VARS.4m.fd ./edge/2026.10.09.431/vm/SHA256SUMS ./edge/2026.10.09.431/vm/base.qcow2 ./edge/2026.10.09.431/vm/cmdline ./edge/2026.10.09.431/vm/initrd ./edge/2026.10.09.431/vm/vm-boot ./edge/2026.10.09.431/vm/vmlinuz ./edge/latest.json"
-(cd "$dir" && sha256sum -c --quiet ./*.sha256) || fail "edge: the ISO's checksum file does not match the ISO"
-(cd "$dir/vm" && sha256sum -c --quiet SHA256SUMS) || fail "edge: SHA256SUMS does not match the image"
+  "./edge/2026.10.09.431/omarchy-edge-2026.10.09.431.iso ./edge/2026.10.09.431/omarchy-edge-2026.10.09.431.iso.sha256 ./edge/2026.10.09.431/omarchy-edge-2026.10.09.431.qcow2 ./edge/2026.10.09.431/omarchy-edge-2026.10.09.431.qcow2.sha256 ./edge/2026.10.09.431/unpacked/SHA256SUMS ./edge/2026.10.09.431/unpacked/cmdline ./edge/2026.10.09.431/unpacked/initrd ./edge/2026.10.09.431/unpacked/vm-boot ./edge/2026.10.09.431/unpacked/vmlinuz ./edge/latest.json"
+(cd "$dir" && sha256sum -c --quiet ./*.sha256) || fail "edge: a checksum file does not match the file it is for"
+equal "edge: the ISO and the image each have a checksum file" "$(cd "$dir" && ls ./*.sha256 | wc -l)" "2"
+equal "edge: the image is the sealed disk" "$(cat "$dir/omarchy-edge-2026.10.09.431.qcow2")" "base.qcow2 of sealed-edge"
+(cd "$dir/unpacked" && sha256sum -c --quiet SHA256SUMS) || fail "edge: SHA256SUMS does not match the unpacked files"
 equal "edge: SHA256SUMS covers every file beside it" \
-  "$(awk '{ print $2 }' "$dir/vm/SHA256SUMS" | sort | paste -sd' ')" "$(cd "$dir/vm" && ls | grep -v SHA256SUMS | sort | paste -sd' ')"
-cmp -s "$dir/vm/vm-boot" "$ROOT/test/vm-image/vm-boot" || fail "edge: the published vm-boot is not the repository's"
+  "$(awk '{ print $2 }' "$dir/unpacked/SHA256SUMS" | sort | paste -sd' ')" "$(cd "$dir/unpacked" && ls | grep -v SHA256SUMS | sort | paste -sd' ')"
+cmp -s "$dir/unpacked/vm-boot" "$ROOT/test/vm-image/vm-boot" || fail "edge: the published vm-boot is not the repository's"
 equal "edge: version" "$(field .version)" "2026.10.09.431"
 equal "edge: channel" "$(field .channel)" "edge"
 equal "edge: url" "$(field .url)" "https://nightly.example/edge/2026.10.09.431/omarchy-edge-2026.10.09.431.iso"
@@ -92,9 +94,12 @@ equal "edge: iso_commit" "$(field .iso_commit)" "$ISO_COMMIT"
 equal "edge: omarchy_version, once" "$(field .omarchy_version)" "4.0.0.r6818.gc352b62-2"
 equal "edge: omarchy_commit" "$(field .omarchy_commit)" "c352b62"
 equal "edge: kernel" "$(field .kernel)" "7.2.8-5-omarchy-bore"
-equal "edge: image address" "$(field .vm.disk)" "https://nightly.example/edge/2026.10.09.431/vm/base.qcow2"
-equal "edge: image checksum is the disk's" "$(field .vm.disk_sha256)" "$(sha256sum "$dir/vm/base.qcow2" | cut -d' ' -f1)"
-equal "edge: every listed file is published" "$(field '.vm.files[]' | sort | paste -sd' ')" "$(cd "$dir/vm" && ls | sort | paste -sd' ')"
+equal "edge: image address" "$(field .vm.url)" "https://nightly.example/edge/2026.10.09.431/omarchy-edge-2026.10.09.431.qcow2"
+equal "edge: image checksum is the image's" "$(field .vm.sha256)" "$(sha256sum "$dir/omarchy-edge-2026.10.09.431.qcow2" | cut -d' ' -f1)"
+equal "edge: image size is the image's" "$(field .vm.size)" "$(stat -c %s "$dir/omarchy-edge-2026.10.09.431.qcow2")"
+equal "edge: the ISO and the image differ only in their ending" "$(field .url | sed 's/\.iso$//')" "$(field .vm.url | sed 's/\.qcow2$//')"
+equal "edge: unpacked folder" "$(field .vm.unpacked)" "https://nightly.example/edge/2026.10.09.431/unpacked/"
+equal "edge: every unpacked file listed is published" "$(field '.vm.unpacked_files[]' | sort | paste -sd' ')" "$(cd "$dir/unpacked" && ls | sort | paste -sd' ')"
 [[ $(field .built_at) =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$ ]] || fail "edge: built_at is '$(field .built_at)'"
 # What a consumer does with the ISO's name: the first run of three or more
 # dotted numbers is the version.
@@ -115,8 +120,10 @@ equal "stable: sha256 is the ISO's" "$(field .sha256)" "$(sha256sum "$tmp/releas
 equal "stable: version" "$(field .version)" "4.0.4"
 equal "stable: omarchy_version" "$(field .omarchy_version)" "4.0.4-1"
 equal "stable: a release names no commit" "$(field .omarchy_commit)" ""
-equal "stable: image address has the run number" "$(field .vm.disk)" "https://nightly.example/stable/4.0.4/431/vm/base.qcow2"
-(cd "$tmp/out/stable/4.0.4/431/vm" && sha256sum -c --quiet SHA256SUMS) || fail "stable: SHA256SUMS does not match the image"
+equal "stable: image address has the run number" "$(field .vm.url)" "https://nightly.example/stable/4.0.4/431/omarchy-4.0.4.qcow2"
+equal "stable: unpacked folder" "$(field .vm.unpacked)" "https://nightly.example/stable/4.0.4/431/unpacked/"
+(cd "$tmp/out/stable/4.0.4/431" && sha256sum -c --quiet omarchy-4.0.4.qcow2.sha256) || fail "stable: the image's checksum file does not match it"
+(cd "$tmp/out/stable/4.0.4/431/unpacked" && sha256sum -c --quiet SHA256SUMS) || fail "stable: SHA256SUMS does not match the unpacked files"
 
 # Nothing half-made is described.
 sealed "$tmp/sealed-short"; rm "$tmp/sealed-short/initrd"

@@ -1,11 +1,16 @@
 #!/bin/bash
 # Boots a sealed Omarchy image (vm-seal) as a throwaway machine.
 #
-#   vm-boot <sealed_dir>                 boot, print how to log in, run until Ctrl-C
-#   vm-boot <sealed_dir> <command...>    boot, run the command over SSH, power off;
-#                                        exits with the command's status
+#   vm-boot <image>                 boot, print how to log in, run until Ctrl-C
+#   vm-boot <image> <command...>    boot, run the command over SSH, power off;
+#                                   exits with the command's status
 #
-# Nothing is written to sealed_dir: the machine runs on a copy-on-write overlay
+# <image> is a downloaded disk, omarchy-<...>.qcow2, with vmlinuz, initrd and
+# cmdline in the same directory as this script, as in a published "unpacked"
+# folder. Or it is a directory as vm-seal leaves it, holding base.qcow2 and
+# those three files.
+#
+# Nothing is written to the image: the machine runs on a copy-on-write overlay
 # that is deleted on exit. Each boot gets a new SSH key and a new machine ID;
 # the image itself holds no key and its SSH takes no password.
 #
@@ -14,9 +19,15 @@
 #      kernel arguments), QEMU_EXTRA (more qemu arguments, split on spaces),
 #      VM_STATE_DIR (/var/tmp; holds the overlay, so it needs room to grow).
 set -euo pipefail
-[[ $# -ge 1 ]] || { sed -n '2,16p' "$0" >&2; exit 2; }
-base=$(realpath "$1"); shift
-for f in base.qcow2 vmlinuz initrd cmdline; do
+[[ $# -ge 1 ]] || { sed -n '2,21p' "$0" >&2; exit 2; }
+image=$(realpath "$1"); shift
+if [[ -d $image ]]; then
+  base=$image disk=$image/base.qcow2
+else
+  base=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd) disk=$image
+fi
+[[ -s $disk ]] || { echo "vm-boot: there is no disk image at $disk" >&2; exit 1; }
+for f in vmlinuz initrd cmdline; do
   [[ -s $base/$f ]] || { echo "vm-boot: $base/$f is missing" >&2; exit 1; }
 done
 [[ -r /dev/kvm && -w /dev/kvm ]] || { echo "vm-boot: /dev/kvm is not usable" >&2; exit 1; }
@@ -45,7 +56,7 @@ keys=$(printf 'd /home/omarchy/.ssh 0700 omarchy omarchy -\nf+ /home/omarchy/.ss
 ssh_opts=(-i "$state/id_ed25519" -p "$port" -o BatchMode=yes -o IdentitiesOnly=yes
   -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
 
-qemu-img create -qf qcow2 -b "$base/base.qcow2" -F qcow2 "$state/run.qcow2"
+qemu-img create -qf qcow2 -b "$disk" -F qcow2 "$state/run.qcow2"
 t0=$(date +%s%N)
 # shellcheck disable=SC2086
 qemu-system-x86_64 -cpu host -enable-kvm -machine q35,accel=kvm -smp "${SMP:-4}" -m "${MEM:-4G}" \

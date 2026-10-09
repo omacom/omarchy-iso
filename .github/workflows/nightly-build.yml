@@ -12,8 +12,10 @@ name: Nightly ISO Build
 #
 #   https://nightly.omarchy.org/<channel>/latest.json
 #   https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.iso
-#   https://nightly.omarchy.org/edge/<version>/vm/        base.qcow2 and what boots it
-#   https://nightly.omarchy.org/stable/<version>/<run>/vm/
+#   https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.qcow2
+#   https://nightly.omarchy.org/edge/<version>/unpacked/    kernel, initramfs, vm-boot
+#   https://nightly.omarchy.org/stable/<version>/<run>/omarchy-<version>.qcow2
+#   https://nightly.omarchy.org/stable/<version>/<run>/unpacked/
 #
 # Nothing is published unless the ISO installed and the image passed its
 # checks. A version's files are written once and never replaced: the CDN keeps
@@ -263,17 +265,12 @@ jobs:
             echo "ok $1"
           }
           # Every file of the version, the checksum files too.
-          for iso in "$dir"/*.iso; do
-            [[ -f $iso ]] || continue
-            check "$SITE/$RELEASE/${iso##*/}" "$(cut -d" " -f1 "$iso.sha256")"
-            check "$SITE/$RELEASE/${iso##*/}.sha256" "$(sha256sum "$iso.sha256" | cut -d" " -f1)"
-          done
-          while read -r sum name; do
-            check "$SITE/$RELEASE/vm/$name" "$sum"
-          done <"$dir/vm/SHA256SUMS"
-          check "$SITE/$RELEASE/vm/SHA256SUMS" "$(sha256sum "$dir/vm/SHA256SUMS" | cut -d" " -f1)"
-          published=$(find "$dir" -type f | wc -l)
-          echo "$published files published and checked"
+          (cd "$dir" && find . -type f -printf '%P\n' | sort) >files.txt
+          [ -s files.txt ] || { echo "::error::nothing to check under $dir"; exit 1; }
+          while read -r file; do
+            check "$SITE/$RELEASE/$file" "$(sha256sum "$dir/$file" | cut -d" " -f1)"
+          done <files.txt
+          echo "$(wc -l <files.txt) files published and checked"
 
       - name: Point latest.json at it
         run: |

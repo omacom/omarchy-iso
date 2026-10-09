@@ -13,14 +13,21 @@
 # Env: SITE (https://nightly.omarchy.org), ISO_SITE (https://iso.omarchy.org),
 #      ISO_COMMIT (the omarchy-iso commit, default: HEAD of this checkout).
 #
-# out_dir gets <release>/vm/ with the image, its checksums and vm-boot, and
-# <channel>/latest.json. The edge ISO is published too, next to the image.
-# The released one already has its place: latest.json points there and the
-# ISO stays where it is.
+# out_dir gets, under <release>/:
+#
+#   omarchy-<...>.qcow2 and .qcow2.sha256   the VM image: one file, which boots
+#                                           by itself through UEFI
+#   unpacked/                               its kernel, initramfs and kernel
+#                                           arguments for booting it directly,
+#                                           vm-boot, and their SHA256SUMS
+#   omarchy-edge-<version>.iso and .sha256  edge only
+#
+# and <channel>/latest.json. The released ISO already has its place:
+# latest.json points there and the ISO stays where it is.
 #
 # The ISO and the image are moved, not copied: they are gigabytes.
 set -euo pipefail
-[[ $# -eq 7 ]] || { sed -n '2,13p' "$0" >&2; exit 2; }
+[[ $# -eq 7 ]] || { sed -n '2,12p' "$0" >&2; exit 2; }
 channel=$1 version=$2 release=$3 iso_file=$4 sealed=$5 packages=$6 out=$7
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 site=${SITE:-https://nightly.omarchy.org}
@@ -30,8 +37,8 @@ fail() { echo "nightly-layout: $*" >&2; exit 1; }
 
 [[ $channel == edge || $channel == stable ]] || fail "'$channel' is not a channel"
 [[ -f $iso_file ]] || fail "no ISO at $iso_file"
-files=(base.qcow2 OVMF_VARS.4m.fd vmlinuz initrd cmdline)
-for file in "${files[@]}"; do
+unpacked=(vmlinuz initrd cmdline)
+for file in base.qcow2 "${unpacked[@]}"; do
   [[ -s $sealed/$file ]] || fail "the sealed image has no $file"
 done
 
@@ -43,46 +50,52 @@ kernel=$(tail -n 1 "$packages")
 omarchy_commit=$(sed -nE 's/.*\.g([0-9a-f]+)-.*/\1/p' <<<"$omarchy")
 
 dir=$out/$release
-mkdir -p "$dir/vm" "$out/$channel"
+mkdir -p "$dir/unpacked" "$out/$channel"
 if [[ $channel == edge ]]; then
-  iso=omarchy-$channel-$version.iso
+  name=omarchy-$channel-$version
+  iso=$name.iso
   iso_url=$site/$release/$iso
   mv "$iso_file" "$dir/$iso"
   (cd "$dir" && sha256sum "$iso" >"$iso.sha256")
   iso_sha256=$(cut -d' ' -f1 "$dir/$iso.sha256") iso_size=$(stat -c %s "$dir/$iso")
 else
-  iso=omarchy-$version.iso
+  name=omarchy-$version
+  iso=$name.iso
   [[ ${iso_file##*/} == "$iso" ]] || fail "the released ISO is $iso, not ${iso_file##*/}"
   iso_url=$iso_site/$iso
   iso_sha256=$(sha256sum "$iso_file" | cut -d' ' -f1) iso_size=$(stat -c %s "$iso_file")
 fi
 
-for file in "${files[@]}"; do mv "$sealed/$file" "$dir/vm/$file"; done
-cp "$here/vm-boot" "$dir/vm/vm-boot"
-files+=(vm-boot)
-(cd "$dir/vm" && sha256sum "${files[@]}" >SHA256SUMS)
+# The image has the ISO's name, so the two are told apart by their endings.
+image=$name.qcow2
+mv "$sealed/base.qcow2" "$dir/$image"
+(cd "$dir" && sha256sum "$image" >"$image.sha256")
+
+for file in "${unpacked[@]}"; do mv "$sealed/$file" "$dir/unpacked/$file"; done
+cp "$here/vm-boot" "$dir/unpacked/vm-boot"
+unpacked+=(vm-boot)
+(cd "$dir/unpacked" && sha256sum "${unpacked[@]}" >SHA256SUMS)
 
 latest=$out/$channel/latest.json
 jq -n \
-  --arg version "$version" --arg channel "$channel" --arg vm "$site/$release/vm" \
+  --arg version "$version" --arg channel "$channel" --arg release "$site/$release" --arg image "$image" \
   --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg url "$iso_url" --arg sha256 "$iso_sha256" --argjson size "$iso_size" \
   --arg iso_commit "$iso_commit" --arg omarchy_version "$omarchy" --arg omarchy_commit "$omarchy_commit" \
   --arg kernel "$kernel" \
-  --arg disk_sha256 "$(awk '$2 == "base.qcow2" { print $1 }' "$dir/vm/SHA256SUMS")" \
-  --argjson disk_size "$(stat -c %s "$dir/vm/base.qcow2")" \
+  --arg vm_sha256 "$(cut -d' ' -f1 "$dir/$image.sha256")" --argjson vm_size "$(stat -c %s "$dir/$image")" \
   --args '{
     version: $version, channel: $channel, built_at: $built_at,
     url: $url, sha256: $sha256, size: $size,
     iso_commit: $iso_commit, omarchy_version: $omarchy_version, omarchy_commit: $omarchy_commit,
     kernel: $kernel,
     vm: {
-      url: "\($vm)/", disk: "\($vm)/base.qcow2", disk_sha256: $disk_sha256, disk_size: $disk_size,
-      files: ($ARGS.positional + ["SHA256SUMS"]),
+      url: "\($release)/\($image)", sha256: $vm_sha256, size: $vm_size,
+      unpacked: "\($release)/unpacked/", unpacked_files: ($ARGS.positional + ["SHA256SUMS"]),
       user: "omarchy", password: "omarchy",
       ssh: "keys only; vm-boot makes one for each boot"
     }
-  }' "${files[@]}" >"$latest"
+  }' "${unpacked[@]}" >"$latest"
 
 # What is about to be published has to say what it should: one value in every
 # field, and checksums that are checksums.
@@ -93,6 +106,7 @@ jq -e --arg channel "$channel" '
   and (.url | test("^https://[^\n ]+\\.iso$")) and (.sha256 | sha) and .size > 0
   and (.iso_commit | test("^[0-9a-f]{40}$"))
   and (.omarchy_version | one_line) and (.omarchy_commit | test("^[0-9a-f]*$")) and (.kernel | one_line)
-  and (.vm.disk | test("^https://[^\n ]+/vm/base\\.qcow2$")) and (.vm.disk_sha256 | sha) and .vm.disk_size > 0
+  and (.vm.url | test("^https://[^\n ]+\\.qcow2$")) and (.vm.sha256 | sha) and .vm.size > 0
+  and (.vm.unpacked | test("^https://[^\n ]+/unpacked/$")) and (.vm.unpacked_files | length) == 5
 ' "$latest" >/dev/null || { cat "$latest" >&2; fail "latest.json does not say what it should"; }
 cat "$latest"

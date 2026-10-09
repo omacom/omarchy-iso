@@ -7,10 +7,9 @@
 #
 # installed_dir holds base.qcow2, OVMF_VARS.4m.fd and id_ed25519, which is
 # what test/integration leaves in test-runs/<iso>-integration once its install
-# has passed. sealed_dir gets a standalone, zstd-compressed base.qcow2, the
-# firmware variables that boot it through UEFI, and the UKI's vmlinuz, initrd
-# and cmdline for booting it directly. It holds no key: each boot is handed
-# one (see vm-boot).
+# has passed. sealed_dir gets a standalone, zstd-compressed base.qcow2, which
+# boots by itself through UEFI, and the UKI's vmlinuz, initrd and cmdline for
+# booting it directly. It holds no key: each boot is handed one (see vm-boot).
 #
 # The image keeps the installer's user and password (GUEST_PASSWORD, default
 # omarchy) for the desktop and sudo. SSH takes keys only.
@@ -145,8 +144,5 @@ tr -d '\0' <"$state/cmdline" | tr ' ' '\n' | { grep -vE '^(resume|resume_offset)
 
 # zstd clusters: QEMU reads them as they are, so the download boots as it is.
 qemu-img convert -c -O qcow2 -o compression_type=zstd -m 16 -W "$state/edit.qcow2" "$out/base.qcow2"
-# The variables hold the boot entry the installer registered; a firmware boot
-# of this disk needs them, a direct kernel boot does not.
-cp "$in/OVMF_VARS.4m.fd" "$out/OVMF_VARS.4m.fd"
-( cd "$out" && sha256sum base.qcow2 OVMF_VARS.4m.fd vmlinuz initrd cmdline >SHA256SUMS )
+( cd "$out" && sha256sum base.qcow2 vmlinuz initrd cmdline >SHA256SUMS )
 echo "sealed: $out ($(du -sh "$out/base.qcow2" | cut -f1)); cmdline: $(cat "$out/cmdline")"

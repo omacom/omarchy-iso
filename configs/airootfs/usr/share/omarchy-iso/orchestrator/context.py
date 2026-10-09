@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .keyboard import validate_input_selection
+
 # Select Limine EFI filenames for the target architecture.
 _LIMINE_EFI_ARCH = {
     "x86_64": "X64",
@@ -68,6 +70,8 @@ class InstallContext:
         if not user_configuration.get("kernels"):
             kernel = (omarchy_install.get("storage") or {}).get("kernel") or _default_kernel()
             user_configuration["kernels"] = [kernel]
+
+        validate_input_selection(omarchy_install.get("input_method"), omarchy_install.get("input_xkb_layout", ""))
 
         # Deferred provisioning: the whole system installs but user creation is deferred to
         # first boot. Selected by the configurator (omarchy_install.defer_provisioning) or by

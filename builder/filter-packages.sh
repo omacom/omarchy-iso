@@ -4,10 +4,11 @@
 OMARCHY_ARCH_DROP=(
   # x86 platform hardware
   amd-ucode intel-ucode
-  apple-bcm-firmware apple-t2-audio-config t2fanrd linux-t2 linux-t2-headers
+  apple-bcm-firmware apple-bcm-firmware-fetcher apple-t2-audio-config t2fanrd linux-t2 linux-t2-headers
   macbook12-spi-driver-dkms macbook8-spi-pxa2xx-nodma-dkms
   asusctl supergfxctl rog-control-center
-  dell-xps-touchpad-haptics dell-xps13-sidecar-amps tuxedo-drivers-nocompatcheck-dkms
+  dell-xps-touchpad-haptics dell-xps13-sidecar-amps linux-firmware-cirrus-dx13260
+  tuxedo-drivers-nocompatcheck-dkms
   intel-ipu7-camera intel-lpmd intel-media-driver libva-intel-driver
   thermald linux-ptl linux-ptl-headers vpl-gpu-rt libvpl
   vulkan-intel vulkan-radeon
@@ -20,7 +21,7 @@ OMARCHY_ARCH_DROP=(
   hyperv open-vm-tools virtualbox-guest-utils-nox qemu-user-static-binfmt
 
   # Software without an aarch64 build
-  obs-studio obsidian pinta dotnet-runtime asdcontrol
+  obs-studio obsidian pinta dotnet-runtime asdcontrol gliff superwhisper-bin
 
   # Build artifacts not carried by Arch Linux ARM
   yay-debug reflector

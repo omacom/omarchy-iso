@@ -10,7 +10,7 @@ case "$OMARCHY_ARCH" in
     OMARCHY_MEDIA_TARGET=${OMARCHY_MEDIA_TARGET:-x86_64/pc}
     ISO_NODE_ARCH=x64
     ISO_KERNEL=linux-t2
-    BUILD_IMAGE=archlinux/archlinux:latest
+    BUILD_IMAGE=ghcr.io/archlinux/archlinux:latest
     DOCKER_PLATFORM=linux/amd64
     ;;
   aarch64)

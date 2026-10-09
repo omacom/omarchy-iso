@@ -13,6 +13,9 @@
 #
 # Usage: omarchy-iso-test [release/omarchy.iso] [options]
 #
+#   --keyboard LABEL   English (US/UK), Japanese, Japanese (US keyboard), Korean,
+#                      or Chinese (Simplified, Pinyin)/(Traditional, Zhuyin).
+#                      OMARCHY_PATH must be the source tree used to build the ISO.
 #   --encrypt          Drive the encrypted install flow (default: unencrypted)
 #   --provision              Drive the deferred-provisioning install flow: no user during install, the
 #                      first boot runs omarchy-provision-owner and creates it there
@@ -47,12 +50,14 @@ NO_PREVIEW=false
 SYNC_DIR=""
 SYNC_ALL=false
 
+KEYBOARD_LABEL="English (US)"
 GUEST_USER="omarchy"
 GUEST_PASSWORD="omarchy"
 GUEST_HOSTNAME="omarchy-test"
 
 while (($#)); do
   case "$1" in
+    --keyboard) KEYBOARD_LABEL="$2"; shift ;;
     --encrypt) ENCRYPT=true ;;
     --provision) PROVISION=true ;;
     --reuse-base) REUSE_BASE=true ;;
@@ -84,12 +89,20 @@ if [[ ! -f ${ISO:-} ]]; then
   exit 1
 fi
 
+case "$KEYBOARD_LABEL" in
+  "English (US)" | "English (UK)" | "Japanese" | "Japanese (US keyboard)" | "Korean" | "Chinese (Simplified, Pinyin)" | "Chinese (Traditional, Zhuyin)") ;;
+  *) echo "The VM harness cannot type credentials with keyboard: $KEYBOARD_LABEL" >&2; exit 1 ;;
+esac
+
 omarchy-pkg-add qemu-full edk2-ovmf socat imagemagick tesseract tesseract-data-eng
 
 OVMF_CODE="/usr/share/edk2/x64/OVMF_CODE.4m.fd"
 OVMF_VARS_TEMPLATE="/usr/share/edk2/x64/OVMF_VARS.4m.fd"
 
 BASE_NAME="$(basename "$ISO" .iso)"
+if [[ $KEYBOARD_LABEL != "English (US)" ]]; then
+  BASE_NAME+="-$(printf '%s' "$KEYBOARD_LABEL" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')"
+fi
 $ENCRYPT && BASE_NAME+="-encrypted"
 $PROVISION && BASE_NAME+="-provision"
 BASE_DIR="$REPO_DIR/test-runs/$BASE_NAME"
@@ -610,6 +623,35 @@ audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel|omarchy.audio'
 
 # ----------------------------------------------------- driving the installer
 
+select_keyboard() {
+  local label="$1" index direction="down"
+  # gum choose uses arrows, not a searchable text field. Read the same ordered
+  # choices the ISO vendors from the runtime rather than hard-code row numbers.
+  index=$(OMARCHY_TEST_KEYBOARD="$label" python - <<'PYTHON'
+import os, re
+from pathlib import Path
+source = Path(os.environ.get("OMARCHY_PATH", "")) / "install/provisioning/setup-form.sh"
+if not source.is_file():
+    raise SystemExit("Set OMARCHY_PATH to the source tree used to build this ISO")
+text = source.read_text()
+rows = re.search(r"OMARCHY_KEYBOARD_LAYOUTS=\$'(.*?)'\n", text, re.S).group(1).splitlines()
+labels = [row.split("|")[0] for row in rows]
+label = os.environ["OMARCHY_TEST_KEYBOARD"]
+if label not in labels:
+    raise SystemExit(f"Keyboard choice is absent from the ISO source: {label}")
+print(labels.index(label) - labels.index("English (US)"))
+PYTHON
+  ) || return 1
+  if (( index < 0 )); then
+    direction="up"
+    index=$((-index))
+  fi
+  for (( i = 0; i < index; i++ )); do
+    press "$direction"
+    sleep 0.1
+  done
+}
+
 drive_configurator() {
   log "Driving the installer wizard"
 
@@ -651,7 +693,11 @@ drive_configurator() {
     return 0
   fi
 
-  press ret # English (US) is preselected
+  if [[ $KEYBOARD_LABEL != "English (US)" ]]; then
+    select_keyboard "$KEYBOARD_LABEL"
+    capture_console "success-installer-01-selected-keyboard"
+  fi
+  press ret
 
   # Normal flow: user step comes before disk selection.
   wait_for_screen "Username" 120
@@ -675,7 +721,15 @@ drive_configurator() {
   press ret
 
   wait_for_screen "Email address" 60
-  type_text "test@omarchy.org"
+  type_text "test"
+  if [[ $KEYBOARD_LABEL == "Japanese" ]]; then
+    press bracket_left
+  elif [[ $KEYBOARD_LABEL == "English (UK)" ]]; then
+    press shift-apostrophe
+  else
+    press shift-2
+  fi
+  type_text "omarchy.org"
   capture_console "success-installer-06-email"
   press ret
 
@@ -736,8 +790,12 @@ drive_provision_owner() {
   press ret
 
   wait_for_screen "keyboard layout" 120
-  press down
-  capture_console "success-provision-01-keyboard-layout-uk"
+  if [[ $KEYBOARD_LABEL == "English (US)" ]]; then
+    press down # preserve the harness's default UK provisioning coverage
+  else
+    select_keyboard "$KEYBOARD_LABEL"
+  fi
+  capture_console "success-provision-01-keyboard-layout"
   press ret
 
   wait_for_screen "Username" 120
@@ -763,7 +821,13 @@ drive_provision_owner() {
   # Shift+2 as on US); send that keycode so the typed email is correct under
   # the new layout — itself further proof the deferred keymap took effect.
   type_text "test"
-  press shift-apostrophe
+  if [[ $KEYBOARD_LABEL == "English (US)" || $KEYBOARD_LABEL == "English (UK)" ]]; then
+    press shift-apostrophe
+  elif [[ $KEYBOARD_LABEL == "Japanese" ]]; then
+    press bracket_left
+  else
+    press shift-2
+  fi
   type_text "omarchy.org"
   capture_console "success-provision-04-email"
   press ret

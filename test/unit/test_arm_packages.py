@@ -113,4 +113,4 @@ class ArmPackagesTest(unittest.TestCase):
         builder = (ROOT / "builder/build-iso.sh").read_text()
         check = builder.index('bash /builder/check-arm-packages.sh "$OMARCHY_MEDIA_TARGET" "$runtime_package" "$settings_package"')
         self.assertLess(builder.index("bash /builder/prune-offline-mirror.sh"), check)
-        self.assertLess(check, builder.index('repo-add "$offline_mirror_dir/offline.db.tar.gz"'))
+        self.assertLess(check, builder.index('bash /builder/index-offline-mirror.sh "$offline_mirror_dir"'))

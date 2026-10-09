@@ -73,7 +73,7 @@ name = "omarchy-generic" if args["OMARCHY_MEDIA_TARGET"] == "aarch64/generic" el
     def test_defaults_and_explicit_targets_select_image_platform_and_isolated_cache(self):
         cases = [
             ("arm64", (), "aarch64", "snapdragon", "linux/arm64", "menci/archlinuxarm:base-devel"),
-            ("x86_64", (), "x86_64", "pc", "linux/amd64", "archlinux/archlinux:latest"),
+            ("x86_64", (), "x86_64", "pc", "linux/amd64", "ghcr.io/archlinux/archlinux:latest"),
             ("x86_64", ("--arch", "aarch64", "--media-target", "aarch64/generic"),
              "aarch64", "generic", "linux/arm64", "menci/archlinuxarm:base-devel"),
         ]

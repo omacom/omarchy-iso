@@ -21,13 +21,16 @@ concurrency:
 
 jobs:
   install:
-    runs-on: ubuntu-24.04
+    # Our own branches run on Namespace. A pull request from a fork stays on
+    # GitHub's runner: it is somebody else's code, and it has no business on
+    # our account's machines. No cache volume either way: what one pull
+    # request leaves in a cache the next run would trust.
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'namespace-profile-linux-amd64-16x32' }}
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
 
-      # The hosted runner has far more disk than the build needs (145 GB,
-      # ~86 GB free); fail early and loudly if that ever changes.
+      # Fail early and loudly if the runner ever has less disk than this needs.
       - name: Check disk space
         run: |
           df -h /
@@ -48,8 +51,22 @@ jobs:
           docker run --rm --device /dev/kvm -v "$PWD:/w" -w /w \
             -e OMARCHY_INTEGRATION_DISK_CACHE=none \
             archlinux:latest bash -euo pipefail -c '
-              pacman -Syu --noconfirm --needed qemu-system-x86 qemu-hw-display-virtio-gpu qemu-hw-display-virtio-vga qemu-img edk2-ovmf socat \
-                imagemagick tesseract tesseract-data-eng mtools dosfstools jq openssh openssl python curl >/dev/null
+              # pacman 7 fails every sync on a kernel without Landlock, which
+              # these runners have; builder/build-iso.sh does the same.
+              if ! grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then
+                printf "#!/bin/sh\nexec /usr/bin/pacman --disable-sandbox \"\$@\"\n" >/usr/local/bin/pacman
+                chmod 0755 /usr/local/bin/pacman
+              fi
+              # The tools come from our own Arch mirror first, the public ones
+              # after it. A mirror that drops one file must not fail the test:
+              # try again.
+              sed -i "1i Server = https://mirror.omarchy.org/\$repo/os/\$arch" /etc/pacman.d/mirrorlist
+              for attempt in 1 2 3; do
+                pacman -Syu --noconfirm --needed qemu-system-x86 qemu-hw-display-virtio-gpu qemu-hw-display-virtio-vga qemu-img edk2-ovmf socat \
+                  imagemagick tesseract tesseract-data-eng mtools dosfstools jq openssh openssl python curl >/dev/null && break
+                [ "$attempt" -lt 3 ] || { echo "::error::the test container could not install its tools"; exit 1; }
+                echo "pacman failed, attempt $attempt of 3; trying again in 15 s"; sleep 15
+              done
               # test/integration installs its tools through Omarchy'"'"'s helper; they are installed above.
               printf "#!/bin/sh\nexit 0\n" >/usr/local/bin/omarchy-pkg-add
               chmod 0755 /usr/local/bin/omarchy-pkg-add

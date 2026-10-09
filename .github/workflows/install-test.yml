@@ -21,9 +21,11 @@ concurrency:
 
 jobs:
   install:
-    # No cache volume here on purpose: this runs for pull requests, and what
-    # one of them leaves in a cache the next run would trust.
-    runs-on: namespace-profile-linux-amd64-16x32
+    # Our own branches run on Namespace. A pull request from a fork stays on
+    # GitHub's runner: it is somebody else's code, and it has no business on
+    # our account's machines. No cache volume either way: what one pull
+    # request leaves in a cache the next run would trust.
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'namespace-profile-linux-amd64-16x32' }}
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5

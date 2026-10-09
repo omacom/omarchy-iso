@@ -67,12 +67,22 @@ _disk_abort() {
 # /var/log/omarchy-install.log but sends stderr straight to the tty (gum draws
 # its TUI there), so an unwrapped failure leaves no trace in the log the user
 # uploads — and the configurator's next screen clears it off the display too.
+#
+# That same tee also reaches the tty, so a successful command's output goes to
+# the log file alone: mkfs.btrfs, the subvolumes and mkfs.fat otherwise flash
+# ~27 lines of text between two configurator screens.
 disk_step() {
   local desc="$1"
   shift
   local output status=0
   output=$("$@" 2>&1) || status=$?
-  [[ -n $output ]] && printf '%s\n' "$output"
+  if [[ -n $output ]]; then
+    if (( status == 0 )) && [[ -n ${OMARCHY_INSTALL_LOG_FILE:-} ]]; then
+      printf '%s\n' "$output" >>"$OMARCHY_INSTALL_LOG_FILE"
+    else
+      printf '%s\n' "$output"
+    fi
+  fi
   (( status == 0 )) && return 0
   _disk_abort "$desc failed (exit $status)"
 }

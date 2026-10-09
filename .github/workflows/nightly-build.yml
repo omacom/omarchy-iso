@@ -232,6 +232,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: nightly
+    # actions: read is for finding and fetching the build job's artifact.
+    permissions:
+      contents: read
+      actions: read
     env:
       CHANNEL: ${{ matrix.channel }}
       VERSION: ${{ matrix.version }}
@@ -243,10 +247,20 @@ jobs:
       RCLONE_CONFIG_R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
       BUCKET: omarchy-nightly
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: nightly-${{ matrix.channel }}-${{ github.run_id }}
-          path: out
+          sparse-checkout: test/vm-image
+          persist-credentials: false
+
+      # Not the download action: GitHub's storage limits each connection to a
+      # few megabytes a second, and the action took 10 minutes over 4.6 GB.
+      # nightly-fetch takes the same artifact over 16 connections.
+      - name: Fetch the release from the build job
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq aria2 unzip >/dev/null
+          ./test/vm-image/nightly-fetch "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "nightly-$CHANNEL-$GITHUB_RUN_ID" out
 
       - name: rclone
         run: |

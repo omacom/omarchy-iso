@@ -135,6 +135,56 @@ refused "a released ISO under another version's name" "$layout" stable 4.0.5 sta
 sealed "$tmp/sealed-z"
 refused "a channel that does not exist" "$layout" rc 4.0.4 rc/4.0.4 "$tmp/release/omarchy-4.0.4.iso" "$tmp/sealed-z" "$tmp/stable-packages" "$tmp/out5"
 
+# --------------------------------------------------------------- nightly-fetch
+# The network is played by three stand-ins: gh lists the artifacts, curl gives
+# the signed address, aria2c "downloads" a zip made here.
+fetch="$ROOT/test/vm-image/nightly-fetch"
+bash -n "$fetch"
+if command -v zip >/dev/null && command -v unzip >/dev/null; then
+  stubs=$tmp/stubs; mkdir -p "$stubs" "$tmp/payload/edge/1"
+  echo "an image" >"$tmp/payload/edge/1/omarchy-edge-1.qcow2"
+  echo '{"version": "1"}' >"$tmp/payload/edge/latest.json"
+  (cd "$tmp/payload" && zip -qr "$tmp/artifact.zip" .)
+  zip_size=$(stat -c %s "$tmp/artifact.zip")
+  cat >"$stubs/gh" <<STUB
+#!/bin/bash
+case "\$*" in
+  "auth token") echo token ;;
+  *"/runs/7/artifacts"*) printf '%s\\n' \${FETCH_IDS:-11 12} ;;
+  *"/artifacts/"*) echo \${FETCH_SIZE:-$zip_size} ;;
+esac
+STUB
+  cat >"$stubs/curl" <<'STUB'
+#!/bin/bash
+echo "${@: -1}" >>"$FETCH_LOG"; printf 'https://storage.example/signed'
+STUB
+  cat >"$stubs/aria2c" <<STUB
+#!/bin/bash
+echo aria2c >>"\$FETCH_LOG"
+if [[ -n \${FETCH_FAIL_ONCE:-} && ! -e $tmp/failed ]]; then touch $tmp/failed; exit 1; fi
+for arg in "\$@"; do case \$arg in --dir=*) dir=\${arg#--dir=} ;; --out=*) out=\${arg#--out=} ;; esac; done
+cp "$tmp/artifact.zip" "\$dir/\$out"
+STUB
+  chmod +x "$stubs"/*
+  fetched() { PATH="$stubs:$PATH" TMPDIR="$tmp" FETCH_LOG="$tmp/fetch.log" "$@"; }
+
+  : >"$tmp/fetch.log"
+  fetched "$fetch" omacom/omarchy-iso 7 nightly-edge-7 "$tmp/fetched" >/dev/null
+  equal "fetch: the files of the artifact" "$(cd "$tmp/fetched" && find . -type f | sort | paste -sd' ')" "./edge/1/omarchy-edge-1.qcow2 ./edge/latest.json"
+  grep -q "/artifacts/12/zip" "$tmp/fetch.log" || fail "fetch: of two artifacts with one name, the newer was not the one fetched"
+  equal "fetch: nothing left behind" "$(ls "$tmp" | grep -c 'nightly-fetch\.')" "0"
+
+  : >"$tmp/fetch.log"; rm -f "$tmp/failed"
+  FETCH_FAIL_ONCE=1 fetched "$fetch" omacom/omarchy-iso 7 nightly-edge-7 "$tmp/fetched-again" >/dev/null 2>&1
+  equal "fetch: a failed download is tried again with a new address" "$(grep -c zip "$tmp/fetch.log")" "2"
+
+  refused "an artifact that does not exist" env FETCH_IDS=" " PATH="$stubs:$PATH" TMPDIR="$tmp" FETCH_LOG="$tmp/fetch.log" "$fetch" omacom/omarchy-iso 7 nightly-edge-7 "$tmp/f3"
+  refused "a download of the wrong size" env FETCH_SIZE=1 PATH="$stubs:$PATH" TMPDIR="$tmp" FETCH_LOG="$tmp/fetch.log" "$fetch" omacom/omarchy-iso 7 nightly-edge-7 "$tmp/f4"
+  [[ ! -e $tmp/f4/edge ]] || fail "fetch: a download of the wrong size was unpacked"
+else
+  echo "nightly-fetch tests skipped: no zip or unzip here"
+fi
+
 # ------------------------------------------------------------ the install test
 # The harness is a script that starts a VM when it is read; take the two
 # functions out of it.

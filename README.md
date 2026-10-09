@@ -8,10 +8,14 @@ The Omarchy ISO is the only supported way to install Omarchy. It ships the Omarc
 
 [Download the ISO](https://omarchy.org) and put it on a USB stick, with [balenaEtcher](https://etcher.balena.io/) on Mac or Windows or [caligula](https://github.com/ifd3f/caligula) on Linux. Turn off Secure Boot and/or TPM in the BIOS, boot off the stick, answer the configuration questions and select a drive. The install can be done in under a minute on the fastest modern machines and shouldn't take more than 5 minutes even on an older computer.
 
-Check the download before writing it to the stick. Every release ISO has a `.sha256` beside it at the same URL, linked next to the download; put both in one directory:
+Check the download before writing it to the stick. Every release ISO has a `.sha256` beside it at the same URL, linked next to the download. From a terminal, this fetches the latest release and checks it; the version is the latest release of [omacom/omarchy](https://github.com/omacom/omarchy/releases):
 
 ```bash
-sha256sum -c omarchy-4.0.4.iso.sha256
+version=$(curl -fsSL https://api.github.com/repos/omacom/omarchy/releases/latest | jq -r .tag_name)
+version=${version#v}
+curl -fLO "https://iso.omarchy.org/omarchy-$version.iso"
+curl -fsSLO "https://iso.omarchy.org/omarchy-$version.iso.sha256"
+sha256sum -c "omarchy-$version.iso.sha256"
 ```
 
 A damaged download otherwise shows up minutes into the install, as a pacman "invalid or corrupted package" error. There is a `.sig` beside the ISO too, for verifying it against the Omarchy signing key.
@@ -21,31 +25,6 @@ The manual has the rest:
 - [Getting started](https://omarchy.org/manual/getting-started/): the install step by step, installing for another owner, installing without encryption.
 - [Dual-boot install](https://omarchy.org/manual/dual-boot-install/): Omarchy in the free space of a drive, beside Windows or another OS.
 - [Unattended installs](https://omarchy.org/manual/unattended-installs/): the ISO installs itself, with no keyboard and no wizard, from a configuration on a second drive.
-
-## Try it in a VM
-
-A VM image is Omarchy already installed: no installer to go through, and it boots in seconds. There is one of the last release and one of edge, which is rebuilt every night from what is about to become the next release and can be broken on any given day.
-
-On a Linux machine with QEMU (`qemu-system-x86_64` and `qemu-img`), a `/dev/kvm` you can read and write, `ssh`, `curl` and `jq`:
-
-```bash
-latest=https://nightly.omarchy.org/stable/latest.json    # or .../edge/latest.json
-vm=$(curl -fsSL "$latest" | jq -r .vm.url)
-for file in $(curl -fsSL "$latest" | jq -r '.vm.files[]'); do curl -fsSLO "$vm$file"; done
-sha256sum -c SHA256SUMS
-chmod +x vm-boot
-
-./vm-boot .             # boots, prints how to log in, runs until Ctrl-C
-./vm-boot . uname -r    # boots, runs the command over SSH, powers off
-```
-
-The user is `omarchy` with password `omarchy`. SSH takes keys only, and `vm-boot` makes one for each boot. Every boot is a new machine, and the downloaded image is never written to: the machine runs on an overlay under `/var/tmp` (`VM_STATE_DIR` moves it) that is deleted on exit. The disk is a download of 4 to 5 GB.
-
-The edge ISO itself is published every night as well:
-
-```bash
-curl -fsSL https://nightly.omarchy.org/edge/latest.json | jq -r .url
-```
 
 ## For maintainers
 
@@ -107,6 +86,27 @@ The version is also in the edge ISO's file name.
 | `vm-boot` | A script that boots the image with QEMU. |
 | `SHA256SUMS` | Checksums of the files above. |
 
+
+### Using a VM image
+
+For testing, not for users: users get the release ISO from iso.omarchy.org. A VM image is Omarchy already installed, with no installer to go through, and it boots in seconds. There is one of edge, rebuilt every night, and one of the last release.
+
+On a Linux machine with QEMU (`qemu-system-x86_64` and `qemu-img`), a `/dev/kvm` you can read and write, `ssh`, `curl` and `jq`:
+
+```bash
+latest=https://nightly.omarchy.org/edge/latest.json    # or .../stable/latest.json
+vm=$(curl -fsSL "$latest" | jq -r .vm.url)
+for file in $(curl -fsSL "$latest" | jq -r '.vm.files[]'); do curl -fsSLO "$vm$file"; done
+sha256sum -c SHA256SUMS
+chmod +x vm-boot
+
+./vm-boot .             # boots, prints how to log in, runs until Ctrl-C
+./vm-boot . uname -r    # boots, runs the command over SSH, powers off
+```
+
+The user is `omarchy` with password `omarchy`. SSH takes keys only, and `vm-boot` makes one for each boot. Every boot is a new machine, and the downloaded image is never written to: the machine runs on an overlay under `/var/tmp` (`VM_STATE_DIR` moves it) that is deleted on exit. The disk is a download of 4 to 5 GB.
+
+The nightly's edge ISO is `jq -r .url` of the same `latest.json`.
 
 ### Autoinstall
 

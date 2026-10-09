@@ -195,17 +195,19 @@ jobs:
             else
               echo "**The test did not get as far as a report** (job result: $RESULT)."
             fi
-            if [ -n "$PICTURES" ]; then
+            if [ -n "$PICTURES" ] && [ -s evidence/before.png ] && [ -s evidence/after.png ]; then
               echo
               echo "| Before, $FROM | After, on $TO |"
               echo "| --- | --- |"
               echo "| ![before]($PICTURES/before.png) | ![after]($PICTURES/after.png) |"
-              if [ -s evidence/stuck.png ]; then
-                echo
-                echo "The reboot did not come back by itself. This is what the screen showed:"
-                echo
-                echo "![stuck]($PICTURES/stuck.png)"
-              fi
+            fi
+            # The picture of a reboot that stuck stands by itself: it is the
+            # one worth having when there is no "after" to show.
+            if [ -n "$PICTURES" ] && [ -s evidence/stuck.png ]; then
+              echo
+              echo "The reboot did not come back by itself. This is what the screen showed:"
+              echo
+              echo "![stuck]($PICTURES/stuck.png)"
             fi
             echo
             echo "[Run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID), attempt $GITHUB_RUN_ATTEMPT, at \`${GITHUB_SHA:0:7}\`."

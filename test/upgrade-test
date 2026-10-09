@@ -131,7 +131,13 @@ log "Booting the installed system"
 wait_ssh 300 || { echo "upgrade-test: the installed system did not come up" >&2; exit 1; }
 # The overlay is thrown away: let sudo through without asking, so a long
 # update does not stop at a password prompt nobody is there to answer.
-ssh "${ssh_opts[@]}" omarchy@127.0.0.1 "echo $(printf %q "$pw") | sudo -S -p '' sh -c 'echo \"omarchy ALL=(ALL) NOPASSWD: ALL\" >/etc/sudoers.d/99-upgrade-test'" </dev/null
+# sudo takes the last rule that matches, and reads this folder in name order:
+# the name has to sort after the install's own rule for the wheel group.
+ssh "${ssh_opts[@]}" omarchy@127.0.0.1 "echo $(printf %q "$pw") | sudo -S -p '' sh -c 'printf \"%s\\n\" \"omarchy ALL=(ALL:ALL) NOPASSWD: ALL\" \"Defaults:omarchy !authenticate\" >/etc/sudoers.d/zzz-upgrade-test'" </dev/null
+# "sudo -v" is the hard one: it asks unless every rule for the user lets it
+# through, which is why the rule alone is not enough.
+ssh "${ssh_opts[@]}" omarchy@127.0.0.1 'sudo -k; sudo -n true && sudo -n -v' </dev/null ||
+  { echo "upgrade-test: sudo still asks for a password in the guest" >&2; exit 1; }
 guest 'timeout 180 systemctl is-system-running --wait >/dev/null 2>&1 || true'
 facts "$out/before.txt"
 desktop_shot "$out/before.png"
@@ -141,6 +147,38 @@ for migration in ${EXTRA_MIGRATIONS:-}; do
   log "Putting $(basename "$migration") in place before the update"
   ssh "${ssh_opts[@]}" omarchy@127.0.0.1 "sudo tee /usr/share/omarchy/migrations/$(basename "$migration") >/dev/null" <"$migration"
 done
+
+# A channel that offers what the machine already has, or something older, is
+# no upgrade. Say so now: the release's own updater, run with nothing to do,
+# ends at a prompt nobody is there to answer.
+case $channel in edge) package=omarchy-dev ;; *) package=omarchy ;; esac
+# A server that cannot be reached, or does not answer in time, is not a channel
+# with nothing on offer: that is a failure of its own, said as one.
+if ! offered=$(guest "set -o pipefail; curl -fsSL --connect-timeout 20 --max-time 120 --retry 2 https://pkgs.omarchy.org/$channel/\$(uname -m)/omarchy.db | bsdtar -xOf - '$package-[0-9]*/desc' | sed -n '/^%VERSION%\$/{n;p;}' | head -n 1" 2>"$out/probe.log") || [[ -z $offered ]]; then
+  {
+    echo "**The $channel channel could not be asked what it offers.** The test did not run."
+    echo
+    echo '```'
+    tail -n 5 "$out/probe.log"
+    echo '```'
+  } >"$out/report.md"
+  cat "$out/report.md"
+  exit 1
+fi
+installed=$(guest "pacman -Q $package 2>/dev/null | cut -d' ' -f2" 2>/dev/null)
+log "The $channel channel offers $package $offered; installed: ${installed:-none}"
+# pacman's own ordering: 0 for the same version, below 0 for an older offer.
+newer=1
+[[ -z $installed ]] || newer=$(guest "vercmp $(printf %q "$offered") $(printf %q "$installed")" 2>/dev/null)
+if (( ${newer:-0} <= 0 )); then
+  {
+    echo "**Nothing to upgrade to.** The $channel channel offers \`$package $offered\`, and the machine has \`$(fact "$out/before.txt" omarchy)\`."
+    echo
+    echo "The test did not run: point it at a channel that holds a newer Omarchy."
+  } >"$out/report.md"
+  cat "$out/report.md"
+  exit 1
+fi
 
 log "omarchy-channel-set $channel"
 update_start=$SECONDS

@@ -1,6 +1,6 @@
 """Unit tests for the root image install's disk steps and the parallel finalize.
 
-_install_root_image_dd runs against a stand-in for subprocess.run that acts
+_place_root_image runs against a stand-in for subprocess.run that acts
 like the tools it calls: mounting the image's top level makes its subvolume
 appear, `btrfs subvolume create` makes a directory. What is asserted is the
 order the real tools must see (write, new fsid, wait for blkid, then mount)
@@ -61,7 +61,7 @@ class InstallRootImageDdTest(unittest.TestCase):
 
     def install(self, frames_written=True, fail_on=None):
         self.fail_on = fail_on
-        with mock.patch.object(phases_impl, "ROOT_IMAGE_RAW_ZST", self.image), \
+        with mock.patch.object(phases_impl, "ROOT_IMAGE", self.image), \
              mock.patch.object(phases_impl, "_root_image_target_mounts", return_value=(self.mounts, DEVICE)), \
              mock.patch.object(phases_impl, "_umount_tree",
                                side_effect=lambda t: self.calls.append(["umount-tree", str(t)])), \
@@ -75,7 +75,7 @@ class InstallRootImageDdTest(unittest.TestCase):
              mock.patch.object(phases_impl, "_write_phase_progress"), \
              mock.patch.object(phases_impl, "info"), \
              mock.patch.object(phases_impl.subprocess, "run", side_effect=self.fake_run):
-            phases_impl._install_root_image_dd(self.ctx)
+            phases_impl._place_root_image(self.ctx)
 
     def index(self, prefix):
         for i, call in enumerate(self.calls):

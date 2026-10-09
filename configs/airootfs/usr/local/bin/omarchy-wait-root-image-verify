@@ -24,8 +24,8 @@ MIRROR_UNIT=omarchy-mirror-verify.service
 MIRROR_SUMS=/usr/share/omarchy-iso/offline-mirror.sha256
 MIRROR_DIR=/var/cache/omarchy/mirror/offline
 BOOT_MEDIUM_MOUNT=/run/archiso/bootmnt
-STREAM="$BOOT_MEDIUM_MOUNT/arch/x86_64/omarchy-root.img.zst"
-CHECKSUM="$STREAM.sha256"
+IMAGE="$BOOT_MEDIUM_MOUNT/arch/x86_64/omarchy-root.img.zst"
+CHECKSUM="$IMAGE.sha256"
 
 fail() { echo "$1" >&2; exit 1; }
 
@@ -58,7 +58,7 @@ hash_where() {
   [[ $pid =~ ^[0-9]+$ && $pid -gt 0 ]] || return 1
   for fd in /proc/"$pid"/fd/*; do
     path=$(readlink "$fd" 2>/dev/null) || continue
-    [[ $path == "$STREAM" || $path == "$MIRROR_DIR"/* ]] || continue
+    [[ $path == "$IMAGE" || $path == "$MIRROR_DIR"/* ]] || continue
     pos=$(awk '/^pos:/ {print $2; exit}' "/proc/$pid/fdinfo/${fd##*/}" 2>/dev/null)
     [[ -n $pos ]] && { printf '%s\t%s\n' "$path" "$pos"; return 0; }
   done
@@ -72,8 +72,8 @@ hash_pct() {
   local where path pos size line total
   where=$(hash_where) || return 1
   path=${where%$'\t'*} pos=${where##*$'\t'}
-  if [[ $path == "$STREAM" ]]; then
-    size=$(stat -c %s "$STREAM" 2>/dev/null) || return 1
+  if [[ $path == "$IMAGE" ]]; then
+    size=$(stat -c %s "$IMAGE" 2>/dev/null) || return 1
     ((size > 0)) || return 1
     echo $((pos * 100 / size))
     return 0
@@ -94,12 +94,12 @@ if [[ -n $src ]]; then
   echo "boot medium: $src on /dev/$disk, scheduler: $sched"
 fi
 
-if [[ ! -f $STREAM ]]; then
+if [[ ! -f $IMAGE ]]; then
   # The archiso hook unmounts the boot medium after copying the airootfs to RAM
   # (copytoram). The boot entries pin copytoram=n, so this only happens when
   # someone edits the kernel command line.
   [[ -d $BOOT_MEDIUM_MOUNT ]] || fail "boot medium is not mounted at $BOOT_MEDIUM_MOUNT: the live system was copied to RAM (copytoram) and the medium released; boot with copytoram=n"
-  fail "root image stream missing: $STREAM"
+  fail "root image missing: $IMAGE"
 fi
 [[ -f $CHECKSUM ]] || fail "root image checksum missing: $CHECKSUM"
 
@@ -235,7 +235,7 @@ await_verdict() {
         ;;
       *)
         # inactive after the start above: a condition kept it from running
-        # (the stream or its checksum is not where the unit expects them).
+        # (the image or its checksum is not where the unit expects them).
         fail "$UNIT did not run ($state); cannot verify $what"
         ;;
     esac

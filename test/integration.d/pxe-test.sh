@@ -102,10 +102,8 @@ assert_nbd_medium() {
     ssh_live_root "findmnt -no SOURCE /run/archiso/bootmnt | grep -qxE '/dev/nbd0(p[0-9]+)?'"
   check "kernel cmdline pinned copytoram=n" \
     ssh_live_root "grep -q 'copytoram=n' /proc/cmdline"
-  # An ISO ships either the raw image (omarchy-root.img.zst) or the send
-  # stream. Either is the medium the installer reads.
   check "root image is reachable on the netboot medium" \
-    ssh_live_root "test -f /run/archiso/bootmnt/arch/x86_64/omarchy-root.img.zst || test -f /run/archiso/bootmnt/arch/x86_64/omarchy-root.btrfs.zst"
+    ssh_live_root "test -f /run/archiso/bootmnt/arch/x86_64/omarchy-root.img.zst"
 }
 
 assert_installed_system() {

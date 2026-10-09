@@ -1,32 +1,23 @@
 #!/bin/bash
 #
-# Build the root filesystem image the installer unpacks instead of pacstrapping
+# Build the root filesystem image the installer writes instead of pacstrapping
 # every package on the target machine.
 #
 # The target install is the same ~940 packages for everyone; only the kernel,
 # CPU microcode, audio firmware and Tailscale vary per machine. So pacstrap the
-# invariant set once here, at build time, into a btrfs subvolume compressed at
-# a high zstd level (see IMAGE_COMPRESS below — higher than the installer's own
-# compress=zstd, since the level only costs build time), and ship it as a
-# `btrfs send --compressed-data` stream. At install time `btrfs receive` writes
-# the compressed extents straight to disk (no decompress/recompress), which
-# measured at roughly half the time of extracting the same packages with pacman,
-# independent of CPU count; the per-machine delta is a small pacstrap after.
+# invariant set once here, at build time, into a btrfs filesystem compressed at
+# a high zstd level (see IMAGE_COMPRESS below), shrink it, and pack the
+# filesystem image as independent 256 KiB zstd frames with a seek table
+# (omarchy-image-write pack). At install time omarchy-image-write decodes the
+# frames on every core and writes them straight onto the target partition;
+# the installer then gives the filesystem a fresh fsid and grows it to fill
+# the partition. The per-machine delta is a small pacstrap after.
 #
-# The stream itself then gets an outer zstd layer (STREAM_COMPRESS below). The
-# per-extent compression above cannot see past a 128 KiB extent, so the send
-# stream still carries its protocol framing uncompressed plus redundancy that
-# only exists across extents; one whole-stream pass reclaims ~11% (measured on
-# a 3.75 GB stream — and the level barely matters, the long-range window does).
-# The installer decompresses it in the receive pipe, where zstd -d is orders of
-# magnitude faster than any install medium; the extents inside still land on
-# disk as they are.
-#
-# Usage: build-root-image.sh <pacman.conf> <output-stream> <package>...
+# Usage: build-root-image.sh <pacman.conf> <output.img.zst> <package>...
 #
 #   pacman.conf     Config whose repositories resolve every package; its
 #                   CacheDir must hold the package files so nothing is copied.
-#   output-stream   Where to write the send stream.
+#   output.img.zst  Where to write the packed image.
 #   package...      Packages to pacstrap into the image.
 #
 # Environment:
@@ -46,7 +37,7 @@ shift 2 || true
 packages=("$@")
 
 if [[ -z $pacman_conf || -z $output || ${#packages[@]} -eq 0 ]]; then
-  echo "Usage: build-root-image.sh <pacman.conf> <output-stream> <package>..." >&2
+  echo "Usage: build-root-image.sh <pacman.conf> <output.img.zst> <package>..." >&2
   exit 1
 fi
 if [[ ! -r $pacman_conf ]]; then
@@ -56,18 +47,12 @@ fi
 
 # Forced zstd at a higher level than the installer's own compress=zstd (level
 # 3): btrfs's incompressibility heuristic declines a lot of data in this tree
-# that zstd handles fine, and the level only costs build time. btrfs receive
-# stores the extents as they arrive, so neither choice affects install speed;
-# the installed system writes new data at its own mount option either way.
+# that zstd handles fine, and the level only costs build time. The image is
+# written to the target as it is, so neither choice affects install speed; the
+# installed system writes new data at its own mount option either way.
 IMAGE_COMPRESS="compress-force=zstd:15"
-# Outer layer over the whole send stream. Level 15 and the 128 MiB long-range
-# window are each worth a few hundred MB/-tens of MB respectively over the
-# defaults; beyond either lies ~0.3% for minutes of build time (level 19+) or
-# a stream a stock `zstd -d` refuses (--long>27 exceeds the decoder's default
-# window limit). -T0 is a pure win: ~25 s on a many-core builder, same bytes.
-STREAM_COMPRESS=(zstd -q -15 --long=27 -T0)
-# Name of the subvolume inside the stream. The orchestrator looks for this name
-# after `btrfs receive` (phases_impl.ROOT_IMAGE_SUBVOLUME).
+# Name of the image's one subvolume. The installer renames it to @ after the
+# write (phases_impl.ROOT_IMAGE_SUBVOLUME).
 IMAGE_SUBVOLUME="omarchy-root"
 
 # Boot-image pacman hooks that must not run while the image is built: there is
@@ -403,10 +388,8 @@ CONF
   rm -f "$root/etc/mkinitcpio-prebuilt-uki.conf" "$root/etc/kernel/cmdline.prebuilt-uki"
 fi
 
-# Emit the filesystem image itself, not a send stream. The installer writes
-# it straight onto the target partition, gives the filesystem a new fsid and
-# grows it to fill the partition: no btrfs receive, and about 14 s becomes
-# about 3 s on a Gen4 NVMe.
+# The image is the loop backing file itself: the same on-disk bytes, written
+# to the target partition as they are.
 #
 # Shrink the filesystem and truncate the backing file first: xorriso stores a
 # file at its apparent size, so a sparse 24 GiB backing file would overflow
@@ -437,9 +420,6 @@ sync
 umount "$mnt"
 losetup -d "$loop"
 truncate -s "${shrink_mb}M" "$backing"
-# build-iso.sh passes the final file name, omarchy-root.img.zst.
-zst_output="$output"
-[[ $zst_output == *.zst ]] || zst_output="${zst_output}.zst"
 
 # Compress the image for the ISO. zstd collapses the unused space; the data
 # is already compressed inside btrfs and shrinks little. Measured: 6.3 GB
@@ -450,5 +430,5 @@ zst_output="$output"
 # 0.9 s instead of 2.5 s through zstdcat | dd on a 990 PRO. Framing costs
 # 1.3% (55 MB). It is still one valid .zst; zstd -d reads it unchanged.
 echo "Packing the root image as 256 KiB zstd frames"
-omarchy-image-write pack "$backing" "$zst_output"
-echo "Root image raw.zst: $(du -h "$zst_output" | cut -f1) at $zst_output (from ${shrink_mb}M apparent input)"
+omarchy-image-write pack "$backing" "$output"
+echo "Root image: $(du -h "$output" | cut -f1) at $output (from ${shrink_mb}M apparent input)"

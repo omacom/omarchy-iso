@@ -7,11 +7,11 @@ Phase ordering (full-disk and protected/pre-mounted):
                              wrapper before Python imports it)
     prepare_install_target → everything that can fail before the disk is
                              touched: the pre-mounted target/ESP when the JSON
-                             uses pre_mounted_config, the root image stream
-                             and its checksum, and a disk layout the image can
-                             land on
+                             uses pre_mounted_config, the root image and its
+                             checksum, the package mirror's checksums, and a
+                             disk layout the image can land on
     arch_install_system    → one archinstall flow for partition/mount-or-use,
-                             root image unpack (btrfs receive), per-machine
+                             root image write, per-machine
                              package delta, Limine setup, useradd, fstab; the
                              per-machine pacman keyring starts as a transient
                              systemd unit after the last pacstrap
@@ -129,14 +129,6 @@ def _omarchy_nvim_package() -> str:
     return _package_targets()["nvim"]
 
 
-# The root image: a `btrfs send --compressed-data` stream of the invariant
-# target system (build-root-image.sh), unpacked onto the target in place of
-# pacstrapping it, shipped behind an outer whole-stream zstd layer (the
-# per-extent compression inside the stream cannot reach the send framing or
-# redundancy that spans extents; the outer pass is ~11% of the stream).
-# build-iso.sh ships it as a plain file on the ISO, read straight off the
-# boot medium, with sha256sum output for it (the compressed file) next to it.
-# The subvolume name is what build-root-image.sh sends.
 # Sub-step timing: anything that takes 0.05 s or more gets a [step] line in
 # the install log (/var/log/omarchy-install.log).
 from contextlib import contextmanager as _contextmanager
@@ -167,29 +159,19 @@ def _time_step(label: str):
             info(f"[step] {label}: {_elapsed:.6f}s")
 
 
-ROOT_IMAGE_STREAM = Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.btrfs.zst")
-# The btrfs filesystem image build-root-image.sh emits. When the ISO carries
-# it, the installer writes it onto the target partition and gives the
-# filesystem a new fsid; without it, the install falls back to the stream.
-ROOT_IMAGE_RAW = Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.img")
-# The same image, zstd-compressed: what the ISO ships.
-ROOT_IMAGE_RAW_ZST = Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.img.zst")
-# Writes ROOT_IMAGE_RAW_ZST in parallel; compiled and installed by build-iso.sh.
+# The root image: the invariant target system as a btrfs filesystem image
+# (build-root-image.sh), packed as independent 256 KiB zstd frames with a seek
+# table and written onto the target partition in place of pacstrapping it.
+# build-iso.sh ships it as a plain file on the ISO, read straight off the boot
+# medium, with its sha256 next to it. Its one subvolume becomes @.
+ROOT_IMAGE = Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.img.zst")
+ROOT_IMAGE_SUBVOLUME = "omarchy-root"
+# Writes ROOT_IMAGE in parallel; compiled and installed by build-iso.sh.
 IMAGE_WRITE = Path("/usr/local/bin/omarchy-image-write")
 
 
-def _root_image_verified() -> Path:
-    """The artifact omarchy-root-image-verify.service hashes: the raw image
-    stream when the ISO ships one, else the send stream."""
-    return ROOT_IMAGE_RAW_ZST if ROOT_IMAGE_RAW_ZST.is_file() else ROOT_IMAGE_STREAM
-# Decompresses the outer layer in the receive pipe. --long=27 mirrors the
-# compressing side's window: it is within the decoder's default 128 MiB
-# acceptance limit, but saying it here keeps the pair visibly in step with
-# STREAM_COMPRESS in build-root-image.sh.
-ROOT_IMAGE_DECOMPRESS = ("zstd", "-dc", "--long=27")
-ROOT_IMAGE_SUBVOLUME = "omarchy-root"
 # The live ISO starts omarchy-root-image-verify.service at boot: `sha256sum -c`
-# of the stream, running while the user is in the configurator. It is the only
+# of the image, running while the user is in the configurator. It is the only
 # verifier. Both this phase and the free-space configurator gate collect its
 # verdict through this helper, which logs the boot medium and its I/O scheduler,
 # waits for the unit if it is still hashing, and starts it if it never ran.
@@ -205,8 +187,8 @@ OFFLINE_MIRROR = Path("/var/cache/omarchy/mirror/offline")
 BOOT_MEDIUM_MOUNT = Path("/run/archiso/bootmnt")
 
 
-def _root_image_stream() -> Path:
-    if not ROOT_IMAGE_STREAM.is_file():
+def _root_image() -> Path:
+    if not ROOT_IMAGE.is_file():
         # The archiso hook unmounts the boot medium after copying the airootfs
         # to RAM (copytoram). The boot entries pin copytoram=n, so this only
         # happens when someone edits the kernel command line.
@@ -215,14 +197,15 @@ def _root_image_stream() -> Path:
                 f"boot medium is not mounted at {BOOT_MEDIUM_MOUNT}: the live system was "
                 "copied to RAM (copytoram) and the medium released; boot with copytoram=n"
             )
-        raise RuntimeError(f"root image stream missing: {ROOT_IMAGE_STREAM}")
-    return ROOT_IMAGE_STREAM
+        raise RuntimeError(f"root image missing: {ROOT_IMAGE}")
+    return ROOT_IMAGE
 
 # Packages the image must carry for the rest of the install to work: Limine
 # setup reads the settings package's limine config, useradd copies the skel the
 # settings and nvim packages populate, and the target-side setup commands come
-# from the runtime package. Checked right after unpacking so a mismatched
-# image fails here with a clear message instead of three phases later.
+# from the runtime package. Checked right after the image is written so a
+# mismatched image fails here with a clear message instead of three phases
+# later.
 ROOT_IMAGE_REQUIRED_PACKAGES = ("limine", "omarchy-keyring")
 
 
@@ -290,7 +273,7 @@ def prepare_install_target(ctx: InstallContext) -> None:
     """Everything that can fail before the disk is touched. The next phase
     partitions, formats and encrypts as its first step, and a failure after
     that leaves a wiped (or wiped and encrypted) disk with no system on it:
-    so the stream, its checksum and a layout the image can land on are all
+    so the image, its checksum and a layout the image can land on are all
     checked here, where failing costs nothing."""
     if ctx.is_protected:
         verify_protected_mounts(ctx)
@@ -298,7 +281,7 @@ def prepare_install_target(ctx: InstallContext) -> None:
         _root_image_target_mounts(ctx.target)
     else:
         verify_root_image_layout(ctx.user_configuration.get("disk_config") or {})
-    verify_root_image_stream(ctx)
+    verify_install_medium(ctx)
 
 
 def verify_root_image_layout(disk_config: dict) -> None:
@@ -322,11 +305,11 @@ def verify_root_image_layout(disk_config: dict) -> None:
     )
 
 
-def verify_root_image_stream(ctx: InstallContext) -> None:
-    """The stream is present and hashes to what the build recorded. A
-    truncated or corrupt copy (a badly flashed USB is the common case) would
-    also trip btrfs receive's per-command checksums, but only after the disk
-    is formatted.
+def verify_install_medium(ctx: InstallContext) -> None:
+    """The image (and the package mirror) are present and hash to what the
+    build recorded. A truncated or corrupt copy (a badly flashed USB is the
+    common case) would also fail the write's per-frame checksums, but only
+    after the disk is formatted.
 
     ROOT_IMAGE_VERIFY_HELPER is the single source of truth: it collects the
     boot-time hasher's verdict, waiting for the unit if it is still running
@@ -334,7 +317,7 @@ def verify_root_image_stream(ctx: InstallContext) -> None:
     scheduler. The free-space configurator gate runs the same helper before it
     partitions, so both disk-touching paths clear the same check; whoever gets
     there first pays the wait. The hasher's read also leaves as much of the
-    stream as fits in the page cache for the unpack that follows."""
+    image as fits in the page cache for the write that follows."""
     _publish_verify_progress(ctx)
     try:
         result = subprocess.run(
@@ -364,7 +347,7 @@ def _publish_verify_progress(ctx: InstallContext) -> None:
     verdict, and any hiccup here (unit already done, hasher between opens,
     /proc gone) just skips a sample."""
     try:
-        image = _root_image_verified().stat().st_size
+        image = ROOT_IMAGE.stat().st_size
     except OSError:
         return
     mirror = _mirror_files()
@@ -435,7 +418,7 @@ def _hasher_positions(unit: str = ROOT_IMAGE_VERIFY_UNIT) -> dict[Path, int]:
 
 def _hasher_read_pos() -> int | None:
     """How far the root image hasher has read the image."""
-    return _hasher_positions().get(_root_image_verified())
+    return _hasher_positions().get(ROOT_IMAGE)
 
 
 def _mirror_files() -> list[tuple[Path, int]]:
@@ -472,7 +455,7 @@ def _mirror_bytes_hashed(mirror: list[tuple[Path, int]]) -> int | None:
 
 def arch_install_system(ctx: InstallContext) -> None:
     """Install the target system: archinstall partitions and mounts per the
-    configurator JSON, the root image is unpacked onto the mounted layout, and
+    configurator JSON, the root image is written onto the mounted layout, and
     archinstall finishes with the per-machine package delta, users, and fstab.
 
     The phase sequence is the same for full-disk and protected installs. The
@@ -492,7 +475,7 @@ def arch_install_system(ctx: InstallContext) -> None:
             # image a moment later, so it need not TRIM the device first.
             arch.perform_filesystem_operations(
                 config,
-                throwaway_root_fs=ROOT_IMAGE_RAW_ZST.is_file() or ROOT_IMAGE_RAW.is_file(),
+                throwaway_root_fs=True,
             )
 
     info("› opening installer context")
@@ -605,18 +588,16 @@ def arch_install_system(ctx: InstallContext) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Root image: btrfs receive the build-time system into the target filesystem
-# and make it the @ subvolume.
+# Root image: write the build-time filesystem over the target root and make
+# its subvolume @.
 #
 # archinstall (or the configurator, for protected installs) has created and
 # mounted the subvolume layout by the time this runs: @ at the target, with
-# @home, @log, @pkg and the ESP mounted inside it. `btrfs receive` can only
-# create a new subvolume, never fill an existing one, so the image is received
-# at the filesystem's top level, snapshotted writable, and swapped in for the
-# empty @ while the layout is unmounted; then the layout is mounted again
-# exactly as it was. The mount table is replayed from findmnt rather than
-# asking archinstall to mount a second time, which would also unlock LUKS a
-# second time; the mapper stays open throughout.
+# @home, @log, @pkg and the ESP mounted inside it. The layout is unmounted,
+# the image written over the root partition (or its LUKS mapper), and the
+# layout mounted again exactly as it was. The mount table is replayed from
+# findmnt rather than asking archinstall to mount a second time, which would
+# also unlock LUKS a second time; the mapper stays open throughout.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _findmnt_mounts(root: Path) -> list[dict]:
@@ -643,7 +624,7 @@ def _remount_option_string(options: str) -> str:
 
 
 def _root_image_target_mounts(target: Path) -> tuple[list[dict], str]:
-    """The mount table under target, checked for what the image swap needs:
+    """The mount table under target, checked for what the image write needs:
     target itself mounted, btrfs, on the @ subvolume. Returns the mounts and
     the device backing the root."""
     mounts = _findmnt_mounts(target)
@@ -776,15 +757,13 @@ def _write_root_image_pipe(image: Path, device: str) -> None:
         _check_dd_full_blocks(dd_stderr)
 
 
-def _install_root_image_dd(ctx: InstallContext) -> None:
-    """Write the pre-built btrfs image straight onto the target partition, then
-    give the filesystem a new fsid. Same result as the btrfs receive path, the
-    same packages in the same @ subvolume layout, about five times faster
-    because nothing is decoded per extent."""
+def _place_root_image(ctx: InstallContext) -> None:
+    """Write the pre-built btrfs image onto the target root device, give it a
+    fresh fsid, grow it to the partition, and reshape it into the @ layout:
+    the same ~940 packages a pacstrap would install, at the speed of the
+    drive."""
     target = ctx.target
-    # The compressed image if the ISO has it, the plain one otherwise. One of
-    # the two exists, or _install_root_image would not have called this.
-    raw_image = ROOT_IMAGE_RAW_ZST if ROOT_IMAGE_RAW_ZST.is_file() else ROOT_IMAGE_RAW
+    raw_image = _root_image()
     mounts, device = _root_image_target_mounts(target)
 
     info(f"› writing root image ({raw_image.stat().st_size >> 20} MiB from {raw_image})")
@@ -796,16 +775,8 @@ def _install_root_image_dd(ctx: InstallContext) -> None:
     # the page cache: near zero when the verify left it all cached, up to the
     # whole image on a machine whose RAM could not hold it.
     medium_before = _medium_bytes_read()
-    if ROOT_IMAGE_RAW_ZST.is_file():
-        if not _write_root_image_frames(ROOT_IMAGE_RAW_ZST, device):
-            _write_root_image_pipe(ROOT_IMAGE_RAW_ZST, device)
-    else:
-        with _time_step("F1.dd (oflag=direct)"):
-            subprocess.run(
-                ["dd", f"if={raw_image}", f"of={device}", "bs=64M",
-                 "conv=sparse,fsync", "oflag=direct", "status=none"],
-                check=True,
-            )
+    if not _write_root_image_frames(raw_image, device):
+        _write_root_image_pipe(raw_image, device)
     medium_after = _medium_bytes_read()
     if medium_before is not None and medium_after is not None:
         info(f"› read {(medium_after - medium_before) / 1048576:.0f} MiB of the "
@@ -841,10 +812,10 @@ def _install_root_image_dd(ctx: InstallContext) -> None:
         with _time_step("F1.btrfs_resize_max"):
             subprocess.run(["btrfs", "filesystem", "resize", "max", str(top)], check=True)
 
-        received = top / ROOT_IMAGE_SUBVOLUME
+        image_subvol = top / ROOT_IMAGE_SUBVOLUME
         at_subvol = top / "@"
         with _time_step("F1.mv_omarchy-root_to_@"):
-            received.rename(at_subvol)
+            image_subvol.rename(at_subvol)
 
         with _time_step("F1.create_@home_@log_@pkg"):
             for name in ("@home", "@log", "@pkg"):
@@ -873,63 +844,12 @@ def _install_root_image_dd(ctx: InstallContext) -> None:
 
 
 def _install_root_image(ctx: InstallContext) -> None:
-    # Block copy when the ISO carries the image, btrfs receive otherwise.
-    if ROOT_IMAGE_RAW_ZST.is_file() or ROOT_IMAGE_RAW.is_file():
-        _install_root_image_dd(ctx)
-        _finish_root_image(ctx)
-        return
-
-    target = ctx.target
-    stream = _root_image_stream()
-    mounts, device = _root_image_target_mounts(target)
-
-    top = ctx.state_dir / "image-top"
-    top.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["mount", "-o", "subvolid=5", device, str(top)], check=True)
-    try:
-        received = top / ROOT_IMAGE_SUBVOLUME
-        if received.exists():
-            subprocess.run(["btrfs", "subvolume", "delete", str(received)], check=True, capture_output=True)
-
-        info(f"› unpacking root image ({stream.stat().st_size >> 20} MiB stream from {stream})")
-        _receive_root_image(ctx, top, stream)
-
-        staged = top / "@.image"
-        if staged.exists():
-            subprocess.run(["btrfs", "subvolume", "delete", str(staged)], check=True, capture_output=True)
-        subprocess.run(["btrfs", "subvolume", "snapshot", str(received), str(staged)], check=True, capture_output=True)
-        subprocess.run(["btrfs", "subvolume", "delete", str(received)], check=True, capture_output=True)
-
-        # The image's pacman.log ends up under the @log mount; carry it over so
-        # the installed system's log starts with the packages it was built from.
-        image_log = staged / "var" / "log" / "pacman.log"
-        log_subvol = top / "@log"
-        if image_log.is_file() and log_subvol.is_dir():
-            shutil.copy2(image_log, log_subvol / "pacman.log")
-
-        info("› making the image the root subvolume")
-        _umount_tree(target)
-        try:
-            subprocess.run(["btrfs", "subvolume", "delete", str(top / "@")], check=True, capture_output=True)
-            staged.rename(top / "@")
-        finally:
-            for mount in mounts:
-                mountpoint = Path(mount["target"])
-                mountpoint.mkdir(parents=True, exist_ok=True)
-                source = (mount["source"] or "").split("[")[0]
-                subprocess.run(
-                    ["mount", "-t", mount["fstype"], "-o", _remount_option_string(mount["options"] or ""),
-                     source, str(mountpoint)],
-                    check=True,
-                )
-    finally:
-        subprocess.run(["umount", str(top)], check=False, capture_output=True)
-
+    _place_root_image(ctx)
     _finish_root_image(ctx)
 
 
 def _finish_root_image(ctx: InstallContext) -> None:
-    """What both install paths owe the rest of the install: the image carries
+    """What the written image owes the rest of the install: it carries
     the packages the phases assume, and the target has a machine-id (the
     image deliberately ships an empty one) before limine-entry-tool and the
     factory snapshot read it."""
@@ -1023,116 +943,6 @@ def _umount_tree(root: Path, attempts: int = 20) -> None:
         if attempt == attempts:
             raise RuntimeError(f"could not unmount {root}: {res.stderr.strip()}")
         time.sleep(0.25)
-
-
-def _receive_root_image(ctx: InstallContext, top: Path, stream_path: Path) -> None:
-    """Pipe the stream through the outer-layer decompressor into btrfs
-    receive, publishing progress for the dashboard as a fraction of stream
-    bytes consumed (compressed bytes — the fraction of the medium read, which
-    is what the wait is made of).
-
-    This loop keeps the read off the medium for itself rather than handing
-    zstd the file: a read error here is the dying-medium case the verify
-    machinery exists for, and it must surface as this process's OSError, not
-    as a decompressor exit code to reverse-engineer.
-    """
-    total = stream_path.stat().st_size
-    errors = ctx.state_dir / "btrfs-receive.err"
-    with errors.open("w") as err:
-        unzstd = subprocess.Popen(
-            [*ROOT_IMAGE_DECOMPRESS],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=err,
-        )
-        try:
-            proc = subprocess.Popen(
-                ["btrfs", "receive", "-q", str(top)],
-                stdin=unzstd.stdout,
-                stderr=err,
-            )
-        except BaseException:
-            # A half-built pipeline has no receive to drain the decompressor,
-            # and _close_receive below never runs: close both of its pipes so
-            # it exits (EOF on stdin; EPIPE once its output has nowhere to
-            # go) and reap it, then let the original exception tell the
-            # story. btrfs is on every live ISO, so this is close to
-            # unreachable -- but a leaked child blocked on stdin is the kind
-            # of close-to that turns a loud failure into a wedged teardown.
-            # BaseException, not Exception: a KeyboardInterrupt aimed at this
-            # process alone must run the same cleanup on its way out (the
-            # block re-raises, so nothing is swallowed).
-            for pipe in (unzstd.stdin, unzstd.stdout):
-                if pipe is not None:
-                    try:
-                        pipe.close()
-                    except OSError:
-                        pass
-            unzstd.wait()
-            raise
-    assert unzstd.stdin is not None
-    assert unzstd.stdout is not None
-    # The receive holds the decoded pipe now. Dropping this copy of its read
-    # end is load-bearing: with it open, a receive that dies early would
-    # never turn zstd's writes into EPIPE, and the whole pipeline — this
-    # loop included — would block on full pipes instead of failing.
-    unzstd.stdout.close()
-    sent = 0
-    last_report = 0.0
-    try:
-        with stream_path.open("rb") as stream:
-            while chunk := stream.read(8 << 20):
-                unzstd.stdin.write(chunk)
-                sent += len(chunk)
-                now = time.monotonic()
-                if now - last_report >= 0.5:
-                    _write_phase_progress(ctx, sent / total if total else 1.0)
-                    last_report = now
-    except BrokenPipeError:
-        pass
-    finally:
-        # Whatever happened above — including the EIO off a dying medium that
-        # the whole verify machinery exists to catch — neither child must be
-        # left blocked on an open stdin. A blocked receive would hold the
-        # caller's staging mount busy, and that umount is check=False: the
-        # mount would leak onto the target filesystem with nothing said.
-        unzstd_code, code = _close_receive(unzstd, proc)
-    if unzstd_code != 0 or code != 0:
-        # Both children share the error file, so the full story is in the
-        # detail either way. When both fail, the order of death is not
-        # knowable from exit codes alone -- a corrupt outer layer kills zstd
-        # and starves the receive, while a dead receive EPIPEs zstd -- so
-        # the headline names both instead of guessing a culprit, and the
-        # detail (zstd's "premature end", the receive's own complaint)
-        # disambiguates.
-        if unzstd_code != 0 and code != 0:
-            stage = "root image decompression and btrfs receive both"
-        elif code != 0:
-            stage = "btrfs receive"
-        else:
-            stage = "root image decompression"
-        raise RuntimeError(f"{stage} failed: {errors.read_text(errors='replace').strip()}")
-    _write_phase_progress(ctx, 1.0)
-
-
-def _close_receive(unzstd: subprocess.Popen, proc: subprocess.Popen) -> tuple[int, int]:
-    """Close the pipeline's intake and reap both children, returning
-    (decompressor, receive) exit statuses.
-
-    Never raises: it runs on the way out of a failing read, where the original
-    exception is the one worth keeping. Closing flushes, so a decompressor
-    that has already died answers with a BrokenPipeError of its own; on EOF it
-    drains what it holds and exits, which ends the receive's stdin in turn.
-    The receive's wait is unbounded because a receive that has read EOF is
-    committing the subvolume, which on slow media is legitimately slow and
-    must not be killed.
-    """
-    if unzstd.stdin is not None:
-        try:
-            unzstd.stdin.close()
-        except OSError:
-            pass
-    return unzstd.wait(), proc.wait()
 
 
 def _write_phase_progress(ctx: InstallContext, fraction: float) -> None:

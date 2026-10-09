@@ -41,7 +41,7 @@ if grep -rq archiso_http_srv configs/syslinux configs/grub configs/efiboot; then
   exit 1
 fi
 
-if grep -rhE '^[^#]*cms_verify' configs/syslinux configs/grub configs/efiboot | grep -q .; then
+if grep -rqE '^[^#]*cms_verify' configs/syslinux configs/grub configs/efiboot; then
   echo "cms_verify found: the ISO is not codesigned, so any boot entry carrying it aborts into an emergency shell"
   exit 1
 fi

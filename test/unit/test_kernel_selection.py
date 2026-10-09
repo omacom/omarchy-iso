@@ -130,6 +130,10 @@ class KernelSelectionTest(unittest.TestCase):
                     stack.enter_context(mock.patch.object(phases_impl.arch, "is_pre_mount", return_value=True, create=True))
                     stack.enter_context(mock.patch.object(phases_impl.arch, "root_user", return_value=None, create=True))
                     stack.enter_context(mock.patch.object(
+                        phases_impl.arch, "sanity_check", create=True,
+                        side_effect=lambda installer: installer.sanity_check(skip_ntp=True, skip_wkd=True),
+                    ))
+                    stack.enter_context(mock.patch.object(
                         phases_impl.arch, "install_base_delta", create=True,
                         side_effect=lambda *args, **kwargs: events.append("base")))
                     stack.enter_context(mock.patch.object(

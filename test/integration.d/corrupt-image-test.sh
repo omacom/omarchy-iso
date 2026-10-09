@@ -3,13 +3,13 @@
 # A corrupt install medium is refused before the disk is touched. The root
 # image ships on the ISO with its sha256 beside it; omarchy-root-image-verify
 # checks it at boot and the installer's pre-flight phase takes that verdict.
-# Flip one byte inside the image stream on a copy of the ISO (a badly
+# Flip one byte inside the root image on a copy of the ISO (a badly
 # flashed stick's damage, for real), autoinstall from it, and assert: the
 # unit fails, the install halts in "Preparing install target" telling the
 # user to re-flash, nothing after that phase ran, and the target disk still
 # has no partition table. Damaging the artifact rather than the recorded
 # digest proves the digest is sensitive to the shipped bytes at that
-# offset; the fixture separately proves the pristine stream matches its
+# offset; the fixture separately proves the pristine image matches its
 # recorded digest host-side, so a build hashing the wrong or a stale file
 # fails even in --reuse-base and standalone runs, where no install ever
 # boots the untouched ISO. (That the verify truly reads the whole multi-GB
@@ -25,24 +25,22 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 # points OMARCHY_INTEGRATION_SCRATCH_DIR at its disk (the copy is read once
 # at boot and once by the hasher, so a ramdisk buys it nothing).
 CORRUPT_ISO="${OMARCHY_INTEGRATION_SCRATCH_DIR:-$BASE_DIR}/corrupt.iso"
-# The root image's file name is resolved from the ISO, not assumed
-# (omarchy-root.img.zst for the block copy, omarchy-root.btrfs.zst for a
-# btrfs receive stream): with the wrong name the scenario silently tests
-# nothing.
-STREAM=$(xorriso -indev "$ISO" -find /arch/x86_64 -name 'omarchy-root.*.zst' 2>/dev/null |
+# The root image's file name, resolved from the ISO instead of assumed: with
+# a wrong hardcoded name this scenario would silently test nothing.
+IMAGE_PATH=$(xorriso -indev "$ISO" -find /arch/x86_64 -name 'omarchy-root.*.zst' 2>/dev/null |
   tr -d "'" | sed 's|^/||' | head -n1)
-STREAM=${STREAM:-arch/x86_64/omarchy-root.img.zst}
+IMAGE_PATH=${IMAGE_PATH:-arch/x86_64/omarchy-root.img.zst}
 VERIFY_UNIT=omarchy-root-image-verify.service
 STATE=/run/omarchy-install/state.json
 
 # ------------------------------------------------------------------ fixture
 
-# A copy of the ISO with one byte flipped inside the root image stream
+# A copy of the ISO with one byte flipped inside the root image
 # itself. ISO9660 files are contiguous extents with no per-file integrity
 # data, so patching in place leaves everything else on the medium intact
 # (cp --reflink makes the copy free on btrfs).
 #
-# The stream's extent comes from the ISO9660 directory records themselves:
+# The image's extent comes from the ISO9660 directory records themselves:
 # xorriso reports the file's start LBA and byte size, so the flip is placed
 # by filesystem metadata, not by searching for content (the zstd frame
 # magic opens every mirror package and countless squashfs blocks on this
@@ -52,7 +50,7 @@ STATE=/run/omarchy-install/state.json
 corrupt_iso() {
   local lba size start off orig flipped
 
-  log "Copying the ISO and corrupting one byte inside the root image stream"
+  log "Copying the ISO and corrupting one byte inside the root image"
   mkdir -p "$(dirname "$CORRUPT_ISO")"
   rm -f "$CORRUPT_ISO"
   cp --reflink=auto "$ISO" "$CORRUPT_ISO"
@@ -60,10 +58,10 @@ corrupt_iso() {
   # "File data lba:  xt , startlba , blocks , filesize , path"
   # || true: under set -e a read off an empty pipe would kill the scenario
   # before the guard below could say what went wrong.
-  read -r lba size < <(xorriso -indev "$ISO" -find "/$STREAM" -exec report_lba 2>/dev/null |
+  read -r lba size < <(xorriso -indev "$ISO" -find "/$IMAGE_PATH" -exec report_lba 2>/dev/null |
     awk -F, '/File data lba/ { gsub(/ /, ""); print $2, $4 }') || true
   [[ ${lba:-} =~ ^[0-9]+$ && ${size:-} =~ ^[0-9]+$ ]] ||
-    { echo "xorriso could not report the extent of $STREAM" >&2; return 1; }
+    { echo "xorriso could not report the extent of $IMAGE_PATH" >&2; return 1; }
   start=$((lba * 2048))
 
   # Before damaging anything, prove the pristine artifact verifies: the
@@ -73,19 +71,19 @@ corrupt_iso() {
   # standalone, and in those modes nothing else would catch a build that
   # hashed the wrong or a stale file.
   local recorded computed
-  recorded=$(xorriso -osirrox on -indev "$ISO" -extract "/$STREAM.sha256" "$BASE_DIR/stream.sha256" 2>/dev/null &&
-    awk '{print $1; exit}' "$BASE_DIR/stream.sha256") || true
+  recorded=$(xorriso -osirrox on -indev "$ISO" -extract "/$IMAGE_PATH.sha256" "$BASE_DIR/image.sha256" 2>/dev/null &&
+    awk '{print $1; exit}' "$BASE_DIR/image.sha256") || true
   [[ ${recorded:-} =~ ^[0-9a-f]{64}$ ]] ||
-    { echo "could not read the recorded digest for $STREAM" >&2; return 1; }
+    { echo "could not read the recorded digest for $IMAGE_PATH" >&2; return 1; }
   computed=$(dd if="$ISO" bs=1M iflag=skip_bytes,count_bytes skip="$start" count="$size" status=none | sha256sum | cut -d' ' -f1)
   [[ $computed == "$recorded" ]] ||
     { echo "pristine image does not match its recorded digest (recorded ${recorded:0:8}..., shipped ${computed:0:8}...)" >&2; return 1; }
-  log "Pristine stream matches its recorded digest (${recorded:0:8}...)"
+  log "Pristine image matches its recorded digest (${recorded:0:8}...)"
 
   # Deep enough to model bit-rot in the payload, and provably inside the
   # file's extent; +1 mod 256 so the byte always changes.
   off=$((start + 1048576))
-  ((1048576 < size)) || { echo "stream unexpectedly small: $size bytes" >&2; return 1; }
+  ((1048576 < size)) || { echo "image unexpectedly small: $size bytes" >&2; return 1; }
   orig=$(dd if="$CORRUPT_ISO" bs=1 skip="$off" count=1 status=none | od -An -tu1 | tr -d ' ')
   flipped=$(( (orig + 1) % 256 ))
   printf "\\$(printf '%03o' "$flipped")" |

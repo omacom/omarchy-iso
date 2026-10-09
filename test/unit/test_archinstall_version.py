@@ -1,7 +1,7 @@
 """Unit tests for the archinstall version check in archinstall_adapter.
 
 The adapter replaces archinstall internals, so it refuses to start on an
-archinstall other than the one it is tested against, unless told to try.
+archinstall other than the ones it is tested against, unless told to try.
 """
 
 import os
@@ -29,17 +29,20 @@ class ArchinstallVersionTest(unittest.TestCase):
         self.enterContext(mock.patch.object(arch, "info", said.append))
         return arch, said
 
-    def test_the_tested_version_passes(self):
+    def test_the_tested_versions_pass(self):
         arch, said = self.load()
-        arch.check_archinstall_version(arch.TESTED_ARCHINSTALL)
-        arch.check_archinstall_version(arch.TESTED_ARCHINSTALL + ".1")  # a patch release
+        for tested in arch.TESTED_ARCHINSTALL:
+            arch.check_archinstall_version(tested)
+            arch.check_archinstall_version(tested + ".1")  # a patch release
+        self.assertEqual(arch.TESTED_ARCHINSTALL, ("4.4", "4.5"))
         self.assertEqual(said, [])
 
     def test_another_version_stops_the_install(self):
         arch, _ = self.load()
         with self.assertRaises(RuntimeError) as caught:
-            arch.check_archinstall_version("4.5")
-        self.assertIn("archinstall 4.5 is installed", str(caught.exception))
+            arch.check_archinstall_version("4.6")
+        self.assertIn("archinstall 4.6 is installed", str(caught.exception))
+        self.assertIn("tested against archinstall 4.4 and 4.5", str(caught.exception))
         self.assertIn("OMARCHY_ARCHINSTALL_UNTESTED=1", str(caught.exception))
 
     def test_an_unknown_version_stops_the_install(self):
@@ -50,7 +53,7 @@ class ArchinstallVersionTest(unittest.TestCase):
     def test_the_override_runs_anyway_and_says_so(self):
         arch, said = self.load()
         os.environ["OMARCHY_ARCHINSTALL_UNTESTED"] = "1"
-        arch.check_archinstall_version("4.5")
+        arch.check_archinstall_version("4.6")
         self.assertEqual(len(said), 1)
         self.assertIn("running anyway", said[0])
 
@@ -61,7 +64,7 @@ class ArchinstallVersionTest(unittest.TestCase):
 
         untouched = dict(vars(Luks2))
         with self.assertRaises(RuntimeError):
-            with adapter({"archinstall.lib.disk.luks": {"Luks2": Luks2}}, version="4.5"):
+            with adapter({"archinstall.lib.disk.luks": {"Luks2": Luks2}}, version="4.6"):
                 pass
         self.assertEqual(dict(vars(Luks2)), untouched, "archinstall was patched before the version check")
 

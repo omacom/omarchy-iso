@@ -38,7 +38,7 @@ run_helper() { # loadstate, active_seq, start_rc, [result]  ->  sets RC and OUT
   : >"$box/medium/arch/x86_64/omarchy-root.img.zst"
   : >"$box/medium/arch/x86_64/omarchy-root.img.zst.sha256"
 
-  # WITH_HASHER_PROC=1: a fake hasher (pid 4242) holds the stream at pos 512
+  # WITH_HASHER_PROC=1: a fake hasher (pid 4242) holds the image at pos 512
   # of 1024 bytes, and the helper draws progress into $box/progress. The shim
   # rewrites /proc to the sandbox, so hash_pct reads this fixture.
   local mainpid=0

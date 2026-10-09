@@ -195,7 +195,7 @@ jobs:
             else
               echo "**The test did not get as far as a report** (job result: $RESULT)."
             fi
-            if [ -n "$PICTURES" ]; then
+            if [ -n "$PICTURES" ] && [ -s evidence/before.png ] && [ -s evidence/after.png ]; then
               echo
               echo "| Before, $FROM | After, on $TO |"
               echo "| --- | --- |"

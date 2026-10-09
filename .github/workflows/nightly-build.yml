@@ -262,18 +262,36 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq aria2 unzip >/dev/null
           ./test/vm-image/nightly-fetch "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "nightly-$CHANNEL-$GITHUB_RUN_ID" out
 
+      # A current rclone, by version and checksum. Ubuntu's is 1.60 from 2022:
+      # with it R2 answered every first upload "501 Not Implemented", though
+      # it had stored the file, and the publish only passed on rclone's retry.
+      # 1.60 sends "x-amz-acl: private" with each upload; current rclone does
+      # not send it to Cloudflare.
       - name: rclone
+        env:
+          RCLONE_VERSION: v1.75.2
+          RCLONE_SHA256: efbfe852181f7191eb3c9043ed1ab49c9b2d0ba045c61c926a5da111c939ec5c
         run: |
+          set -euo pipefail
           [ -n "$RCLONE_CONFIG_R2_ACCESS_KEY_ID" ] || { echo "::error::the nightly environment has no bucket key"; exit 1; }
-          sudo apt-get update -qq && sudo apt-get install -y -qq rclone >/dev/null
+          curl -fsSL --retry 3 -o rclone.deb "https://github.com/rclone/rclone/releases/download/$RCLONE_VERSION/rclone-$RCLONE_VERSION-linux-amd64.deb"
+          echo "$RCLONE_SHA256  rclone.deb" | sha256sum -c -
+          sudo dpkg -i rclone.deb >/dev/null
           rclone version | head -1
 
       # --immutable: a name that exists with other bytes is an error, not an
       # overwrite.
+      # An upload that only passes on a retry is said so on the run's page:
+      # the files are compared afterwards either way, but it should not go
+      # unnoticed again.
       - name: Upload this version
         run: |
+          set -euo pipefail
           rclone copy "out/$RELEASE" "r2:$BUCKET/$RELEASE" \
-            --immutable --s3-no-check-bucket --transfers 8 --s3-upload-concurrency 8 --s3-chunk-size 64M --stats 30s --stats-one-line
+            --immutable --s3-no-check-bucket --transfers 8 --s3-upload-concurrency 8 --s3-chunk-size 64M --stats 30s --stats-one-line 2>&1 | tee upload.log
+          if grep -q "Failed to copy" upload.log; then
+            echo "::warning::rclone needed a retry: $(grep -c "Failed to copy" upload.log) uploads failed on an earlier attempt"
+          fi
 
       # Fetched the way a user fetches them. It proves what is served, and it
       # is the first request the CDN sees for each file.

@@ -771,14 +771,15 @@ wait_for_unattended_install() {
 
     # A BIOS install boots the mkinitcpio initramfs, whose LUKS prompt is
     # Plymouth's lock field under the logo: OCR reads the logo ("OMARCHY",
-    # or "OMARCHS" at this size) and nothing else. Once an encrypted run has
+    # "OMARCHS" at this size, "0MMARCHY" with tesseract 5.5) and nothing else:
+    # one short word around "arch". Once an encrypted run has
     # shown nothing but the logo for two samples in a row, nothing but that
     # prompt is listening to the keyboard, so type the passphrase blind. The
     # installer's dashboard always carries more text ("Installing Omarchy",
     # the tip line); the splash between the reboot and the prompt discards
     # keystrokes.
     local screen_words=${text//[^[:alpha:]]/}
-    if [[ $ENCRYPT == true && ${screen_words,,} =~ ^(omarch[a-z]{0,2})?$ ]]; then
+    if [[ $ENCRYPT == true && ${screen_words,,} =~ ^([a-z]{0,3}arch[a-z]{0,3})?$ ]]; then
       if ((++blank_screens >= 2)); then
         capture_console "success-install-luks-prompt-blind"
         type_text "$GUEST_PASSWORD"

@@ -38,6 +38,7 @@ from the start.
 from __future__ import annotations
 
 import importlib
+import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -57,10 +58,43 @@ from archinstall.lib.models.device import DiskLayoutType, EncryptionType
 from archinstall.lib.pacman.config import PacmanConfig
 from archinstall.lib.models.users import User
 
-from . import luks_tuning
-luks_tuning.apply()
-
 from .ui import info
+
+# The archinstall this adapter is written and tested against. luks_tuning and
+# _filesystem_step_tweaks replace archinstall internals (Luks2's methods, the
+# device handler's), and install_base_delta calls private Installer methods;
+# none of that is a stable API. The ISO pins archinstall in its offline
+# mirror, so another version means the ISO build picked up a new release:
+# stop at startup and say so, before a replaced internal misbehaves in the
+# middle of an install. OMARCHY_ARCHINSTALL_UNTESTED=1 runs anyway, which is
+# how a new release gets tried.
+TESTED_ARCHINSTALL = "4.4"
+
+
+def check_archinstall_version(version: str | None = None) -> None:
+    if version is None:
+        from importlib.metadata import PackageNotFoundError, version as package_version
+        try:
+            version = package_version("archinstall")
+        except PackageNotFoundError:
+            version = "unknown"
+    if version.split(".")[:2] == TESTED_ARCHINSTALL.split(".")[:2]:
+        return
+    message = (
+        f"archinstall {version} is installed, but this installer is tested against "
+        f"archinstall {TESTED_ARCHINSTALL}: it replaces archinstall internals that "
+        f"change between releases (orchestrator/archinstall_adapter.py)"
+    )
+    if os.environ.get("OMARCHY_ARCHINSTALL_UNTESTED") == "1":
+        info(f"› {message}; running anyway (OMARCHY_ARCHINSTALL_UNTESTED=1)")
+        return
+    raise RuntimeError(f"{message}. Set OMARCHY_ARCHINSTALL_UNTESTED=1 to try it anyway.")
+
+
+check_archinstall_version()
+
+from . import luks_tuning  # noqa: E402 - patches archinstall only after the check
+luks_tuning.apply()
 
 
 def load_arch_config(config_path: Path, creds_path: Path) -> ArchConfigHandler:
@@ -194,7 +228,7 @@ def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
         for module, function in settle_originals.items():
             module.udev_sync = function
         if settle["seconds"] >= 0.05:
-            info(f"[step] FS.udevadm settle ({settle['calls']} calls): {settle['seconds']:.3f}s")
+            info(f"[step] FS.udevadm settle ({settle['calls']} calls): {settle['seconds']:.6f}s")
 
 
 def _write_locale_conf_for_prebuilt(installer, locale_config) -> None:
@@ -274,6 +308,27 @@ def perform_filesystem_operations(arch_config: ArchConfig, throwaway_root_fs: bo
                 info(f"› partition commit lost a udev race (attempt {attempt}/{attempts}); retrying")
 
 
+class OmarchyInstaller(Installer):
+    """archinstall's Installer, without its request to report our failures.
+
+    Installer.__exit__ answers any exception inside `with Installer(...)` with
+    "Please submit this issue (and file) to
+    https://github.com/archlinux/archinstall/issues". Most of what runs in that
+    block here is Omarchy's own install (the root image, Limine, efibootmgr),
+    so Omarchy's failures would be filed with archinstall
+    (archlinux/archinstall#4773: an efibootmgr refusal in phases_impl). The
+    phase runner reports a failure itself, with its own log; on the way out
+    this keeps only archinstall's copy of its log to the install medium."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if exc_type is None:
+            return super().__exit__(exc_type, exc_value, traceback)
+        sync_log = getattr(self, "sync_log_to_install_medium", None)
+        if sync_log is not None:
+            sync_log()
+        return None
+
+
 @contextmanager
 def open_installer(
     arch_config: ArchConfig,
@@ -284,7 +339,7 @@ def open_installer(
     /mnt is left clean for a retry."""
     if not arch_config.disk_config:
         raise RuntimeError("disk_config missing from arch config")
-    with Installer(
+    with OmarchyInstaller(
         mountpoint,
         arch_config.disk_config,
         kernels=arch_config.kernels,

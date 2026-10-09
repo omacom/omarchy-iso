@@ -37,6 +37,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import textwrap
 import time
 from dataclasses import replace
@@ -163,7 +164,7 @@ def _time_step(label: str):
     finally:
         _elapsed = time.monotonic() - _t0
         if _elapsed >= 0.05:
-            info(f"[step] {label}: {_elapsed:.3f}s")
+            info(f"[step] {label}: {_elapsed:.6f}s")
 
 
 ROOT_IMAGE_STREAM = Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.btrfs.zst")
@@ -665,7 +666,10 @@ def _write_root_image_pipe(image: Path, device: str) -> None:
             fcntl.fcntl(write_end, fcntl.F_SETPIPE_SZ, 4 << 20)
         except OSError:
             pass  # a smaller pipe is slower, not wrong
-        zstd = subprocess.Popen(["zstdcat", str(image)], stdout=write_end)
+        # zstd's stderr is captured so its reason ("premature end", a bad
+        # frame) travels with the failure; it only writes there on an error.
+        zstd = subprocess.Popen(["zstdcat", str(image)], stdout=write_end,
+                                stderr=subprocess.PIPE, text=True)
         dd = subprocess.Popen(
             ["dd", f"of={device}", "bs=2M", "iflag=fullblock",
              "conv=sparse,fsync", "oflag=direct", "status=noxfer"],
@@ -674,12 +678,12 @@ def _write_root_image_pipe(image: Path, device: str) -> None:
         os.close(read_end)
         os.close(write_end)
         _, dd_stderr = dd.communicate()
-        zstd.wait()
+        _, zstd_stderr = zstd.communicate()
         # dd first: when dd dies, zstd dies of the broken pipe after it.
         if dd.returncode != 0:
             raise subprocess.CalledProcessError(dd.returncode, dd.args, stderr=dd_stderr)
         if zstd.returncode != 0:
-            raise subprocess.CalledProcessError(zstd.returncode, zstd.args)
+            raise subprocess.CalledProcessError(zstd.returncode, zstd.args, stderr=zstd_stderr)
         _check_dd_full_blocks(dd_stderr)
 
 
@@ -1887,6 +1891,42 @@ def _target_user_env(ctx: InstallContext, user: str) -> list[str]:
     ]
 
 
+# Omarchy's run_logged prints "[<date> <time>] Starting: <script>" as a script
+# begins and "Completed:" (or "Failed:") as it ends.
+_OMARCHY_SCRIPT_LINE = re.compile(rb"^\[[0-9: -]+\] (Starting|Completed|Failed): (\S+)")
+
+
+def _run_timing_scripts(cmd: list[str]) -> None:
+    """Run cmd with its output passed through line by line, and after each
+    Omarchy install script it runs, add a [step] line with its duration in
+    microseconds.
+
+    run_logged stamps its lines in whole seconds (bash printf %T), too coarse
+    for a phase that runs about 50 scripts in 3 s. It prints them unbuffered as
+    each script starts and ends, so the time they arrive here is the script's
+    own. The output goes where it went before, stderr folded into stdout as
+    the dashboard already merges them."""
+    out = sys.stdout.buffer
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    started: dict[bytes, float] = {}
+    for line in proc.stdout:
+        now = time.monotonic()
+        out.write(line)
+        out.flush()
+        match = _OMARCHY_SCRIPT_LINE.match(line)
+        if not match:
+            continue
+        event, script = match.groups()
+        if event == b"Starting":
+            started[script] = now
+        elif script in started:
+            name = script.decode(errors="replace").removeprefix("/usr/share/omarchy/install/")
+            info(f"[step] {name}: {now - started.pop(script):.6f}s")
+    returncode = proc.wait()
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, cmd)
+
+
 def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str | None = None,
                               private_mounts: bool = False) -> None:
     _prepare_target_setup(ctx)
@@ -1941,7 +1981,7 @@ def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str 
     chroot_cmd += [str(ctx.target), "env", "--unset=XDG_RUNTIME_DIR", *env_extras, *cmd]
 
     try:
-        subprocess.run(chroot_cmd, check=True)
+        _run_timing_scripts(chroot_cmd)
     finally:
         if log_bind_mounted:
             subprocess.run(["umount", str(target_log)], check=False, capture_output=True)
@@ -2727,11 +2767,14 @@ def validate_boot(ctx: InstallContext) -> None:
         if not limine_binary.exists() or limine_binary.stat().st_size == 0:
             raise RuntimeError(f"{limine_binary} missing or empty")
 
-        # Hardware packages (omarchy-hw-intel-ptl, …) can swap the kernel out
-        # from under us mid-install, so trust what's on disk over what we asked
-        # for and only fall back to the configured name when nothing's there.
+        # Hardware packages (omarchy-hw-intel-ptl, …) can swap the configured
+        # kernel out mid-install, so trust what's on disk over what we asked
+        # for. But while the configured kernel is installed, require its own
+        # UKI: the image always carries the prebuilt stock UKI, which must not
+        # hide a failed linux-t2 build (the rule of omacom/omarchy-iso#145).
         uki_dir = esp_mount / "EFI" / "Linux"
-        candidates = _installed_kernels(ctx) or [kernel]
+        installed_kernels = _installed_kernels(ctx)
+        candidates = [kernel] if kernel in installed_kernels else installed_kernels or [kernel]
         ukis = [uki_dir / f"{uki_prefix}_{name}.efi" for name in candidates]
         if not any(uki.exists() and uki.stat().st_size for uki in ukis):
             raise RuntimeError(f"{' / '.join(str(uki) for uki in ukis)} missing or empty")

@@ -48,6 +48,7 @@ run_helper() { # loadstate, active_seq, start_rc, [result]  ->  sets RC and OUT
   fi
   echo "none mq-deadline kyber [bfq]" >"$box/sys/block/sdz/queue/scheduler"
   printf '%s\n' "$active_seq" >"$box/active_seq"
+  printf '%s\n' "$loadstate" >"$box/load_seq"
 
   cat >"$box/bin/findmnt" <<EOF
 #!/bin/bash
@@ -57,9 +58,16 @@ EOF
 #!/bin/bash
 echo sdz
 EOF
-  cat >"$box/bin/journalctl" <<'EOF'
+  # sha256sum's summary line reaches the journal JOURNAL_LATE reads late (0:
+  # on the first read), as it can on a real system right after the unit fails.
+  printf '%s\n' "${JOURNAL_LATE:-0}" >"$box/journal_late"
+  cat >"$box/bin/journalctl" <<EOF
 #!/bin/bash
+[[ \$1 == --sync ]] && exit 0
+late=\$(cat "$box/journal_late")
 echo "omarchy-root.img.zst: FAILED"
+if ((late > 0)); then echo \$((late - 1)) >"$box/journal_late"; exit 0; fi
+echo "sha256sum: WARNING: 1 computed checksum did NOT match"
 EOF
   # systemctl show -p LoadState|ActiveState --value ; systemctl start ...
   cat >"$box/bin/systemctl" <<EOF
@@ -67,7 +75,11 @@ EOF
 box="$box"; start_rc=$start_rc; loadstate="$loadstate"; result="$result"; mainpid=$mainpid
 if [[ \$1 == show ]]; then
   case "\$*" in
-    *LoadState*)  echo "\$loadstate" ;;
+    *LoadState*)
+      mapfile -t seq <"\$box/load_seq"
+      echo "\${seq[0]}"
+      if ((\${#seq[@]} > 1)); then printf '%s\n' "\${seq[@]:1}" >"\$box/load_seq"; fi
+      ;;
     *Result*)     echo "\$result" ;;
     *MainPID*)    echo "\$mainpid" ;;
     *ActiveState*)
@@ -97,7 +109,7 @@ EOF
   [[ -n ${WITH_HASHER_PROC:-} ]] && progress_env=(OMARCHY_VERIFY_PROGRESS="$box/progress")
 
   set +e
-  OUT=$(PATH="$box/bin:$PATH" env "${progress_env[@]}" bash "$shim" 2>&1)
+  OUT=$(PATH="$box/bin:$PATH" OMARCHY_VERIFY_RETRY_SECONDS=0 env "${progress_env[@]}" bash "$shim" 2>&1)
   RC=$?
   set -e
   PROGRESS_OUT=$(cat "$box/progress" 2>/dev/null || true)
@@ -132,6 +144,26 @@ WITH_HASHER_PROC=1 run_helper loaded $'activating\nactivating\nfailed' 0
 # Hash failed: corrupt medium, re-flash message leads.
 run_helper loaded "failed" 0
 check "failed unit is a corrupt medium" 1 "$RC" "install medium is corrupt: re-flash it" "$OUT"
+
+# The failed hash's verdict is in the message even when sha256sum's summary
+# line reaches the journal after the unit is already reported failed (seen
+# in CI under low memory: the message lacked "did NOT match" while the
+# journal collected afterwards had it).
+JOURNAL_LATE=2 run_helper loaded "failed" 0
+check "a late journal still gets the verdict into the message" 1 "$RC" "did NOT match" "$OUT"
+
+# systemctl answering nothing at first is systemd not answering yet (on a dying
+# medium systemctl itself is paged in slowly), not a missing unit: ask again.
+# Seen in CI: "is not on this live system" on a choked
+# medium whose unit then timed out.
+run_helper $'\n\nloaded' "failed" 0 timeout
+check "empty LoadState answers are retried, not a missing unit" 1 "$RC" "install medium is too slow" "$OUT"
+[[ $OUT != *"not on this live system"* ]] && echo "ok: no missing-unit claim after empty answers" ||
+  { echo "FAIL: empty answers reported as a missing unit: $OUT"; fails=1; }
+
+# If systemd never answers, say that, not that the unit is missing.
+run_helper "" "failed" 0
+check "no answer at all is reported as systemd not answering" 1 "$RC" "systemd is not answering" "$OUT"
 
 # Hash hit the size-based TimeoutStartSec: the medium stalls reads. Distinct
 # advice -- re-flashing the same stick would not help.

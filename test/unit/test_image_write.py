@@ -107,6 +107,7 @@ class WriteRootImagePipeTest(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError) as caught:
             phases_impl._write_root_image_pipe(truncated, str(self.target))
         self.assertEqual(caught.exception.cmd[0], "zstdcat")
+        self.assertIn("premature end", caught.exception.stderr)
 
     def test_unwritable_target_is_an_error(self):
         with self.assertRaises(subprocess.CalledProcessError) as caught:

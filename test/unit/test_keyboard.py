@@ -1,6 +1,7 @@
 #!/usr/bin/python
 
 import re
+import os
 import sys
 import tempfile
 import unittest
@@ -19,6 +20,7 @@ from orchestrator import keyboard as KEYBOARD  # noqa: E402
 # wherever this checkout can see a runtime, and skip the coverage test rather
 # than fail when none is around (a bare CI checkout of just this repo).
 SETUP_FORM_CANDIDATES = (
+    Path(os.environ.get("OMARCHY_PATH", "/nonexistent")) / "install/provisioning/setup-form.sh",
     Path("/omarchy-source/install/provisioning/setup-form.sh"),
     ROOT.parent / "omarchy/install/provisioning/setup-form.sh",
     Path("/usr/share/omarchy/install/provisioning/setup-form.sh"),
@@ -33,7 +35,7 @@ def supported_keymaps():
             r"OMARCHY_KEYBOARD_LAYOUTS=\$'(.*?)'\n", candidate.read_text(), re.DOTALL
         )
         assert block, f"no layout list in {candidate}"
-        return [line.split("|", 1)[1] for line in block.group(1).splitlines()]
+        return [line.split("|")[1] for line in block.group(1).splitlines()]
     return None
 
 
@@ -47,9 +49,10 @@ class KeyboardConfigurationTest(unittest.TestCase):
         (target / "etc/vconsole.conf").write_text(
             "KEYMAP=us\nFONT=default8x16\n"
         )
-        keymap = target / "usr/share/kbd/keymaps/i386/qwerty/us.map.gz"
-        keymap.parent.mkdir(parents=True)
-        keymap.touch()
+        for name in ("us", "jp106"):
+            keymap = target / f"usr/share/kbd/keymaps/i386/qwerty/{name}.map.gz"
+            keymap.parent.mkdir(parents=True, exist_ok=True)
+            keymap.touch()
         return target
 
     def test_uses_target_keymap_catalog_without_host_localectl(self):
@@ -108,6 +111,36 @@ class KeyboardConfigurationTest(unittest.TestCase):
                     (target / "etc/vconsole.conf").read_text(),
                     "KEYMAP=us\nFONT=default8x16\n",
                 )
+
+    def test_input_choice_survives_while_console_keymap_stays_real(self):
+        for method, keymap, layout in (("mozc", "jp106", ""), ("mozc", "us", ""), ("hangul", "us", "kr"), ("pinyin", "us", ""), ("chewing", "us", "")):
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as directory:
+                target = self.target(directory)
+                self.assertTrue(KEYBOARD.configure_keyboard(target, keymap, method, layout))
+                self.assertIn(f"KEYMAP={keymap}", (target / "etc/vconsole.conf").read_text())
+                if keymap == "jp106":
+                    self.assertIn("XKBLAYOUT=jp", (target / "etc/vconsole.conf").read_text())
+                self.assertEqual((target / "etc/omarchy/input-method").read_text(), f"INPUT_METHOD={method}\nXKB_LAYOUT={layout}\n")
+
+    def test_input_choice_with_no_console_map_defaults_to_us(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self.target(directory)
+            self.assertTrue(KEYBOARD.configure_keyboard(target, "", "pinyin"))
+            self.assertIn("INPUT_METHOD=pinyin", (target / "etc/omarchy/input-method").read_text())
+
+    def test_unknown_keyboard_does_not_silently_drop_an_input_choice(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self.target(directory)
+            with self.assertRaises(ValueError):
+                KEYBOARD.configure_keyboard(target, "unknown", "pinyin")
+
+    def test_invalid_input_preferences_are_rejected_without_writes(self):
+        for method, layout in (("unknown", ""), ("hangul", "kr\nKEYMAP=ru")):
+            with tempfile.TemporaryDirectory() as directory:
+                target = self.target(directory)
+                with self.assertRaises(ValueError):
+                    KEYBOARD.configure_keyboard(target, "us", method, layout)
+                self.assertFalse((target / "etc/omarchy/input-method").exists())
 
 
 if __name__ == "__main__":

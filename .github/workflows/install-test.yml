@@ -1,0 +1,134 @@
+name: Install test
+
+# Builds the ISO a pull request produces, installs it unattended in a KVM
+# guest, boots the installed system again, and reports how long the install
+# and both boots took. Every later change to the installer is measured
+# against these numbers in its own PR.
+
+on:
+  pull_request:
+  # Each merge records quattro's numbers, which PR comments compare against.
+  push:
+    branches: [quattro]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install:
+    # Our own branches run on Namespace. A pull request from a fork stays on
+    # GitHub's runner: it is somebody else's code, and it has no business on
+    # our account's machines. No cache volume either way: what one pull
+    # request leaves in a cache the next run would trust.
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-26.04' || 'namespace-profile-linux-amd64-16x32' }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Fail early and loudly if the runner ever has less disk than this needs.
+      - name: Check disk space
+        run: |
+          df -h /
+          avail_gb=$(df -BG --output=avail / | tail -1 | tr -dc 0-9)
+          [ "$avail_gb" -ge 40 ] || { echo "::error::only ${avail_gb} GB free, the ISO build and install test need ~40 GB"; exit 1; }
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the ISO
+        run: NO_BOOT_OFFER=1 ./bin/omarchy-iso-make
+
+      # The harness runs in an Arch container: Arch's current QEMU and OVMF
+      # (QEMU 11) instead of the runner's older one, at the paths the
+      # harness expects, the same as on an Omarchy workstation.
+      - name: Install unattended, then boot the installed system
+        run: |
+          sudo chmod 0666 /dev/kvm
+          docker run --rm --device /dev/kvm -v "$PWD:/w" -w /w \
+            -e OMARCHY_INTEGRATION_DISK_CACHE=none \
+            ghcr.io/archlinux/archlinux:latest bash -euo pipefail -c '
+              # pacman 7 fails every sync on a kernel without Landlock, which
+              # these runners have; builder/build-iso.sh does the same.
+              if ! grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then
+                printf "#!/bin/sh\nexec /usr/bin/pacman --disable-sandbox \"\$@\"\n" >/usr/local/bin/pacman
+                chmod 0755 /usr/local/bin/pacman
+              fi
+              # The tools come from our own Arch mirror first, the public ones
+              # after it. A mirror that drops one file must not fail the test:
+              # try again.
+              sed -i "1i Server = https://mirror.omarchy.org/\$repo/os/\$arch" /etc/pacman.d/mirrorlist
+              for attempt in 1 2 3; do
+                pacman -Syu --noconfirm --needed qemu-system-x86 qemu-hw-display-virtio-gpu qemu-hw-display-virtio-vga qemu-img edk2-ovmf socat \
+                  imagemagick tesseract tesseract-data-eng mtools dosfstools jq openssh openssl python curl >/dev/null && break
+                [ "$attempt" -lt 3 ] || { echo "::error::the test container could not install its tools"; exit 1; }
+                echo "pacman failed, attempt $attempt of 3; trying again in 15 s"; sleep 15
+              done
+              # test/integration installs its tools through Omarchy'"'"'s helper; they are installed above.
+              printf "#!/bin/sh\nexit 0\n" >/usr/local/bin/omarchy-pkg-add
+              chmod 0755 /usr/local/bin/omarchy-pkg-add
+              qemu-system-x86_64 --version | head -1
+              ./test/integration release/*.iso boot --no-preview --memory 8192 --timeout 1800
+            '
+
+      # The harness ran as root in its container: test-runs and what QEMU
+      # wrote there (the serial logs) belong to root until this step.
+      - name: Hand the results to the runner's user
+        if: always()
+        run: |
+          mkdir -p test-runs
+          sudo chown -R "$(id -u):$(id -g)" test-runs
+
+      - name: Report times
+        if: always()
+        run: |
+          base=$(ls -d test-runs/*-integration 2>/dev/null | head -1)
+          [ -n "$base" ] || { echo "No test run to report" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          {
+            echo "## Install test"
+            echo
+            if [ -f "$base/omarchy-install-timing.json" ]; then
+              jq -r '"**Install:** \((.finished_at - .started_at) * 10 | round / 10) s across \(.phases | length) phases"' "$base/omarchy-install-timing.json"
+              echo
+              echo "| Phase | Seconds |"
+              echo "| --- | ---: |"
+              jq -r '.phases[] | "| \(.name) | \(.elapsed * 10 | round / 10) |"' "$base/omarchy-install-timing.json"
+              echo
+            fi
+            if [ -f "$base/first-boot-systemd-analyze.txt" ]; then
+              echo "**First boot:** $(head -1 "$base/first-boot-systemd-analyze.txt")"
+              echo
+            fi
+            boot_dir=$(ls -d "$base"/runs/*-boot 2>/dev/null | tail -1)
+            if [ -n "$boot_dir" ] && [ -f "$boot_dir/systemd-analyze.txt" ]; then
+              echo "**Everyday boot:** $(head -1 "$boot_dir/systemd-analyze.txt")"
+              echo
+              echo "System state: $(jq -r .system_state "$boot_dir/boot-timing.json" 2>/dev/null)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The comment workflow runs from quattro and reads only this artifact;
+      # it needs the PR number, which a workflow_run event omits for forks.
+      - name: Record the pull request
+        if: always() && github.event_name == 'pull_request'
+        run: echo "${{ github.event.pull_request.number }}" > test-runs/pr-number
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: install-test-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-runs/pr-number
+            test-runs/*/omarchy-install-timing.json
+            test-runs/*/omarchy-install.log
+            test-runs/*/first-boot-systemd-analyze.txt
+            test-runs/*/runs/**/*.png
+            test-runs/*/runs/**/*.txt
+            test-runs/*/runs/**/*.json
+            test-runs/*/runs/**/*.log
+          if-no-files-found: ignore
+          retention-days: 14

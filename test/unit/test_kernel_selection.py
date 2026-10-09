@@ -116,7 +116,7 @@ class KernelSelectionTest(unittest.TestCase):
                     )
                     ctx = types.SimpleNamespace(
                         state={"arch_config_handler": types.SimpleNamespace(config=config), "mirror_handler": None},
-                        target=Path("/unused"), tailscale_authkey_path=None,
+                        target=Path("/unused"), tailscale_authkey_path=None, omarchy_install={},
                     )
                     for name in ("_mount_offline_package_cache", "_mask_mkinitcpio_pacman_hooks",
                                  "_configure_limine_boot", "_write_pre_mounted_fstab"):
@@ -128,6 +128,7 @@ class KernelSelectionTest(unittest.TestCase):
                     stack.enter_context(mock.patch.object(phases_impl, "_runtime_package_list", return_value=["omarchy"]))
                     stack.enter_context(mock.patch.object(phases_impl.arch, "is_pre_mount", return_value=True, create=True))
                     stack.enter_context(mock.patch.object(phases_impl.arch, "root_user", return_value=None, create=True))
+                    stack.enter_context(mock.patch.object(phases_impl.arch, "sanity_check", create=True))
                     opened = stack.enter_context(mock.patch.object(phases_impl.arch, "open_installer", create=True))
                     opened.return_value.__enter__.return_value = installer
                     if fail_headers:

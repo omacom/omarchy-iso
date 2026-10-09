@@ -1,0 +1,19 @@
+#!/bin/bash
+# Runs rclone for the publish job and says when it only got there on a retry.
+#
+#   nightly-rclone <rclone arguments...>
+#
+# rclone tries a failed transfer again by itself, and a run that passes on the
+# second attempt looks like any other. This passes rclone's output and exit
+# status through, and adds a warning for the run's page naming the files that
+# failed on an earlier attempt.
+set -uo pipefail
+log=$(mktemp)
+trap 'rm -f "$log"' EXIT
+rclone "$@" 2>&1 | tee "$log"
+status=${PIPESTATUS[0]}
+files=$(sed -nE 's/^.*ERROR : (.*): Failed to copy: .*$/\1/p' "$log" | sort -u)
+if [[ $status -eq 0 && -n $files ]]; then
+  echo "::warning::rclone needed a retry for $(wc -l <<<"$files") file(s): $(paste -sd' ' <<<"$files")"
+fi
+exit "$status"

@@ -30,7 +30,7 @@ class LocalRepoConfigTest(unittest.TestCase):
                 )
                 self.assertIn("Server = file:///omarchy-repo", result)
                 self.assertNotIn("https://pkgs.omarchy.org/", result)
-                self.assertEqual(result.split("[omarchy]")[0], original.split("[core]")[0])
+                self.assertEqual(result.split("[omarchy]")[0], original.split("[omarchy]")[0])
                 self.assertIn("SigLevel    = Required DatabaseOptional", result)
                 with tempfile.TemporaryDirectory() as directory:
                     configured = Path(directory) / "pacman.conf"

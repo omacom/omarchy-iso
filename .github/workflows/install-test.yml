@@ -21,13 +21,14 @@ concurrency:
 
 jobs:
   install:
-    runs-on: ubuntu-24.04
+    # No cache volume here on purpose: this runs for pull requests, and what
+    # one of them leaves in a cache the next run would trust.
+    runs-on: namespace-profile-linux-amd64-16x32
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
 
-      # The hosted runner has far more disk than the build needs (145 GB,
-      # ~86 GB free); fail early and loudly if that ever changes.
+      # Fail early and loudly if the runner ever has less disk than this needs.
       - name: Check disk space
         run: |
           df -h /
@@ -48,6 +49,12 @@ jobs:
           docker run --rm --device /dev/kvm -v "$PWD:/w" -w /w \
             -e OMARCHY_INTEGRATION_DISK_CACHE=none \
             archlinux:latest bash -euo pipefail -c '
+              # pacman 7 fails every sync on a kernel without Landlock, which
+              # these runners have; builder/build-iso.sh does the same.
+              if ! grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then
+                printf "#!/bin/sh\nexec /usr/bin/pacman --disable-sandbox \"\$@\"\n" >/usr/local/bin/pacman
+                chmod 0755 /usr/local/bin/pacman
+              fi
               pacman -Syu --noconfirm --needed qemu-system-x86 qemu-hw-display-virtio-gpu qemu-hw-display-virtio-vga qemu-img edk2-ovmf socat \
                 imagemagick tesseract tesseract-data-eng mtools dosfstools jq openssh openssl python curl >/dev/null
               # test/integration installs its tools through Omarchy'"'"'s helper; they are installed above.

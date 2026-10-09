@@ -1,12 +1,18 @@
 name: Nightly ISO Build
 
-# Every night: builds the edge ISO, installs it unattended and boots what it
+# Every night, for two channels: installs an ISO unattended and boots what it
 # installed (the install test), turns that installed disk into a VM image, and
-# publishes all of it with a latest.json saying what is in it.
+# publishes it with a latest.json saying what is in it.
 #
-#   https://nightly.omarchy.org/edge/latest.json
+#   edge    the ISO is built here, from quattro and the edge packages
+#   stable  the ISO is the last release: omacom/omarchy's latest release names
+#           the version, iso.omarchy.org has the ISO, its signature is checked.
+#           Done once for each release, skipped on the nights after.
+#
+#   https://nightly.omarchy.org/<channel>/latest.json
 #   https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.iso
-#   https://nightly.omarchy.org/edge/<version>/vm/   base.qcow2 and what boots it
+#   https://nightly.omarchy.org/edge/<version>/vm/        base.qcow2 and what boots it
+#   https://nightly.omarchy.org/stable/<version>/<run>/vm/
 #
 # Nothing is published unless the ISO installed and the image passed its
 # checks. A version's files are written once and never replaced: the CDN keeps
@@ -34,23 +40,56 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CHANNEL: edge
   SITE: https://nightly.omarchy.org
 
 jobs:
+  # Which channels this run makes, under which version, and where each goes.
+  # An edge version is the date and the run number. A stable version is the
+  # release's own, and a release already published is left out of a scheduled
+  # run. Two builds of one release are not the same bytes, so a stable image
+  # also has the run number in its path: a published path is never reused, and
+  # a publish that stopped halfway is simply made again.
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      channels: ${{ steps.plan.outputs.channels }}
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          edge=$(date -u +%Y.%m.%d).${{ github.run_number }}
+          stable=$(gh api repos/omacom/omarchy/releases/latest --jq .tag_name)
+          stable=${stable#v}
+          [[ $stable =~ ^[0-9]+(\.[0-9]+)+$ ]] || { echo "::error::omacom/omarchy's latest release is '$stable', not a version"; exit 1; }
+          published=$(curl -fsL "$SITE/stable/latest.json?run=$GITHUB_RUN_ID" | jq -r .version || true)
+          channels=$(jq -cn --arg edge "$edge" '[{channel: "edge", version: $edge, release: "edge/\($edge)"}]')
+          if [[ $GITHUB_EVENT_NAME == schedule && $published == "$stable" ]]; then
+            echo "stable $stable is already published"
+          else
+            channels=$(jq -c --arg stable "$stable" --arg run "${{ github.run_number }}" \
+              '. + [{channel: "stable", version: $stable, release: "stable/\($stable)/\($run)"}]' <<<"$channels")
+          fi
+          echo "channels=$channels" | tee -a "$GITHUB_OUTPUT"
+
   build:
-    name: Build, install, seal
+    name: ${{ matrix.channel }} ${{ matrix.version }}
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.channels) }}
     runs-on: namespace-profile-linux-amd64-16x32
     timeout-minutes: 90
-    outputs:
-      version: ${{ steps.version.outputs.version }}
+    env:
+      CHANNEL: ${{ matrix.channel }}
+      VERSION: ${{ matrix.version }}
+      RELEASE: ${{ matrix.release }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
-
-      # The date says when, the run number keeps two builds of one day apart:
-      # a published name is never reused.
-      - id: version
-        run: echo "version=$(date -u +%Y.%m.%d).${{ github.run_number }}" | tee -a "$GITHUB_OUTPUT"
 
       - name: Runner
         run: |
@@ -67,6 +106,7 @@ jobs:
           [ "$avail_gb" -ge 50 ] || { echo "::error::only ${avail_gb} GB free, the build, the install test and the image need ~50 GB"; exit 1; }
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+        if: matrix.channel == 'edge'
 
       # What a build downloads and would download again tomorrow: the packages
       # the ISO's offline mirror is made of (the build prunes the ones it no
@@ -81,7 +121,25 @@ jobs:
             ~/.cache/omarchy-ci
 
       - name: Build the edge ISO
+        if: matrix.channel == 'edge'
         run: NO_BOOT_OFFER=1 ./bin/omarchy-iso-make --edge
+
+      # Good only if the signature is the release key's, the one in this repo.
+      - name: Download the released ISO and check its signature
+        if: matrix.channel == 'stable'
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          iso=omarchy-$VERSION.iso
+          curl -fSL --retry 3 -o "release/$iso" "https://iso.omarchy.org/$iso"
+          curl -fsSL --retry 3 -o "release/$iso.sig" "https://iso.omarchy.org/$iso.sig"
+          home=$(mktemp -d)
+          gpg --homedir "$home" --quiet --batch --import builder/omarchy.gpg
+          key=$(gpg --homedir "$home" --batch --with-colons --list-keys | awk -F: '$1 == "fpr" { print $10; exit }')
+          gpg --homedir "$home" --batch --status-fd 1 --verify "release/$iso.sig" "release/$iso" 2>/dev/null |
+            grep -q "^\[GNUPG:\] VALIDSIG $key " || { echo "::error::$iso is not signed by $key"; exit 1; }
+          echo "$iso is signed by $key"
+          rm -rf "$home" "release/$iso.sig"
 
       # The same install test a pull request gets (install-test.yml), then the
       # image: the installed disk that test leaves behind, sealed and checked.
@@ -110,7 +168,7 @@ jobs:
               base=$(ls -d test-runs/*-integration)
               ./test/vm-image/vm-seal "$base" sealed
               ./test/vm-image/vm-verify sealed | tee vm-verify.txt
-              ./test/vm-image/vm-boot sealed "pacman -Q omarchy-dev omarchy-settings-dev; pacman -Qo /usr/lib/modules/\$(uname -r)/pkgbase; uname -r" >vm-packages.txt
+              ./test/vm-image/vm-boot sealed "pacman -Qq omarchy omarchy-dev 2>/dev/null | xargs pacman -Q; pacman -Qo /usr/lib/modules/\$(uname -r)/pkgbase; uname -r" >vm-packages.txt
               cat vm-packages.txt
             '
 
@@ -122,24 +180,30 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" test-runs sealed release vm-*.txt 2>/dev/null || true
 
       - name: Lay out the release and describe it
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          dir=out/$CHANNEL/$VERSION
-          iso=omarchy-$CHANNEL-$VERSION.iso
+          dir=out/$RELEASE
           mkdir -p "$dir/vm"
-          mv release/*.iso "$dir/$iso"
-          (cd "$dir" && sha256sum "$iso" >"$iso.sha256")
+          # The edge ISO is published here. The released one already has its
+          # place, so latest.json points there and it is not uploaded again.
+          if [[ $CHANNEL == edge ]]; then
+            iso=omarchy-$CHANNEL-$VERSION.iso iso_url=$SITE/$RELEASE/$iso
+            mv release/*.iso "$dir/$iso"
+            (cd "$dir" && sha256sum "$iso" >"$iso.sha256")
+            iso_sha256=$(cut -d" " -f1 "$dir/$iso.sha256") iso_size=$(stat -c %s "$dir/$iso")
+          else
+            iso=omarchy-$VERSION.iso iso_url=https://iso.omarchy.org/$iso
+            iso_sha256=$(sha256sum "release/$iso" | cut -d" " -f1) iso_size=$(stat -c %s "release/$iso")
+          fi
           mv sealed/* "$dir/vm/"
           cp test/vm-image/vm-boot "$dir/vm/vm-boot"
           (cd "$dir/vm" && sha256sum base.qcow2 OVMF_VARS.4m.fd vmlinuz initrd cmdline vm-boot >SHA256SUMS)
 
-          omarchy=$(awk '$1 == "omarchy-dev" { print $2 }' vm-packages.txt)
+          omarchy=$(awk '$1 == "omarchy" || $1 == "omarchy-dev" { print $2 }' vm-packages.txt)
           jq -n \
-            --arg version "$VERSION" --arg channel "$CHANNEL" --arg site "$SITE/$CHANNEL/$VERSION" --arg iso "$iso" \
+            --arg version "$VERSION" --arg channel "$CHANNEL" --arg site "$SITE/$RELEASE" --arg iso_url "$iso_url" \
             --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg sha256 "$(cut -d" " -f1 "$dir/$iso.sha256")" --argjson size "$(stat -c %s "$dir/$iso")" \
+            --arg sha256 "$iso_sha256" --argjson size "$iso_size" \
             --arg iso_commit "$GITHUB_SHA" \
             --arg omarchy_version "$omarchy" --arg omarchy_commit "$(sed -nE "s/.*\.g([0-9a-f]+)-.*/\1/p" <<<"$omarchy")" \
             --arg kernel "$(tail -n 1 vm-packages.txt)" \
@@ -147,7 +211,7 @@ jobs:
             --argjson disk_size "$(stat -c %s "$dir/vm/base.qcow2")" \
             '{
               version: $version, channel: $channel, built_at: $built_at,
-              url: "\($site)/\($iso)", sha256: $sha256, size: $size,
+              url: $iso_url, sha256: $sha256, size: $size,
               iso_commit: $iso_commit, omarchy_version: $omarchy_version, omarchy_commit: $omarchy_commit,
               kernel: $kernel,
               vm: {
@@ -173,7 +237,7 @@ jobs:
       - name: Keep the release for the publish job
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: nightly-${{ steps.version.outputs.version }}
+          name: nightly-${{ matrix.channel }}-${{ github.run_id }}
           path: out/
           compression-level: 0
           retention-days: 2
@@ -183,7 +247,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: nightly-install-test-${{ github.run_id }}-${{ github.run_attempt }}
+          name: nightly-install-test-${{ matrix.channel }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             test-runs/*/omarchy-install-timing.json
             test-runs/*/omarchy-install.log
@@ -200,15 +264,23 @@ jobs:
   # The only job that holds the bucket's key, and it builds nothing: it copies
   # what the job above made, checks what the CDN then serves, and only then
   # points latest.json at it.
+  # One channel failing does not hold back the other: each is published if
+  # its own build left a release behind.
   publish:
-    name: Publish
-    needs: build
-    if: github.ref == 'refs/heads/quattro' && (github.event_name == 'schedule' || inputs.publish)
+    name: Publish ${{ matrix.channel }}
+    needs: [plan, build]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/quattro' && (github.event_name == 'schedule' || inputs.publish) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.channels) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: nightly
     env:
-      VERSION: ${{ needs.build.outputs.version }}
+      CHANNEL: ${{ matrix.channel }}
+      VERSION: ${{ matrix.version }}
+      RELEASE: ${{ matrix.release }}
       RCLONE_CONFIG_R2_TYPE: s3
       RCLONE_CONFIG_R2_PROVIDER: Cloudflare
       RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -218,7 +290,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: nightly-${{ needs.build.outputs.version }}
+          name: nightly-${{ matrix.channel }}-${{ github.run_id }}
           path: out
 
       - name: rclone
@@ -231,7 +303,7 @@ jobs:
       # overwrite.
       - name: Upload this version
         run: |
-          rclone copy "out/$CHANNEL/$VERSION" "r2:$BUCKET/$CHANNEL/$VERSION" \
+          rclone copy "out/$RELEASE" "r2:$BUCKET/$RELEASE" \
             --immutable --s3-no-check-bucket --transfers 8 --s3-upload-concurrency 8 --s3-chunk-size 64M --stats 30s --stats-one-line
 
       # Fetched the way a user fetches them. It proves what is served, and it
@@ -239,16 +311,18 @@ jobs:
       - name: Check what the CDN serves
         run: |
           set -euo pipefail
-          dir=out/$CHANNEL/$VERSION
+          dir=out/$RELEASE
           check() { # url, expected sha256
             got=$(curl -fsSL --retry 3 "$1" | sha256sum | cut -d" " -f1)
             [ "$got" = "$2" ] || { echo "::error::$1 serves $got, expected $2"; exit 1; }
             echo "ok $1"
           }
-          iso=$(basename "$dir"/*.iso)
-          check "$SITE/$CHANNEL/$VERSION/$iso" "$(cut -d" " -f1 "$dir/$iso.sha256")"
+          for iso in "$dir"/*.iso; do
+            [[ -f $iso ]] || continue
+            check "$SITE/$RELEASE/${iso##*/}" "$(cut -d" " -f1 "$iso.sha256")"
+          done
           while read -r sum name; do
-            check "$SITE/$CHANNEL/$VERSION/vm/$name" "$sum"
+            check "$SITE/$RELEASE/vm/$name" "$sum"
           done <"$dir/vm/SHA256SUMS"
 
       - name: Point latest.json at it

@@ -1,7 +1,8 @@
 """Unit tests for the child install profile (Omarchy's kids mode) in the
 orchestrator: the profile read from the configurator's JSON, the child package
-list on top of the base set, the --profile handoff to omarchy-apply-system, and
-the parent password added as a second LUKS key."""
+list on top of the base set, the --profile handoff to omarchy-apply-system, the kernel default a child
+install shares with every other install, and the parent password added as a
+second LUKS key."""
 
 import json
 import os
@@ -19,7 +20,7 @@ sys.modules.setdefault(
     "orchestrator.archinstall_adapter", types.ModuleType("orchestrator.archinstall_adapter")
 )
 
-from orchestrator import phases_impl  # noqa: E402
+from orchestrator import context, phases_impl  # noqa: E402
 from orchestrator.context import InstallContext  # noqa: E402
 
 
@@ -75,6 +76,25 @@ class ChildProfileContextTest(unittest.TestCase):
         self.assertEqual(ctx.user_credentials.get("users"), [])
         self.assertNotIn("parent_encryption_password", ctx.user_credentials)
 
+
+    def test_child_profile_keeps_the_hardware_kernel_default(self):
+        # Kids mode changes who the computer is for, not what it boots: a child
+        # install without an explicit kernel gets the same default as any other
+        # (linux-omarchy, or linux-t2 on a T2 Mac), and an explicit choice from
+        # the configurator still wins. The offline mirror carries that kernel
+        # next to the child package list, so both must agree for pacstrap.
+        for default in ("linux-omarchy", "linux-t2"):
+            with self.subTest(default=default), \
+                    mock.patch.object(context, "_default_kernel", return_value=default):
+                ctx = self.from_env(self.config(profile="child"), self.creds())
+            self.assertEqual(ctx.profile, "child")
+            self.assertEqual(ctx.user_configuration["kernels"], [default])
+            self.assertEqual(json.loads(ctx.arch_config_path.read_text())["kernels"], [default])
+
+        with mock.patch.object(context, "_default_kernel", return_value="linux-omarchy"):
+            ctx = self.from_env(self.config(profile="child", storage={"kernel": "linux-t2"}), self.creds())
+        self.assertEqual(ctx.profile, "child")
+        self.assertEqual(ctx.user_configuration["kernels"], ["linux-t2"])
 
 class ChildPackageListTest(unittest.TestCase):
     def setUp(self):

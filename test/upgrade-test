@@ -148,14 +148,17 @@ for migration in ${EXTRA_MIGRATIONS:-}; do
   ssh "${ssh_opts[@]}" omarchy@127.0.0.1 "sudo tee /usr/share/omarchy/migrations/$(basename "$migration") >/dev/null" <"$migration"
 done
 
-# A channel that offers what the machine already has is no upgrade. Say so
-# now: the release's own updater, run with nothing to do, ends at a prompt
-# nobody is there to answer.
+# A channel that offers what the machine already has, or something older, is
+# no upgrade. Say so now: the release's own updater, run with nothing to do,
+# ends at a prompt nobody is there to answer.
 case $channel in edge) package=omarchy-dev ;; *) package=omarchy ;; esac
 offered=$(guest "curl -fsSL --retry 3 https://pkgs.omarchy.org/$channel/\$(uname -m)/omarchy.db | bsdtar -xOf - '$package-[0-9]*/desc' | sed -n '/^%VERSION%\$/{n;p;}'" 2>/dev/null | head -n 1)
 installed=$(guest "pacman -Q $package 2>/dev/null | cut -d' ' -f2" 2>/dev/null)
 log "The $channel channel offers $package ${offered:-nothing}; installed: ${installed:-none}"
-if [[ -z $offered || $offered == "$installed" ]]; then
+# pacman's own ordering: 0 for the same version, below 0 for an older offer.
+newer=1
+[[ -z $installed ]] || newer=$(guest "vercmp $(printf %q "${offered:-0}") $(printf %q "$installed")" 2>/dev/null)
+if [[ -z $offered ]] || (( ${newer:-0} <= 0 )); then
   {
     echo "**Nothing to upgrade to.** The $channel channel offers \`$package ${offered:-nothing}\`, and the machine has \`$(fact "$out/before.txt" omarchy)\`."
     echo

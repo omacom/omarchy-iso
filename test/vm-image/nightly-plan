@@ -1,0 +1,42 @@
+#!/bin/bash
+# Says which channels a nightly run makes, under which version, and where
+# each one is published. It decides; the workflow fetches what it needs to
+# know and passes it in, so every case can be tried without a runner.
+#
+#   nightly-plan <date> <run_number> <run_attempt> <event> <release_tag> [published_stable]
+#
+#   date              today, as YYYY.MM.DD
+#   event             what started the run: schedule, workflow_dispatch
+#   release_tag       omacom/omarchy's latest release, such as v4.0.4
+#   published_stable  the version stable/latest.json names now, if any
+#
+# Prints a JSON list of {channel, version, release}; release is the path
+# under the site.
+#
+# An edge version is the date and the run number. A stable version is the
+# release's own, and on a scheduled run a release already published is left
+# out: it is done once. Two builds are never the same bytes and a published
+# file is never replaced, so no path is used twice: a stable image has the run
+# number in its path, and a run started again adds its attempt to the number.
+set -euo pipefail
+[[ $# -eq 5 || $# -eq 6 ]] || { sed -n '2,12p' "$0" >&2; exit 2; }
+date=$1 run=$2 attempt=$3 event=$4 tag=$5 published=${6:-}
+fail() { echo "nightly-plan: $*" >&2; exit 1; }
+
+[[ $date =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}$ ]] || fail "'$date' is not a date like 2026.10.09"
+[[ $run =~ ^[1-9][0-9]*$ ]] || fail "'$run' is not a run number"
+[[ $attempt =~ ^[1-9][0-9]*$ ]] || fail "'$attempt' is not a run attempt"
+stable=${tag#v}
+[[ $stable =~ ^[0-9]+(\.[0-9]+)+$ ]] || fail "the latest release is '$tag', not a version"
+
+build=$run
+[[ $attempt == 1 ]] || build+=.$attempt
+
+channels=$(jq -cn --arg v "$date.$build" '[{channel: "edge", version: $v, release: "edge/\($v)"}]')
+if [[ $event == schedule && $published == "$stable" ]]; then
+  echo "nightly-plan: stable $stable is already published" >&2
+else
+  channels=$(jq -c --arg v "$stable" --arg build "$build" \
+    '. + [{channel: "stable", version: $v, release: "stable/\($v)/\($build)"}]' <<<"$channels")
+fi
+echo "$channels"

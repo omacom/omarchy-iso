@@ -50,7 +50,7 @@ jobs:
             # mirror that drops one file must not fail the tests.
             sed -i "1i Server = https://mirror.omarchy.org/\$repo/os/\$arch" /etc/pacman.d/mirrorlist
             for attempt in 1 2 3; do
-              pacman -Syu --noconfirm --needed python parted diffutils jq zip unzip >/dev/null && break
+              pacman -Syu --noconfirm --needed python parted gcc diffutils jq zip unzip >/dev/null && break
               [ "$attempt" -lt 3 ] || { echo "::error::the test container could not install its tools"; exit 1; }
               sleep 15
             done

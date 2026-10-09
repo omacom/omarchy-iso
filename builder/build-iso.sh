@@ -45,6 +45,21 @@ pacman --noconfirm -Sy archlinux-keyring
 # the container doesn't have yet.
 pacman --noconfirm -Syu archiso git sudo base-devel jq grub imagemagick neovim nodejs npm tree-sitter-cli btrfs-progs
 
+# The root image writer (builder/omarchy-image-write.c): build-root-image.sh
+# packs the image with it below, and the live root ships it to write the image
+# at install time. The container's libzstd is the one the live root gets.
+# Built with Arch's own package flags (FORTIFY_SOURCE=3, stack clash
+# protection, CET, full RELRO), like every other binary in the live root.
+# Speed flags would not matter: the time is in libzstd and libc, which pick
+# their code for the CPU at run time (-O2, Arch's flags and -O3 -march=native
+# -flto all measure 0.78 s on the root image).
+(
+  source /etc/makepkg.conf
+  # shellcheck disable=SC2086 # the flag lists are meant to split
+  gcc -std=gnu11 $CFLAGS -Wall -Wextra -pthread $LDFLAGS \
+    -o /usr/local/bin/omarchy-image-write /builder/omarchy-image-write.c -lzstd
+)
+
 # Pre-import the omarchy signing key (so pacman trusts our [omarchy] repo
 # during the build without keyserver lookups).
 pacman-key --add /builder/omarchy.gpg
@@ -80,6 +95,7 @@ rm -rf "$build_cache_dir/airootfs/etc/xdg/reflector"
 
 # Bring in our archiso profile additions.
 cp -r /configs/* "$build_cache_dir/"
+install -Dm755 /usr/local/bin/omarchy-image-write "$build_cache_dir/airootfs/usr/local/bin/omarchy-image-write"
 mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
 echo "$OMARCHY_MIRROR" > "$build_cache_dir/airootfs/root/omarchy_mirror"
 echo "$OMARCHY_ISO_REF" > "$build_cache_dir/airootfs/root/omarchy_iso_ref"

@@ -28,6 +28,7 @@ Phase ordering (full-disk and protected/pre-mounted):
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -171,6 +172,8 @@ ROOT_IMAGE_STREAM = Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.btrfs.zs
 ROOT_IMAGE_RAW = Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.img")
 # The same image, zstd-compressed: what the ISO ships.
 ROOT_IMAGE_RAW_ZST = Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.img.zst")
+# Writes ROOT_IMAGE_RAW_ZST in parallel; compiled and installed by build-iso.sh.
+IMAGE_WRITE = Path("/usr/local/bin/omarchy-image-write")
 
 
 def _root_image_verified() -> Path:
@@ -607,6 +610,78 @@ def _wait_for_blkid_uuid(device: str, attempts: int = 50) -> None:
     raise RuntimeError(f"blkid still reports an old UUID for {device} after the fsid change (want {want})")
 
 
+def _write_root_image_frames(image: Path, device: str) -> bool:
+    """Write the image with omarchy-image-write (builder/omarchy-image-write.c):
+    the ISO packs it as independent 256 KiB zstd frames with a seek table,
+    which N threads decode and pwrite with O_DIRECT, so the drive sees N
+    requests in flight where zstdcat | dd gives it one (2.5 s -> 0.9 s on a
+    990 PRO, stream in RAM). False when the tool is not on the ISO or the
+    image is not one it writes (exit 2, nothing written), so the caller can
+    use the pipe instead. Exit 1 is an error: the target could not be used
+    (in use, too small) or the write failed partway."""
+    if not IMAGE_WRITE.is_file():
+        return False
+    with _time_step("F1.image_write (parallel frames, O_DIRECT)"):
+        proc = subprocess.run([str(IMAGE_WRITE), "write", str(image), device],
+                              stderr=subprocess.PIPE, text=True, check=False)
+    for line in proc.stderr.splitlines():
+        info(f"› {line}")
+    if proc.returncode == 2:
+        info("› image-write refused the image; writing it through zstdcat | dd")
+        return False
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, proc.args, stderr=proc.stderr)
+    return True
+
+
+def _write_root_image_pipe(image: Path, device: str) -> None:
+    with _time_step("F1.dd (zstdcat | dd oflag=direct)"):
+        # dd blocks on its writes, so the pipe paces zstd to the disk,
+        # and the decoding runs on another core.
+        #
+        # iflag=fullblock is what makes oflag=direct true. A read from a
+        # pipe returns at most one pipe buffer (64 KiB), dd treats that
+        # as a partial block, and for a partial block it silently drops
+        # O_DIRECT, so without fullblock every write is buffered. On a
+        # LUKS mapper with 512-byte sectors the block device's writeback
+        # then goes out 512 bytes at a time: 2 million NVMe requests per
+        # GiB, 87 s for this image on a 980 PRO against 2.7 s
+        # with full blocks. QEMU hides it (4.9 s there), real disks do
+        # not. bs: 1M-4M measure the same within noise, 2M best, 16M and
+        # 64M slower (on the same drive, stream in RAM).
+        # status=noxfer keeps dd's record counts for the check below.
+        #
+        # The pipe is ours, not the shell's, for two reasons. Size: with
+        # the default 64 KiB pipe zstd stalls on every dd write and dd on
+        # every read; 4 MiB lets zstd stay two blocks ahead (2.5 s -> 2.1 s
+        # on a 990 PRO, stream in RAM; 1-16 MiB measure the same, 64 MiB
+        # and up slower). Above 1 MiB, F_SETPIPE_SZ needs
+        # CAP_SYS_RESOURCE, which the orchestrator has as root. Status:
+        # a shell pipeline reports dd's alone, so a zstd that died on a
+        # bad frame read as a short image written successfully.
+        read_end, write_end = os.pipe()
+        try:
+            fcntl.fcntl(write_end, fcntl.F_SETPIPE_SZ, 4 << 20)
+        except OSError:
+            pass  # a smaller pipe is slower, not wrong
+        zstd = subprocess.Popen(["zstdcat", str(image)], stdout=write_end)
+        dd = subprocess.Popen(
+            ["dd", f"of={device}", "bs=2M", "iflag=fullblock",
+             "conv=sparse,fsync", "oflag=direct", "status=noxfer"],
+            stdin=read_end, stderr=subprocess.PIPE, text=True,
+        )
+        os.close(read_end)
+        os.close(write_end)
+        _, dd_stderr = dd.communicate()
+        zstd.wait()
+        # dd first: when dd dies, zstd dies of the broken pipe after it.
+        if dd.returncode != 0:
+            raise subprocess.CalledProcessError(dd.returncode, dd.args, stderr=dd_stderr)
+        if zstd.returncode != 0:
+            raise subprocess.CalledProcessError(zstd.returncode, zstd.args)
+        _check_dd_full_blocks(dd_stderr)
+
+
 def _install_root_image_dd(ctx: InstallContext) -> None:
     """Write the pre-built btrfs image straight onto the target partition, then
     give the filesystem a new fsid. Same result as the btrfs receive path, the
@@ -624,27 +699,8 @@ def _install_root_image_dd(ctx: InstallContext) -> None:
         _umount_tree(target)
 
     if ROOT_IMAGE_RAW_ZST.is_file():
-        with _time_step("F1.dd (zstdcat | dd oflag=direct)"):
-            # dd blocks on its writes, so the pipe paces zstd to the disk,
-            # and the decoding runs on another core.
-            #
-            # iflag=fullblock is what makes oflag=direct true. A read from a
-            # pipe returns at most one pipe buffer (64 KiB), dd treats that
-            # as a partial block, and for a partial block it silently drops
-            # O_DIRECT, so without fullblock every write is buffered. On a
-            # LUKS mapper with 512-byte sectors the block device's writeback
-            # then goes out 512 bytes at a time: 2 million NVMe requests per
-            # GiB, 87 s for this image on a 980 PRO against 2.7 s
-            # with full blocks. QEMU hides it (4.9 s there), real disks do
-            # not. bs: 1M-4M measure the same within noise, 2M best, 16M and
-            # 64M slower (on the same drive, stream in RAM).
-            # status=noxfer keeps dd's record counts for the check below.
-            proc = subprocess.run(
-                f"zstdcat {ROOT_IMAGE_RAW_ZST} | dd of={device} bs=2M "
-                f"iflag=fullblock conv=sparse,fsync oflag=direct status=noxfer",
-                shell=True, check=True, stderr=subprocess.PIPE, text=True,
-            )
-            _check_dd_full_blocks(proc.stderr)
+        if not _write_root_image_frames(ROOT_IMAGE_RAW_ZST, device):
+            _write_root_image_pipe(ROOT_IMAGE_RAW_ZST, device)
     else:
         with _time_step("F1.dd (oflag=direct)"):
             subprocess.run(

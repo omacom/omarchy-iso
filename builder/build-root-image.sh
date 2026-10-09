@@ -437,8 +437,12 @@ zst_output="$output"
 
 # Compress the image for the ISO. zstd collapses the unused space; the data
 # is already compressed inside btrfs and shrinks little. Measured: 6.3 GB
-# becomes 3.8 GB at zstd -3, for about 1 s more at install time, because the
-# decompression runs alongside the write.
-echo "Compressing the root image with zstd -3"
-zstd -3 -q --stdout "$backing" >"$zst_output"
+# becomes 3.8 GB at zstd -3.
+#
+# As independent 256 KiB frames (level 3, a checksum each), which is what lets
+# omarchy-image-write decode and write it on every core at install time:
+# 0.9 s instead of 2.5 s through zstdcat | dd on a 990 PRO. Framing costs
+# 1.3% (55 MB). It is still one valid .zst; zstd -d reads it unchanged.
+echo "Packing the root image as 256 KiB zstd frames"
+omarchy-image-write pack "$backing" "$zst_output"
 echo "Root image raw.zst: $(du -h "$zst_output" | cut -f1) at $zst_output (from ${shrink_mb}M apparent input)"

@@ -266,6 +266,21 @@ else
   # hardware scripts add to them (nvidia.sh, fix-t2.sh) builds its own UKI.
   { grep -hE '^\s*MODULES\s*\+?=' "$root"/etc/mkinitcpio.conf.d/*.conf 2>/dev/null || true; } |
     sed -E 's/\s+/ /g; s/^ //; s/ $//' | sort -u >"$root/var/lib/omarchy-iso/prebuilt-uki.modules"
+  # The console keymap this UKI is built with. omarchy_hooks.conf runs the
+  # `keymap` hook, which compiles the keymap named by /etc/vconsole.conf into
+  # the initramfs at build time, and bundles vconsole.conf itself for Plymouth.
+  # Both are fixed here, at image build, to whatever this image has: in
+  # practice nothing, so mkinitcpio falls back to us. The installer writes the
+  # user's choice into the target's /etc/vconsole.conf afterwards, which cannot
+  # reach an initramfs that is only copied, so an install picking another
+  # layout has to build its own UKI exactly as one adding modules does.
+  # Recording the value is what lets the installer tell the difference.
+  #
+  # The LUKS passphrase prompt runs from this initramfs, so a stale `us` makes
+  # a passphrase enrolled under another layout untypeable and locks the owner
+  # out of a fresh install (upstream omarchy#8196).
+  ( [ -f "$root/etc/vconsole.conf" ] && . "$root/etc/vconsole.conf"; printf '%s\n' "${KEYMAP:-}" ) \
+    >"$root/var/lib/omarchy-iso/prebuilt-uki.keymap"
   cat >"$root/etc/mkinitcpio.d/${image_kernel}.preset" <<PRESET
 ALL_config="/etc/mkinitcpio.conf"
 ALL_kver="/usr/lib/modules/${image_kver}/vmlinuz"

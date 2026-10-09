@@ -42,6 +42,12 @@ VARIANT="${OMARCHY_INTEGRATION_VARIANT:-default}"
 DISK_GB="${OMARCHY_INTEGRATION_DISK_GB:-40}"
 UKI="${OMARCHY_INTEGRATION_UKI:-false}"
 ENCRYPT="${OMARCHY_INTEGRATION_ENCRYPT:-false}"
+# The console keymap the autoinstall asks for. With the default, us, a dropped
+# layout looks the same as a kept one. keymap-locale-test.sh checks that the
+# chosen layout reaches the target and the initramfs the LUKS passphrase
+# prompt runs from (upstream omarchy#8196); it needs a non-us value here to
+# assert anything.
+KB_LAYOUT="${OMARCHY_INTEGRATION_KB_LAYOUT:-us}"
 
 BASE_DIR="$ROOT/test-runs/$(basename "$ISO" .iso)-integration"
 if [[ $FIRMWARE == bios ]]; then
@@ -49,6 +55,9 @@ if [[ $FIRMWARE == bios ]]; then
 fi
 if [[ $VARIANT != default ]]; then
   BASE_DIR="$BASE_DIR-$VARIANT"
+fi
+if [[ $KB_LAYOUT != us ]]; then
+  BASE_DIR="$BASE_DIR-kb$KB_LAYOUT"
 fi
 RUN_DIR="$BASE_DIR/runs/$(date +%Y%m%d-%H%M%S)-$SCENARIO"
 BASE_DISK="$BASE_DIR/base.qcow2"
@@ -673,7 +682,7 @@ EOF
     "services": [],
     "swap": true,
     "timezone": "UTC",
-    "locale_config": { "kb_layout": "us", "sys_enc": "UTF-8", "sys_lang": "en_US.UTF-8" },
+    "locale_config": { "kb_layout": "$KB_LAYOUT", "sys_enc": "UTF-8", "sys_lang": "en_US.UTF-8" },
     "mirror_config": {
         "custom_repositories": [],
         "custom_servers": [

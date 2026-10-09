@@ -1964,6 +1964,52 @@ def _prebuilt_module_lines(target: Path) -> set[str]:
     return {line for line in recorded.read_text().splitlines() if line}
 
 
+def _keymap_of(vconsole: Path) -> str:
+    """KEYMAP= from a vconsole.conf, or "" when unset or unreadable."""
+    if not vconsole.is_file():
+        return ""
+    for line in vconsole.read_text().splitlines():
+        line = line.strip()
+        if line.startswith("KEYMAP="):
+            return line.partition("=")[2].strip().strip('"\'')
+    return ""
+
+
+def _prebuilt_uki_keymap_stale(target: Path) -> str:
+    """The chosen console keymap when it differs from the one baked into the
+    image's UKI, else "".
+
+    mkinitcpio's `keymap` hook compiles the keymap named by /etc/vconsole.conf
+    at build time and omarchy_hooks.conf bundles vconsole.conf for Plymouth, so
+    the pre-built UKI is frozen to whatever the image had. configure_keyboard
+    writes the user's choice to the target afterwards, which never reaches a
+    UKI that is only copied. The LUKS passphrase prompt runs from that
+    initramfs: leaving it stale is upstream omarchy#8196, where a passphrase
+    enrolled under AZERTY cannot be typed at a QWERTY prompt and the owner is
+    locked out of a fresh install with no recovery but reinstalling.
+
+    An image that records nothing is assumed to have built in "us", and that
+    covers two cases:
+
+      * the file is absent: an image built before the keymap was recorded;
+      * the file is present and empty: the normal case, because the image
+        carries no /etc/vconsole.conf for mkinitcpio to read.
+
+    Both mean the same thing: mkinitcpio fell back to us, which is what the
+    pre-built UKIs contain (extracting .initrd from one gives us.map.gz and
+    no vconsole.conf). Reading the empty file as a keymap of "" would make
+    every ordinary us install differ from it and rebuild the UKI: correct,
+    but about 4 s slower for no gain. Treating an unknown as a match would be
+    faster still and would leave the lockout in place on every image without
+    the record; being wrong that way costs the owner their disk, so unknown
+    resolves to us, not to "skip the check".
+    """
+    recorded = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki.keymap"
+    baked = (recorded.read_text().strip() if recorded.is_file() else "") or "us"
+    chosen = _keymap_of(target / "etc" / "vconsole.conf")
+    return chosen if chosen and chosen != baked else ""
+
+
 def _is_apple_t2_hardware() -> bool:
     """Only Apple T2 Macs need the linux-t2 kernel. Everywhere else its
     mkinitcpio preset is dropped, so the boot step does not build and register
@@ -2059,6 +2105,14 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
         info(f"› hardware setup added initramfs modules ({'; '.join(added_modules)}); "
              "building the UKI on this machine instead of using the pre-built one")
 
+    # Same reasoning for the console keymap: the pre-built initramfs has the
+    # image's, and the LUKS prompt types with it.
+    stale_keymap = _prebuilt_uki_keymap_stale(ctx.target)
+    if prebuilt_uki.is_file() and stale_keymap:
+        info(f"› keyboard layout {stale_keymap} differs from the pre-built UKI's; "
+             "building the UKI on this machine so the LUKS prompt uses it")
+    skip_prebuilt = bool(added_modules) or bool(stale_keymap)
+
     # A selected kernel other than the image's boots first, as in omarchy's own
     # kernel migration. Written before any UKI is built so the entries sort by it.
     selected = next((k for k in selected_kernels if k != prebuilt_kernel and k in _installed_kernels(ctx)), None)
@@ -2071,10 +2125,10 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     # initramfs pair, and limine-entry-tool --add-uki refuses ("Your system is
     # not using EFI mode"), so such a machine builds its boot files the normal
     # way below.
-    if prebuilt_uki.is_file() and not added_modules and not arch.has_uefi():
+    if prebuilt_uki.is_file() and not skip_prebuilt and not arch.has_uefi():
         info("› BIOS firmware; the pre-built UKI is UEFI-only, building the boot files on this machine")
 
-    if prebuilt_uki.is_file() and not added_modules and arch.has_uefi():
+    if prebuilt_uki.is_file() and not skip_prebuilt and arch.has_uefi():
         used_prebuilt_uki = True
         with _time_step("LIMINE.deploy_prebuilt_uki (copy from image)"):
             esp_uki.parent.mkdir(parents=True, exist_ok=True)

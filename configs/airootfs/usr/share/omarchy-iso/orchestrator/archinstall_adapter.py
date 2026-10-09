@@ -197,6 +197,41 @@ def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
             info(f"[step] FS.udevadm settle ({settle['calls']} calls): {settle['seconds']:.3f}s")
 
 
+def _write_locale_conf_for_prebuilt(installer, locale_config) -> None:
+    """Write /etc/locale.conf when archinstall's set_locale declined to.
+
+    set_locale finds the chosen locale by matching a *commented* line in
+    /etc/locale.gen (`re.compile(rf'#{lang}(\\.{encoding})?{modifier} {encoding}')`),
+    uncomments it, runs locale-gen, and only then writes locale.conf. The
+    root image ships en_US.UTF-8 already uncommented and already compiled
+    (build-root-image.sh does that to save 0.77 s of locale-gen at install), so
+    the match fails, set_locale logs "Invalid locale" and returns False, and
+    locale.conf is never written. The installed system then falls back to
+    systemd's LANG=C.UTF-8 instead of the locale it just generated.
+
+    So: if the locale is present and *enabled* in locale.gen, the image already
+    did set_locale's work and only the last line is missing. Anything else is a
+    genuine failure and is left alone for the caller's error to stand.
+    """
+    target = Path(installer.target)
+    locale_gen = target / "etc" / "locale.gen"
+    if not locale_gen.is_file():
+        return
+    lang, encoding = locale_config.sys_lang, locale_config.sys_enc
+    # sys_lang may or may not already carry the encoding ("en_US" vs
+    # "en_US.UTF-8"); accept the entry either way, as set_locale's regex does.
+    wanted = {f"{lang} {encoding}", f"{lang}.{encoding} {encoding}"}
+    enabled = next(
+        (line.split()[0] for line in locale_gen.read_text().splitlines()
+         if not line.startswith("#") and line.strip() in wanted),
+        None,
+    )
+    if not enabled:
+        return
+    (target / "etc" / "locale.conf").write_text(f"LANG={enabled}\n")
+    info(f"› locale {enabled} is already compiled into the image; wrote locale.conf directly")
+
+
 def perform_filesystem_operations(arch_config: ArchConfig, throwaway_root_fs: bool = False) -> None:
     """Partition, format, encrypt. archinstall's FilesystemHandler is its own
     object (separate from Installer) so we run it before opening the
@@ -344,7 +379,8 @@ def install_base_delta(
 
     with _time_step("DELTA.locale_and_keyboard"):
         if locale_config:
-            installer.set_locale(locale_config)
+            if not installer.set_locale(locale_config):
+                _write_locale_conf_for_prebuilt(installer, locale_config)
             installer.set_keyboard_language(locale_config.kb_layout)
 
     installer._helper_flags["base"] = True

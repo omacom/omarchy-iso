@@ -33,7 +33,7 @@ jobs:
         run: |
           docker run -d --name unit --privileged --cgroupns=host \
             -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /tmp:exec \
-            -v "$PWD:/src:ro" archlinux:latest bash -c '
+            -v "$PWD:/src:ro" ghcr.io/archlinux/archlinux:latest bash -c '
               systemctl mask getty.target console-getty.service \
                 systemd-udev-trigger.service systemd-udevd.service \
                 systemd-vconsole-setup.service

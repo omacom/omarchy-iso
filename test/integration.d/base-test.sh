@@ -503,11 +503,12 @@ EOF
   mcopy -i "$CIDATA_IMG" "$dir"/* ::/
 }
 
-# The dev/local ISO installs the -dev packages; a stable ISO the plain ones.
+# The edge/dev/local ISO installs the -dev packages, as builder/build-iso.sh
+# picks them; a stable ISO the plain ones.
 detect_packages() {
   RUNTIME_PACKAGE=omarchy-dev
   SETTINGS_PACKAGE=omarchy-settings-dev
-  if [[ $(basename "$ISO") != *dev* && $(basename "$ISO") != *local* && $(basename "$ISO") != *pr* ]]; then
+  if [[ $(basename "$ISO") != *edge* && $(basename "$ISO") != *dev* && $(basename "$ISO") != *local* && $(basename "$ISO") != *pr* ]]; then
     RUNTIME_PACKAGE=omarchy
     SETTINGS_PACKAGE=omarchy-settings
   fi

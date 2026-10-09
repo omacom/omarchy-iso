@@ -203,7 +203,7 @@ jobs:
           cp test/vm-image/vm-boot "$dir/vm/vm-boot"
           (cd "$dir/vm" && sha256sum base.qcow2 OVMF_VARS.4m.fd vmlinuz initrd cmdline vm-boot >SHA256SUMS)
 
-          omarchy=$(awk '$1 == "omarchy" || $1 == "omarchy-dev" { print $2 }' vm-packages.txt)
+          omarchy=$(awk '$1 == "omarchy" || $1 == "omarchy-dev" { print $2; exit }' vm-packages.txt)
           jq -n \
             --arg version "$VERSION" --arg channel "$CHANNEL" --arg site "$SITE/$RELEASE" --arg iso_url "$iso_url" \
             --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \

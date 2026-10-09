@@ -60,6 +60,11 @@ CONF
   " >/dev/null
 
   ssh_sudo "cat /boot/limine.conf" >"$RUN_DIR/limine.conf.fixtured"
+  # Every UKI the fixture planted, kept on this side: the reset wipes foreign
+  # boot directories (a known failure), so a list stored on the ESP would
+  # vanish with them and fail the UKI check for the wrong reason.
+  FOREIGN_UKIS=$(ssh_sudo "ls /boot/EFI/Linux/foreign_*.efi" | tr '\r\n' '  ')
+  [[ $FOREIGN_UKIS == *foreign_* ]] || { echo "the fixture planted no foreign UKI" >&2; return 1; }
   log "ESP fixtured as a shared dual-boot ESP (old machine-id $OLD_ID)"
 }
 
@@ -156,7 +161,7 @@ reset_phase() {
   check "foreign boot directory survives staging" \
     ssh_sudo "grep -q foreign-payload /boot/$FOREIGN_ID/marker"
   check "foreign UKI survives staging" \
-    ssh_sudo "ls /boot/EFI/Linux/foreign_*.efi >/dev/null 2>&1"
+    ssh_sudo "for u in $FOREIGN_UKIS; do test -f \$u || exit 1; done"
   check "old omarchy entry is removed by staging" \
     ssh_sudo "! grep -q 'machine-id=$OLD_ID' /boot/limine.conf"
   check "old omarchy boot directory is removed by staging" \
@@ -298,7 +303,7 @@ first_boot_phase() {
   check "foreign boot directory survives the first boot" \
     ssh_sudo "grep -q foreign-payload /boot/$FOREIGN_ID/marker"
   check "foreign UKI survives the first boot" \
-    ssh_sudo "ls /boot/EFI/Linux/foreign_*.efi >/dev/null 2>&1"
+    ssh_sudo "for u in $FOREIGN_UKIS; do test -f \$u || exit 1; done"
   check "old omarchy identity never returns" \
     ssh_sudo "! grep -q 'machine-id=$OLD_ID' /boot/limine.conf"
   check "the new identity owns a boot entry" \

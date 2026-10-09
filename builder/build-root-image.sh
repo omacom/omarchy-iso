@@ -409,8 +409,8 @@ echo "Shrinking image btrfs to ${shrink_mb}M (used $((used_bytes / 1048576))M + 
 # If the shrink fails, ship the image at its current size.
 if ! btrfs filesystem resize "${shrink_mb}M" "$mnt"; then
   echo "WARNING: btrfs shrink to ${shrink_mb}M failed; keeping the current size"
-  shrink_mb=$(( ${OMARCHY_IMAGE_SIZE:-24G} ))
-  shrink_mb=$(( ${shrink_mb%G} * 1024 ))
+  image_size=${OMARCHY_IMAGE_SIZE:-24G}
+  shrink_mb=$(( ${image_size%G} * 1024 ))
 fi
 sync
 umount "$mnt"

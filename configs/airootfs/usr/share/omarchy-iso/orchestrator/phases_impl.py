@@ -171,6 +171,12 @@ ROOT_IMAGE_STREAM = Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.btrfs.zs
 ROOT_IMAGE_RAW = Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.img")
 # The same image, zstd-compressed: what the ISO ships.
 ROOT_IMAGE_RAW_ZST = Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.img.zst")
+
+
+def _root_image_verified() -> Path:
+    """The artifact omarchy-root-image-verify.service hashes: the raw image
+    stream when the ISO ships one, else the send stream."""
+    return ROOT_IMAGE_RAW_ZST if ROOT_IMAGE_RAW_ZST.is_file() else ROOT_IMAGE_STREAM
 # Decompresses the outer layer in the receive pipe. --long=27 mirrors the
 # compressing side's window: it is within the decoder's default 128 MiB
 # acceptance limit, but saying it here keeps the pair visibly in step with
@@ -346,7 +352,7 @@ def _publish_verify_progress(ctx: InstallContext) -> None:
     helper is the authority on the verdict, and any hiccup here (unit already
     done, hasher between opens, /proc gone) just skips a sample."""
     try:
-        total = ROOT_IMAGE_STREAM.stat().st_size
+        total = _root_image_verified().stat().st_size
     except OSError:
         return
     while total and _verify_unit_property("ActiveState") == "activating":
@@ -374,7 +380,7 @@ def _hasher_read_pos() -> int | None:
     try:
         for fd in fd_dir.iterdir():
             try:
-                if fd.resolve() != ROOT_IMAGE_STREAM:
+                if fd.resolve() != _root_image_verified():
                     continue
                 fdinfo = (fd_dir.parent / "fdinfo" / fd.name).read_text()
             except OSError:
@@ -711,7 +717,9 @@ def _install_root_image_dd(ctx: InstallContext) -> None:
 def _install_root_image(ctx: InstallContext) -> None:
     # Block copy when the ISO carries the image, btrfs receive otherwise.
     if ROOT_IMAGE_RAW_ZST.is_file() or ROOT_IMAGE_RAW.is_file():
-        return _install_root_image_dd(ctx)
+        _install_root_image_dd(ctx)
+        _finish_root_image(ctx)
+        return
 
     target = ctx.target
     stream = _root_image_stream()
@@ -759,11 +767,18 @@ def _install_root_image(ctx: InstallContext) -> None:
     finally:
         subprocess.run(["umount", str(top)], check=False, capture_output=True)
 
+    _finish_root_image(ctx)
+
+
+def _finish_root_image(ctx: InstallContext) -> None:
+    """What both install paths owe the rest of the install: the image carries
+    the packages the phases assume, and the target has a machine-id (the
+    image deliberately ships an empty one) before limine-entry-tool and the
+    factory snapshot read it."""
+    target = ctx.target
     missing = [pkg for pkg in _root_image_required_packages() if not arch.target_has_package(target, pkg)]
     if missing:
         raise RuntimeError(f"root image lacks required packages: {', '.join(missing)}")
-
-    # Per-machine identity the image deliberately ships without.
     subprocess.run(["systemd-machine-id-setup", f"--root={target}"], check=True, capture_output=True)
 
 
@@ -2029,7 +2044,7 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     # records which one it was built with (stock linux on older images).
     prebuilt_kernel_file = ctx.target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki.kernel"
     prebuilt_kernel = prebuilt_kernel_file.read_text().strip() if prebuilt_kernel_file.is_file() else "linux"
-    esp_uki = ctx.target / "boot" / "EFI" / "Linux" / f"omarchy_{prebuilt_kernel}.efi"
+    esp_uki = esp_root / "EFI" / "Linux" / f"omarchy_{prebuilt_kernel}.efi"
     used_prebuilt_uki = False
 
     # The pre-built UKI was made before any hardware script ran. nvidia.sh and
@@ -2052,7 +2067,14 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
         default_limine.write_text(f'{text}\nBOOT_ORDER="{selected}, {selected}-*, *, *fallback, Snapshots"\n')
         info(f"› {selected} boots first; the pre-built UKI is for {prebuilt_kernel}")
 
-    if prebuilt_uki.is_file() and not added_modules:
+    # A UKI is a UEFI executable. On BIOS firmware Limine boots a kernel and
+    # initramfs pair, and limine-entry-tool --add-uki refuses ("Your system is
+    # not using EFI mode"), so such a machine builds its boot files the normal
+    # way below.
+    if prebuilt_uki.is_file() and not added_modules and not arch.has_uefi():
+        info("› BIOS firmware; the pre-built UKI is UEFI-only, building the boot files on this machine")
+
+    if prebuilt_uki.is_file() and not added_modules and arch.has_uefi():
         used_prebuilt_uki = True
         with _time_step("LIMINE.deploy_prebuilt_uki (copy from image)"):
             esp_uki.parent.mkdir(parents=True, exist_ok=True)
@@ -2072,7 +2094,7 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
         with _time_step("LIMINE.limine-entry-tool --add-uki (register boot entry)"):
             subprocess.run(
                 ["arch-chroot", str(ctx.target), "limine-entry-tool",
-                 "--add-uki", prebuilt_kernel, f"/boot/EFI/Linux/omarchy_{prebuilt_kernel}.efi",
+                 "--add-uki", prebuilt_kernel, f"{esp_path.rstrip('/')}/EFI/Linux/omarchy_{prebuilt_kernel}.efi",
                  "--comment", "Pre-built UKI",
                  "--no-mutex", "--no-hooks"],
                 check=True,

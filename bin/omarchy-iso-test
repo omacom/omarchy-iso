@@ -147,6 +147,7 @@ fi
 $ENCRYPT && BASE_NAME+="-encrypted"
 $PROVISION && BASE_NAME+="-provision"
 $FREE_SPACE && BASE_NAME+="-free-space"
+$NO_NETWORK && BASE_NAME+="-no-network"
 BASE_DIR="$REPO_DIR/test-runs/$BASE_NAME"
 RUN_DIR="$BASE_DIR/runs/$(date +%Y%m%d-%H%M%S)"
 BASE_DISK="$BASE_DIR/base.qcow2"
@@ -240,6 +241,7 @@ cleanup() {
   local status=$?
 
   [[ -n $HTTP_PID ]] && kill "$HTTP_PID" 2>/dev/null || true
+  for pid in "${FAKE_PCI_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
 
   if ! $KEEP_RUNNING; then
     vm_running && log "Stopping test VM"
@@ -1366,6 +1368,10 @@ else
   install_phase
 fi
 
+if $NO_NETWORK && ! $INSTALL_ONLY; then
+  log "No network: the acceptance suite needs SSH; stopping after the install"
+  INSTALL_ONLY=true
+fi
 if $INSTALL_ONLY; then
   log "Base image ready: $BASE_DISK"
   exit 0

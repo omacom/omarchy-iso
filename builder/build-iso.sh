@@ -128,12 +128,17 @@ if [[ -d /omarchy-source && -d /omarchy-pkgs ]]; then
   done
 fi
 
-# Node.js binary for offline mise install.
-NODE_DIST_URL="https://nodejs.org/dist/latest"
-NODE_SHASUMS=$(curl -fsSL "$NODE_DIST_URL/SHASUMS256.txt")
+# Node.js binary for offline mise install. The version is resolved from the
+# "latest" alias, the file is fetched from its own versioned directory: the
+# alias directory changes under a release, and a CDN edge can answer 404 for
+# the new filename there for hours. Versioned paths never change once
+# published.
+NODE_DIST="https://nodejs.org/dist"
+NODE_SHASUMS=$(curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 "$NODE_DIST/latest/SHASUMS256.txt")
 NODE_FILENAME=$(echo "$NODE_SHASUMS" | grep "linux-x64.tar.gz" | awk '{print $2}')
 NODE_SHA=$(echo "$NODE_SHASUMS" | grep "linux-x64.tar.gz" | awk '{print $1}')
-curl -fsSL "$NODE_DIST_URL/$NODE_FILENAME" -o "/tmp/$NODE_FILENAME"
+NODE_VERSION=${NODE_FILENAME#node-}; NODE_VERSION=${NODE_VERSION%%-*}
+curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 "$NODE_DIST/$NODE_VERSION/$NODE_FILENAME" -o "/tmp/$NODE_FILENAME"
 echo "$NODE_SHA /tmp/$NODE_FILENAME" | sha256sum -c -
 mkdir -p "$build_cache_dir/airootfs/opt/packages/"
 cp "/tmp/$NODE_FILENAME" "$build_cache_dir/airootfs/opt/packages/"
@@ -601,6 +606,23 @@ cp "$build_cache_dir/pacman-offline.conf" "$build_cache_dir/airootfs/etc/pacman.
 echo "[timing] mkarchiso start $(date +%s)"
 mkarchiso -v -w "$build_cache_dir/work/" -o /out/ "$build_cache_dir/"
 echo "[timing] mkarchiso end $(date +%s)"
+
+# The live initramfs must stay small enough for GRUB and the kernel to place
+# it. omarchy-iso#128: at 241 MiB (every DRM driver's firmware, via the kms
+# hook) GRUB could not allocate it on a Lenovo Yoga's EFI memory map and booted
+# the kernel without it; measured under OVMF it needs 1 GB of RAM where the
+# 91 MiB one boots in 512 MB. 128 MiB leaves headroom over today's size and
+# none for that class of regression.
+live_initramfs_limit=$((128 * 1024 * 1024))
+for live_initramfs in "$build_cache_dir/work/iso/${iso_subdir%/*}/boot/x86_64"/initramfs-*.img; do
+  [[ -f $live_initramfs ]] || { echo "ERROR: no live initramfs under work/iso/${iso_subdir%/*}/boot/x86_64" >&2; exit 1; }
+  live_initramfs_bytes=$(stat -c %s "$live_initramfs")
+  echo "live initramfs $(basename "$live_initramfs"): $live_initramfs_bytes bytes"
+  if (( live_initramfs_bytes > live_initramfs_limit )); then
+    echo "ERROR: live initramfs is $live_initramfs_bytes bytes, over the $live_initramfs_limit limit (omarchy-iso#128)" >&2
+    exit 1
+  fi
+done
 
 # Match host UID/GID on output.
 if [[ -n $HOST_UID && -n $HOST_GID ]]; then

@@ -9,8 +9,7 @@
 #
 # Runs on the default variant only: desktop behaviour does not vary by disk
 # size, encryption, or bootloader, and the smoke is expensive. The universal
-# clipboard sub-phase (opens Chromium) is deliberately left for a follow-up
-# once the session + core shortcuts are proven green in CI.
+# clipboard sub-phase (opens Chromium) runs too.
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 

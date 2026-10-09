@@ -2,7 +2,7 @@
 
 [![Nightly ISO Build](https://github.com/omacom/omarchy-iso/actions/workflows/nightly-build.yml/badge.svg?branch=quattro&event=schedule)](https://github.com/omacom/omarchy-iso/actions/workflows/nightly-build.yml?query=branch%3Aquattro+event%3Aschedule)
 
-The Omarchy ISO is the only supported way to install Omarchy. It ships the Omarchy Configurator, unpacks a pre-built Arch Linux + Omarchy root image onto the target with `btrfs receive`, installs the per-machine packages (kernel, microcode, audio firmware) from the bundled mirror, runs target system setup in the chroot, creates the user, and runs `omarchy-provision-user` for that user.
+The Omarchy ISO is the only supported way to install Omarchy. It ships the Omarchy Configurator, writes a pre-built Arch Linux + Omarchy root image (a zstd-compressed btrfs partition image) onto the target with `zstdcat | dd`, gives it a fresh filesystem id and grows it to the partition, installs the per-machine packages (kernel, microcode, audio firmware) from the bundled mirror, runs target system setup in the chroot, creates the user, and runs `omarchy-provision-user` for that user.
 
 ## Get Omarchy
 

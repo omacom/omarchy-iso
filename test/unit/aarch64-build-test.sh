@@ -85,7 +85,7 @@ fi
 
 # --- manifest filter -----------------------------------------------------------
 source "$ROOT/builder/aarch64-package-filter.sh"
-result=$(filter_aarch64_packages linux-omarchy-n1x linux linux-headers linux-omarchy linux-omarchy-headers amd-ucode broadcom-wl-dkms tzupdate lib32-nvidia-utils dell-xps13-sidecar-amps mise-bin nvim vi obs-studio yay-debug hyprland omarchy-dev 2>/dev/null | tr '\n' ' ')
+result=$(filter_aarch64_packages linux-omarchy-n1x linux linux-headers linux-omarchy linux-omarchy-headers amd-ucode broadcom-wl-dkms tzupdate lib32-nvidia-utils dell-xps13-sidecar-amps linux-firmware-cirrus-dx13260 apple-bcm-firmware-fetcher superwhisper-bin mise-bin nvim vi obs-studio yay-debug hyprland omarchy-dev 2>/dev/null | tr '\n' ' ')
 [[ $result == "linux-omarchy-n1x linux-omarchy-n1x-headers linux-omarchy-n1x linux-omarchy-n1x-headers tzupdate mise-bin neovim ex-vi-compat hyprland omarchy-dev " ]] || fail "manifest filter produced: $result"
 
 grep -Fq -- '-e "OMARCHY_RUNTIME_PACKAGE=${OMARCHY_RUNTIME_PACKAGE:-}"' "$ROOT/bin/omarchy-iso-make" \

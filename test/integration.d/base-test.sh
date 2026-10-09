@@ -707,14 +707,21 @@ EOF
   mcopy -i "$CIDATA_IMG" "$dir"/* ::/
 }
 
-# The dev/local ISO installs the -dev packages; a stable ISO the plain ones.
+# The edge/dev/local ISO installs the -dev packages, as builder/build-iso.sh
+# picks them; a stable ISO the plain ones.
 detect_packages() {
   RUNTIME_PACKAGE=omarchy-dev
   SETTINGS_PACKAGE=omarchy-settings-dev
-  if [[ $(basename "$ISO") != *dev* && $(basename "$ISO") != *local* && $(basename "$ISO") != *pr* ]]; then
+  if [[ $(basename "$ISO") != *edge* && $(basename "$ISO") != *dev* && $(basename "$ISO") != *local* && $(basename "$ISO") != *pr* ]]; then
     RUNTIME_PACKAGE=omarchy
     SETTINGS_PACKAGE=omarchy-settings
   fi
+}
+
+# The firmware names what it starts on the serial port: the ISO's medium while
+# the installer runs, the installed disk's Limine once the install is over.
+installed_system_started() {
+  grep -aq 'starting Boot.*"Limine"' "$1" 2>/dev/null
 }
 
 # Wait out an unattended cidata install to its reboot into the installed
@@ -724,9 +731,11 @@ detect_packages() {
 # Reboot Now prompt if one appears. Screenshot names take the given prefix so
 # each caller's artifacts stay apart; on a stopped install the live system's
 # log and state are saved best-effort (root SSH may not be authorized yet).
+# Given the VM's serial log, it also says when the install is over and the
+# first boot is what is being waited for.
 wait_for_unattended_install() {
-  local prefix="$1"
-  local waited=0 text progress_name blank_screens=0
+  local prefix="$1" serial_log="${2:-}"
+  local waited=0 text progress_name blank_screens=0 first_boot_at=""
 
   log "Waiting for the unattended install to finish (timeout ${INSTALL_TIMEOUT}s)"
   while true; do
@@ -813,7 +822,20 @@ wait_for_unattended_install() {
       printf -v progress_name 'success-%s-progress-%04ds' "$prefix" "$waited"
       capture_console "$progress_name"
     fi
-    ((waited % 30 == 0)) && echo "    ... installing (${waited}s)"
+    # Once the installed system has started, the install is over and what is
+    # being waited for is the first boot: say so, or a hung first boot reads
+    # as a slow install.
+    if [[ -n $serial_log && -z $first_boot_at ]] && installed_system_started "$serial_log"; then
+      first_boot_at=$waited
+      log "Install finished after about ${waited}s. Waiting for the installed system's first boot."
+    fi
+    if ((waited % 30 == 0)); then
+      if [[ -n $first_boot_at ]]; then
+        echo "    ... first boot ($((waited - first_boot_at))s, install took about ${first_boot_at}s)"
+      else
+        echo "    ... installing (${waited}s)"
+      fi
+    fi
 
     sleep 10
     ((waited += 10))
@@ -847,7 +869,7 @@ install_phase() {
     -drive "file=$CIDATA_IMG,format=raw,if=none,id=cidata" \
     -device usb-storage,drive=cidata
 
-  wait_for_unattended_install install || return 1
+  wait_for_unattended_install install "$RUN_DIR/install-serial.log" || return 1
 
   # Keep the installer's own clock, its log and the first boot's numbers next
   # to the base image while the system is reachable, so CI can report them

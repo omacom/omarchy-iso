@@ -1,9 +1,12 @@
 name: Install test
 
-# Builds the ISO a pull request produces, installs it unattended in a KVM
-# guest, boots the installed system again, and reports how long the install
-# and both boots took. Every later change to the installer is measured
-# against these numbers in its own PR.
+# Builds the ISO a pull request produces once, then installs it unattended in
+# KVM guests, one job per variant: the default install and the encrypted one
+# run every scenario in test/integration.d/, the others install a machine the
+# default does not cover (another keyboard, a small disk, little memory, BIOS
+# firmware, a slow medium) and run the scenarios that concern it. The default
+# variant's install and boot times are what every later change is measured
+# against in its own PR.
 
 on:
   pull_request:
@@ -20,13 +23,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  install:
+  build:
+    name: Build the ISO
     # Our own branches run on Namespace. A pull request from a fork stays on
     # GitHub's runner: it is somebody else's code, and it has no business on
     # our account's machines. No cache volume either way: what one pull
     # request leaves in a cache the next run would trust.
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-26.04' || 'namespace-profile-linux-amd64-16x32' }}
-    timeout-minutes: 75
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -35,21 +39,92 @@ jobs:
         run: |
           df -h /
           avail_gb=$(df -BG --output=avail / | tail -1 | tr -dc 0-9)
-          [ "$avail_gb" -ge 40 ] || { echo "::error::only ${avail_gb} GB free, the ISO build and install test need ~40 GB"; exit 1; }
+          [ "$avail_gb" -ge 40 ] || { echo "::error::only ${avail_gb} GB free, the ISO build needs ~40 GB"; exit 1; }
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Build the ISO
         run: NO_BOOT_OFFER=1 ./bin/omarchy-iso-make
 
+      # Already compressed, and only the jobs below read it.
+      - name: Hand the ISO to the install jobs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: iso-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release/*.iso
+          compression-level: 0
+          retention-days: 1
+
+  install:
+    name: ${{ matrix.variant }}
+    needs: build
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-26.04' || 'namespace-profile-linux-amd64-16x32' }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # scenarios: the test/integration.d/ scenarios to run after the
+        # install; empty runs all of them. options go to test/integration,
+        # env to the harness (OMARCHY_INTEGRATION_*, base-test.sh).
+        include:
+          - variant: default
+          - variant: encrypted
+            env: OMARCHY_INTEGRATION_ENCRYPT=true
+          - variant: kb-uk
+            scenarios: boot keymap-locale
+            env: OMARCHY_INTEGRATION_KB_LAYOUT=uk
+          - variant: encrypted-kb-uk
+            scenarios: boot keymap-locale
+            env: OMARCHY_INTEGRATION_ENCRYPT=true OMARCHY_INTEGRATION_KB_LAYOUT=uk
+          - variant: small-disk
+            scenarios: boot
+            env: OMARCHY_INTEGRATION_DISK_GB=24
+          - variant: low-memory
+            scenarios: boot
+            memory: 4096
+          - variant: low-memory-encrypted
+            scenarios: boot
+            memory: 2048
+            env: OMARCHY_INTEGRATION_ENCRYPT=true
+          - variant: bios
+            scenarios: boot firmware-boot
+            options: --bios
+          - variant: uki
+            scenarios: boot
+            env: OMARCHY_INTEGRATION_UKI=true
+          # A 30 MiB/s medium, a USB 2 stick: the install is read-bound and
+          # the image does not stay cached between the verify and the write.
+          - variant: usb2-4g
+            scenarios: noop
+            memory: 4096
+            env: OMARCHY_INTEGRATION_ENCRYPT=true OMARCHY_ISO_THROTTLE_BPS=31457280
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Fetch the ISO
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: iso-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release
+
       # The harness runs in an Arch container: Arch's current QEMU and OVMF
       # (QEMU 11) instead of the runner's older one, at the paths the
       # harness expects, the same as on an Omarchy workstation.
-      - name: Install unattended, then boot the installed system
+      - name: Install unattended, then run the scenarios
+        env:
+          VARIANT: ${{ matrix.variant }}
+          VARIANT_ENV: ${{ matrix.env }}
+          SCENARIOS: ${{ matrix.scenarios }}
+          OPTIONS: ${{ matrix.options }}
+          MEMORY: ${{ matrix.memory || 8192 }}
         run: |
           sudo chmod 0666 /dev/kvm
+          variant_env=()
+          for setting in $VARIANT_ENV; do variant_env+=(-e "$setting"); done
           docker run --rm --device /dev/kvm -v "$PWD:/w" -w /w \
-            -e OMARCHY_INTEGRATION_DISK_CACHE=none \
+            -e OMARCHY_INTEGRATION_DISK_CACHE=none -e OMARCHY_INTEGRATION_DISCARD_DISKS=1 \
+            -e OMARCHY_INTEGRATION_VARIANT="$VARIANT" -e SCENARIOS -e OPTIONS -e MEMORY \
+            "${variant_env[@]}" \
             ghcr.io/archlinux/archlinux:latest bash -euo pipefail -c '
               # pacman 7 fails every sync on a kernel without Landlock, which
               # these runners have; builder/build-iso.sh does the same.
@@ -62,8 +137,8 @@ jobs:
               # try again.
               sed -i "1i Server = https://mirror.omarchy.org/\$repo/os/\$arch" /etc/pacman.d/mirrorlist
               for attempt in 1 2 3; do
-                pacman -Syu --noconfirm --needed qemu-system-x86 qemu-hw-display-virtio-gpu qemu-hw-display-virtio-vga qemu-img edk2-ovmf socat \
-                  imagemagick tesseract tesseract-data-eng mtools dosfstools jq openssh openssl python curl >/dev/null && break
+                pacman -Syu --noconfirm --needed qemu-system-x86 qemu-hw-display-virtio-gpu qemu-hw-display-virtio-vga qemu-img edk2-ovmf seabios socat \
+                  imagemagick tesseract tesseract-data-eng mtools dosfstools e2fsprogs parted libisoburn acpica cpio zstd file jq openssh openssl python curl >/dev/null && break
                 [ "$attempt" -lt 3 ] || { echo "::error::the test container could not install its tools"; exit 1; }
                 echo "pacman failed, attempt $attempt of 3; trying again in 15 s"; sleep 15
               done
@@ -71,7 +146,8 @@ jobs:
               printf "#!/bin/sh\nexit 0\n" >/usr/local/bin/omarchy-pkg-add
               chmod 0755 /usr/local/bin/omarchy-pkg-add
               qemu-system-x86_64 --version | head -1
-              ./test/integration release/*.iso boot --no-preview --memory 8192 --timeout 1800
+              # shellcheck disable=SC2086 # scenario names and options are separate words
+              ./test/integration release/*.iso $SCENARIOS $OPTIONS --no-preview --memory "$MEMORY" --timeout 1800
             '
 
       # The harness ran as root in its container: test-runs and what QEMU
@@ -85,10 +161,10 @@ jobs:
       - name: Report times
         if: always()
         run: |
-          base=$(ls -d test-runs/*-integration 2>/dev/null | head -1)
+          base=$(ls -d test-runs/*-integration* 2>/dev/null | head -1)
           [ -n "$base" ] || { echo "No test run to report" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
           {
-            echo "## Install test"
+            echo "## Install test: ${{ matrix.variant }}"
             echo
             if [ -f "$base/omarchy-install-timing.json" ]; then
               jq -r '"**Install:** \((.finished_at - .started_at) * 10 | round / 10) s across \(.phases | length) phases"' "$base/omarchy-install-timing.json"
@@ -113,14 +189,15 @@ jobs:
       # The comment workflow runs from quattro and reads only this artifact;
       # it needs the PR number, which a workflow_run event omits for forks.
       - name: Record the pull request
-        if: always() && github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request' && matrix.variant == 'default'
         run: echo "${{ github.event.pull_request.number }}" > test-runs/pr-number
 
       - name: Upload test artifacts
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: install-test-${{ github.run_id }}-${{ github.run_attempt }}
+          # The comment workflow reads the default variant's artifact by this name.
+          name: install-test-${{ matrix.variant != 'default' && format('{0}-', matrix.variant) || '' }}${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             test-runs/pr-number
             test-runs/*/omarchy-install-timing.json

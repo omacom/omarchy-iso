@@ -80,20 +80,28 @@ QMP_SOCK=$(mktemp -u "${TMPDIR:-/tmp}/omarchy-integration-qmp.XXXXXX.sock")
 PIDFILE="$RUN_DIR/qemu.pid"
 
 FAILURES=0
+KNOWN_FAILURES=0
+source "$ROOT/test/integration.d/known-failures.sh"
 
 log() {
   printf '\033[1;35m==> %s\033[0m\n' "$1"
 }
 
 check() {
-  local description="$1"
+  local description="$1" until
   shift
 
   if "$@" >/dev/null 2>&1; then
     printf 'ok - %s\n' "$description"
   else
-    printf 'not ok - %s\n' "$description"
-    ((FAILURES += 1))
+    until=$(known_failure_until "$description")
+    if [[ -n $until ]]; then
+      printf 'not ok - %s # known failure, allowed until %s\n' "$description" "$until"
+      ((KNOWN_FAILURES += 1))
+    else
+      printf 'not ok - %s\n' "$description"
+      ((FAILURES += 1))
+    fi
     # What was on the screen when it failed. A screen assertion that fails
     # leaves nothing else to look at: the last capture predates it.
     local slug=${description,,}
@@ -104,7 +112,11 @@ check() {
 
 finish() {
   if ((FAILURES == 0)); then
-    log "$SCENARIO passed. Artifacts: $RUN_DIR"
+    if ((KNOWN_FAILURES > 0)); then
+      log "$SCENARIO passed with $KNOWN_FAILURES known failure(s). Artifacts: $RUN_DIR"
+    else
+      log "$SCENARIO passed. Artifacts: $RUN_DIR"
+    fi
     # The disk overlays a passed scenario booted are reproducible from the
     # base image and are the bulk of what a run leaves behind (a hibernate
     # overlay carries the memory image); on a ramdisk run directory they

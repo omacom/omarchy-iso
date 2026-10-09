@@ -1,0 +1,14 @@
+# Assertions that fail today because of a bug outside this repository. Each is
+# a finding, not an excuse: the run still prints it, it fails the run again the
+# moment it is unlisted, and it fails the run anyway once its date has passed.
+#
+# Format: YYYY-MM-DD scenario assertion, the assertion exactly as the scenario
+# prints it. The scenario is part of the match because assertion text is not
+# unique across scenarios.
+#
+# omarchy-system-factory-reset removes other systems' boot entries from a
+# shared ESP, so a factory reset destroys a dual-boot setup
+# (basecamp/omarchy#6847).
+2026-12-01 factory-reset windows entry survives staging
+2026-12-01 factory-reset foreign linux entry survives staging
+2026-12-01 factory-reset foreign boot directory survives staging

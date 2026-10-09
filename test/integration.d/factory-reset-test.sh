@@ -173,9 +173,13 @@ reset_phase() {
   ssh_sudo "cat /var/log/omarchy-system-factory-reset.log" >"$RUN_DIR/factory-reset.log" || true
   capture_console "success-reset-staged"
 
-  if ((FAILURES > 0)); then
+  # A reset that damaged the shared ESP is not rebooted into: what the first
+  # boot would show depends on the damage. The scenario ends here, failed, or
+  # passed when every failure is a known one.
+  if ((FAILURES > 0 || KNOWN_FAILURES > 0)); then
     log "Staging assertions failed; keeping the VM off the reboot path."
-    return 1
+    finish
+    exit 0
   fi
 
   # Decline the prompt's reboot; reboot deliberately so the ssh session

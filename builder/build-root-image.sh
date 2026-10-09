@@ -224,6 +224,11 @@ if [[ -f $logging_sh ]] && grep -q "date '+%Y-%m-%d %H:%M:%S'" "$logging_sh"; th
   bash -n "$logging_sh" && echo "logging.sh: timestamps without forking date"
 fi
 
+# Package names no repository offers any more: follow the known renames in the
+# image's install scripts, refuse to ship one that still asks for a dropped name.
+bash "$(dirname -- "${BASH_SOURCE[0]}")/follow-renamed-packages.sh" "$root/usr/share/omarchy/install" \
+  "${OMARCHY_RENAMED_PACKAGES:-}" "${OMARCHY_UNRESOLVED_PACKAGES:-}"
+
 sync
 
 # Build the UKI here, once, so the installer copies it to the ESP and skips

@@ -233,15 +233,28 @@ mapfile -t all_packages < <(
 # "target not found". Published Omarchy runtime packages that predate the rename
 # still list it in omarchy-other.packages, so map it here until every channel
 # ships a runtime that names broadcom-wl-dkms itself.
-# arch-mact2 dropped apple-bcm-firmware on 2026-09-16 in favour of
-# apple-bcm-firmware-fetcher, which does the same job (pull the T2 Wi-Fi and
-# Bluetooth firmware off the macOS volume) but only conflicts with the old name
-# rather than replacing it, so pacman cannot follow the rename on its own.
+# apple-bcm-firmware, which arch-mact2 dropped for apple-bcm-firmware-fetcher,
+# is not mapped here: renamed_packages below follows it, into the
+# mirror and into the install scripts that still ask for the old name.
 mapfile -t all_packages < <(
   printf '%s\n' "${all_packages[@]}" |
-    sed -e 's/^broadcom-wl$/broadcom-wl-dkms/' \
-      -e 's/^apple-bcm-firmware$/apple-bcm-firmware-fetcher/' |
+    sed -e 's/^broadcom-wl$/broadcom-wl-dkms/' |
     sort -u
+)
+
+# The names an install can ask pacman for: everything above except the live
+# system's own package list (packages.x86_64). The live root is pacstrapped
+# from the same mirror, so its tools (grub, nmap, vim, espeak-ng, man pages ...)
+# are downloaded too, but nothing on the target ever installs them; see the
+# shipped-mirror selection below.
+declare -a target_packages
+mapfile -t target_packages < <(
+  {
+    grep -hv '^#\|^$' "${base_pkg_lists[@]}"
+    grep -hv '^#\|^$' /builder/archinstall.packages
+    grep -hv '^#\|^$' /builder/image.packages
+    printf '%s\n' "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"
+  } | sed 's/^broadcom-wl$/broadcom-wl-dkms/' | sort -u
 )
 
 # With --local-source we already built these omarchy* packages directly into
@@ -250,6 +263,15 @@ mapfile -t all_packages < <(
 if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
   mapfile -t all_packages < <(
     printf '%s\n' "${all_packages[@]}" |
+      grep -Fxv \
+        -e "$OMARCHY_RUNTIME_PACKAGE" \
+        -e "$OMARCHY_SETTINGS_PACKAGE" \
+        -e "$OMARCHY_NVIM_PACKAGE" || true
+  )
+  # They are in the image, so never shipped; and the online db the closure is
+  # resolved against does not know the local builds.
+  mapfile -t target_packages < <(
+    printf '%s\n' "${target_packages[@]}" |
       grep -Fxv \
         -e "$OMARCHY_RUNTIME_PACKAGE" \
         -e "$OMARCHY_SETTINGS_PACKAGE" \
@@ -274,6 +296,43 @@ if (( ${#unresolved[@]} )); then
   # anything -Sp can still turn into a download.
   mapfile -t unresolved < <(for p in "${unresolved[@]}"; do
     pacman --config "/configs/pacman-online-${OMARCHY_MIRROR}.conf" --dbpath /tmp/offlinedb -Sp "$p" >/dev/null 2>&1 || echo "$p"; done)
+fi
+# Dropping a name keeps the build alive but loses whatever needed the package,
+# and the hardware-conditional ones are needed where no VM test looks: the
+# runtime's T2 step asks for apple-bcm-firmware in one pacman -S with linux-t2,
+# its headers, the audio config and t2fanrd, so "target not found" costs a T2
+# Mac all five. A known rename is followed instead: the new name goes
+# into the mirror here, and build-root-image.sh rewrites the old name in the
+# image's install scripts (arch-mact2's package has no provides= for it).
+# Only names nothing offers are looked up, so an entry goes inert by itself
+# once the old name is back or the runtime stops asking for it.
+declare -A renamed_packages=(
+  [apple-bcm-firmware]=apple-bcm-firmware-fetcher
+)
+renamed_list="$build_cache_dir/airootfs/usr/share/omarchy-iso/renamed-packages.txt"
+unresolved_list="$build_cache_dir/airootfs/usr/share/omarchy-iso/unresolved-packages.txt"
+rm -f "$renamed_list" "$unresolved_list"
+still_unresolved=()
+for p in "${unresolved[@]}"; do
+  new=${renamed_packages[$p]:-}
+  if [[ -n $new ]] && printf '%s\n' "${offered[@]}" | grep -Fxq "$new"; then
+    echo "NOTE: $p is gone from every repository; following its rename to $new" >&2
+    all_packages+=("$new")
+    printf '%s %s\n' "$p" "$new" >>"$renamed_list"
+    mapfile -t all_packages < <(printf '%s\n' "${all_packages[@]}" | grep -Fxv "$p" | sort -u)
+  else
+    still_unresolved+=("$p")
+  fi
+done
+unresolved=("${still_unresolved[@]}")
+# The same renames and drops for the names an install can ask for.
+for p in "${!renamed_packages[@]}"; do
+  if [[ -f $renamed_list ]] && grep -q "^$p " "$renamed_list"; then
+    mapfile -t target_packages < <(printf '%s\n' "${target_packages[@]}" | sed "s/^${p}\$/${renamed_packages[$p]}/" | sort -u)
+  fi
+done
+if (( ${#unresolved[@]} )); then
+  mapfile -t target_packages < <(printf '%s\n' "${target_packages[@]}" | grep -Fxv -f <(printf '%s\n' "${unresolved[@]}"))
 fi
 if (( ${#unresolved[@]} )); then
   echo "WARNING: dropping package names no configured repository offers: ${unresolved[*]}" >&2
@@ -409,6 +468,7 @@ rm -f "$build_cache_dir/airootfs/var/cache/omarchy/rootfs/omarchy-root.btrfs"*
 image_localdb=/tmp/omarchy-root-image-localdb
 echo "[timing] root image start $(date +%s)"
 OMARCHY_IMAGE_LOCALDB_COPY="$image_localdb" \
+  OMARCHY_RENAMED_PACKAGES="$renamed_list" OMARCHY_UNRESOLVED_PACKAGES="$unresolved_list" \
   bash /builder/build-root-image.sh "$image_pacman_conf" "$root_image_stream" "${image_packages[@]}"
 echo "[timing] root image end $(date +%s)"
 
@@ -455,11 +515,24 @@ image_package_index() {
     awk '/^%NAME%$/ { getline n } /^%VERSION%$/ { getline v; print n "\t" v }' "$desc"
   done
 }
+#
+# And of what the image lacks, only what an install can reach: the dependency
+# closure of the names it can ask for. The rest is the live system's own
+# tooling (about 180 packages, 125 MB), downloaded because
+# the live root is pacstrapped from this mirror and then left in it.
+if ! installable_files="$(
+  pacman --config "/configs/pacman-online-${OMARCHY_MIRROR}.conf" --noconfirm \
+    --dbpath /tmp/offlinedb -S --print --print-format '%f' "${target_packages[@]}"
+)"; then
+  echo "ERROR: could not resolve the packages an install can ask for" >&2
+  exit 1
+fi
 shipped_list="$build_cache_dir/airootfs/usr/share/omarchy-iso/offline-mirror.shipped"
 awk -F'\t' '
-  NR == FNR { image[$1 "\t" $2] = 1; next }
-  !(($1 "\t" $2) in image) { print $3 }
-' <(image_package_index) <(mirror_package_index) | sort -u >"$shipped_list"
+  FILENAME == ARGV[1] { installable[$1] = 1; next }
+  FILENAME == ARGV[2] { image[$1 "\t" $2] = 1; next }
+  !(($1 "\t" $2) in image) && ($3 in installable) { print $3 }
+' <(printf '%s\n' "$installable_files") <(image_package_index) <(mirror_package_index) | sort -u >"$shipped_list"
 # grep -c exits 1 on no match; the count check below wants the 0.
 shipped_count=$(grep -c . "$shipped_list" || true)
 mirror_count=$(mirror_package_index | wc -l)

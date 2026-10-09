@@ -29,6 +29,37 @@ else
   echo "WARNING: /usr/lib/systemd/systemd-update-done missing; every live boot will redo the update units" >&2
 fi
 
+# The live system installs from the stick and never joins a network on its
+# own: the configurator has no Wi-Fi step, and the one network call it makes
+# (tzupdate, for a timezone guess) only works over a cable that is already
+# plugged in. So firmware for radios, datacenter NICs, cameras and ARM SoCs is
+# 330 MB of ISO that no driver in this system can ask for. What stays is
+# everything a machine may need to show the installer and speak it: GPU
+# firmware (a GPU driver that fails for want of firmware has already taken the
+# screen from the firmware framebuffer, and nouveau needs nvidia/ for GSP),
+# audio (the accessibility entry speaks), microcode, and wired NICs.
+# The installed system gets its firmware from the root image, not from here.
+fw=/usr/lib/firmware
+if [[ -d $fw ]]; then
+  before=$(du -sm "$fw" | cut -f1)
+  rm -rf "$fw"/intel/iwlwifi "$fw"/intel/ibt-* "$fw"/iwlwifi-* \
+    "$fw"/mediatek "$fw"/mrvl "$fw"/ath[0-9]* "$fw"/ar3k "$fw"/brcm "$fw"/cypress \
+    "$fw"/rtw88 "$fw"/rtw89 "$fw"/rtlwifi "$fw"/rtl_bt "$fw"/ti-connectivity "$fw"/qca \
+    "$fw"/nxp "$fw"/libertas "$fw"/mwl8k "$fw"/mwlwifi "$fw"/airoha "$fw"/qcom \
+    "$fw"/wfx "$fw"/rsi "$fw"/mt76* "$fw"/mt79* \
+    "$fw"/dpaa2 "$fw"/cxgb3 "$fw"/cxgb4 "$fw"/mellanox "$fw"/netronome "$fw"/liquidio \
+    "$fw"/qed "$fw"/cavium "$fw"/intel/ice \
+    "$fw"/dvb-* "$fw"/v4l-* "$fw"/intel/ipu* "$fw"/intel/vsc "$fw"/intel/irci* \
+    "$fw"/imx "$fw"/meson "$fw"/rockchip "$fw"/arm "$fw"/powervr "$fw"/nvidia/tegra* \
+    "$fw"/amlogic "$fw"/cnm "$fw"/cadence "$fw"/ti-keystone "$fw"/microchip
+  echo "Live firmware: ${before} MB -> $(du -sm "$fw" | cut -f1) MB (no radio, datacenter NIC, camera or SoC firmware)."
+fi
+
+# Nobody reads documentation or compiles against headers in the installer, and
+# it speaks English only.
+rm -rf /usr/share/doc /usr/share/man /usr/share/info /usr/share/gtk-doc /usr/share/gir-1.0 /usr/include
+find /usr/share/locale -mindepth 1 -maxdepth 1 ! -name 'en*' ! -name locale.alias -exec rm -rf {} +
+
 mirror=/var/cache/omarchy/mirror/offline
 shipped_list=/usr/share/omarchy-iso/offline-mirror.shipped
 

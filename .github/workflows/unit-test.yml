@@ -15,10 +15,10 @@ permissions:
 
 jobs:
   unit:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The tests run where the code they cover runs: on Arch, the same as
       # the live ISO and an Omarchy workstation. The container boots systemd
@@ -33,7 +33,7 @@ jobs:
         run: |
           docker run -d --name unit --privileged --cgroupns=host \
             -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /tmp:exec \
-            -v "$PWD:/src:ro" archlinux:latest bash -c '
+            -v "$PWD:/src:ro" ghcr.io/archlinux/archlinux:latest bash -c '
               systemctl mask getty.target console-getty.service \
                 systemd-udev-trigger.service systemd-udevd.service \
                 systemd-vconsole-setup.service
@@ -46,7 +46,14 @@ jobs:
               sleep 1
             done
             echo "systemd: $state"
-            pacman -Syu --noconfirm --needed python parted gcc diffutils >/dev/null
+            # From our own Arch mirror first, and a second and third try: a
+            # mirror that drops one file must not fail the tests.
+            sed -i "1i Server = https://mirror.omarchy.org/\$repo/os/\$arch" /etc/pacman.d/mirrorlist
+            for attempt in 1 2 3; do
+              pacman -Syu --noconfirm --needed python parted gcc diffutils jq zip unzip >/dev/null && break
+              [ "$attempt" -lt 3 ] || { echo "::error::the test container could not install its tools"; exit 1; }
+              sleep 15
+            done
             useradd -m tester
             cp -r /src /home/tester/omarchy-iso
             chown -R tester /home/tester/omarchy-iso

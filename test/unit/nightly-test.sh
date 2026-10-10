@@ -214,6 +214,12 @@ if PATH="$tmp/rc:$PATH" "$wrapped" copy a b >"$tmp/rc/out" 2>&1; then fail "rclo
 equal "rclone: its exit status is kept" "$(PATH="$tmp/rc:$PATH" "$wrapped" copy a b >/dev/null 2>&1; echo $?)" "3"
 if grep -q '::warning::' "$tmp/rc/out"; then fail "rclone: a failed upload was reported as a retry"; fi
 
+# rclone reads every RCLONE_<FLAG> variable as that flag: RCLONE_VERSION=v1.75.2
+# was "--version=v1.75.2" and stopped the publish before it uploaded anything.
+# Only its remote's settings, RCLONE_CONFIG_*, belong in a workflow's environment.
+flags=$(sed -nE 's/^[[:space:]]+(RCLONE_[A-Z0-9_]+):.*/\1/p' "$ROOT"/.github/workflows/*.yml | grep -v '^RCLONE_CONFIG_' | sort -u | paste -sd' ' || true)
+[[ -z $flags ]] || fail "rclone: a workflow sets $flags, which rclone would read as flags"
+
 # ------------------------------------------------------------ the install test
 # The harness is a script that starts a VM when it is read; take the two
 # functions out of it.

@@ -51,6 +51,11 @@ CONF
     echo windows-payload >/boot/EFI/Microsoft/Boot/bootmgfw.efi
   " >/dev/null
 
+  # Which UKIs exist depends on the kernels the ISO installs, so check the
+  # clones by the names the fixture actually gave them.
+  FOREIGN_UKIS=$(ssh_sudo "ls /boot/EFI/Linux/foreign_*.efi" | tr -d '\r' | xargs)
+  [[ -n $FOREIGN_UKIS ]] || { echo "the fixture cloned no UKI" >&2; return 1; }
+
   ssh_sudo "cat /boot/limine.conf" >"$RUN_DIR/limine.conf.fixtured"
   log "ESP fixtured as a shared dual-boot ESP (old machine-id $OLD_ID)"
 }
@@ -128,7 +133,7 @@ reset_phase() {
   check "foreign boot directory survives staging" \
     ssh_sudo "grep -q foreign-payload /boot/$FOREIGN_ID/marker"
   check "foreign UKI survives staging" \
-    ssh_sudo "test -f /boot/EFI/Linux/foreign_linux.efi"
+    ssh_sudo "ls $FOREIGN_UKIS >/dev/null"
   check "old omarchy entry is removed by staging" \
     ssh_sudo "! grep -q 'machine-id=$OLD_ID' /boot/limine.conf"
   check "old omarchy boot directory is removed by staging" \
@@ -270,7 +275,7 @@ first_boot_phase() {
   check "foreign boot directory survives the first boot" \
     ssh_sudo "grep -q foreign-payload /boot/$FOREIGN_ID/marker"
   check "foreign UKI survives the first boot" \
-    ssh_sudo "test -f /boot/EFI/Linux/foreign_linux.efi"
+    ssh_sudo "ls $FOREIGN_UKIS >/dev/null"
   check "old omarchy identity never returns" \
     ssh_sudo "! grep -q 'machine-id=$OLD_ID' /boot/limine.conf"
   check "the new identity owns a boot entry" \

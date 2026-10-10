@@ -258,13 +258,16 @@ if [[ $MEDIA_MODE == netinstall ]]; then
   # as "unknown trust" several phases into an install. Check what is being
   # shipped here, where the build fails and says so.
   #
-  # --no-autostart keeps gpg from starting an agent to answer these questions.
-  # An agent with this homedir leaves its sockets in the directory that is about
-  # to be shipped, and that directory is copied onto the live system.
-  keyring_keys=$(gpg --homedir "$keyring_dir" --no-autostart --with-colons --list-keys 2>/dev/null | grep -c '^pub:')
-  keyring_secret=$(gpg --homedir "$keyring_dir" --no-autostart --with-colons --list-secret-keys 2>/dev/null | grep -c '^sec:')
-  keyring_trusted=$(gpg --homedir "$keyring_dir" --no-autostart --with-colons --list-keys 2>/dev/null |
-    awk -F: '/^pub:/ { print $2 }' | grep -c '[fum]')
+  # Each count is allowed to come back zero, because grep reports "no matches"
+  # as a failure and this script runs under set -e — a check meant to report a
+  # problem must not kill the build without saying what the problem is.
+  keyring_keys=$(gpg --homedir "$keyring_dir" --with-colons --list-keys 2>/dev/null | grep -c '^pub:' || true)
+  keyring_secret=$(gpg --homedir "$keyring_dir" --with-colons --list-secret-keys 2>/dev/null | grep -c '^sec:' || true)
+  keyring_trusted=$(gpg --homedir "$keyring_dir" --with-colons --list-keys 2>/dev/null |
+    awk -F: '/^pub:/ { print $2 }' | grep -c '[fum]' || true)
+  keyring_keys=${keyring_keys:-0}
+  keyring_secret=${keyring_secret:-0}
+  keyring_trusted=${keyring_trusted:-0}
   echo "netinstall keyring: $keyring_keys keys, $keyring_trusted trusted, $keyring_secret secret"
   if ((keyring_keys == 0 || keyring_secret == 0 || keyring_trusted == 0)); then
     echo "ERROR: the keyring going onto this netinstall medium is unusable" >&2
@@ -273,11 +276,21 @@ if [[ $MEDIA_MODE == netinstall ]]; then
     echo "       install would fail with 'unknown trust'." >&2
     exit 1
   fi
-  # Sockets and locks from this build mean nothing on the medium, and the copy
-  # the installer makes would fail on them — so they go last, after anything
-  # above that might have created them.
+  # Asking gpg those questions starts an agent and a keybox daemon in this
+  # homedir, and they leave their sockets there whatever they are asked. Sockets
+  # are not files: the copy the installer makes would fail on them, and the
+  # install would halt in "Preparing live environment" before it wrote anything.
+  # So they are cleared after the checks rather than before them, and anything
+  # left over fails the build here instead of an install later.
+  gpgconf --homedir "$keyring_dir" --kill all >/dev/null 2>&1 || true
   rm -rf "$keyring_dir"/S.* "$keyring_dir"/*.lock "$keyring_dir"/.#*
   find "$keyring_dir" ! -type f ! -type d -delete
+  if [[ -n $(find "$keyring_dir" ! -type f ! -type d) ]]; then
+    echo "ERROR: the keyring this medium would carry holds entries that are" >&2
+    echo "       neither files nor directories; copying them would fail:" >&2
+    find "$keyring_dir" ! -type f ! -type d >&2
+    exit 1
+  fi
   rm -f "$build_cache_dir/airootfs/etc/systemd/system/pacman-init.service" \
     "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/pacman-init.service"
   # The weekly key-signature sync writes into the live keyring over the

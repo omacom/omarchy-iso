@@ -1,4 +1,4 @@
-"""Fresh installs use the Omarchy kernel, except for T2 Macs."""
+"""Fresh installs select the platform kernel and matching headers."""
 
 import json
 import os
@@ -34,12 +34,16 @@ class KernelSelectionTest(unittest.TestCase):
             ("04:00.0 Mass storage controller [0180]: Apple [106b:1802]", "linux-t2"),
             ("", "linux-omarchy"),
         ]
-        for devices, expected in cases:
-            with self.subTest(devices=devices):
+        # An aarch64 image names its kernel; an x86_64 one leaves it to the hardware.
+        cases = [("x86_64", "", devices, expected) for devices, expected in cases]
+        cases += [("aarch64", "linux-aarch64", "", "linux-aarch64")]
+        for machine, kernel, devices, expected in cases:
+            with self.subTest(machine=machine, devices=devices):
                 result = subprocess.run(
-                    ["bash", "-c", 'lspci() { printf "%s\\n" "$TEST_PCI"; }\n'
+                    ["bash", "-c", 'iso_arch=$TEST_MACHINE\niso_kernel=$TEST_KERNEL\n'
+                     + 'lspci() { printf "%s\\n" "$TEST_PCI"; }\n'
                      + probe.group() + "\ndetect_kernel"],
-                    env={**os.environ, "TEST_PCI": devices},
+                    env={**os.environ, "TEST_PCI": devices, "TEST_MACHINE": machine, "TEST_KERNEL": kernel},
                     check=True, capture_output=True, text=True,
                 )
                 self.assertEqual(result.stdout.strip(), expected)
@@ -51,15 +55,20 @@ class KernelSelectionTest(unittest.TestCase):
             ("0x106b", "0x1801", "linux-t2"),
             ("0x106b", "0x1802", "linux-t2"),
         ]:
-            with self.subTest(device=device), tempfile.TemporaryDirectory() as tmp:
+            with self.subTest(device=device), tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(context.platform, "machine", return_value="x86_64"):
                 pci = Path(tmp)
                 slot = pci / "0000:00:00.0"
                 slot.mkdir()
                 (slot / "vendor").write_text(vendor + "\n")
                 (slot / "device").write_text(device + "\n")
                 self.assertEqual(context._default_kernel(pci), expected)
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(context.platform, "machine", return_value="x86_64"):
             self.assertEqual(context._default_kernel(Path(tmp)), "linux-omarchy")
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(context.platform, "machine", return_value="aarch64"):
+            self.assertEqual(context._default_kernel(Path(tmp)), "linux-aarch64")
 
     def test_context_passes_effective_kernels_to_archinstall(self):
         for config, default, expected in [
@@ -67,6 +76,7 @@ class KernelSelectionTest(unittest.TestCase):
             ({"kernels": []}, "linux-omarchy", ["linux-omarchy"]),
             ({"kernels": None}, "linux-t2", ["linux-t2"]),
             ({}, "linux-t2", ["linux-t2"]),
+            ({}, "linux-aarch64", ["linux-aarch64"]),
             ({"kernels": ["linux-lts"]}, "linux-omarchy", ["linux-lts"]),
             ({"kernels": ["linux-omarchy", "linux-lts"]}, "linux-t2", ["linux-omarchy", "linux-lts"]),
             ({"omarchy_install": {"storage": {"kernel": "linux-t2"}}}, "linux-omarchy", ["linux-t2"]),
@@ -87,7 +97,7 @@ class KernelSelectionTest(unittest.TestCase):
                 self.assertEqual(json.loads(ctx.arch_config_path.read_text())["kernels"], expected)
 
     def test_headers_install_before_dkms_packages(self):
-        for kernels in (["linux-omarchy"], ["linux-t2"], ["linux-omarchy", "linux-lts"]):
+        for kernels in (["linux-omarchy"], ["linux-t2"], ["linux-aarch64"], ["linux-omarchy", "linux-lts"]):
             for fail_headers in (False, True):
                 with self.subTest(kernels=kernels, fail_headers=fail_headers), ExitStack() as stack:
                     events = []
@@ -135,7 +145,7 @@ class KernelSelectionTest(unittest.TestCase):
                     unmount.assert_called_once_with(ctx)
 
     def test_validation_rejects_missing_or_mismatched_headers(self):
-        for kernel in ("linux-omarchy", "linux-t2"):
+        for kernel in ("linux-omarchy", "linux-t2", "linux-aarch64"):
             with self.subTest(kernel=kernel), tempfile.TemporaryDirectory() as tmp:
                 target = Path(tmp)
                 ctx = types.SimpleNamespace(target=target)
@@ -160,6 +170,7 @@ class KernelSelectionTest(unittest.TestCase):
             ({}, {"kernels": ["linux-t2"]}, "linux-t2"),
             ({"kernel": "linux-t2"}, {"kernels": ["linux-omarchy"]}, "linux-t2"),
             ({}, {"kernels": ["linux-lts"]}, "linux-lts"),
+            ({}, {"kernels": ["linux-aarch64"]}, "linux-aarch64"),
         ]:
             # The fixtures are x86_64 ones; the Limine binary checked follows the host.
             with self.subTest(kernel=expected, storage=storage), tempfile.TemporaryDirectory() as tmp, \
@@ -171,7 +182,7 @@ class KernelSelectionTest(unittest.TestCase):
                     "boot/limine.conf": "/Omarchy\n",
                     "etc/kernel/cmdline": "root=UUID=test\n",
                     "etc/default/limine": "CUSTOM_UKI_NAME=omarchy\n",
-                    "boot/EFI/limine/limine_x64.efi": "bootloader",
+                    f"boot/EFI/limine/{phases_impl._default_limine_efi_binary()}": "bootloader",
                     f"boot/EFI/Linux/omarchy_{expected}.efi": "UKI",
                 }
                 for name, content in files.items():

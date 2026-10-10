@@ -1,0 +1,15 @@
+Copy /boot/*.efi into ISO 9660 so GRUB can chainload the live ARM UKI.
+Applies to archiso v87. The El Torito fallback keeps its kernel and initramfs.
+
+--- a/archiso/mkarchiso
++++ b/archiso/mkarchiso
+@@ -433 +433 @@ _make_boot_on_iso9660() {
+-    local ucode_image
++    local ucode_image _uki
+@@ -437,0 +438,6 @@ _make_boot_on_iso9660() {
++    # Unified kernel images built into /boot by the profile travel with the
++    # kernel they wrap, where a GRUB entry can chainload them.
++    for _uki in "${pacstrap_dir}/boot/"*.efi; do
++        [[ -e "${_uki}" ]] || continue
++        install -m 0644 -- "${_uki}" "${isofs_dir}/${install_dir}/boot/${arch}/"
++    done

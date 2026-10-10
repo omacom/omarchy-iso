@@ -387,6 +387,35 @@ detect_bitlocker() {
   return 1
 }
 
+# Save vendor-signed Qualcomm firmware before a full-disk install removes Windows.
+# Missing firmware does not abort installation.
+stage_qualcomm_firmware() {
+  command -v qcom-firmware-extract >/dev/null 2>&1 || return 0
+  [[ -d /sys/firmware/devicetree/base ]] || return 0
+
+  local stage=/run/omarchy/firmware
+  local missing saved
+  missing=$(qcom-firmware-extract --list-missing 2>/dev/null | grep -c . || true)
+  ((missing > 0)) || return 0
+
+  step "Saving Qualcomm firmware from Windows"
+  qcom-firmware-extract --stage "$stage" >/run/omarchy/firmware-stage.log 2>&1 || true
+  saved=$(grep -c . "$stage/manifest" 2>/dev/null || true)
+  if ((saved >= missing)); then
+    say "Saved $saved firmware files from Windows for the install."
+  elif ((saved > 0)); then
+    say "Saved $saved of $missing firmware files from Windows; the rest were not in the driver store."
+  else
+    say --foreground 1 "No Windows firmware found on this machine."
+    if grep -q BitLocker /run/omarchy/firmware-stage.log 2>/dev/null; then
+      say "The Windows partition is BitLocker-encrypted. Turn BitLocker off in Windows to let the firmware be read."
+    fi
+    say "Installation can continue, but GPU acceleration, audio and battery reporting may need"
+    say "\`sudo qcom-firmware-extract\` afterwards with a Windows driver store of this laptop model."
+  fi
+  echo
+}
+
 # Look for an existing Windows ESP (FAT partition containing EFI/Microsoft) on $disk.
 detect_windows_esp() {
   local p tmp_mp
@@ -410,19 +439,19 @@ to_gb() {
   awk -v bytes="$1" 'BEGIN {printf "%.1fGB", bytes/1024/1024/1024}'
 }
 
-# The ISO build records its architecture and, on aarch64, the board platform
-# the image was built for (see build-iso.sh). x86_64 images carry an empty
-# platform.
+# The ISO build records its architecture and, on aarch64, the hardware family
+# the image was built for (see build-iso.sh). x86_64 images and generic aarch64
+# media carry an empty platform.
 iso_arch=$(cat /root/omarchy_arch 2>/dev/null || uname -m)
 iso_platform=$(cat /root/omarchy_arm_platform 2>/dev/null || true)
-if [[ $iso_arch == aarch64 && ( -z $iso_platform || ! -s /root/omarchy_kernel ) ]]; then
-  echo "Error: this aarch64 ISO does not record the platform and kernel it was built for" >&2
+if [[ $iso_arch == aarch64 && ! -s /root/omarchy_kernel ]]; then
+  echo "Error: this aarch64 ISO does not record the kernel it was built for" >&2
   exit 1
 fi
 
-# T2 Macs need their own kernel for keyboard/wifi drivers. aarch64 images are
-# built for one platform kernel (linux-omarchy-n1x today), recorded by the
-# build, and nothing else boots.
+# T2 Macs need their own kernel for keyboard/wifi drivers. An aarch64 image is
+# built for one kernel (linux-omarchy-n1x on the N1x, Arch Linux ARM's
+# linux-aarch64 elsewhere), recorded by the build, and nothing else boots.
 iso_kernel=$(cat /root/omarchy_kernel 2>/dev/null || true)
 detect_kernel() {
   if [[ $iso_arch == aarch64 ]]; then
@@ -1099,12 +1128,14 @@ if $defer_provisioning; then
   # Jump straight to disk selection + overwrite confirmation (encrypted by
   # default, Ctrl+C toggles unencrypted). deferred provisioning is always a full-disk install.
   disk_form
+  stage_qualcomm_firmware
   until confirm_disk_overwrite; do
     disk_form
   done
   install_target="full_disk"
 else
   disk_form
+  stage_qualcomm_firmware
   select_installation
 fi
 

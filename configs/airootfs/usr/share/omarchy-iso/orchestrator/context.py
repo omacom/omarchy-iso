@@ -3,17 +3,16 @@ mutable `state` dict for objects that live across phases (e.g., the
 archinstall config handler and mirror list handler)."""
 
 from __future__ import annotations
-import platform
 
 import json
 import os
+import platform
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .keyboard import validate_input_selection
-
 
 @dataclass
 class InstallContext:
@@ -187,8 +186,8 @@ def _inject_provisioning_encryption_password(arch_configuration: dict, user_cred
     user_credentials["encryption_password"] = password
 
 
-# build-iso.sh records the board an aarch64 image was built for; x86_64
-# images carry an empty file.
+# build-iso.sh records the hardware family an aarch64 image was built for (n1x,
+# qualcomm); x86_64 images and generic aarch64 media carry an empty file.
 ISO_ARM_PLATFORM_FILE = Path("/root/omarchy_arm_platform")
 
 
@@ -212,11 +211,14 @@ def iso_kernel(path: Path = ISO_KERNEL_FILE) -> str:
 
 
 def _default_kernel(pci_devices: Path = Path("/sys/bus/pci/devices"), platform_kernel: str | None = None) -> str:
-    # An aarch64 image is built for one platform kernel and nothing else boots;
-    # the configurator's detect_kernel makes the same choice.
+    # An aarch64 image is built for one kernel and nothing else boots; the
+    # configurator's detect_kernel makes the same choice.
     platform_kernel = iso_kernel() if platform_kernel is None else platform_kernel
     if platform_kernel:
         return platform_kernel
+    # Arch Linux ARM names its generic kernel linux-aarch64.
+    if platform.machine() == "aarch64":
+        return "linux-aarch64"
     for device in pci_devices.glob("*"):
         try:
             vendor = (device / "vendor").read_text().strip().lower()

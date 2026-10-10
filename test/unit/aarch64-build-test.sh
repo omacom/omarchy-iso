@@ -14,25 +14,30 @@ trap 'rm -rf "$fixture" /tmp/omarchy-aarch64-base.packages' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # --- entrypoint argument contract -------------------------------------------
-bash -n "$ROOT/bin/omarchy-iso-make" "$ROOT/builder/build-iso.sh" \
+bash -n "$ROOT/bin/omarchy-iso-make" "$ROOT/builder/build-iso.sh" "$ROOT/builder/architecture.sh" \
   "$ROOT/builder/aarch64-package-filter.sh" "$ROOT/builder/grub-platform.sh" \
   "$ROOT/builder/archiso-aarch64-mkinitcpio.sh" "$ROOT/builder/archiso-aarch64-grub-modules.sh" \
   "$ROOT/builder/node-release.sh" "$ROOT/builder/arm64-kernel-image.sh" \
   "$ROOT/builder/n1x-dev-ssh/omarchy-n1x-dev-ssh" "$ROOT/configs/airootfs/root/.automated_script.sh"
 
-grep -Fq 'menci/archlinuxarm@sha256:' "$ROOT/bin/omarchy-iso-make" || fail "aarch64 container is not pinned by digest"
-grep -Fq -- '--arch aarch64 requires --package-dir DIR' "$ROOT/bin/omarchy-iso-make" || fail "aarch64 builds must require the package bundle"
-grep -Fq -- '--arch aarch64 requires --local-source' "$ROOT/bin/omarchy-iso-make" || fail "aarch64 builds must require --local-source"
+# builder/architecture.sh settles what each media target builds with.
+n1x_target() {
+  OMARCHY_ARCH=aarch64 OMARCHY_MEDIA_TARGET=aarch64/n1x bash -c 'source "$1" && printf "%s\n" "${!2}"' _ "$ROOT/builder/architecture.sh" "$1"
+}
+[[ $(n1x_target BUILD_IMAGE) == menci/archlinuxarm@sha256:* ]] || fail "the N1x container is not pinned by digest"
+[[ $(n1x_target OMARCHY_ARM_PLATFORM) == n1x ]] || fail "the N1x image is not built for the n1x platform"
+grep -Fq -- '--platform n1x requires --package-dir DIR' "$ROOT/bin/omarchy-iso-make" || fail "N1x builds must require the package bundle"
+grep -Fq -- '--platform n1x requires --local-source' "$ROOT/bin/omarchy-iso-make" || fail "N1x builds must require --local-source"
 grep -Fq 'sha256sum --check --strict --quiet SHA256SUMS' "$ROOT/bin/omarchy-iso-make" || fail "bundle checksums are not verified on the host"
 grep -Fq -- '-v "$PACKAGE_DIR:/packages:ro"' "$ROOT/bin/omarchy-iso-make" || fail "bundle is not mounted read-only at /packages"
-grep -Fq 'OMARCHY_ARCH == x86_64 && -d /var/cache/pacman/pkg' "$ROOT/bin/omarchy-iso-make" || fail "host pacman cache would leak into aarch64 builds"
-grep -Fq 'builds use the edge channel' "$ROOT/bin/omarchy-iso-make" || fail "aarch64 builds must be pinned to the edge channel"
-grep -Fq 'n1x) OMARCHY_KERNEL=linux-omarchy-n1x ;;' "$ROOT/bin/omarchy-iso-make" || fail "the N1x image does not ship linux-omarchy-n1x"
+grep -Fq '$(uname -m) == "$ISO_ARCH" && -d /var/cache/pacman/pkg' "$ROOT/bin/omarchy-iso-make" || fail "host pacman cache would leak into builds for another architecture"
+grep -Fq 'builds use the edge channel' "$ROOT/bin/omarchy-iso-make" || fail "N1x builds must be pinned to the edge channel"
+[[ $(n1x_target OMARCHY_KERNEL) == linux-omarchy-n1x ]] || fail "the N1x image does not ship linux-omarchy-n1x"
 grep -Fq "ALL_kver='/boot/vmlinuz-linux-omarchy-n1x'" "$ROOT/builder/linux-omarchy-n1x.preset" || fail "the live preset does not boot linux-omarchy-n1x"
 grep -Fq 'echo "$OMARCHY_KERNEL" > "$build_cache_dir/airootfs/root/omarchy_kernel"' "$ROOT/builder/build-iso.sh" || fail "the installer is not told which kernel to install"
 
 # --- builder wiring -----------------------------------------------------------
-grep -Fq 'online_pacman_conf=/configs/pacman-online-aarch64.conf' "$ROOT/builder/build-iso.sh" || fail "aarch64 does not use its own online pacman config"
+grep -Fq '/configs/pacman-online-aarch64.conf > "$online_pacman_conf"' "$ROOT/builder/build-iso.sh" || fail "the N1x build does not use its own online pacman config"
 if grep -Fq 'pacman-online-${OMARCHY_MIRROR}.conf --noconfirm' "$ROOT/builder/build-iso.sh"; then
   fail "a pacman call still hardcodes the x86 mirror config"
 fi

@@ -1,0 +1,111 @@
+name: aarch64 ISO Build
+
+# Build an ISO from the published ARM repositories on a native ARM runner.
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Published package channel (independent of the ISO branch)"
+        type: choice
+        default: edge
+        options:
+          - edge
+          - rc
+          - stable
+      media_target:
+        description: "ARM live-media boot path"
+        type: choice
+        default: aarch64/snapdragon
+        options:
+          - aarch64/snapdragon
+          - aarch64/generic
+
+permissions:
+  contents: read
+
+jobs:
+  build-iso:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 330
+    env:
+      PACKAGE_CHANNEL: ${{ inputs.channel || 'edge' }}
+      MEDIA_TARGET: ${{ inputs.media_target || 'aarch64/snapdragon' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          persist-credentials: false
+
+      - name: Runner facts
+        run: |
+          set -x
+          uname -a
+          nproc
+          free -h
+          df -h
+          docker version --format '{{.Server.Version}}'
+          docker info --format '{{.Driver}} {{.DockerRootDir}}'
+
+      - name: Test ARM live build configuration
+        run: |
+          sudo apt-get install -y -qq libarchive-tools >/dev/null
+          bash test/unit/arch-package-filter-test.sh
+          bash test/unit/aarch64-initramfs-test.sh
+          python3 -m unittest discover -s test/unit -p test_local_repo_config.py
+          python3 -m unittest discover -s test/unit -p test_iso_architecture.py
+          python3 -m unittest discover -s test/unit -p test_live_dsp.py
+          python3 -m unittest discover -s test/unit -p test_hardware_platforms.py
+          python3 -m unittest discover -s test/unit -p test_keyboard.py
+          python3 -m unittest discover -s test/unit -p test_arm_packages.py
+          python3 -m unittest discover -s test/unit -p test_limine_target_packages.py
+          python3 -m unittest discover -s test/unit -p test_arm_workflow.py
+
+      # Leave room for the offline package mirror and ISO staging tree.
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        continue-on-error: true
+
+      - name: Disk after cleanup
+        run: df -h
+
+      - name: Build ISO
+        id: build
+        run: |
+          channel_args=()
+          case "$PACKAGE_CHANNEL" in
+            edge) channel_args=(--edge) ;;
+            rc) channel_args=(--rc) ;;
+            stable) ;;
+            *) echo "Invalid package channel: $PACKAGE_CHANNEL" >&2; exit 1 ;;
+          esac
+          start=$(date +%s)
+          ./bin/omarchy-iso-make --keep-pkg-cache --no-boot-offer "${channel_args[@]}" --arch aarch64 --media-target "$MEDIA_TARGET"
+          echo "ISO build wall-clock: $(( $(date +%s) - start ))s"
+
+      - name: Inspect ISO
+        run: |
+          sudo apt-get install -y -qq xorriso >/dev/null
+          ls -l release/
+          for iso in release/*.iso; do
+            echo "== $iso"
+            sha256sum "$iso"
+            xorriso -indev "$iso" -ls /EFI/BOOT/ 2>/dev/null
+            xorriso -indev "$iso" -lsl /arch/boot/aarch64/ 2>/dev/null
+            if [[ $MEDIA_TARGET == aarch64/snapdragon ]]; then
+              xorriso -indev "$iso" -ls /arch/boot/aarch64/omarchy-live.efi 2>/dev/null \
+                || { echo "ISO is missing the DTB-carrying live UKI" >&2; exit 1; }
+            else
+              [[ $iso == release/omarchy-generic-*-aarch64-*.iso ]]
+            fi
+          done
+          df -h
+
+      - name: Upload newly built ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: omarchy-iso-aarch64-${{ inputs.channel || 'edge' }}-${{ github.run_number }}
+          path: ./release/*.iso
+          if-no-files-found: error
+          retention-days: 3

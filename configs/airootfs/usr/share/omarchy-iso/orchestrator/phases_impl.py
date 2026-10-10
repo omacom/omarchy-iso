@@ -22,10 +22,10 @@ Phase ordering (full-disk and protected/pre-mounted):
 """
 
 from __future__ import annotations
-import platform
 
 import hashlib
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -35,11 +35,11 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import archinstall_adapter as arch
+from . import hardware
 from .command import capture, capture_identifier, require_text
 from .context import InstallContext, iso_arm_platform, iso_kernel
 from .keyboard import configure_keyboard
 from .ui import error, info
-
 
 # Package targets are written by builder/build-iso.sh. Stable ISOs use the
 # stable package names, while dev/local-source ISOs install the dev package
@@ -153,11 +153,24 @@ AARCH64_BOOTSTRAP_PACKAGES = [
     "archlinuxarm-keyring",
 ]
 
+# Supply the kernel metadata mkinitcpio and Limine need for Arch Linux ARM's own
+# kernel. An image built for another kernel (the N1x's) has no use for it.
+ALARM_KERNEL = "linux-aarch64"
+ALARM_KERNEL_BOOTSTRAP_PACKAGES = [
+    "linux-aarch64-pkgbase-shim",
+]
+
+# This installer uses Limine, but the ARM runtime package does not require it.
+# Install these in the target after the ESP and initial Limine config exist.
+LIMINE_TARGET_PACKAGES = ["limine-mkinitcpio-hook", "limine-snapper-sync", "snapper"]
+
 
 def _early_bootstrap_packages() -> list[str]:
     packages = [*EARLY_BOOTSTRAP_BASE_PACKAGES]
     if platform.machine() == "aarch64":
         packages += AARCH64_BOOTSTRAP_PACKAGES
+        if iso_kernel() in ("", ALARM_KERNEL):
+            packages += ALARM_KERNEL_BOOTSTRAP_PACKAGES
     return [*packages, _omarchy_settings_package()]
 
 
@@ -191,7 +204,33 @@ def _early_packages() -> list[str]:
 # imports it, so no patching happens here.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Stage vendor-signed Qualcomm firmware before the Windows partition is removed.
+LIVE_FIRMWARE_STAGE = Path("/run/omarchy/firmware")
+TARGET_FIRMWARE_STAGE = Path("var/lib/omarchy/firmware-stage")
+
+
+def _stage_qualcomm_firmware() -> None:
+    tool = shutil.which("qcom-firmware-extract")
+    if not tool:
+        return
+    info("› saving Qualcomm firmware from Windows before the disk is written")
+    # Firmware extraction is idempotent and optional.
+    subprocess.run([tool, "--stage", str(LIVE_FIRMWARE_STAGE)], check=False)
+
+
+def _copy_firmware_stage_into_target(ctx: InstallContext) -> None:
+    if not (LIVE_FIRMWARE_STAGE / "manifest").is_file():
+        return
+    dst = ctx.target / TARGET_FIRMWARE_STAGE
+    shutil.copytree(LIVE_FIRMWARE_STAGE, dst, dirs_exist_ok=True)
+
+
 def prepare_live(ctx: InstallContext) -> None:
+    # Reject malformed/ambiguous profiles or the wrong media before disk cleanup.
+    ctx.state["hardware_platform"] = hardware.detect_platform()
+    if entry := ctx.state["hardware_platform"]:
+        info(f"› hardware profile: {entry['name']}")
+    _stage_qualcomm_firmware()
     if ctx.is_protected:
         info("› protected mode: skipping whole-disk cleanup")
     else:
@@ -772,8 +811,7 @@ def _unmask_mkinitcpio_pacman_hooks(
 
 
 def _runtime_package_list(ctx: InstallContext) -> list[str]:
-    """Selected Omarchy runtime package + every package in the ISO-bundled
-    base package list that isn't already installed early."""
+    """Runtime, base, Limine and hardware packages not already installed early."""
     base_pkgs_file = Path("/usr/share/omarchy-iso/omarchy-base.packages")
     pkgs = [_omarchy_runtime_package()]
     already_installed = set(_early_packages()) | {
@@ -784,7 +822,8 @@ def _runtime_package_list(ctx: InstallContext) -> list[str]:
         "omarchy-settings",
         "omarchy-nvim",
     }
-    for raw in base_pkgs_file.read_text().splitlines():
+    entry = ctx.state.get("hardware_platform") or {}
+    for raw in base_pkgs_file.read_text().splitlines() + LIMINE_TARGET_PACKAGES + entry.get("packages", []):
         s = raw.strip()
         if not s or s.startswith("#"):
             continue
@@ -1079,6 +1118,8 @@ def _prepare_target_setup(ctx: InstallContext) -> None:
             ctx.state["bind_mounts"].append(str(target_dst))
             mounted.add(str(target_dst))
 
+    _copy_firmware_stage_into_target(ctx)
+
     ctx.state["target_setup_prepared"] = True
 
 
@@ -1343,6 +1384,7 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     if "@@CMDLINE@@" in default_text:
         raise RuntimeError(f"{default_limine} still contains @@CMDLINE@@")
 
+    hardware.configure_boot(ctx.target, ctx.state.get("hardware_platform"))
     config_text = _limine_combined_config_text(ctx, default_text)
     cmdline = _limine_kernel_cmdline(config_text)
     if not cmdline.strip():
@@ -1749,14 +1791,17 @@ def validate_boot(ctx: InstallContext) -> None:
         if not limine_binary.exists() or limine_binary.stat().st_size == 0:
             raise RuntimeError(f"{limine_binary} missing or empty")
 
-        # Hardware packages (omarchy-hw-intel-ptl, …) can swap the kernel out
-        # from under us mid-install, so trust what's on disk over what we asked
-        # for and only fall back to the configured name when nothing's there.
-        uki_dir = esp_mount / "EFI" / "Linux"
-        candidates = _installed_kernels(ctx) or [kernel]
-        ukis = [uki_dir / f"{uki_prefix}_{name}.efi" for name in candidates]
-        if not any(uki.exists() and uki.stat().st_size for uki in ukis):
-            raise RuntimeError(f"{' / '.join(str(uki) for uki in ukis)} missing or empty")
+        if _limine_setting(config_text, "ENABLE_UKI", "yes") == "no":
+            _validate_linux_boot_entry(esp_mount, limine_conf_text, ctx.encrypt)
+        else:
+            # Hardware packages (omarchy-hw-intel-ptl, …) can swap the kernel out
+            # from under us mid-install, so trust what's on disk over what we asked
+            # for and only fall back to the configured name when nothing's there.
+            uki_dir = esp_mount / "EFI" / "Linux"
+            candidates = _installed_kernels(ctx) or [kernel]
+            ukis = [uki_dir / f"{uki_prefix}_{name}.efi" for name in candidates]
+            if not any(uki.exists() and uki.stat().st_size for uki in ukis):
+                raise RuntimeError(f"{' / '.join(str(uki) for uki in ukis)} missing or empty")
 
         post = _read_efibootmgr()
         if not _find_label_entries(post["entries"], "Limine"):
@@ -1883,6 +1928,45 @@ def _validate_platform_boot_entries(limine_conf_text: str, arm_platform: str, ke
             raise RuntimeError(f"{rescue_name} entry does not boot to a text login; its own cmdline was overridden")
 
 
+def _validate_linux_boot_entry(esp_mount: Path, config_text: str, encrypted: bool) -> None:
+    """Check the kernel and initramfs that limine-entry-tool copied to the ESP."""
+    # limine-entry-tool writes an indented //<kernel> entry per kernel under
+    # /+Omarchy; deeper entries belong to snapshots.
+    entries: list[list[str]] = []
+    in_omarchy = False
+    current: list[str] | None = None
+    for line in config_text.splitlines():
+        header = re.match(r"\s*(/+)\+?(.*)$", line)
+        if header:
+            depth = len(header.group(1))
+            if depth == 1:
+                in_omarchy = header.group(2).startswith("Omarchy")
+            current = [] if in_omarchy and depth == 2 else None
+            if current is not None:
+                entries.append(current)
+        elif current is not None:
+            current.append(line)
+
+    for entry in map("\n".join, entries):
+        if not re.search(r"(?m)^\s*protocol:\s*linux\s*$", entry):
+            continue
+        cmdline = re.search(r"(?m)^\s*cmdline:\s*(.*)$", entry)
+        if not cmdline or not re.search(r"(?:^|\s)root=\S+", cmdline.group(1)):
+            continue
+        if encrypted and not re.search(r"(?:^|\s)cryptdevice=\S+", cmdline.group(1)):
+            continue
+        kernel = re.findall(r"(?m)^\s*path:\s*(\S+)\s*$", entry)
+        modules = re.findall(r"(?m)^\s*module_path:\s*(\S+)\s*$", entry)
+        if not kernel or not modules:
+            continue
+        # limine-entry-tool writes boot():/<path>#<hash>; resources elsewhere
+        # don't resolve on the ESP and so fail the check.
+        files = [esp_mount / r.removeprefix("boot():").split("#", 1)[0].lstrip("/") for r in kernel + modules]
+        if all(path.is_file() and path.stat().st_size for path in files):
+            return
+    raise RuntimeError(f"{esp_mount / 'limine.conf'} has no bootable Omarchy Linux entry with a kernel and initramfs")
+
+
 def _validate_provisioning_state(ctx: InstallContext) -> None:
     """An deferred-provisioning install that boots without a working first-boot setup is a
     user-less brick; insist the armed state is complete before reboot."""
@@ -1925,9 +2009,9 @@ def _assert_boot_hooks_restored(ctx: InstallContext) -> None:
         backup = hooks_dir / f"{name}.omarchy-backup"
         if backup.exists() or backup.is_symlink():
             raise RuntimeError(f"{backup} left behind by the install-time hook mask")
-        # limine-mkinitcpio-hook is a hard dependency of the Omarchy runtime
-        # package, so the real hook is on disk before the mask ever goes up and
-        # must be on disk again now.
+        # limine-mkinitcpio-hook is installed with the target runtime packages,
+        # so the real hook is on disk before the mask ever goes up and must
+        # be on disk again now.
         if not path.is_file():
             raise RuntimeError(f"{path} is missing — future kernel updates would ship no UKI")
 

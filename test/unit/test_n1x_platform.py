@@ -83,7 +83,8 @@ class PlatformKernelTest(unittest.TestCase):
             self.assertEqual(context._default_kernel(Path(tmp), platform_kernel=KERNEL), KERNEL)
 
     def test_no_platform_kernel_keeps_x86_default(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(context.platform, "machine", return_value="x86_64"):
             self.assertEqual(context._default_kernel(Path(tmp), platform_kernel=""), "linux-omarchy")
 
     def test_kernel_file(self):

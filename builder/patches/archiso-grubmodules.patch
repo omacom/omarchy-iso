@@ -1,0 +1,35 @@
+# Filter unavailable GRUB modules on ARM. Applies to archiso v87.
+--- a/archiso/mkarchiso
++++ b/archiso/mkarchiso
+@@ -672,3 +672,23 @@
++# Filter module names against the GRUB target's installed modules.
++# $1: target; remaining arguments: module names.
++_filter_grubmodules() {
++    local _target="${1}"
++    shift
++    local _module _available=() _missing=()
++    for _module in "$@"; do
++        if [[ -e "/usr/lib/grub/${_target}/${_module}.mod" ]]; then
++            _available+=("${_module}")
++        else
++            _missing+=("${_module}")
++        fi
++    done
++    if (( ${#_missing[@]} )); then
++        # stdout carries the module list, so this has to go to stderr.
++        _msg_info "Skipping GRUB module(s) not built for ${_target}: ${_missing[*]}" >&2
++    fi
++    printf '%s\n' "${_available[@]}"
++}
++
+ # Prepare GRUB
+ _make_bootmode_uefi.grub() {
+     local grub_target grubmodules=() files_to_copy=()
+@@ -691,6 +711,7 @@
+                  minicmd normal ntfs ntfscomp part_apple part_gpt part_msdos png read reboot regexp search \
+                  search_fs_file search_fs_uuid search_label serial sleep tpm udf usb usbserial_common usbserial_ftdi \
+                  usbserial_pl2303 usbserial_usbdebug video xfs zstd)
++    mapfile -t grubmodules < <(_filter_grubmodules "$grub_target" "${grubmodules[@]}")
+     grub-mkstandalone -O "$grub_target" \
+         --modules="${grubmodules[*]}" \
+         --locales="en@quot" \

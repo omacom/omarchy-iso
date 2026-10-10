@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "platforms": [
+    {
+      "id": "lenovo-yoga-slim7x",
+      "name": "Lenovo Yoga Slim 7x",
+      "media_target": "aarch64/snapdragon",
+      "match": [
+        { "sys_vendor": "LENOVO", "product_name": "83ED" }
+      ],
+      "packages": ["linux-firmware-qcom"],
+      "kernel_cmdline": []
+    },
+    {
+      "id": "nvidia-dgx-spark",
+      "name": "NVIDIA DGX Spark",
+      "media_target": "aarch64/generic",
+      "match": [
+        { "sys_vendor": "NVIDIA", "product_name": "NVIDIA_DGX_Spark" }
+      ],
+      "packages": [
+        "linux-aarch64-headers",
+        "linux-firmware-nvidia",
+        "nvidia-open-dkms",
+        "nvidia-utils",
+        "nvidia-container-toolkit",
+        "nvidia-ai-workbench",
+        "dgx-dashboard",
+        "nsight-compute",
+        "nsight-systems",
+        "rdma-core"
+      ],
+      "kernel_cmdline": ["console=tty0", "plymouth.ignore-serial-consoles"]
+    },
+    {
+      "id": "asus-ascent-gx10",
+      "name": "ASUS Ascent GX10",
+      "media_target": "aarch64/generic",
+      "match": [
+        { "sys_vendor": "ASUSTeK COMPUTER INC.", "product_name": "GX10" }
+      ],
+      "packages": [
+        "linux-aarch64-headers",
+        "linux-firmware-nvidia",
+        "nvidia-open-dkms",
+        "nvidia-utils",
+        "nvidia-container-toolkit"
+      ],
+      "kernel_cmdline": []
+    }
+  ]
+}

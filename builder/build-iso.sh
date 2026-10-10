@@ -39,7 +39,7 @@ case "$OMARCHY_ARCH" in
           exit 1
         fi
         ;;
-      generic|qualcomm)
+      generic|qualcomm|gb10)
         # Arch Linux ARM's kernel, the published packages, no bundle.
         if [[ $OMARCHY_KERNEL != linux-aarch64 ]]; then
           echo "ERROR: $OMARCHY_ARM_PLATFORM aarch64 builds boot linux-aarch64 (got '$OMARCHY_KERNEL')" >&2
@@ -51,7 +51,7 @@ case "$OMARCHY_ARCH" in
         fi
         ;;
       *)
-        echo "ERROR: aarch64 builds need OMARCHY_ARM_PLATFORM=n1x, generic or qualcomm (got '$OMARCHY_ARM_PLATFORM')" >&2
+        echo "ERROR: aarch64 builds need OMARCHY_ARM_PLATFORM=n1x, generic, qualcomm or gb10 (got '$OMARCHY_ARM_PLATFORM')" >&2
         exit 1
         ;;
     esac
@@ -435,6 +435,16 @@ if [[ $OMARCHY_ARM_PLATFORM == qualcomm ]]; then
     echo "       Build with --local-source against a checkout that has the Snapdragon setup." >&2
     exit 1
   }
+fi
+
+# A GB10 image is the generic image plus the runtime's GB10 package list, so
+# refuse a runtime from before that list rather than build a generic image under
+# the GB10 name.
+if [[ $OMARCHY_ARM_PLATFORM == gb10 && ! -f $(dirname "${base_pkg_lists[0]}")/omarchy-aarch64-gb10.packages ]]; then
+  echo "ERROR: the Omarchy runtime for this image ships no install/omarchy-aarch64-gb10.packages." >&2
+  echo "       A GB10 installed from it would get none of its platform packages." >&2
+  echo "       Build with --local-source against a checkout that has the GB10 platform." >&2
+  exit 1
 fi
 
 # aarch64 takes the runtime's own default set, as omarchy-pkg-defaults composes

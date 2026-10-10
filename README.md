@@ -231,6 +231,14 @@ The Snapdragon image is the generic aarch64 image with one addition. These lapto
 
 The runtime the image installs must have the Snapdragon hardware setup (`install/hardware/qualcomm/`), which lists those device trees for the installed system's own UKI. The build refuses a runtime without it. On a laptop that still has Windows, the installer copies the vendor-signed firmware off the Windows partition before the disk is written.
 
+### NVIDIA GB10 desktops
+
+```bash
+./bin/omarchy-iso-make --arch aarch64 --platform gb10 --edge --local-source ../omarchy-installer ../omarchy-pkgs
+```
+
+The GB10 image (DGX Spark, ASUS Ascent GX10) is the generic aarch64 image with the runtime's GB10 packages (`install/omarchy-aarch64-gb10.packages`) installed offline: the NVIDIA driver, the container toolkit, `rdma-core` and NVIDIA's profilers. The build refuses a runtime without that list.
+
 ## Testing the ISO
 
 Run `./bin/omarchy-iso-boot [release/omarchy.iso]`.

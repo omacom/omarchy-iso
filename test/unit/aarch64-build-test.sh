@@ -57,7 +57,7 @@ for cfg in grub.cfg loopback.cfg; do
   grep -Fq -- "--id 'n1x-recovery'" "$src" || fail "$cfg lacks the N1x recovery entry"
   grep -Fq 'omarchy.n1x_recovery=1 acpi=nospcr' "$src" || fail "$cfg recovery entry lacks acpi=nospcr"
   source "$ROOT/builder/grub-platform.sh"
-  for platform in "" n1x generic qualcomm; do
+  for platform in "" n1x generic qualcomm gb10; do
     cp "$src" "$fixture/$platform-$cfg"
     configure_grub_platform "$fixture/$platform-$cfg" "$platform"
     sed -i -e 's|%KERNEL%|linux-omarchy-n1x|g' -e 's|%BOOT_SPLASH_KERNEL_OPTIONS%|quiet splash |g' -e 's|%KERNEL_OPTIONS%|console=tty0|g' \
@@ -111,7 +111,7 @@ grep -Fq 'platform_packages+=(nvidia-open-dkms nvidia-utils libva-nvidia-driver)
 live="$ROOT/builder/linux-aarch64-live.sh"
 bash -n "$live"
 [[ -x $live ]] || fail "the generic live-kernel script is not executable"
-grep -Fq 'generic|qualcomm) OMARCHY_KERNEL=linux-aarch64 ;;' "$ROOT/bin/omarchy-iso-make" || fail "the generic image does not boot linux-aarch64"
+grep -Fq 'generic|qualcomm|gb10) OMARCHY_KERNEL=linux-aarch64 ;;' "$ROOT/bin/omarchy-iso-make" || fail "the generic image does not boot linux-aarch64"
 grep -Fq -- '--package-dir and --dev-ssh are only valid with --platform n1x' "$ROOT/bin/omarchy-iso-make" \
   || fail "a generic build would accept the N1x bundle or dev key"
 grep -Fq 'install -Dm0755 /builder/linux-aarch64-live.sh "$build_cache_dir/airootfs/root/customize_airootfs.sh"' "$ROOT/builder/build-iso.sh" \
@@ -131,8 +131,8 @@ make_refuses() { # expected message, then arguments
   out=$(cd "$ROOT" && bash bin/omarchy-iso-make "$@" 2>&1) && fail "omarchy-iso-make $* was accepted"
   grep -Fq -- "$want" <<<"$out" || fail "omarchy-iso-make $*: expected '$want', got: $out"
 }
-make_refuses 'requires --platform n1x, generic or qualcomm' --arch aarch64 --edge
-make_refuses '--platform must be n1x, generic or qualcomm' --arch aarch64 --platform pi
+make_refuses 'requires --platform n1x, generic, qualcomm or gb10' --arch aarch64 --edge
+make_refuses '--platform must be n1x, generic, qualcomm or gb10' --arch aarch64 --platform pi
 make_refuses 'only valid with --platform n1x' --arch aarch64 --platform generic --edge --package-dir "$fixture"
 make_refuses 'builds use the edge channel' --arch aarch64 --platform generic
 make_refuses 'requires --package-dir DIR' --arch aarch64 --platform n1x --edge
@@ -168,6 +168,23 @@ grep -Fq 'patch --batch --forward --fuzz=0 "$mkarchiso_command" </builder/archis
   || fail "Snapdragon builds do not patch mkarchiso to copy the live UKI"
 # A runtime without the Snapdragon setup would install a laptop that cannot boot.
 grep -Fq 'ships no $qualcomm_setup' "$ROOT/builder/build-iso.sh" || fail "a runtime without the Snapdragon setup is not refused"
+
+# --- gb10 platform ----------------------------------------------------------------
+# The generic image, plus the runtime's GB10 packages installed offline.
+make_refuses 'only valid with --platform n1x' --arch aarch64 --platform gb10 --edge --package-dir "$fixture"
+make_refuses 'builds use the edge channel' --arch aarch64 --platform gb10
+# A runtime without the GB10 list would make a generic image under the GB10 name.
+gb10_check=$(sed -n '/^# A GB10 image is the generic image/,/^fi$/p' "$ROOT/builder/build-iso.sh")
+[[ -n $gb10_check ]] || fail "GB10 builds do not check the runtime for the GB10 list"
+mkdir -p "$fixture/gb10-lists"
+printf '%s\n' base-one >"$fixture/gb10-lists/omarchy-base.packages"
+gb10_runtime_ok() { # platform
+  (base_pkg_lists=("$fixture/gb10-lists/omarchy-base.packages"); OMARCHY_ARM_PLATFORM=$1; eval "$gb10_check") 2>/dev/null
+}
+gb10_runtime_ok gb10 && fail "a runtime without the GB10 list is accepted for a GB10 image"
+gb10_runtime_ok generic || fail "a generic image asks for the GB10 list"
+printf '%s\n' nvidia-container-toolkit >"$fixture/gb10-lists/omarchy-aarch64-gb10.packages"
+gb10_runtime_ok gb10 || fail "a runtime with the GB10 list is refused"
 
 # --- package sources ---------------------------------------------------------------
 # Arch Linux ARM's packages come from Omarchy's own mirror of them: for the
@@ -235,6 +252,16 @@ composed=$(
 )
 [[ $composed == $'base-one\nbase-two\nzram-generator\nrtkit\nlinux-omarchy-n1x' ]] \
   || fail "aarch64 does not get the base list plus its architecture's and platform's additions minus the x86_64-only packages: $composed"
+printf '%s\n' '# gb10' nvidia-container-toolkit rdma-core >"$fixture/lists/omarchy-aarch64-gb10.packages"
+composed=$(
+  base_pkg_lists=("$fixture/lists/omarchy-base.packages")
+  OMARCHY_ARCH=aarch64
+  OMARCHY_ARM_PLATFORM=gb10
+  eval "$(sed -n '/^# aarch64 takes the runtime/,/^fi$/p' "$ROOT/builder/build-iso.sh")" 2>/dev/null
+  cat "${base_pkg_lists[0]}"
+)
+[[ $composed == $'base-one\nbase-two\nzram-generator\nrtkit\nnvidia-container-toolkit\nrdma-core' ]] \
+  || fail "a GB10 image does not get the GB10 list in place of other platforms': $composed"
 composed=$(
   rm "$fixture/lists/omarchy-aarch64.packages" "$fixture/lists/omarchy-x86_64-only.packages" "$fixture/lists/omarchy-aarch64-n1x.packages"
   base_pkg_lists=("$fixture/lists/omarchy-base.packages")

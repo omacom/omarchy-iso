@@ -221,6 +221,16 @@ Despite the local folder name, the first argument is the Omarchy source checkout
 
 Use `--dev` or `--rc` to build against those package channels. Both `--dev` and `--edge` select the dev packages from the edge mirror.
 
+### Snapdragon laptops
+
+```bash
+./bin/omarchy-iso-make --arch aarch64 --platform qualcomm --edge --local-source ../omarchy-installer ../omarchy-pkgs
+```
+
+The Snapdragon image is the generic aarch64 image with one addition. These laptops get no device tree from their firmware, so the live system boots a UKI that carries one for every supported laptop, and systemd-stub picks by the machine's SMBIOS data. The N1x image is described in [N1X.md](N1X.md).
+
+The runtime the image installs must have the Snapdragon hardware setup (`install/hardware/qualcomm/`), which lists those device trees for the installed system's own UKI. The build refuses a runtime without it. On a laptop that still has Windows, the installer copies the vendor-signed firmware off the Windows partition before the disk is written.
+
 ## Testing the ISO
 
 Run `./bin/omarchy-iso-boot [release/omarchy.iso]`.

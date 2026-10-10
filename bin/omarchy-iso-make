@@ -191,12 +191,10 @@ fi
 
 lint_file_permissions() {
   local profiledef="configs/profiledef.sh"
-  local -A declared=()
+  local declared
   local missing=()
 
-  while IFS= read -r path; do
-    [[ -n $path ]] && declared["$path"]=1
-  done < <(grep -oP '^\s*\["\K[^"]+(?="\])' "$profiledef" || true)
+  declared=$(sed -n 's/^[[:space:]]*\["\([^"]*\)"\].*/\1/p' "$profiledef")
 
   while IFS= read -r f; do
     [[ -f $f ]] || continue
@@ -209,7 +207,7 @@ lint_file_permissions() {
       continue
     fi
 
-    if [[ -z ${declared[$rel]+x} ]]; then
+    if ! grep -Fxq -- "$rel" <<<"$declared"; then
       missing+=("$rel")
     fi
   done < <(find configs/airootfs/usr/local/bin configs/airootfs/root -type f 2>/dev/null)

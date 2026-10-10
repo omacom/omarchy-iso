@@ -8,6 +8,10 @@
 
 set -euo pipefail
 
+# The expected file lists below are in byte order. sort follows the locale,
+# and en_US puts "x.iso.sha256" and "x.qcow2" in another order than C does.
+export LC_ALL=C
+
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 plan="$ROOT/test/vm-image/nightly-plan"
 layout="$ROOT/test/vm-image/nightly-layout"

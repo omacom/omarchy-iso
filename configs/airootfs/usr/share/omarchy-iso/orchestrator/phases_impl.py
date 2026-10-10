@@ -191,7 +191,29 @@ def _early_packages() -> list[str]:
 # imports it, so no patching happens here.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Stage vendor-signed Qualcomm firmware before the Windows partition is removed.
+LIVE_FIRMWARE_STAGE = Path("/run/omarchy/firmware")
+TARGET_FIRMWARE_STAGE = Path("var/lib/omarchy/firmware-stage")
+
+
+def _stage_qualcomm_firmware() -> None:
+    tool = shutil.which("qcom-firmware-extract")
+    if not tool:
+        return
+    info("› saving Qualcomm firmware from Windows before the disk is written")
+    # Firmware extraction is idempotent and optional.
+    subprocess.run([tool, "--stage", str(LIVE_FIRMWARE_STAGE)], check=False)
+
+
+def _copy_firmware_stage_into_target(ctx: InstallContext) -> None:
+    if not (LIVE_FIRMWARE_STAGE / "manifest").is_file():
+        return
+    dst = ctx.target / TARGET_FIRMWARE_STAGE
+    shutil.copytree(LIVE_FIRMWARE_STAGE, dst, dirs_exist_ok=True)
+
+
 def prepare_live(ctx: InstallContext) -> None:
+    _stage_qualcomm_firmware()
     if ctx.is_protected:
         info("› protected mode: skipping whole-disk cleanup")
     else:
@@ -1078,6 +1100,8 @@ def _prepare_target_setup(ctx: InstallContext) -> None:
             subprocess.run(["mount", "--bind", src, str(target_dst)], check=True)
             ctx.state["bind_mounts"].append(str(target_dst))
             mounted.add(str(target_dst))
+
+    _copy_firmware_stage_into_target(ctx)
 
     ctx.state["target_setup_prepared"] = True
 

@@ -111,6 +111,8 @@ name = "omarchy-generic" if args["OMARCHY_MEDIA_TARGET"] == "aarch64/generic" el
         self.assertIn("--package-dir", result.stderr)
         self.assertFalse((self.root / "docker.json").exists())
 
+        # On its usual host, an ARM Linux machine, where another ARM build shares the pacman cache.
+        self.env.update(TEST_MACHINE="aarch64", TEST_OS="Linux")
         result = self.launch("--arch", "aarch64", "--platform", "n1x", "--package-dir", str(bundle), *sources)
         self.assertEqual(result.returncode, 0, result.stderr)
         args = json.loads((self.root / "docker.json").read_text())
@@ -118,6 +120,7 @@ name = "omarchy-generic" if args["OMARCHY_MEDIA_TARGET"] == "aarch64/generic" el
         self.assertEqual(args[args.index("--platform") + 1], "linux/arm64")
         self.assertTrue(any(arg.startswith("menci/archlinuxarm@sha256:") for arg in args))
         self.assertIn(f"{bundle.resolve()}:/packages:ro", args)
+        self.assertFalse(any(arg.startswith("/var/cache/pacman/pkg:") for arg in args))
         # The N1x build keeps the cache path and the image name it has had.
         cache = self.root / "home/.cache/omarchy/iso_edge_aarch64/airootfs/var/cache/omarchy"
         self.assertIn(f"{cache}:/var/cache/airootfs/var/cache/omarchy", args)

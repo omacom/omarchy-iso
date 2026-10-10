@@ -207,11 +207,18 @@ lint_file_permissions() {
 
 lint_file_permissions
 
+# The host pacman cache belongs to the host architecture; sharing it with a
+# container of another one would leak foreign packages into the offline mirror.
+# An N1x build leaves it alone on every host, as it always has.
+SHARE_HOST_PKG_CACHE=""
+if [[ $(uname -s) == Linux && $(uname -m) == "$ISO_ARCH" && $OMARCHY_ARM_PLATFORM != n1x ]]; then
+  SHARE_HOST_PKG_CACHE=1
+fi
+
 # Purging the host package cache needs interactive sudo; --keep-pkg-cache
 # skips it so unattended builds (test rigs, agents) can run without a prompt.
-# A cache of another architecture is never shared with the build (see below),
-# so there is nothing to purge then.
-if [[ -z $KEEP_PKG_CACHE && $(uname -s) == Linux && $(uname -m) == "$ISO_ARCH" ]]; then
+# A build that does not share the cache has nothing to purge.
+if [[ -z $KEEP_PKG_CACHE && -n $SHARE_HOST_PKG_CACHE ]]; then
   sudo rm -rf /var/cache/pacman/pkg/*
 fi
 git submodule update --init --recursive --jobs=8
@@ -267,9 +274,7 @@ if [[ -n $LOCAL_REPO_PATH ]]; then
   DOCKER_ARGS+=(-v "$LOCAL_REPO_PATH:/omarchy-repo:ro")
 fi
 
-# The host pacman cache belongs to the host architecture; sharing it with a
-# container of another one would leak foreign packages into the offline mirror.
-if [[ $(uname -s) == Linux && $(uname -m) == "$ISO_ARCH" && -d /var/cache/pacman/pkg ]]; then
+if [[ -n $SHARE_HOST_PKG_CACHE && -d /var/cache/pacman/pkg ]]; then
   DOCKER_ARGS+=(-v "/var/cache/pacman/pkg:/var/cache/pacman/pkg")
 fi
 

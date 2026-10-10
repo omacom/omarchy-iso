@@ -20,6 +20,10 @@ PACMAN_FILES = (
     "usr/share/omarchy/default/pacman/pacman-aarch64.conf",
     "usr/share/omarchy/default/pacman/mirrorlist-aarch64",
 )
+PLATFORM_PACMAN_FILES = (
+    "usr/share/omarchy/default/pacman/aarch64/pacman-edge.conf",
+    "usr/share/omarchy/default/pacman/aarch64/mirrorlist-edge",
+)
 RUNTIME_FILES = tuple(
     f"usr/share/omarchy/install/hardware/qualcomm/{name}.sh"
     for name in ("dtb-uki", "firmware", "kernel-params")
@@ -67,6 +71,18 @@ class ArmPackagesTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(missing, result.stderr)
                 self.assertIn("selected channel", result.stderr)
+
+    def test_pacman_templates_in_a_platform_directory_are_accepted(self):
+        self.settings = self.package("omarchy-settings", BOOT_FILES + PLATFORM_PACMAN_FILES)
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for missing in PLATFORM_PACMAN_FILES:
+            with self.subTest(missing=missing):
+                kept = [p for p in PLATFORM_PACMAN_FILES if p != missing]
+                self.settings = self.package("omarchy-settings", [*BOOT_FILES, *kept])
+                result = self.check()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(missing, result.stderr)
 
     def test_generic_requires_boot_settings_but_not_snapdragon_scripts(self):
         self.runtime = self.package("omarchy", ())

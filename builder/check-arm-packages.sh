@@ -38,9 +38,20 @@ if [[ $media_target == aarch64/snapdragon ]]; then
     usr/share/omarchy/install/hardware/qualcomm/kernel-params.sh; do
     require_file "$runtime_package" "$runtime_files" "$path"
   done
-  for path in \
-    usr/share/omarchy/default/pacman/pacman-aarch64.conf \
-    usr/share/omarchy/default/pacman/mirrorlist-aarch64; do
+  # A runtime with platform names keeps the ARM pacman templates in a
+  # directory per platform. An older one has the two files beside the x86 ones.
+  if grep -q '^usr/share/omarchy/default/pacman/aarch64/' <<< "$settings_files"; then
+    pacman_templates=(
+      usr/share/omarchy/default/pacman/aarch64/pacman-edge.conf
+      usr/share/omarchy/default/pacman/aarch64/mirrorlist-edge
+    )
+  else
+    pacman_templates=(
+      usr/share/omarchy/default/pacman/pacman-aarch64.conf
+      usr/share/omarchy/default/pacman/mirrorlist-aarch64
+    )
+  fi
+  for path in "${pacman_templates[@]}"; do
     require_file "$settings_package" "$settings_files" "$path"
   done
 fi

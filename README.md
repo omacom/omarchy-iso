@@ -179,6 +179,8 @@ When `authorized_keys` is present, autoinstall installs it as the user's `~/.ssh
 
 When `tailscale_authkey` is present (one key, blank lines and `#` comments ignored), the install adds the `tailscale` package from the ISO's bundled mirror — nothing is fetched from the network at install or boot — and stages the join for first boot: the key lands at `/etc/tailscale/authkey` (root-only), `tailscaled` is enabled, ufw allows traffic in on `tailscale0`, and a background unit runs `tailscale up` once the network is actually up, retrying until it succeeds without holding up the boot. After a successful join the key is deleted and the unit disables itself; until then both survive reboots, so a machine installed offline joins whenever it first gets connectivity. The node appears on the tailnet under the configured hostname. Use a reusable, pre-authorized (tagged) key so one drive image serves many machines — or an ephemeral key for disposable VMs.
 
+The region follows `timezone`, exactly as in an interactive install: a timezone listed in one of the runtime's region profiles (`default/regions/*/timezones`, such as `Asia/Shanghai` for `cn`) selects that profile's mirrors and repositories, and anything else is global. Set `omarchy_install.region` in `user_configuration.json` to pick one explicitly, for example `"cn"` on a deferred-provisioning install, which carries `UTC` until first boot. Every ISO bundles every profile's packages, so a regional install still needs no network.
+
 ### Building the drive
 
 ```bash

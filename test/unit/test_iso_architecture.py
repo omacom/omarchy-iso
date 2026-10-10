@@ -1,5 +1,6 @@
 """Exercise the real launcher without Docker, sudo or host cache writes."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -93,6 +94,34 @@ name = "omarchy-generic" if args["OMARCHY_MEDIA_TARGET"] == "aarch64/generic" el
                 self.assertIn(f"{cache}:/var/cache/airootfs/var/cache/omarchy", args)
                 name = "omarchy-generic" if target == "generic" else "omarchy"
                 self.assertTrue((self.root / f"release/{name}-2026.09.10-{arch}-edge.iso").exists())
+
+    def test_platform_n1x_builds_the_n1x_target_from_its_bundle(self):
+        bundle = self.root / "bundle"
+        bundle.mkdir()
+        package = bundle / "linux-omarchy-n1x-1-1-aarch64.pkg.tar.zst"
+        package.write_bytes(b"kernel")
+        (bundle / "SHA256SUMS").write_text(f"{hashlib.sha256(package.read_bytes()).hexdigest()}  {package.name}\n")
+        for name in ("omarchy", "pkgs"):
+            (self.root / name).mkdir()
+        sources = ("--local-source", str(self.root / "omarchy"), str(self.root / "pkgs"))
+
+        # The bundle is required before anything is touched.
+        result = self.launch("--arch", "aarch64", "--platform", "n1x", *sources)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--package-dir", result.stderr)
+        self.assertFalse((self.root / "docker.json").exists())
+
+        result = self.launch("--arch", "aarch64", "--platform", "n1x", "--package-dir", str(bundle), *sources)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads((self.root / "docker.json").read_text())
+        self.assertIn("OMARCHY_MEDIA_TARGET=aarch64/n1x", args)
+        self.assertEqual(args[args.index("--platform") + 1], "linux/arm64")
+        self.assertTrue(any(arg.startswith("menci/archlinuxarm@sha256:") for arg in args))
+        self.assertIn(f"{bundle.resolve()}:/packages:ro", args)
+        # The N1x build keeps the cache path and the image name it has had.
+        cache = self.root / "home/.cache/omarchy/iso_edge_aarch64/airootfs/var/cache/omarchy"
+        self.assertIn(f"{cache}:/var/cache/airootfs/var/cache/omarchy", args)
+        self.assertTrue((self.root / "release/omarchy-2026.09.10-aarch64-n1x-local.iso").exists())
 
     def test_invalid_selection_fails_before_side_effects(self):
         cases = [("--arch",), ("--arch", "--edge"), ("--arch", "riscv64"),

@@ -143,6 +143,12 @@ chmod +x vm-boot
 
 To get the URL of the edge ISO, run `jq -r .url` on the same `latest.json`.
 
+## Installing from the target disk
+
+The UEFI installer can use free space on the GPT disk it booted from while
+preserving the installer and EFI partitions. See the [installation guide](docs/same-disk-installation.md)
+for limitations, BitLocker instructions and testing.
+
 ## Autoinstall
 
 The [manual's page](https://omarchy.org/manual/unattended-installs/) is the one for users; this is the same feature in full.

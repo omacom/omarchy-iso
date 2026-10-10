@@ -75,6 +75,11 @@ build_holey_disk() {
   parted --script "$IMG" rm 2
   parted --script "$IMG" rm 3
   created_parts=()
+  created_part_identities=()
+  created_partition_write_uncertain=false
+  protected_disk=""
+  protected_partition_table=""
+  protected_part_identities=()
 }
 
 echo "==> numbering on a disk with holes"
@@ -123,6 +128,223 @@ created_parts=()
 create_partition "$IMG" "$((100 * MIB))" "$((300 * MIB))" ext4 OVERLAP
 check "overlapping creation failed" "1" "$?"
 check "nothing tracked" "0" "${#created_parts[@]}"
+check "unchanged rejection is not uncertain" "false" "$created_partition_write_uncertain"
+
+echo "==> a failed creation preserves prior known rollback"
+build_holey_disk
+create_partition "$IMG" "$((1000 * MIB))" "$((1200 * MIB))" ext4 OMARCHY_ROOT
+check "prior partition is safely owned" "2" "$created_partition_number"
+create_partition "$IMG" "$((100 * MIB))" "$((300 * MIB))" ext4 OVERLAP
+check "later overlapping creation fails" "1" "$?"
+check "failed creation is not uncertain" "false" "$created_partition_write_uncertain"
+check "prior ownership remains tracked" "2" "${created_parts[*]}"
+rollback_created_parts "$IMG"
+check "prior owned partition still rolls back" "0" "$?"
+check "originals survive prior rollback" "1 4" "$(partition_numbers "$IMG" | sort | xargs)"
+
+echo "==> mkpart writes the table but returns failure"
+build_holey_disk
+(
+  parted() {
+    command parted "$@" || return $?
+    [[ ${3:-} == mkpart ]] && return 1
+    return 0
+  }
+  create_partition "$IMG" "$((1000 * MIB))" "$((1200 * MIB))" ext4 OMARCHY_ROOT && exit 10
+  $created_partition_write_uncertain || exit 11
+  rollback_created_parts "$IMG" && exit 12
+  exit 0
+)
+check "failed mkpart cannot claim successful rollback after writing" "0" "$?"
+check "untracked partition is left for inspection" "1 2 4" "$(partition_numbers "$IMG" | sort | xargs)"
+
+echo "==> failed mkpart cannot read back the table"
+build_holey_disk
+(
+  attempted=false
+  parted() { attempted=true; return 1; }
+  sfdisk() {
+    $attempted && return 1
+    command sfdisk "$@"
+  }
+  create_partition "$IMG" "$((1000 * MIB))" "$((1200 * MIB))" ext4 OMARCHY_ROOT && exit 10
+  $created_partition_write_uncertain || exit 11
+  rollback_created_parts "$IMG" && exit 12
+  exit 0
+)
+check "unreadable table cannot claim successful rollback" "0" "$?"
+check "failed attempt leaves originals intact" "1 4" "$(partition_numbers "$IMG" | sort | xargs)"
+
+echo "==> protected disk preserves every snapshotted partition"
+build_holey_disk
+protect_existing_partitions "$IMG"
+check "GPT source can be protected" "0" "$?"
+original_table="$protected_partition_table"
+create_partition "$IMG" "$((1000 * MIB))" "$((1200 * MIB))" fat32 OMARCHY_EFI
+check "new ESP alongside protected source" "0" "$?"
+create_partition "$IMG" "$((1201 * MIB))" "$((2000 * MIB))" btrfs OMARCHY_ROOT
+check "new root alongside protected source" "0" "$?"
+verify_existing_partitions "$IMG"
+check "original entries unchanged" "0" "$?"
+rollback_created_parts "$IMG"
+check "rollback preserves protected entries" "$original_table" "$(parted -ms "$IMG" unit B print | grep -E '^[0-9]+:')"
+
+create_partition "$IMG" "$MIB" "$((100 * MIB))" ext4 OVERLAP
+check "source overlap rejected" "1" "$?"
+check "source overlap not tracked" "0" "${#created_parts[@]}"
+created_parts=(1)
+rollback_created_parts "$IMG"
+check "rollback refuses an existing partition" "1" "$?"
+check "existing partition survived" "$original_table" "$(parted -ms "$IMG" unit B print | grep -E '^[0-9]+:')"
+created_parts=()
+
+parted --script "$IMG" name 1 CHANGED
+create_partition "$IMG" "$((1000 * MIB))" "$((1200 * MIB))" fat32 OMARCHY_EFI
+check "changed source layout rejects creation" "1" "$?"
+check "no partition created after layout change" "1 4" "$(partition_numbers "$IMG" | sort | xargs)"
+created_parts=(4)
+rollback_created_parts "$IMG"
+check "changed layout rejects rollback" "1" "$?"
+check "rollback left disk alone" "1 4" "$(partition_numbers "$IMG" | sort | xargs)"
+
+echo "==> protected snapshot rejects a UUID-only replacement"
+build_holey_disk
+protect_existing_partitions "$IMG"
+protected_row=$(parted -ms "$IMG" unit B print | grep '^1:')
+protected_uuid=$(gpt_partition_uuid "$IMG" 1)
+parted --script "$IMG" rm 1
+mkpart_mib one ext4 1 200
+check "replacement keeps protected display row" "$protected_row" "$(parted -ms "$IMG" unit B print | grep '^1:')"
+check "replacement gets a new protected identity" "different" \
+  "$([[ $protected_uuid == "$(gpt_partition_uuid "$IMG" 1)" ]] && echo same || echo different)"
+verify_existing_partitions "$IMG"
+check "protected UUID replacement is rejected" "1" "$?"
+
+echo "==> live-media source survives deleting another GPT partition"
+build_holey_disk
+protected_disk="$IMG"
+protected_partition_table=$(parted -ms "$IMG" unit B print | grep '^1:')
+protected_part_identities=()
+protected_part_identities[1]=$(gpt_partition_uuid "$IMG" 1)
+other_entry=$(parted -ms "$IMG" unit B print | grep '^4:')
+other_identity=$(created_partition_identity "$IMG" 4)
+(
+  # A disk image has no kernel block node; idle-state behavior is tested with
+  # synthetic sysfs responses below.
+  partition_is_idle() { return 0; }
+  delete_unprotected_partition "$IMG" 1 "$protected_partition_table" protected
+)
+check "source partition cannot be selected for deletion" "1" "$?"
+(
+  partition_is_idle() { return 0; }
+  delete_unprotected_partition "$IMG" 4 "$other_entry" "$other_identity"
+)
+check "other partition can be removed" "0" "$?"
+verify_existing_partitions "$IMG"
+check "source entry remains unchanged" "0" "$?"
+check "only source partition remains" "1" "$(partition_numbers "$IMG" | sort | xargs)"
+
+echo "==> rollback refuses a replaced partition with the same number"
+build_holey_disk
+protected_disk=""
+protected_partition_table=""
+protect_existing_partitions "$IMG"
+create_partition "$IMG" "$((1000 * MIB))" "$((1200 * MIB))" ext4 OMARCHY_ROOT
+check "installer-created partition uses free slot" "2" "$created_partition_number"
+original_uuid=$(sfdisk --part-uuid "$IMG" 2)
+parted --script "$IMG" rm 2
+mkpart_mib UNRELATED_DATA ext4 2001 2300
+replacement_uuid=$(sfdisk --part-uuid "$IMG" 2)
+check "replacement has a new GPT identity" "different" "$([[ $original_uuid == "$replacement_uuid" ]] && echo same || echo different)"
+rollback_created_parts "$IMG"
+check "rollback refuses the replacement" "1" "$?"
+check "replacement remains on disk" "1 2 4" "$(partition_numbers "$IMG" | sort | xargs)"
+
+echo "==> a differently labeled ESP is protected by its GPT type"
+build_holey_disk
+mkpart_mib BOOT fat32 801 900
+parted --script "$IMG" set 2 esp on
+efi_entry=$(parted -ms "$IMG" unit B print | grep '^2:')
+other_entry=$(parted -ms "$IMG" unit B print | grep '^4:')
+(
+  lsblk() {
+    [[ $* == '-dnro PARTN /dev/installer-source' ]] && echo 1
+    return 0
+  }
+  protect_install_media_partitions "$IMG" /dev/installer-source || exit 1
+  is_existing_partition "$IMG" 1 && is_existing_partition "$IMG" 2 || exit 2
+  partition_is_idle() { return 0; }
+  delete_unprotected_partition "$IMG" 2 "$efi_entry" protected && exit 3
+  other_identity=$(created_partition_identity "$IMG" 4) || exit 4
+  delete_unprotected_partition "$IMG" 4 "$other_entry" "$other_identity" || exit 5
+)
+check "source and ESP retained while another partition can be deleted" "0" "$?"
+check "only source and ESP remain" "1 2" "$(partition_numbers "$IMG" | sort | xargs)"
+
+echo "==> guarded deletion rejects a UUID-only replacement"
+build_holey_disk
+protected_disk="$IMG"
+protected_partition_table=$(parted -ms "$IMG" unit B print | grep '^1:')
+protected_part_identities[1]=$(gpt_partition_uuid "$IMG" 1)
+other_entry=$(parted -ms "$IMG" unit B print | grep '^4:')
+other_identity=$(created_partition_identity "$IMG" 4)
+parted --script "$IMG" rm 4
+# Fill the lower-numbered holes so recreating the same extent reuses slot 4.
+mkpart_mib filler-two ext4 801 900
+mkpart_mib filler-three ext4 901 999
+mkpart_mib four ext4 601 800
+check "replacement keeps the displayed row" "$other_entry" "$(parted -ms "$IMG" unit B print | grep '^4:')"
+(
+  partition_is_idle() { return 0; }
+  delete_unprotected_partition "$IMG" 4 "$other_entry" "$other_identity"
+)
+check "replacement identity blocks deletion" "1" "$?"
+check "replacement survives guarded deletion" "1 2 3 4" "$(partition_numbers "$IMG" | sort | xargs)"
+
+echo "==> post-write identity failure is reported as incomplete cleanup"
+build_holey_disk
+(
+  sfdisk() {
+    [[ $1 == --part-uuid && $3 == 2 ]] && return 1
+    command sfdisk "$@"
+  }
+  create_partition "$IMG" "$((1000 * MIB))" "$((1200 * MIB))" ext4 OMARCHY_ROOT && exit 10
+  [[ ${created_parts[*]} == 2 ]] || exit 11
+  $created_partition_write_uncertain || exit 12
+  rollback_created_parts "$IMG" && exit 13
+  exit 0
+)
+check "identity failure cannot claim successful rollback" "0" "$?"
+check "identity-failed partition is left for inspection" "1 2 4" "$(partition_numbers "$IMG" | sort | xargs)"
+
+echo "==> post-write number discovery failure is reported as incomplete cleanup"
+build_holey_disk
+(
+  comm() { return 0; }
+  create_partition "$IMG" "$((1000 * MIB))" "$((1200 * MIB))" ext4 OMARCHY_ROOT && exit 10
+  (( ${#created_parts[@]} == 0 )) || exit 11
+  $created_partition_write_uncertain || exit 12
+  rollback_created_parts "$IMG" && exit 13
+  exit 0
+)
+check "number discovery failure cannot claim successful rollback" "0" "$?"
+check "undiscovered partition is left for inspection" "1 2 4" "$(partition_numbers "$IMG" | sort | xargs)"
+
+echo "==> MBR free-space partitions still have a rollback identity"
+rm -f "$IMG"
+truncate -s 4G "$IMG"
+parted --script "$IMG" mklabel msdos
+mkpart_mib primary ext4 1 200
+protected_disk=""
+protected_partition_table=""
+created_parts=()
+created_part_identities=()
+create_partition "$IMG" "$((1000 * MIB))" "$((1200 * MIB))" ext4 OMARCHY_ROOT
+check "MBR partition creation succeeds" "0" "$?"
+check "MBR created partition tracked" "2" "$created_partition_number"
+rollback_created_parts "$IMG"
+check "MBR rollback succeeds" "0" "$?"
+check "MBR existing partition remains" "1" "$(partition_numbers "$IMG" | sort | xargs)"
 
 if (( failures > 0 )); then
   printf '\n%d check(s) failed\n' "$failures"

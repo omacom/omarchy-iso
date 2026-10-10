@@ -57,7 +57,7 @@ for cfg in grub.cfg loopback.cfg; do
   grep -Fq -- "--id 'n1x-recovery'" "$src" || fail "$cfg lacks the N1x recovery entry"
   grep -Fq 'omarchy.n1x_recovery=1 acpi=nospcr' "$src" || fail "$cfg recovery entry lacks acpi=nospcr"
   source "$ROOT/builder/grub-platform.sh"
-  for platform in "" n1x; do
+  for platform in "" n1x generic qualcomm gb10; do
     cp "$src" "$fixture/$platform-$cfg"
     configure_grub_platform "$fixture/$platform-$cfg" "$platform"
     sed -i -e 's|%KERNEL%|linux-omarchy-n1x|g' -e 's|%BOOT_SPLASH_KERNEL_OPTIONS%|quiet splash |g' -e 's|%KERNEL_OPTIONS%|console=tty0|g' \
@@ -100,8 +100,91 @@ grep -Fq 'depend = limine-mkinitcpio-hook' "$ROOT/builder/build-iso.sh" \
   && fail "N1x builds still require the aarch64 runtime to depend on Limine"
 grep -Fq 'pacman -Qqp "$archive"' "$ROOT/builder/build-iso.sh" \
   || fail "the offline mirror does not carry every package in the platform bundle"
-grep -Fq 'libva-nvidia-driver limine limine-mkinitcpio-hook limine-snapper-sync snapper pciutils' "$ROOT/builder/build-iso.sh" \
+grep -Fq 'archlinuxarm-keyring limine limine-mkinitcpio-hook limine-snapper-sync snapper pciutils' "$ROOT/builder/build-iso.sh" \
   || fail "the offline mirror lacks the Limine/Snapper stack the installer adds"
+grep -Fq 'platform_packages+=(nvidia-open-dkms nvidia-utils libva-nvidia-driver)' "$ROOT/builder/build-iso.sh" \
+  || fail "the N1x offline mirror lacks the NVIDIA stack the runtime's platform script installs"
+
+# --- generic platform ------------------------------------------------------------
+# The same build without anything board-specific: Arch Linux ARM's kernel, the
+# published packages, no bundle and no NVIDIA stack.
+live="$ROOT/builder/linux-aarch64-live.sh"
+bash -n "$live"
+[[ -x $live ]] || fail "the generic live-kernel script is not executable"
+grep -Fq 'generic|qualcomm|gb10) OMARCHY_KERNEL=linux-aarch64 ;;' "$ROOT/bin/omarchy-iso-make" || fail "the generic image does not boot linux-aarch64"
+grep -Fq -- '--package-dir and --dev-ssh are only valid with --platform n1x' "$ROOT/bin/omarchy-iso-make" \
+  || fail "a generic build would accept the N1x bundle or dev key"
+grep -Fq 'install -Dm0755 /builder/linux-aarch64-live.sh "$build_cache_dir/airootfs/root/customize_airootfs.sh"' "$ROOT/builder/build-iso.sh" \
+  || fail "generic builds do not make linux-aarch64 the live kernel"
+grep -Fq 'kernel_options="console=ttyAMA0,115200 console=tty0 initramfs_async=0"' "$ROOT/builder/build-iso.sh" \
+  || fail "a generic image cannot be watched over its serial port"
+grep -Fq "cp -a \"\$image\" /boot/vmlinuz-linux-aarch64" "$live" || fail "mkarchiso would find no kernel to copy"
+grep -Fq "archiso_image='/boot/initramfs-linux-aarch64.img'" "$live" || fail "GRUB would find no live initramfs"
+# Without a bundle the [platform] repo must go: pacman refuses a repo it cannot sync.
+strip=$(grep -F "awk '/^\\[platform\\]$/" "$ROOT/builder/build-iso.sh" | sed -E "s/.*awk '([^']*)'.*/\1/")
+[[ -n $strip ]] || fail "generic builds keep the [platform] repo"
+stripped=$(awk "$strip" "$ROOT/configs/pacman-online-aarch64.conf" | grep -E '^\[' | paste -sd' ')
+[[ $stripped == '[options] [omarchy] [core] [extra] [alarm] [aur]' ]] || fail "generic repositories are wrong: $stripped"
+# The entrypoint's contract, checked by running it up to its first refusal.
+make_refuses() { # expected message, then arguments
+  local want=$1 out; shift
+  out=$(cd "$ROOT" && bash bin/omarchy-iso-make "$@" 2>&1) && fail "omarchy-iso-make $* was accepted"
+  grep -Fq -- "$want" <<<"$out" || fail "omarchy-iso-make $*: expected '$want', got: $out"
+}
+make_refuses 'requires --platform n1x, generic, qualcomm or gb10' --arch aarch64 --edge
+make_refuses '--platform must be n1x, generic, qualcomm or gb10' --arch aarch64 --platform pi
+make_refuses 'only valid with --platform n1x' --arch aarch64 --platform generic --edge --package-dir "$fixture"
+make_refuses 'builds use the edge channel' --arch aarch64 --platform generic
+make_refuses 'requires --package-dir DIR' --arch aarch64 --platform n1x --edge
+
+# --- qualcomm platform -----------------------------------------------------------
+# The generic image, plus a live UKI that carries the Snapdragon laptops' device
+# trees, since their firmware provides none.
+uki="$ROOT/builder/qualcomm/live-uki.sh"
+bash -n "$uki"
+make_refuses 'only valid with --platform n1x' --arch aarch64 --platform qualcomm --edge --package-dir "$fixture"
+make_refuses 'builds use the edge channel' --arch aarch64 --platform qualcomm
+grep -Fq 'arch_packages+=(systemd-ukify linux-firmware-qcom qcom-firmware-extract)' "$ROOT/builder/build-iso.sh" \
+  || fail "the Snapdragon live image lacks ukify or the firmware tools"
+# The live scripts run in order, from one customize step: the kernel and
+# initramfs first, then the UKI that wraps them.
+customize=$(sed -n "/<<'CUSTOMIZE'/,/^CUSTOMIZE$/p" "$ROOT/builder/build-iso.sh")
+[[ $(grep -n -F -e linux-aarch64-live.sh -e qualcomm-live-uki.sh <<<"$customize" | head -2 | cut -d: -f2- | paste -sd' ') \
+  == 'bash /root/linux-aarch64-live.sh bash /root/qualcomm-live-uki.sh' ]] || fail "the live UKI is not built after the live kernel"
+grep -Fq -- '--devicetree-auto=$dtb' "$uki" || fail "the live UKI carries no device trees"
+grep -Fq '*-el2.dtb' "$uki" || fail "EL2 device trees, which share hardware ids with their base trees, are not left out"
+grep -Fq "chainloader /%INSTALL_DIR%/boot/%ARCH%/omarchy-live.efi" "$ROOT/configs/grub/grub.cfg" || fail "GRUB does not chainload the live UKI"
+grep -Fq "modprobe.blacklist=qcom_q6v5_pas" "$ROOT/configs/grub/grub.cfg" || fail "the live UKI entry loads the DSP driver in the initramfs"
+# mkarchiso copies the UKI onto the ISO only with this patch, applied after the GRUB one.
+if [[ -f "$ROOT/archiso/archiso/mkarchiso" ]]; then
+  cp "$ROOT/archiso/archiso/mkarchiso" "$fixture/mkarchiso-qualcomm"
+  patch --batch --forward --fuzz=0 "$fixture/mkarchiso-qualcomm" <"$ROOT/builder/archiso-v87-aarch64-grub.patch" >/dev/null \
+    && patch --batch --forward --fuzz=0 "$fixture/mkarchiso-qualcomm" <"$ROOT/builder/archiso-v87-aarch64-boot-efi.patch" >/dev/null \
+    || fail "the archiso patch that copies the live UKI no longer applies to the pinned submodule"
+  grep -Fq 'install -m 0644 -- "${uki}" "${isofs_dir}/${install_dir}/boot/${arch}/"' "$fixture/mkarchiso-qualcomm" \
+    || fail "the patched mkarchiso does not copy the live UKI"
+fi
+grep -Fq 'patch --batch --forward --fuzz=0 "$mkarchiso_command" </builder/archiso-v87-aarch64-boot-efi.patch' "$ROOT/builder/build-iso.sh" \
+  || fail "Snapdragon builds do not patch mkarchiso to copy the live UKI"
+# A runtime without the Snapdragon setup would install a laptop that cannot boot.
+grep -Fq 'ships no $qualcomm_setup' "$ROOT/builder/build-iso.sh" || fail "a runtime without the Snapdragon setup is not refused"
+
+# --- gb10 platform ----------------------------------------------------------------
+# The generic image, plus the runtime's GB10 packages installed offline.
+make_refuses 'only valid with --platform n1x' --arch aarch64 --platform gb10 --edge --package-dir "$fixture"
+make_refuses 'builds use the edge channel' --arch aarch64 --platform gb10
+# A runtime without the GB10 list would make a generic image under the GB10 name.
+gb10_check=$(sed -n '/^# A GB10 image is the generic image/,/^fi$/p' "$ROOT/builder/build-iso.sh")
+[[ -n $gb10_check ]] || fail "GB10 builds do not check the runtime for the GB10 list"
+mkdir -p "$fixture/gb10-lists"
+printf '%s\n' base-one >"$fixture/gb10-lists/omarchy-base.packages"
+gb10_runtime_ok() { # platform
+  (base_pkg_lists=("$fixture/gb10-lists/omarchy-base.packages"); OMARCHY_ARM_PLATFORM=$1; eval "$gb10_check") 2>/dev/null
+}
+gb10_runtime_ok gb10 && fail "a runtime without the GB10 list is accepted for a GB10 image"
+gb10_runtime_ok generic || fail "a generic image asks for the GB10 list"
+printf '%s\n' nvidia-container-toolkit >"$fixture/gb10-lists/omarchy-aarch64-gb10.packages"
+gb10_runtime_ok gb10 || fail "a runtime with the GB10 list is refused"
 
 # --- package sources ---------------------------------------------------------------
 # Arch Linux ARM's packages come from Omarchy's own mirror of them: for the
@@ -169,6 +252,16 @@ composed=$(
 )
 [[ $composed == $'base-one\nbase-two\nzram-generator\nrtkit\nlinux-omarchy-n1x' ]] \
   || fail "aarch64 does not get the base list plus its architecture's and platform's additions minus the x86_64-only packages: $composed"
+printf '%s\n' '# gb10' nvidia-container-toolkit rdma-core >"$fixture/lists/omarchy-aarch64-gb10.packages"
+composed=$(
+  base_pkg_lists=("$fixture/lists/omarchy-base.packages")
+  OMARCHY_ARCH=aarch64
+  OMARCHY_ARM_PLATFORM=gb10
+  eval "$(sed -n '/^# aarch64 takes the runtime/,/^fi$/p' "$ROOT/builder/build-iso.sh")" 2>/dev/null
+  cat "${base_pkg_lists[0]}"
+)
+[[ $composed == $'base-one\nbase-two\nzram-generator\nrtkit\nnvidia-container-toolkit\nrdma-core' ]] \
+  || fail "a GB10 image does not get the GB10 list in place of other platforms': $composed"
 composed=$(
   rm "$fixture/lists/omarchy-aarch64.packages" "$fixture/lists/omarchy-x86_64-only.packages" "$fixture/lists/omarchy-aarch64-n1x.packages"
   base_pkg_lists=("$fixture/lists/omarchy-base.packages")

@@ -1,0 +1,17 @@
+[Unit]
+Description=Start Qualcomm DSP after the live root is in RAM
+After=local-fs.target systemd-udev-trigger.service
+Before=getty@tty1.service
+ConditionArchitecture=arm64
+ConditionPathExists=/run/archiso/copytoram
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/omarchy-live-dsp
+TimeoutStartSec=30s
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -191,7 +191,29 @@ def _early_packages() -> list[str]:
 # imports it, so no patching happens here.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Stage vendor-signed Qualcomm firmware before the Windows partition is removed.
+LIVE_FIRMWARE_STAGE = Path("/run/omarchy/firmware")
+TARGET_FIRMWARE_STAGE = Path("var/lib/omarchy/firmware-stage")
+
+
+def _stage_qualcomm_firmware() -> None:
+    tool = shutil.which("qcom-firmware-extract")
+    if not tool:
+        return
+    info("› saving Qualcomm firmware from Windows before the disk is written")
+    # Firmware extraction is idempotent and optional.
+    subprocess.run([tool, "--stage", str(LIVE_FIRMWARE_STAGE)], check=False)
+
+
+def _copy_firmware_stage_into_target(ctx: InstallContext) -> None:
+    if not (LIVE_FIRMWARE_STAGE / "manifest").is_file():
+        return
+    dst = ctx.target / TARGET_FIRMWARE_STAGE
+    shutil.copytree(LIVE_FIRMWARE_STAGE, dst, dirs_exist_ok=True)
+
+
 def prepare_live(ctx: InstallContext) -> None:
+    _stage_qualcomm_firmware()
     if ctx.is_protected:
         info("› protected mode: skipping whole-disk cleanup")
     else:
@@ -1079,6 +1101,8 @@ def _prepare_target_setup(ctx: InstallContext) -> None:
             ctx.state["bind_mounts"].append(str(target_dst))
             mounted.add(str(target_dst))
 
+    _copy_firmware_stage_into_target(ctx)
+
     ctx.state["target_setup_prepared"] = True
 
 
@@ -1328,6 +1352,58 @@ def _stage_provisioning_luks_unlock(ctx: InstallContext, provisioning_dir) -> No
     files_dropin.write_text("FILES+=(/etc/omarchy/provisioning.key)\n")
 
 
+INITRAMFS_MODULES_CONF = "zz-omarchy-kernel-modules.conf"
+
+
+def _drop_initramfs_modules_the_kernel_lacks(ctx: InstallContext) -> None:
+    """Keep mkinitcpio from failing on a module the installed kernel was built
+    without.
+
+    The Omarchy settings name modules for the kernels Omarchy ships, thunderbolt
+    among them. mkinitcpio reports a name it cannot find as an error, and
+    limine-mkinitcpio-hook then builds the unified kernel image but does not
+    install it: Arch Linux ARM's linux-aarch64 has no thunderbolt module, and
+    the machine was left with no kernel to boot. A drop-in that sorts last takes
+    the names this kernel lacks back out of MODULES.
+    """
+    conf_dir = ctx.target / "etc" / "mkinitcpio.conf.d"
+    drop_in = conf_dir / INITRAMFS_MODULES_CONF
+    listed: list[str] = []
+    for conf in sorted(conf_dir.glob("*.conf")) if conf_dir.is_dir() else []:
+        if conf.name == INITRAMFS_MODULES_CONF:
+            continue
+        for match in re.finditer(r"^\s*MODULES\+?=\(([^)]*)\)", conf.read_text(), re.M):
+            listed += [name.strip("\"'") for name in match.group(1).split()]
+
+    missing: list[str] = []
+    for directory, _ in _kernel_directories(ctx):
+        for module in listed:
+            if module in missing or not re.fullmatch(r"[A-Za-z0-9_-]+", module):
+                continue
+            found = subprocess.run(
+                ["modinfo", "--basedir", str(ctx.target), "-k", directory.name, module],
+                capture_output=True,
+            )
+            if found.returncode != 0:
+                missing.append(module)
+
+    if not missing:
+        drop_in.unlink(missing_ok=True)
+        return
+    info(f"› leaving out of the initramfs, not in this kernel: {' '.join(missing)}")
+    drop_in.write_text(
+        "# Written by the Omarchy installer. The installed kernel has no such\n"
+        "# modules, and mkinitcpio fails on a module it cannot find.\n"
+        f"_omarchy_absent=({' '.join(missing)})\n"
+        "_omarchy_kept=()\n"
+        'for _omarchy_module in "${MODULES[@]}"; do\n'
+        '  [[ " ${_omarchy_absent[*]} " == *" $_omarchy_module "* ]] || _omarchy_kept+=("$_omarchy_module")\n'
+        "done\n"
+        'MODULES=("${_omarchy_kept[@]}")\n'
+        "unset _omarchy_absent _omarchy_kept _omarchy_module\n"
+    )
+
+
 def finalize_limine_boot(ctx: InstallContext) -> None:
     """Finalize Limine after target system setup has written all dynamic
     boot drop-ins (hibernation, hardware quirks, protected-mode ESP settings).
@@ -1363,6 +1439,7 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     if not limine_conf.exists():
         raise RuntimeError(f"{limine_conf} missing")
 
+    _drop_initramfs_modules_the_kernel_lacks(ctx)
     subprocess.run(["arch-chroot", str(ctx.target), "limine-update"], check=True)
 
     subprocess.run(
@@ -1749,14 +1826,17 @@ def validate_boot(ctx: InstallContext) -> None:
         if not limine_binary.exists() or limine_binary.stat().st_size == 0:
             raise RuntimeError(f"{limine_binary} missing or empty")
 
-        # Hardware packages (omarchy-hw-intel-ptl, …) can swap the kernel out
-        # from under us mid-install, so trust what's on disk over what we asked
-        # for and only fall back to the configured name when nothing's there.
-        uki_dir = esp_mount / "EFI" / "Linux"
-        candidates = _installed_kernels(ctx) or [kernel]
-        ukis = [uki_dir / f"{uki_prefix}_{name}.efi" for name in candidates]
-        if not any(uki.exists() and uki.stat().st_size for uki in ukis):
-            raise RuntimeError(f"{' / '.join(str(uki) for uki in ukis)} missing or empty")
+        if _limine_setting(config_text, "ENABLE_UKI", "yes") == "no":
+            _validate_linux_boot_entry(esp_mount, limine_conf_text, ctx.encrypt)
+        else:
+            # Hardware packages (omarchy-hw-intel-ptl, …) can swap the kernel out
+            # from under us mid-install, so trust what's on disk over what we asked
+            # for and only fall back to the configured name when nothing's there.
+            uki_dir = esp_mount / "EFI" / "Linux"
+            candidates = _installed_kernels(ctx) or [kernel]
+            ukis = [uki_dir / f"{uki_prefix}_{name}.efi" for name in candidates]
+            if not any(uki.exists() and uki.stat().st_size for uki in ukis):
+                raise RuntimeError(f"{' / '.join(str(uki) for uki in ukis)} missing or empty")
 
         post = _read_efibootmgr()
         if not _find_label_entries(post["entries"], "Limine"):
@@ -1883,6 +1963,45 @@ def _validate_platform_boot_entries(limine_conf_text: str, arm_platform: str, ke
             raise RuntimeError(f"{rescue_name} entry does not boot to a text login; its own cmdline was overridden")
 
 
+def _validate_linux_boot_entry(esp_mount: Path, config_text: str, encrypted: bool) -> None:
+    """Check the kernel and initramfs that limine-entry-tool copied to the ESP."""
+    # limine-entry-tool writes an indented //<kernel> entry per kernel under
+    # /+Omarchy; deeper entries belong to snapshots.
+    entries: list[list[str]] = []
+    in_omarchy = False
+    current: list[str] | None = None
+    for line in config_text.splitlines():
+        header = re.match(r"\s*(/+)\+?(.*)$", line)
+        if header:
+            depth = len(header.group(1))
+            if depth == 1:
+                in_omarchy = header.group(2).startswith("Omarchy")
+            current = [] if in_omarchy and depth == 2 else None
+            if current is not None:
+                entries.append(current)
+        elif current is not None:
+            current.append(line)
+
+    for entry in map("\n".join, entries):
+        if not re.search(r"(?m)^\s*protocol:\s*linux\s*$", entry):
+            continue
+        cmdline = re.search(r"(?m)^\s*cmdline:\s*(.*)$", entry)
+        if not cmdline or not re.search(r"(?:^|\s)root=\S+", cmdline.group(1)):
+            continue
+        if encrypted and not re.search(r"(?:^|\s)cryptdevice=\S+", cmdline.group(1)):
+            continue
+        kernel = re.findall(r"(?m)^\s*path:\s*(\S+)\s*$", entry)
+        modules = re.findall(r"(?m)^\s*module_path:\s*(\S+)\s*$", entry)
+        if not kernel or not modules:
+            continue
+        # limine-entry-tool writes boot():/<path>#<hash>; resources elsewhere
+        # don't resolve on the ESP and so fail the check.
+        files = [esp_mount / r.removeprefix("boot():").split("#", 1)[0].lstrip("/") for r in kernel + modules]
+        if all(path.is_file() and path.stat().st_size for path in files):
+            return
+    raise RuntimeError(f"{esp_mount / 'limine.conf'} has no bootable Omarchy Linux entry with a kernel and initramfs")
+
+
 def _validate_provisioning_state(ctx: InstallContext) -> None:
     """An deferred-provisioning install that boots without a working first-boot setup is a
     user-less brick; insist the armed state is complete before reboot."""
@@ -1932,26 +2051,44 @@ def _assert_boot_hooks_restored(ctx: InstallContext) -> None:
             raise RuntimeError(f"{path} is missing — future kernel updates would ship no UKI")
 
 
+# Arch's kernel packages leave their pkgbase next to their modules, which is
+# also the name limine-mkinitcpio-hook builds the UKI under. Arch Linux ARM's
+# linux-aarch64 leaves none, so a kernel's module directory without one is
+# named by the kernel this image was built to install. modules.builtin marks
+# a kernel's own directory: a leftover of out-of-tree modules has none.
+def _kernel_directories(ctx: InstallContext) -> list[tuple[Path, str]]:
+    found = []
+    modules = ctx.target / "usr" / "lib" / "modules"
+    for directory in sorted(modules.iterdir()) if modules.is_dir() else []:
+        pkgbase = directory / "pkgbase"
+        if pkgbase.is_file():
+            name = pkgbase.read_text().strip()
+        elif (directory / "modules.builtin").is_file():
+            name = iso_kernel()
+        else:
+            continue
+        if name:
+            found.append((directory, name))
+    return found
+
+
 def _validate_kernel_headers(ctx: InstallContext) -> None:
-    kernels = sorted((ctx.target / "usr/lib/modules").glob("*/pkgbase"))
+    kernels = _kernel_directories(ctx)
     if not kernels:
         raise RuntimeError("no installed kernel found in target")
-    for pkgbase in kernels:
-        release = pkgbase.parent.name
-        header_release = pkgbase.parent / "build/include/config/kernel.release"
+    for directory, name in kernels:
+        release = directory.name
+        header_release = directory / "build/include/config/kernel.release"
         if not header_release.is_file():
-            raise RuntimeError(f"{pkgbase.read_text().strip()} ({release}) has no kernel headers")
+            raise RuntimeError(f"{name} ({release}) has no kernel headers")
         if header_release.read_text().strip() != release:
-            raise RuntimeError(f"{pkgbase.read_text().strip()} headers do not match kernel {release}")
+            raise RuntimeError(f"{name} headers do not match kernel {release}")
 
 
-# Every kernel package leaves its pkgbase next to its modules, which is also
-# the name limine-mkinitcpio-hook builds the UKI under.
 def _installed_kernels(ctx: InstallContext) -> list[str]:
     names = []
-    for pkgbase in sorted((ctx.target / "usr" / "lib" / "modules").glob("*/pkgbase")):
-        name = pkgbase.read_text().strip()
-        if name and name not in names:
+    for _, name in _kernel_directories(ctx):
+        if name not in names:
             names.append(name)
     return names
 

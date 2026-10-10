@@ -57,7 +57,7 @@ for cfg in grub.cfg loopback.cfg; do
   grep -Fq -- "--id 'n1x-recovery'" "$src" || fail "$cfg lacks the N1x recovery entry"
   grep -Fq 'omarchy.n1x_recovery=1 acpi=nospcr' "$src" || fail "$cfg recovery entry lacks acpi=nospcr"
   source "$ROOT/builder/grub-platform.sh"
-  for platform in "" n1x generic; do
+  for platform in "" n1x generic qualcomm; do
     cp "$src" "$fixture/$platform-$cfg"
     configure_grub_platform "$fixture/$platform-$cfg" "$platform"
     sed -i -e 's|%KERNEL%|linux-omarchy-n1x|g' -e 's|%BOOT_SPLASH_KERNEL_OPTIONS%|quiet splash |g' -e 's|%KERNEL_OPTIONS%|console=tty0|g' \
@@ -111,7 +111,7 @@ grep -Fq 'platform_packages+=(nvidia-open-dkms nvidia-utils libva-nvidia-driver)
 live="$ROOT/builder/linux-aarch64-live.sh"
 bash -n "$live"
 [[ -x $live ]] || fail "the generic live-kernel script is not executable"
-grep -Fq 'generic) OMARCHY_KERNEL=linux-aarch64 ;;' "$ROOT/bin/omarchy-iso-make" || fail "the generic image does not boot linux-aarch64"
+grep -Fq 'generic|qualcomm) OMARCHY_KERNEL=linux-aarch64 ;;' "$ROOT/bin/omarchy-iso-make" || fail "the generic image does not boot linux-aarch64"
 grep -Fq -- '--package-dir and --dev-ssh are only valid with --platform n1x' "$ROOT/bin/omarchy-iso-make" \
   || fail "a generic build would accept the N1x bundle or dev key"
 grep -Fq 'install -Dm0755 /builder/linux-aarch64-live.sh "$build_cache_dir/airootfs/root/customize_airootfs.sh"' "$ROOT/builder/build-iso.sh" \
@@ -131,11 +131,43 @@ make_refuses() { # expected message, then arguments
   out=$(cd "$ROOT" && bash bin/omarchy-iso-make "$@" 2>&1) && fail "omarchy-iso-make $* was accepted"
   grep -Fq -- "$want" <<<"$out" || fail "omarchy-iso-make $*: expected '$want', got: $out"
 }
-make_refuses 'requires --platform n1x or --platform generic' --arch aarch64 --edge
-make_refuses '--platform must be n1x or generic' --arch aarch64 --platform pi
+make_refuses 'requires --platform n1x, generic or qualcomm' --arch aarch64 --edge
+make_refuses '--platform must be n1x, generic or qualcomm' --arch aarch64 --platform pi
 make_refuses 'only valid with --platform n1x' --arch aarch64 --platform generic --edge --package-dir "$fixture"
 make_refuses 'builds use the edge channel' --arch aarch64 --platform generic
 make_refuses 'requires --package-dir DIR' --arch aarch64 --platform n1x --edge
+
+# --- qualcomm platform -----------------------------------------------------------
+# The generic image, plus a live UKI that carries the Snapdragon laptops' device
+# trees, since their firmware provides none.
+uki="$ROOT/builder/qualcomm/live-uki.sh"
+bash -n "$uki"
+make_refuses 'only valid with --platform n1x' --arch aarch64 --platform qualcomm --edge --package-dir "$fixture"
+make_refuses 'builds use the edge channel' --arch aarch64 --platform qualcomm
+grep -Fq 'arch_packages+=(systemd-ukify linux-firmware-qcom qcom-firmware-extract)' "$ROOT/builder/build-iso.sh" \
+  || fail "the Snapdragon live image lacks ukify or the firmware tools"
+# The live scripts run in order, from one customize step: the kernel and
+# initramfs first, then the UKI that wraps them.
+customize=$(sed -n "/<<'CUSTOMIZE'/,/^CUSTOMIZE$/p" "$ROOT/builder/build-iso.sh")
+[[ $(grep -n -F -e linux-aarch64-live.sh -e qualcomm-live-uki.sh <<<"$customize" | head -2 | cut -d: -f2- | paste -sd' ') \
+  == 'bash /root/linux-aarch64-live.sh bash /root/qualcomm-live-uki.sh' ]] || fail "the live UKI is not built after the live kernel"
+grep -Fq -- '--devicetree-auto=$dtb' "$uki" || fail "the live UKI carries no device trees"
+grep -Fq '*-el2.dtb' "$uki" || fail "EL2 device trees, which share hardware ids with their base trees, are not left out"
+grep -Fq "chainloader /%INSTALL_DIR%/boot/%ARCH%/omarchy-live.efi" "$ROOT/configs/grub/grub.cfg" || fail "GRUB does not chainload the live UKI"
+grep -Fq "modprobe.blacklist=qcom_q6v5_pas" "$ROOT/configs/grub/grub.cfg" || fail "the live UKI entry loads the DSP driver in the initramfs"
+# mkarchiso copies the UKI onto the ISO only with this patch, applied after the GRUB one.
+if [[ -f "$ROOT/archiso/archiso/mkarchiso" ]]; then
+  cp "$ROOT/archiso/archiso/mkarchiso" "$fixture/mkarchiso-qualcomm"
+  patch --batch --forward --fuzz=0 "$fixture/mkarchiso-qualcomm" <"$ROOT/builder/archiso-v87-aarch64-grub.patch" >/dev/null \
+    && patch --batch --forward --fuzz=0 "$fixture/mkarchiso-qualcomm" <"$ROOT/builder/archiso-v87-aarch64-boot-efi.patch" >/dev/null \
+    || fail "the archiso patch that copies the live UKI no longer applies to the pinned submodule"
+  grep -Fq 'install -m 0644 -- "${uki}" "${isofs_dir}/${install_dir}/boot/${arch}/"' "$fixture/mkarchiso-qualcomm" \
+    || fail "the patched mkarchiso does not copy the live UKI"
+fi
+grep -Fq 'patch --batch --forward --fuzz=0 "$mkarchiso_command" </builder/archiso-v87-aarch64-boot-efi.patch' "$ROOT/builder/build-iso.sh" \
+  || fail "Snapdragon builds do not patch mkarchiso to copy the live UKI"
+# A runtime without the Snapdragon setup would install a laptop that cannot boot.
+grep -Fq 'ships no $qualcomm_setup' "$ROOT/builder/build-iso.sh" || fail "a runtime without the Snapdragon setup is not refused"
 
 # --- package sources ---------------------------------------------------------------
 # Arch Linux ARM's packages come from Omarchy's own mirror of them: for the

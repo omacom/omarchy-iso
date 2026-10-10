@@ -27,12 +27,14 @@ while [[ $# -gt 0 ]]; do
     # What the aarch64 image is built for. n1x is the NVIDIA N1x laptop: the
     # linux-omarchy-n1x kernel and the hardware-probe recovery entry. generic
     # is any machine whose firmware describes its hardware (VMs, servers):
-    # Arch Linux ARM's linux-aarch64 kernel and nothing board-specific.
+    # Arch Linux ARM's linux-aarch64 kernel and nothing board-specific. qualcomm
+    # is the Snapdragon laptops: the generic image plus a live UKI that carries
+    # their device trees, which their firmware does not provide.
     OMARCHY_ARM_PLATFORM="${2:-}"
     case "$OMARCHY_ARM_PLATFORM" in
-    n1x|generic) ;;
+    n1x|generic|qualcomm) ;;
     *)
-      echo "Error: --platform must be n1x or generic" >&2
+      echo "Error: --platform must be n1x, generic or qualcomm" >&2
       exit 1
       ;;
     esac
@@ -110,7 +112,7 @@ while [[ $# -gt 0 ]]; do
     echo "Unknown option: $1"
     echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
     echo "       $0 --arch aarch64 --platform n1x [--dev-ssh <pubkey>] --package-dir DIR --local-source <omarchy-checkout> <pkgs-checkout> [...]"
-    echo "       $0 --arch aarch64 --platform generic --edge [--local-source <omarchy-checkout> <pkgs-checkout>] [...]"
+    echo "       $0 --arch aarch64 --platform generic|qualcomm --edge [--local-source <omarchy-checkout> <pkgs-checkout>] [...]"
     exit 1
     ;;
   esac
@@ -134,7 +136,7 @@ CONTAINER_PLATFORM_ARGS=()
 OMARCHY_KERNEL=linux-t2
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   if [[ -z $OMARCHY_ARM_PLATFORM ]]; then
-    echo "Error: --arch aarch64 requires --platform n1x or --platform generic" >&2
+    echo "Error: --arch aarch64 requires --platform n1x, generic or qualcomm" >&2
     exit 1
   fi
   if [[ $OMARCHY_ARM_PLATFORM == n1x ]]; then
@@ -168,7 +170,7 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   fi
   case $OMARCHY_ARM_PLATFORM in
   n1x) OMARCHY_KERNEL=linux-omarchy-n1x ;;
-  generic) OMARCHY_KERNEL=linux-aarch64 ;;
+  generic|qualcomm) OMARCHY_KERNEL=linux-aarch64 ;;
   esac
   if [[ -n $N1X_DEV_SSH_KEY ]]; then
     [[ -f $N1X_DEV_SSH_KEY ]] || { echo "Error: SSH public key not found at $N1X_DEV_SSH_KEY" >&2; exit 1; }

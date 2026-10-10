@@ -39,19 +39,19 @@ case "$OMARCHY_ARCH" in
           exit 1
         fi
         ;;
-      generic)
+      generic|qualcomm)
         # Arch Linux ARM's kernel, the published packages, no bundle.
         if [[ $OMARCHY_KERNEL != linux-aarch64 ]]; then
-          echo "ERROR: generic aarch64 builds boot linux-aarch64 (got '$OMARCHY_KERNEL')" >&2
+          echo "ERROR: $OMARCHY_ARM_PLATFORM aarch64 builds boot linux-aarch64 (got '$OMARCHY_KERNEL')" >&2
           exit 1
         fi
         if [[ -d /packages ]]; then
-          echo "ERROR: generic aarch64 builds take no platform package bundle" >&2
+          echo "ERROR: $OMARCHY_ARM_PLATFORM aarch64 builds take no platform package bundle" >&2
           exit 1
         fi
         ;;
       *)
-        echo "ERROR: aarch64 builds need OMARCHY_ARM_PLATFORM=n1x or generic (got '$OMARCHY_ARM_PLATFORM')" >&2
+        echo "ERROR: aarch64 builds need OMARCHY_ARM_PLATFORM=n1x, generic or qualcomm (got '$OMARCHY_ARM_PLATFORM')" >&2
         exit 1
         ;;
     esac
@@ -142,6 +142,11 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   mkarchiso_command=/tmp/mkarchiso-aarch64
   cp /archiso/archiso/mkarchiso "$mkarchiso_command"
   patch --batch --forward --fuzz=0 "$mkarchiso_command" </builder/archiso-v87-aarch64-grub.patch
+  if [[ $OMARCHY_ARM_PLATFORM == qualcomm ]]; then
+    # The Snapdragon live system boots a UKI built into /boot; carry it onto
+    # the ISO beside the kernel.
+    patch --batch --forward --fuzz=0 "$mkarchiso_command" </builder/archiso-v87-aarch64-boot-efi.patch
+  fi
   chmod 0755 "$mkarchiso_command"
 else
   pacman --noconfirm -Sy archlinux-keyring
@@ -217,7 +222,7 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # I2C-HID keyboard modules.
   configure_archiso_aarch64_mkinitcpio "$build_cache_dir/airootfs/etc/mkinitcpio.conf.d/archiso.conf"
   boot_splash_kernel_options="quiet splash "
-  if [[ $OMARCHY_ARM_PLATFORM == generic ]]; then
+  if [[ $OMARCHY_KERNEL == linux-aarch64 ]]; then
     # linux-aarch64 owns its preset and names its image /boot/Image, so the
     # live preset, kernel name and initramfs are made after pacstrap, inside
     # the image.
@@ -230,6 +235,20 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
     # The N1x firmware's SPCR serial console would take the console from the
     # panel, hence console=tty0 acpi=nospcr.
     kernel_options="console=tty0 acpi=nospcr initramfs_async=0"
+  fi
+  if [[ $OMARCHY_ARM_PLATFORM == qualcomm ]]; then
+    # Snapdragon firmware hands the kernel no device tree. Once the live kernel
+    # and initramfs exist, wrap them in a UKI that carries the device trees;
+    # GRUB chainloads it (configs/grub/grub.cfg).
+    mv "$build_cache_dir/airootfs/root/customize_airootfs.sh" "$build_cache_dir/airootfs/root/linux-aarch64-live.sh"
+    install -Dm0644 /builder/qualcomm/live-uki.sh "$build_cache_dir/airootfs/root/qualcomm-live-uki.sh"
+    cat >"$build_cache_dir/airootfs/root/customize_airootfs.sh" <<'CUSTOMIZE'
+#!/bin/bash
+set -euo pipefail
+bash /root/linux-aarch64-live.sh
+bash /root/qualcomm-live-uki.sh
+rm -f /root/linux-aarch64-live.sh /root/qualcomm-live-uki.sh
+CUSTOMIZE
   fi
   rm -rf "$build_cache_dir/syslinux" "$build_cache_dir/efiboot"
 else
@@ -336,6 +355,11 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # Plymouth stays out of the live initramfs (archiso-aarch64-mkinitcpio.sh);
   # openssh and pciutils serve the recovery entry and remote debugging.
   arch_packages=("$OMARCHY_KERNEL" archlinuxarm-keyring git gum jq openssl openssh pciutils plymouth ttfx tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
+  if [[ $OMARCHY_ARM_PLATFORM == qualcomm ]]; then
+    # ukify builds the live UKI, and the installer saves the laptop's signed
+    # firmware from Windows with qcom-firmware-extract.
+    arch_packages+=(systemd-ukify linux-firmware-qcom qcom-firmware-extract)
+  fi
 else
   arch_packages=(linux-t2 git gum jq openssl plymouth ttfx tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
 fi
@@ -387,6 +411,22 @@ else
   for platform_list in omarchy-aarch64.packages "omarchy-aarch64-$OMARCHY_ARM_PLATFORM.packages" omarchy-x86_64-only.packages; do
     bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists "usr/share/omarchy/install/$platform_list" 2>/dev/null || true
   done
+fi
+
+# A Snapdragon laptop boots only with the device trees the runtime's hardware
+# setup lists for its UKI, so refuse a runtime from before that setup.
+if [[ $OMARCHY_ARM_PLATFORM == qualcomm ]]; then
+  qualcomm_setup=install/hardware/qualcomm/dtb-uki.sh
+  if [[ -d /omarchy-source ]]; then
+    [[ -f /omarchy-source/$qualcomm_setup ]]
+  else
+    bsdtar -tf "$omarchy_pkg" "usr/share/omarchy/$qualcomm_setup" >/dev/null 2>&1
+  fi || {
+    echo "ERROR: the Omarchy runtime for this image ships no $qualcomm_setup." >&2
+    echo "       A Snapdragon laptop installed from it would have no device tree to boot with." >&2
+    echo "       Build with --local-source against a checkout that has the Snapdragon setup." >&2
+    exit 1
+  }
 fi
 
 # aarch64 takes the runtime's own default set, as omarchy-pkg-defaults composes

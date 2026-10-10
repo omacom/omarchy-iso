@@ -161,7 +161,9 @@ class KernelSelectionTest(unittest.TestCase):
             ({"kernel": "linux-t2"}, {"kernels": ["linux-omarchy"]}, "linux-t2"),
             ({}, {"kernels": ["linux-lts"]}, "linux-lts"),
         ]:
-            with self.subTest(kernel=expected, storage=storage), tempfile.TemporaryDirectory() as tmp:
+            # The fixtures are x86_64 ones; the Limine binary checked follows the host.
+            with self.subTest(kernel=expected, storage=storage), tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(phases_impl.platform, "machine", return_value="x86_64"):
                 target = Path(tmp)
                 files = {
                     f"usr/lib/modules/7.2-test/pkgbase": expected + "\n",

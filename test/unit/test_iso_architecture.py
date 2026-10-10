@@ -95,6 +95,14 @@ name = "omarchy-generic" if args["OMARCHY_MEDIA_TARGET"] == "aarch64/generic" el
                 name = "omarchy-generic" if target == "generic" else "omarchy"
                 self.assertTrue((self.root / f"release/{name}-2026.09.10-{arch}-edge.iso").exists())
 
+    def test_platform_qualcomm_is_the_snapdragon_target(self):
+        result = self.launch("--arch", "aarch64", "--platform", "qualcomm")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads((self.root / "docker.json").read_text())
+        self.assertIn("OMARCHY_MEDIA_TARGET=aarch64/snapdragon", args)
+        self.assertIn("menci/archlinuxarm:base-devel", args)
+        self.assertNotEqual(self.launch("--arch", "aarch64", "--platform", "riscv").returncode, 0)
+
     def test_platform_n1x_builds_the_n1x_target_from_its_bundle(self):
         bundle = self.root / "bundle"
         bundle.mkdir()

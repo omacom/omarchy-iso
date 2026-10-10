@@ -223,7 +223,7 @@ Use `--dev` or `--rc` to build against those package channels. Both `--dev` and 
 
 ### ARM media
 
-The build defaults to the host architecture, with Snapdragon media selected on ARM hosts. Use `--arch` and `--media-target` to select explicitly. Docker must support the selected architecture; cross-architecture builds require container emulation.
+The build defaults to the host architecture, with Snapdragon media selected on ARM hosts. Use `--arch` and `--media-target` to select explicitly; `--platform qualcomm` is another name for the Snapdragon target. Docker must support the selected architecture; cross-architecture builds require container emulation.
 
 ```bash
 ./bin/omarchy-iso-make --arch aarch64 --media-target aarch64/snapdragon --edge --keep-pkg-cache --no-boot-offer

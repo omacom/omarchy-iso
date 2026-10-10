@@ -24,13 +24,18 @@ while [[ $# -gt 0 ]]; do
     shift 2
     ;;
   --platform)
-    # The NVIDIA N1x image, the same as --media-target aarch64/n1x: it selects
-    # the linux-omarchy-n1x kernel and the hardware-probe recovery entry.
-    if [[ ${2:-} != n1x ]]; then
-      echo "Error: --platform must be n1x" >&2
+    # The hardware family an aarch64 image is built for, by the runtime's name.
+    # n1x is the NVIDIA N1x laptop: the linux-omarchy-n1x kernel and the
+    # hardware-probe recovery entry. qualcomm is the Snapdragon laptops: a live
+    # UKI that carries their device trees. Each is a media target of its own.
+    case ${2:-} in
+    n1x) OMARCHY_MEDIA_TARGET=aarch64/n1x ;;
+    qualcomm) OMARCHY_MEDIA_TARGET=aarch64/snapdragon ;;
+    *)
+      echo "Error: --platform must be n1x or qualcomm" >&2
       exit 1
-    fi
-    OMARCHY_MEDIA_TARGET=aarch64/n1x
+      ;;
+    esac
     shift 2
     ;;
   --dev-ssh)
@@ -113,6 +118,7 @@ while [[ $# -gt 0 ]]; do
     echo "Unknown option: $1"
     echo "Usage: $0 [--arch x86_64|aarch64] [--media-target x86_64/pc|aarch64/snapdragon|aarch64/generic|aarch64/n1x] [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>] [--local-repo <repo-dir>]"
     echo "       $0 --arch aarch64 --platform n1x [--dev-ssh <pubkey>] --package-dir DIR --local-source <omarchy-checkout> <pkgs-checkout> [...]"
+    echo "       $0 --arch aarch64 --platform qualcomm --edge [...]"
     exit 1
     ;;
   esac

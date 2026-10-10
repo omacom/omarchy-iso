@@ -52,6 +52,8 @@ class BootValidationTest(unittest.TestCase):
         self.write("usr/lib/modules/7.2/pkgbase", "linux-aarch64\n")
         self.write("usr/lib/modules/7.2/build/include/config/kernel.release", "7.2\n")
         for patch in (
+            # The fixtures are x86_64 ones; the Limine binary checked follows the host.
+            mock.patch.object(phases.platform, "machine", return_value="x86_64"),
             mock.patch.object(phases, "_assert_boot_hooks_restored"),
             mock.patch.object(phases.arch, "has_uefi", return_value=True, create=True),
             mock.patch.object(phases, "_read_efibootmgr", return_value={"entries": {"0001": "Limine"}}),

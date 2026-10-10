@@ -346,6 +346,30 @@ else
   # actionable error below.
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/setup-form.sh 2>/dev/null || true
   setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
+  # Runtimes from before the platform lists ship neither, so each is optional.
+  for platform_list in omarchy-aarch64.packages "omarchy-aarch64-$OMARCHY_ARM_PLATFORM.packages" omarchy-x86_64-only.packages; do
+    bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists "usr/share/omarchy/install/$platform_list" 2>/dev/null || true
+  done
+fi
+
+# aarch64 takes the runtime's own default set, as omarchy-pkg-defaults composes
+# it: the base list, then the aarch64 additions (zram-generator, rtkit) and the
+# platform's own (the N1x kernel and NVIDIA stack), minus the base packages with
+# no aarch64 build anywhere (superwhisper-bin, say).
+if [[ $OMARCHY_ARCH == aarch64 ]]; then
+  pkglist_dir=$(dirname "${base_pkg_lists[0]}")
+  aarch64_base_list=/tmp/omarchy-aarch64-base.packages
+  {
+    grep -hv '^#\|^$' "${base_pkg_lists[0]}"
+    [[ ! -f $pkglist_dir/omarchy-aarch64.packages ]] || grep -hv '^#\|^$' "$pkglist_dir/omarchy-aarch64.packages"
+    [[ ! -f $pkglist_dir/omarchy-aarch64-$OMARCHY_ARM_PLATFORM.packages ]] ||
+      grep -hv '^#\|^$' "$pkglist_dir/omarchy-aarch64-$OMARCHY_ARM_PLATFORM.packages"
+  } | sed -e 's/[[:space:]]*#.*$//' -e '/^[[:space:]]*$/d' |
+    awk -v skips="$pkglist_dir/omarchy-x86_64-only.packages" '
+      BEGIN { while ((getline line < skips) > 0) { sub(/[ \t]*#.*$/, "", line); if (line != "") skip[line] = 1 } }
+      skip[$0] { print "aarch64: excluding " $0 ", which the runtime marks x86_64-only" > "/dev/stderr"; next }
+      !seen[$0]++' >"$aarch64_base_list"
+  base_pkg_lists[0]=$aarch64_base_list
 fi
 
 mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"

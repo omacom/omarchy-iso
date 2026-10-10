@@ -9,7 +9,7 @@ set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 fixture=$(mktemp -d)
-trap 'rm -rf "$fixture"' EXIT
+trap 'rm -rf "$fixture" /tmp/omarchy-aarch64-base.packages' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -152,6 +152,32 @@ for dropin in "$ROOT"/archiso/configs/releng/airootfs/etc/ssh/sshd_config.d/*.co
   [[ 05-omarchy-n1x-dev-ssh.conf < ${dropin##*/} ]] || fail "dev SSH drop-in sorts after releng's ${dropin##*/}"
 done
 bash "$dev_ssh" --target "$fixture/missing" 2>/dev/null && fail "dev SSH accepted a target that is not a root filesystem"
+
+# --- default package set -----------------------------------------------------
+# aarch64 composes the runtime's default set the way omarchy-pkg-defaults does.
+mkdir -p "$fixture/lists"
+printf '%s\n' '# base' base-one gliff superwhisper-bin base-two >"$fixture/lists/omarchy-base.packages"
+printf '%s\n' '# aarch64' zram-generator rtkit base-one >"$fixture/lists/omarchy-aarch64.packages"
+printf '%s\n' '# x86_64 only' gliff superwhisper-bin >"$fixture/lists/omarchy-x86_64-only.packages"
+printf '%s\n' '# n1x' linux-omarchy-n1x rtkit >"$fixture/lists/omarchy-aarch64-n1x.packages"
+composed=$(
+  base_pkg_lists=("$fixture/lists/omarchy-base.packages")
+  OMARCHY_ARCH=aarch64
+  OMARCHY_ARM_PLATFORM=n1x
+  eval "$(sed -n '/^# aarch64 takes the runtime/,/^fi$/p' "$ROOT/builder/build-iso.sh")" 2>/dev/null
+  cat "${base_pkg_lists[0]}"
+)
+[[ $composed == $'base-one\nbase-two\nzram-generator\nrtkit\nlinux-omarchy-n1x' ]] \
+  || fail "aarch64 does not get the base list plus its architecture's and platform's additions minus the x86_64-only packages: $composed"
+composed=$(
+  rm "$fixture/lists/omarchy-aarch64.packages" "$fixture/lists/omarchy-x86_64-only.packages" "$fixture/lists/omarchy-aarch64-n1x.packages"
+  base_pkg_lists=("$fixture/lists/omarchy-base.packages")
+  OMARCHY_ARCH=aarch64
+  eval "$(sed -n '/^# aarch64 takes the runtime/,/^fi$/p' "$ROOT/builder/build-iso.sh")" 2>/dev/null
+  cat "${base_pkg_lists[0]}"
+)
+[[ $composed == $'base-one\ngliff\nsuperwhisper-bin\nbase-two' ]] \
+  || fail "a runtime without the platform lists keeps its base list: $composed"
 
 # --- live initramfs overlay -------------------------------------------------
 source "$ROOT/builder/archiso-aarch64-mkinitcpio.sh"

@@ -1,0 +1,191 @@
+#!/bin/bash
+#
+# Static checks for the aarch64 / N1x build overlay. These run without Docker
+# and guard the pieces that a wrong edit would silently break: the entrypoint's
+# argument contract, the GRUB templating markers, the arm64 archiso patch
+# still applying to the pinned submodule, and the manifest filter.
+
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture" /tmp/omarchy-aarch64-base.packages' EXIT
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# --- entrypoint argument contract -------------------------------------------
+bash -n "$ROOT/bin/omarchy-iso-make" "$ROOT/builder/build-iso.sh" \
+  "$ROOT/builder/aarch64-package-filter.sh" "$ROOT/builder/grub-platform.sh" \
+  "$ROOT/builder/archiso-aarch64-mkinitcpio.sh" "$ROOT/builder/archiso-aarch64-grub-modules.sh" \
+  "$ROOT/builder/node-release.sh" "$ROOT/builder/arm64-kernel-image.sh" \
+  "$ROOT/builder/n1x-dev-ssh/omarchy-n1x-dev-ssh" "$ROOT/configs/airootfs/root/.automated_script.sh"
+
+grep -Fq 'menci/archlinuxarm@sha256:' "$ROOT/bin/omarchy-iso-make" || fail "aarch64 container is not pinned by digest"
+grep -Fq -- '--arch aarch64 requires --package-dir DIR' "$ROOT/bin/omarchy-iso-make" || fail "aarch64 builds must require the package bundle"
+grep -Fq -- '--arch aarch64 requires --local-source' "$ROOT/bin/omarchy-iso-make" || fail "aarch64 builds must require --local-source"
+grep -Fq 'sha256sum --check --strict --quiet SHA256SUMS' "$ROOT/bin/omarchy-iso-make" || fail "bundle checksums are not verified on the host"
+grep -Fq -- '-v "$PACKAGE_DIR:/packages:ro"' "$ROOT/bin/omarchy-iso-make" || fail "bundle is not mounted read-only at /packages"
+grep -Fq 'OMARCHY_ARCH == x86_64 && -d /var/cache/pacman/pkg' "$ROOT/bin/omarchy-iso-make" || fail "host pacman cache would leak into aarch64 builds"
+grep -Fq 'builds use the edge channel' "$ROOT/bin/omarchy-iso-make" || fail "aarch64 builds must be pinned to the edge channel"
+grep -Fq 'n1x) OMARCHY_KERNEL=linux-omarchy-n1x ;;' "$ROOT/bin/omarchy-iso-make" || fail "the N1x image does not ship linux-omarchy-n1x"
+grep -Fq "ALL_kver='/boot/vmlinuz-linux-omarchy-n1x'" "$ROOT/builder/linux-omarchy-n1x.preset" || fail "the live preset does not boot linux-omarchy-n1x"
+grep -Fq 'echo "$OMARCHY_KERNEL" > "$build_cache_dir/airootfs/root/omarchy_kernel"' "$ROOT/builder/build-iso.sh" || fail "the installer is not told which kernel to install"
+
+# --- builder wiring -----------------------------------------------------------
+grep -Fq 'online_pacman_conf=/configs/pacman-online-aarch64.conf' "$ROOT/builder/build-iso.sh" || fail "aarch64 does not use its own online pacman config"
+if grep -Fq 'pacman-online-${OMARCHY_MIRROR}.conf --noconfirm' "$ROOT/builder/build-iso.sh"; then
+  fail "a pacman call still hardcodes the x86 mirror config"
+fi
+grep -Fq 'configure_archiso_aarch64_mkinitcpio' "$ROOT/builder/build-iso.sh" || fail "live initramfs is not adapted for aarch64"
+grep -Fq 'kernel_options="console=tty0 acpi=nospcr initramfs_async=0"' "$ROOT/builder/build-iso.sh" || fail "aarch64 live boot does not pin the panel console"
+grep -Fq 'boot_splash_kernel_options="quiet splash "' "$ROOT/builder/build-iso.sh" || fail "aarch64 live boot does not show the splash"
+grep -Fq 'plymouth.enable=0 console=tty0' "$ROOT/builder/build-iso.sh" && fail "aarch64 live boot still turns Plymouth off"
+grep -Fq '"$mkarchiso_command" -v -w' "$ROOT/builder/build-iso.sh" || fail "builder does not use the patched mkarchiso on aarch64"
+# pacman takes the first repository carrying a name: the platform bundle, then
+# Omarchy's edge aarch64 repo, then Arch Linux ARM.
+repos=$(grep -E '^\[|^Server' "$ROOT/configs/pacman-online-aarch64.conf" | grep -v '^\[options\]' | paste -sd' ')
+[[ $repos == '[platform] Server = file:///packages [omarchy] Server = https://pkgs.omarchy.org/edge/$arch [core]'* ]] \
+  || fail "aarch64 repository order is wrong: $repos"
+grep -Fq 'repo-add -q "$bundle_index/platform.db.tar.gz"' "$ROOT/builder/build-iso.sh" || fail "bundle is not indexed as the [platform] repo"
+grep -Fq 'arch="${OMARCHY_ARCH:-x86_64}"' "$ROOT/configs/profiledef.sh" || fail "profiledef ignores OMARCHY_ARCH"
+
+# --- GRUB templating -----------------------------------------------------------
+for cfg in grub.cfg loopback.cfg; do
+  src="$ROOT/configs/grub/$cfg"
+  grep -Fq 'vmlinuz-%KERNEL%' "$src" || fail "$cfg does not template the kernel"
+  grep -Fq '%BOOT_SPLASH_KERNEL_OPTIONS%%KERNEL_OPTIONS%' "$src" || fail "$cfg does not template boot options"
+  grep -Fq -- "--id 'n1x-recovery'" "$src" || fail "$cfg lacks the N1x recovery entry"
+  grep -Fq 'omarchy.n1x_recovery=1 acpi=nospcr' "$src" || fail "$cfg recovery entry lacks acpi=nospcr"
+  source "$ROOT/builder/grub-platform.sh"
+  for platform in "" n1x; do
+    cp "$src" "$fixture/$platform-$cfg"
+    configure_grub_platform "$fixture/$platform-$cfg" "$platform"
+    sed -i -e 's|%KERNEL%|linux-omarchy-n1x|g' -e 's|%BOOT_SPLASH_KERNEL_OPTIONS%|quiet splash |g' -e 's|%KERNEL_OPTIONS%|console=tty0|g' \
+      -e 's|%INSTALL_DIR%|arch|g' -e 's|%ARCH%|aarch64|g' -e 's|%ARCHISO_UUID%|x|g' "$fixture/$platform-$cfg"
+    if command -v grub-script-check >/dev/null; then
+      grub-script-check "$fixture/$platform-$cfg" || fail "$cfg ($platform) is not valid GRUB script"
+    fi
+    if [[ $platform == n1x ]]; then
+      grep -Fq 'n1x-recovery' "$fixture/$platform-$cfg" || fail "n1x overlay lost the recovery entry in $cfg"
+    else
+      grep -Fq 'n1x-recovery' "$fixture/$platform-$cfg" && fail "recovery entry leaked into the generic $cfg"
+    fi
+    grep -Eq '^%(N1X|NON_N1X)_ONLY' "$fixture/$platform-$cfg" && fail "template markers remain in $cfg"
+    grep -Fqx 'timeout_style=hidden' "$fixture/$platform-$cfg" || fail "$cfg ($platform) shows the boot menu"
+    grep -Fqx 'timeout=0' "$fixture/$platform-$cfg" || fail "$cfg ($platform) waits at the boot menu"
+  done
+done
+
+# --- arm64 archiso patch still applies to the pinned submodule ---------------
+if [[ -f "$ROOT/archiso/archiso/mkarchiso" ]]; then
+  cp "$ROOT/archiso/archiso/mkarchiso" "$fixture/mkarchiso"
+  patch --batch --forward --fuzz=0 --dry-run "$fixture/mkarchiso" <"$ROOT/builder/archiso-v87-aarch64-grub.patch" >/dev/null \
+    || fail "archiso arm64 GRUB patch no longer applies to the pinned submodule"
+fi
+
+# --- manifest filter -----------------------------------------------------------
+source "$ROOT/builder/aarch64-package-filter.sh"
+result=$(filter_aarch64_packages linux-omarchy-n1x linux linux-headers linux-omarchy linux-omarchy-headers amd-ucode broadcom-wl-dkms tzupdate lib32-nvidia-utils dell-xps13-sidecar-amps linux-firmware-cirrus-dx13260 apple-bcm-firmware-fetcher superwhisper-bin mise-bin nvim vi obs-studio yay-debug hyprland omarchy-dev 2>/dev/null | tr '\n' ' ')
+[[ $result == "linux-omarchy-n1x linux-omarchy-n1x-headers linux-omarchy-n1x linux-omarchy-n1x-headers tzupdate mise-bin neovim ex-vi-compat hyprland omarchy-dev " ]] || fail "manifest filter produced: $result"
+
+grep -Fq -- '-e "OMARCHY_RUNTIME_PACKAGE=${OMARCHY_RUNTIME_PACKAGE:-}"' "$ROOT/bin/omarchy-iso-make" \
+  || fail "the Omarchy package pair cannot be overridden for a --local-source build"
+
+# --- N1x packages ----------------------------------------------------------------
+grep -Fq 'OMARCHY_PLATFORM' "$ROOT/builder/build-omarchy-packages.sh" \
+  && fail "the local package build still passes a platform no recipe reads"
+grep -Fq 'lacks $required, which the N1x install needs' "$ROOT/builder/build-iso.sh" \
+  || fail "N1x builds do not verify the settings package keeps the Limine drop-ins"
+grep -Fq 'depend = limine-mkinitcpio-hook' "$ROOT/builder/build-iso.sh" \
+  && fail "N1x builds still require the aarch64 runtime to depend on Limine"
+grep -Fq 'pacman -Qqp "$archive"' "$ROOT/builder/build-iso.sh" \
+  || fail "the offline mirror does not carry every package in the platform bundle"
+grep -Fq 'libva-nvidia-driver limine limine-mkinitcpio-hook limine-snapper-sync snapper pciutils' "$ROOT/builder/build-iso.sh" \
+  || fail "the offline mirror lacks the Limine/Snapper stack the installer adds"
+
+# --- package sources ---------------------------------------------------------------
+# Arch Linux ARM's packages come from Omarchy's own mirror of them: for the
+# offline mirror, for the build container, and for the installed system.
+servers=$(grep -E '^Server' "$ROOT/configs/pacman-online-aarch64.conf" | grep -v 'file:///packages' | sort -u)
+grep -vq 'omarchy\.org/' <<<"$servers" && fail "an aarch64 build downloads from outside Omarchy: $(grep -v 'omarchy\.org/' <<<"$servers")"
+grep -Fq 'Server = https://arm-mirror.omarchy.org/$arch/$repo' <<<"$servers" || fail "aarch64 builds do not use Omarchy's Arch Linux ARM mirror"
+grep -Fq '>/etc/pacman.d/mirrorlist' "$ROOT/builder/build-iso.sh" || fail "the build container keeps the mirror its image came with"
+grep -Fq '{"url": "https://arm-mirror.omarchy.org/$arch/$repo"}' "$ROOT/configs/airootfs/root/configurator" \
+  || fail "an installed aarch64 system is not pointed at Omarchy's mirror"
+if grep -rn 'mirror\.archlinuxarm\.org' "$ROOT/bin" "$ROOT/builder" "$ROOT/configs" >/dev/null; then
+  fail "something still names Arch Linux ARM's own mirror"
+fi
+
+# --- recovery entry --------------------------------------------------------------
+grep -Fq "grep -qw 'omarchy.n1x_recovery=1' /proc/cmdline" "$ROOT/configs/airootfs/root/.automated_script.sh" \
+  || fail "the N1x recovery entry would start the installer"
+
+# --- DEV ONLY: N1x debug SSH -------------------------------------------------------
+dev_ssh="$ROOT/builder/n1x-dev-ssh/omarchy-n1x-dev-ssh"
+grep -Fq 'install -Dm0755 /builder/n1x-dev-ssh/omarchy-n1x-dev-ssh' "$ROOT/builder/build-iso.sh" || fail "--dev-ssh builds do not stage the dev SSH script"
+# The dev key is opt-in: only the --dev-ssh flag stages it.
+dev_block=$(awk '/^if \[\[ -n \$\{OMARCHY_N1X_DEV_SSH:-\} \]\]; then$/,/^fi$/' "$ROOT/builder/build-iso.sh")
+grep -Fq 'n1x-dev-ssh' <<<"$dev_block" || fail "dev SSH staging is not gated on OMARCHY_N1X_DEV_SSH"
+[[ $(grep -c 'n1x-dev-ssh/' "$ROOT/builder/build-iso.sh") == $(grep -c 'n1x-dev-ssh/' <<<"$dev_block") ]] \
+  || fail "dev SSH files are staged outside the --dev-ssh block"
+grep -Fq -- '-e "OMARCHY_N1X_DEV_SSH=${N1X_DEV_SSH_KEY:+1}"' "$ROOT/bin/omarchy-iso-make" || fail "--dev-ssh does not reach the build container"
+grep -Fq -- '-v "$N1X_DEV_SSH_KEY:/dev-ssh/authorized_keys:ro"' "$ROOT/bin/omarchy-iso-make" || fail "--dev-ssh does not hand the builder's key to the build"
+grep -Fq -- '${N1X_DEV_SSH_KEY:+-devssh}' "$ROOT/bin/omarchy-iso-make" || fail "dev images are not named apart from normal ones"
+grep -Fq 'file_permissions["/usr/local/sbin/omarchy-n1x-dev-ssh"]="0:0:755"' "$ROOT/builder/build-iso.sh" || fail "dev SSH script would lose its exec bit"
+grep -Fq 'multi-user.target.wants/omarchy-n1x-dev-ssh.service' "$ROOT/builder/build-iso.sh" || fail "dev SSH unit is not enabled on the live ISO"
+[[ ! -e $ROOT/builder/n1x-dev-ssh/authorized_keys ]] || fail "a dev SSH key is baked into the sources"
+ssh-keygen -q -t ed25519 -N '' -C omarchy-iso-test -f "$fixture/devkey"
+mkdir -p "$fixture/target/etc"
+for run in 1 2; do
+  OMARCHY_N1X_DEV_SSH_KEYS="$fixture/devkey.pub" bash "$dev_ssh" --target "$fixture/target" \
+    || fail "dev SSH --target run $run failed"
+done
+[[ $(stat -c %a "$fixture/target/root/.ssh") == 700 && $(stat -c %a "$fixture/target/root/.ssh/authorized_keys") == 600 ]] \
+  || fail "dev SSH wrote loose permissions"
+cmp -s "$fixture/target/root/.ssh/authorized_keys" "$fixture/devkey.pub" || fail "dev SSH key is not authorized exactly once for root"
+grep -Fqx 'PasswordAuthentication no' "$fixture/target/etc/ssh/sshd_config.d/05-omarchy-n1x-dev-ssh.conf" || fail "dev SSH leaves password login on"
+grep -Fqx 'PermitRootLogin prohibit-password' "$fixture/target/etc/ssh/sshd_config.d/05-omarchy-n1x-dev-ssh.conf" || fail "dev SSH root login is not key-only"
+[[ ! -e $fixture/target/root/authorized_keys ]] || fail "--target must not stage installer keys"
+# sshd keeps the first value it reads; the drop-in must sort before releng's.
+for dropin in "$ROOT"/archiso/configs/releng/airootfs/etc/ssh/sshd_config.d/*.conf; do
+  [[ -e $dropin ]] || continue
+  [[ 05-omarchy-n1x-dev-ssh.conf < ${dropin##*/} ]] || fail "dev SSH drop-in sorts after releng's ${dropin##*/}"
+done
+bash "$dev_ssh" --target "$fixture/missing" 2>/dev/null && fail "dev SSH accepted a target that is not a root filesystem"
+
+# --- default package set -----------------------------------------------------
+# aarch64 composes the runtime's default set the way omarchy-pkg-defaults does.
+mkdir -p "$fixture/lists"
+printf '%s\n' '# base' base-one gliff superwhisper-bin base-two >"$fixture/lists/omarchy-base.packages"
+printf '%s\n' '# aarch64' zram-generator rtkit base-one >"$fixture/lists/omarchy-aarch64.packages"
+printf '%s\n' '# x86_64 only' gliff superwhisper-bin >"$fixture/lists/omarchy-x86_64-only.packages"
+printf '%s\n' '# n1x' linux-omarchy-n1x rtkit >"$fixture/lists/omarchy-aarch64-n1x.packages"
+composed=$(
+  base_pkg_lists=("$fixture/lists/omarchy-base.packages")
+  OMARCHY_ARCH=aarch64
+  OMARCHY_ARM_PLATFORM=n1x
+  eval "$(sed -n '/^# aarch64 takes the runtime/,/^fi$/p' "$ROOT/builder/build-iso.sh")" 2>/dev/null
+  cat "${base_pkg_lists[0]}"
+)
+[[ $composed == $'base-one\nbase-two\nzram-generator\nrtkit\nlinux-omarchy-n1x' ]] \
+  || fail "aarch64 does not get the base list plus its architecture's and platform's additions minus the x86_64-only packages: $composed"
+composed=$(
+  rm "$fixture/lists/omarchy-aarch64.packages" "$fixture/lists/omarchy-x86_64-only.packages" "$fixture/lists/omarchy-aarch64-n1x.packages"
+  base_pkg_lists=("$fixture/lists/omarchy-base.packages")
+  OMARCHY_ARCH=aarch64
+  eval "$(sed -n '/^# aarch64 takes the runtime/,/^fi$/p' "$ROOT/builder/build-iso.sh")" 2>/dev/null
+  cat "${base_pkg_lists[0]}"
+)
+[[ $composed == $'base-one\ngliff\nsuperwhisper-bin\nbase-two' ]] \
+  || fail "a runtime without the platform lists keeps its base list: $composed"
+
+# --- live initramfs overlay -------------------------------------------------
+source "$ROOT/builder/archiso-aarch64-mkinitcpio.sh"
+cp "$ROOT/configs/airootfs/etc/mkinitcpio.conf.d/archiso.conf" "$fixture/archiso.conf"
+configure_archiso_aarch64_mkinitcpio "$fixture/archiso.conf"
+grep -Eq '^HOOKS=\(' "$fixture/archiso.conf" || fail "live HOOKS line lost"
+grep -Eq 'microcode|memdisk' "$fixture/archiso.conf" && fail "x86-only hooks remain in the aarch64 live initramfs"
+grep -Eq '^HOOKS=\(.*\bplymouth\b' "$fixture/archiso.conf" || fail "Plymouth is missing from the aarch64 live initramfs"
+grep -Fq 'MODULES=(i2c_mt65xx i2c_tegra i2c_hid i2c_hid_acpi hid_generic hid_multitouch)' "$fixture/archiso.conf" || fail "early keyboard modules missing"
+
+echo "aarch64 build overlay tests passed"

@@ -17,10 +17,12 @@ Phase ordering (full-disk and protected/pre-mounted):
     configure_login        → sddm state + encrypted-install autologin
     configure_ssh_access   → authorized_keys for autoinstall; no-op otherwise
     configure_tailscale    → tailnet join staged for first boot; no-op otherwise
-    validate_boot          → assert UKI / limine.conf / kernel cmdline are sane
+    validate_boot          → assert UKI / limine.conf / kernel cmdline are sane,
+                             and that the target keyring trusts its packages
 """
 
 from __future__ import annotations
+import platform
 
 import hashlib
 import os
@@ -34,7 +36,7 @@ from pathlib import Path
 
 from . import archinstall_adapter as arch
 from .command import capture, capture_identifier, require_text
-from .context import InstallContext
+from .context import InstallContext, iso_arm_platform, iso_kernel
 from .keyboard import configure_keyboard
 from .ui import error, info
 
@@ -141,8 +143,22 @@ EARLY_LUAROCKS_PACKAGES = [
 ]
 
 
+# Arch Linux ARM signs every package in its repositories, archlinux-keyring
+# included, with its own build key, and only archlinuxarm-keyring carries it.
+# pacstrap has initialized the target keyring by now, so the package's install
+# script populates and locally signs the Arch Linux ARM keys the way
+# archlinux-keyring's did. Without it the offline install (SigLevel = Never)
+# looks fine, and the first online pacman run fails with "unknown trust".
+AARCH64_BOOTSTRAP_PACKAGES = [
+    "archlinuxarm-keyring",
+]
+
+
 def _early_bootstrap_packages() -> list[str]:
-    return [*EARLY_BOOTSTRAP_BASE_PACKAGES, _omarchy_settings_package()]
+    packages = [*EARLY_BOOTSTRAP_BASE_PACKAGES]
+    if platform.machine() == "aarch64":
+        packages += AARCH64_BOOTSTRAP_PACKAGES
+    return [*packages, _omarchy_settings_package()]
 
 
 def _early_user_seed_packages() -> list[str]:
@@ -392,7 +408,7 @@ def _install_pre_mounted_limine(ctx: InstallContext) -> None:
         disk=Path(disk),
         part=part,
         esp_path=boot.get("esp_path", "/EFI/limine"),
-        efi_binary=boot.get("efi_binary", "limine_x64.efi"),
+        efi_binary=boot.get("efi_binary", _default_limine_efi_binary()),
         pre_state=pre_state,
     )
 
@@ -400,6 +416,16 @@ def _install_pre_mounted_limine(ctx: InstallContext) -> None:
     windows_after = _find_label_entries(post_state["entries"], "Windows")
     if windows_before and not windows_after:
         raise RuntimeError("Windows boot entry disappeared during Limine install — aborting")
+
+
+# UEFI binary names follow the machine architecture. The live ISO and the
+# target share one architecture, so the running kernel is authoritative.
+def _efi_arch_suffix() -> str:
+    return "AA64" if platform.machine() == "aarch64" else "X64"
+
+
+def _default_limine_efi_binary() -> str:
+    return f"limine_{_efi_arch_suffix().lower()}.efi"
 
 
 def _install_limine_efi(
@@ -410,15 +436,17 @@ def _install_limine_efi(
     part: int,
     removable: bool = False,
     esp_path: str = "/EFI/limine",
-    efi_binary: str = "limine_x64.efi",
+    efi_binary: str | None = None,
     pre_state: dict | None = None,
 ) -> None:
+    if efi_binary is None:
+        efi_binary = _default_limine_efi_binary()
     if removable:
         esp_path = "/EFI/BOOT"
-        efi_binary = "BOOTX64.EFI"
+        efi_binary = f"BOOT{_efi_arch_suffix()}.EFI"
 
     limine_path = ctx.target / "usr" / "share" / "limine"
-    source_name = "BOOTX64.EFI"
+    source_name = f"BOOT{_efi_arch_suffix()}.EFI"
     target_dir = Path(esp_mount) / esp_path.lstrip("/")
     target_path = target_dir / efi_binary
     _copy_required(limine_path / source_name, ctx.target / target_path.relative_to("/"))
@@ -537,6 +565,9 @@ def _write_limine_defaults_from_config(ctx: InstallContext, installer, config) -
     _write_limine_defaults(ctx, cmdline, esp_mount=_installer_esp_mount(installer))
 
 
+AARCH64_CONSOLE_CONF = "00-omarchy-console.conf"
+
+
 def _write_limine_defaults(
     ctx: InstallContext,
     cmdline: str,
@@ -564,6 +595,18 @@ def _write_limine_defaults(
     kernel_cmdline = ctx.target / "etc" / "kernel" / "cmdline"
     kernel_cmdline.parent.mkdir(parents=True, exist_ok=True)
     kernel_cmdline.write_text(cmdline + "\n")
+
+    if platform.machine() == "aarch64":
+        # arm64 firmware commonly publishes an ACPI serial console (SPCR), which
+        # the kernel adopts unless told otherwise; the disk passphrase prompt
+        # then goes to a serial port nobody is watching. The live ISO boots with
+        # the console on the screen; carry that to the installed system.
+        console_conf = ctx.target / "etc" / "limine-entry-tool.d" / AARCH64_CONSOLE_CONF
+        console_conf.parent.mkdir(parents=True, exist_ok=True)
+        console_conf.write_text(
+            "# aarch64: keep the console on the screen rather than the firmware's serial port.\n"
+            'KERNEL_CMDLINE[default]+=" console=tty0 acpi=nospcr"\n'
+        )
 
     limine_conf = ctx.target / esp_mount.lstrip("/") / "limine.conf"
     limine_conf.parent.mkdir(parents=True, exist_ok=True)
@@ -747,6 +790,14 @@ def _runtime_package_list(ctx: InstallContext) -> list[str]:
             continue
         if s not in already_installed and s not in pkgs:
             pkgs.append(s)
+    # The x86_64 runtime depends on the Limine/Snapper stack; the aarch64 one
+    # does not, because Apple Silicon boots through its own loader. UEFI aarch64
+    # machines install with this ISO and boot like x86_64, so add the stack here,
+    # in the same masked-hooks transaction the dependency would have used.
+    if platform.machine() == "aarch64":
+        for s in ("limine", "limine-mkinitcpio-hook", "limine-snapper-sync", "snapper"):
+            if s not in already_installed and s not in pkgs:
+                pkgs.append(s)
     return pkgs
 
 
@@ -760,7 +811,7 @@ def _boot_intent(ctx: InstallContext) -> dict:
     boot = dict(ctx.omarchy_install.get("boot") or {})
     boot.setdefault("esp_mount", "/boot")
     boot.setdefault("esp_path", "/EFI/limine")
-    boot.setdefault("efi_binary", "limine_x64.efi")
+    boot.setdefault("efi_binary", _default_limine_efi_binary())
     boot.setdefault("enable_fallback", not ctx.is_protected)
     return boot
 
@@ -1204,8 +1255,14 @@ def stage_provisioning_state(ctx: InstallContext) -> None:
         _stage_provisioning_luks_unlock(ctx, provisioning_dir)
 
 
+# Node.js names its builds after the CPU: build-iso.sh bundles the one the
+# live ISO (and so the target) runs on.
+def _node_platform() -> str:
+    return "linux-arm64" if platform.machine() == "aarch64" else "linux-x64"
+
+
 def _stage_node_tarball(ctx: InstallContext, provisioning_dir) -> None:
-    tarballs = sorted(NODE_PACKAGES_DIR.glob("node-v*-linux-x64.tar.gz"))
+    tarballs = sorted(NODE_PACKAGES_DIR.glob(f"node-v*-{_node_platform()}.tar.gz"))
     if not tarballs:
         # Hard error on every install, not just deferred-provisioning installs: the stash is what lets a
         # later factory reset finalize the next owner offline, and an ISO
@@ -1513,6 +1570,17 @@ def configure_ssh_access(ctx: InstallContext) -> None:
         raise RuntimeError(f"ufw did not record an allow rule for port 22 in {rules}")
 
 
+# DEV ONLY (N1x bring-up): only the N1x development ISO carries this script
+# (builder/n1x-dev-ssh), and build_phases lists this phase only when it is
+# there. It authorizes the development key for root on the installed system.
+DEV_SSH_SCRIPT = Path("/usr/local/sbin/omarchy-n1x-dev-ssh")
+
+
+def configure_dev_ssh(ctx: InstallContext) -> None:
+    info("› DEV ONLY: authorizing the N1x development SSH key for root")
+    subprocess.run([str(DEV_SSH_SCRIPT), "--target", str(ctx.target)], check=True)
+
+
 def _authorized_keys(path: Path) -> list[str]:
     """Read the autoinstall authorized_keys: sshd's own format, one public key
     per line, with blank lines and # comments dropped.
@@ -1665,6 +1733,8 @@ def validate_boot(ctx: InstallContext) -> None:
     if ctx.encrypt and "cryptdevice=" not in limine_conf_text:
         raise RuntimeError(f"Encrypted install but {limine_conf} has no cryptdevice=")
 
+    _validate_platform_boot_entries(limine_conf_text, _installed_arm_platform(ctx), iso_kernel())
+
     kernel_cmdline = ctx.target / "etc" / "kernel" / "cmdline"
     if not kernel_cmdline.exists():
         raise RuntimeError(f"{kernel_cmdline} missing — UKI would have no cmdline")
@@ -1675,7 +1745,7 @@ def validate_boot(ctx: InstallContext) -> None:
     kernel = storage.get("kernel") or (ctx.user_configuration.get("kernels") or ["linux-omarchy"])[0]
 
     if arch.has_uefi():
-        limine_binary = esp_mount / boot.get("esp_path", "/EFI/limine").lstrip("/") / boot.get("efi_binary", "limine_x64.efi")
+        limine_binary = esp_mount / boot.get("esp_path", "/EFI/limine").lstrip("/") / boot.get("efi_binary", _default_limine_efi_binary())
         if not limine_binary.exists() or limine_binary.stat().st_size == 0:
             raise RuntimeError(f"{limine_binary} missing or empty")
 
@@ -1697,6 +1767,120 @@ def validate_boot(ctx: InstallContext) -> None:
 
     if ctx.defer_provisioning:
         _validate_provisioning_state(ctx)
+
+    _validate_package_signing(ctx)
+
+
+OFFLINE_MIRROR = Path("/var/cache/omarchy/mirror/offline")
+
+
+def _validate_package_signing(ctx: InstallContext, mirror: Path = OFFLINE_MIRROR) -> None:
+    """The installed keyring must trust the packages its repositories ship.
+
+    The install itself never checks a signature (SigLevel = Never), so a target
+    keyring missing a distribution key only shows up at the first online pacman
+    run. On aarch64 every Arch Linux ARM package carries its build key's
+    signature, and the offline mirror keeps them. Verify one against the target
+    keyring and require the full or ultimate validity pacman requires."""
+    if platform.machine() != "aarch64":
+        return
+
+    signatures = sorted(mirror.glob("archlinuxarm-keyring-*.pkg.tar.*.sig"))
+    if not signatures:
+        raise RuntimeError(f"no archlinuxarm-keyring signature in {mirror} to check the target keyring against")
+    signature = signatures[-1]
+    package = signature.with_suffix("")
+
+    gnupg = ctx.target / "etc/pacman.d/gnupg"
+    try:
+        result = subprocess.run(
+            ["gpg", "--homedir", str(gnupg), "--batch", "--no-permission-warning",
+             "--status-fd", "1", "--verify", str(signature), str(package)],
+            capture_output=True, text=True,
+        )
+    finally:
+        # Nothing should be left holding the target mount when it is unmounted.
+        subprocess.run(["gpgconf", "--homedir", str(gnupg), "--kill", "all"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    statuses = [line.split()[1] for line in result.stdout.splitlines() if line.startswith("[GNUPG:] ")]
+    if result.returncode != 0 or "VALIDSIG" not in statuses or not {"TRUST_FULLY", "TRUST_ULTIMATE"} & set(statuses):
+        raise RuntimeError(
+            f"the installed pacman keyring does not trust the Arch Linux ARM signature on {package.name}; "
+            "every online package install would fail with 'unknown trust'"
+        )
+
+
+# The N1x firmware publishes an ACPI SPCR serial console the kernel adopts
+# unless told otherwise, and Limine hands each entry's cmdline to the UKI as
+# load options that replace the embedded one. So the contract has to hold in
+# the generated limine.conf itself: every entry keeps the console on the panel,
+# and the rescue entry boots to a text login. Both failures look like a black
+# screen, which is how the first N1x installs went.
+N1X_REQUIRED_CMDLINE = ("console=tty0", "acpi=nospcr")
+
+
+def _limine_entries(limine_conf_text: str) -> list[tuple[str, dict[str, str]]]:
+    entries: list[tuple[str, dict[str, str]]] = []
+    for line in limine_conf_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("/"):
+            entries.append((stripped, {}))
+        elif entries and ":" in stripped:
+            key, value = stripped.split(":", 1)
+            entries[-1][1][key.strip().lower()] = value.strip()
+    return entries
+
+
+def _installed_arm_platform(ctx: InstallContext) -> str:
+    """The board an aarch64 image was built for, when the target really is one.
+
+    The platform's boot contract comes from its hardware script, which only runs
+    on that hardware; an N1x image installed in a VM gets a generic aarch64
+    setup and is validated as one. The target's own detector decides."""
+    arm_platform = iso_arm_platform()
+    if arm_platform != "n1x":
+        return arm_platform
+    detected = subprocess.run(
+        ["arch-chroot", str(ctx.target), "omarchy-hw-n1x"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    if detected.returncode != 0:
+        info("Not N1x hardware; skipping the N1x boot entry checks")
+        return ""
+    return arm_platform
+
+
+def _validate_platform_boot_entries(limine_conf_text: str, arm_platform: str, kernel: str = "") -> None:
+    if arm_platform != "n1x":
+        return
+
+    # Kernel entries only: the EFI fallback entry chainloads a loader and has
+    # no cmdline of its own.
+    kernels = [
+        (name, options) for name, options in _limine_entries(limine_conf_text)
+        if "cmdline" in options or "/EFI/Linux/" in options.get("path", "")
+    ]
+    if not kernels:
+        raise RuntimeError("limine.conf has no kernel entries")
+
+    for name, options in kernels:
+        cmdline = options.get("cmdline", "").split()
+        missing = [param for param in N1X_REQUIRED_CMDLINE if param not in cmdline]
+        if missing:
+            raise RuntimeError(
+                f"limine.conf entry {name} lacks {' '.join(missing)}; its console would go to the SPCR serial port"
+            )
+
+    # The rescue entry is the kernel's fallback UKI, booted with its own cmdline.
+    rescue_name = f"{kernel}-fallback"
+    rescue = [options for _, options in kernels if f"_{rescue_name}.efi" in options.get("path", "")]
+    if not rescue:
+        raise RuntimeError(f"limine.conf has no {rescue_name} rescue entry")
+    for options in rescue:
+        cmdline = options.get("cmdline", "").split()
+        if "systemd.unit=multi-user.target" not in cmdline or "plymouth.enable=0" not in cmdline:
+            raise RuntimeError(f"{rescue_name} entry does not boot to a text login; its own cmdline was overridden")
 
 
 def _validate_provisioning_state(ctx: InstallContext) -> None:

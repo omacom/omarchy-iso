@@ -3,6 +3,7 @@ mutable `state` dict for objects that live across phases (e.g., the
 archinstall config handler and mirror list handler)."""
 
 from __future__ import annotations
+import platform
 
 import json
 import os
@@ -186,7 +187,36 @@ def _inject_provisioning_encryption_password(arch_configuration: dict, user_cred
     user_credentials["encryption_password"] = password
 
 
-def _default_kernel(pci_devices: Path = Path("/sys/bus/pci/devices")) -> str:
+# build-iso.sh records the board an aarch64 image was built for; x86_64
+# images carry an empty file.
+ISO_ARM_PLATFORM_FILE = Path("/root/omarchy_arm_platform")
+
+
+def iso_arm_platform(path: Path = ISO_ARM_PLATFORM_FILE) -> str:
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return ""
+
+
+# build-iso.sh records the kernel an aarch64 image installs; x86_64 images
+# carry an empty file and pick per machine.
+ISO_KERNEL_FILE = Path("/root/omarchy_kernel")
+
+
+def iso_kernel(path: Path = ISO_KERNEL_FILE) -> str:
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return ""
+
+
+def _default_kernel(pci_devices: Path = Path("/sys/bus/pci/devices"), platform_kernel: str | None = None) -> str:
+    # An aarch64 image is built for one platform kernel and nothing else boots;
+    # the configurator's detect_kernel makes the same choice.
+    platform_kernel = iso_kernel() if platform_kernel is None else platform_kernel
+    if platform_kernel:
+        return platform_kernel
     for device in pci_devices.glob("*"):
         try:
             vendor = (device / "vendor").read_text().strip().lower()
@@ -207,7 +237,7 @@ def _default_omarchy_install(user_configuration: dict) -> dict[str, Any]:
         "boot": {
             "esp_mount": "/boot",
             "esp_path": "/EFI/limine",
-            "efi_binary": "limine_x64.efi",
+            "efi_binary": "limine_aa64.efi" if platform.machine() == "aarch64" else "limine_x64.efi",
             "enable_fallback": mode == "full_disk",
         },
         "storage": {},

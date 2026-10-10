@@ -1,0 +1,49 @@
+#!/bin/bash
+
+# Adapt the x86_64-authored Omarchy package manifests to aarch64. The kernel
+# names are swapped for the platform kernel, and packages that only exist for
+# x86 are dropped with an explicit log line. The list is deliberately closed:
+# anything not named here that is missing from the bundle, Omarchy's edge
+# aarch64 repository or Arch Linux ARM still fails the build when pacman
+# cannot resolve it.
+filter_aarch64_packages() {
+  local kernel=$1
+  shift
+  local package
+
+  for package in "$@"; do
+    case "$package" in
+      linux|linux-omarchy|linux-t2)
+        echo "aarch64: replacing $package with $kernel" >&2
+        printf '%s\n' "$kernel"
+        ;;
+      linux-headers|linux-omarchy-headers|linux-t2-headers)
+        echo "aarch64: replacing $package with $kernel-headers" >&2
+        printf '%s\n' "$kernel-headers"
+        ;;
+      nvim)
+        # Arch Linux ARM still ships Neovim under its previous name.
+        echo "aarch64: replacing $package with neovim" >&2
+        printf '%s\n' neovim
+        ;;
+      vi)
+        echo "aarch64: replacing $package with ex-vi-compat" >&2
+        printf '%s\n' ex-vi-compat
+        ;;
+      obs-studio|yay-debug)
+        # omarchy-pkgs has aarch64 recipes, but edge does not publish them yet.
+        echo "aarch64: excluding $package, not yet published for aarch64" >&2
+        ;;
+      amd-ucode|intel-ucode|syslinux|broadcom-wl|broadcom-wl-dkms|memtest86+|memtest86+-efi|edk2-shell|\
+      apple-bcm-firmware|apple-bcm-firmware-fetcher|apple-t2-audio-config|t2fanrd|tiny-dfr|macbook12-spi-driver-dkms|\
+      asusctl|dell-xps-touchpad-haptics|dell-xps13-sidecar-amps|linux-firmware-cirrus-dx13260|intel-ipu7-camera|intel-lpmd|intel-media-driver|libva-intel-driver|vpl-gpu-rt|thermald|\
+      linux-ptl|linux-ptl-headers|tuxedo-drivers-nocompatcheck-dkms|yt6801-dkms|\
+      nvidia-580xx-dkms|nvidia-580xx-utils|nvidia-dkms|superwhisper-bin|lib32-*|vulkan-intel|vulkan-radeon|vulkan-asahi)
+        echo "aarch64: excluding x86-only package $package" >&2
+        ;;
+      *)
+        printf '%s\n' "$package"
+        ;;
+    esac
+  done
+}

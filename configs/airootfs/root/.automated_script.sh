@@ -12,6 +12,13 @@ set -euo pipefail
 
 [[ $(tty) == /dev/tty1 ]] || exit 0
 
+# The N1x recovery boot entry is a diagnostic shell, never the installer: record
+# the hardware probe, show how to reach the machine, and leave tty1 at a prompt.
+if grep -qw 'omarchy.n1x_recovery=1' /proc/cmdline; then
+  /usr/local/sbin/omarchy-n1x-live-probe || true
+  exit 0
+fi
+
 export OMARCHY_MIRROR="$(cat /root/omarchy_mirror)"
 if [[ -f /root/omarchy_iso_ref ]]; then
   export OMARCHY_ISO_REF="$(cat /root/omarchy_iso_ref)"

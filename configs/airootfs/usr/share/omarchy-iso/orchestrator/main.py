@@ -40,6 +40,8 @@ def build_phases(ctx: InstallContext):
         configure_dns_resolver,
         configure_login,
         configure_ssh_access,
+        configure_dev_ssh,
+        DEV_SSH_SCRIPT,
         configure_tailscale,
         validate_boot,
         create_factory_snapshot,
@@ -58,6 +60,8 @@ def build_phases(ctx: InstallContext):
         ("Finalizing user",            run_chroot_finalizer),
         ("Configuring login",          configure_login),
         ("Configuring SSH access",     configure_ssh_access),
+        # DEV ONLY (N1x bring-up): listed only on images that carry the script.
+        *([("DEV ONLY: N1x debug SSH", configure_dev_ssh)] if DEV_SSH_SCRIPT.exists() else []),
         ("Configuring Tailscale",      configure_tailscale),
         ("Configuring DNS resolver",   configure_dns_resolver),
         ("Validating boot setup",      validate_boot),

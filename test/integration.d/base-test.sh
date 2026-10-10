@@ -503,14 +503,21 @@ EOF
   mcopy -i "$CIDATA_IMG" "$dir"/* ::/
 }
 
-# The dev/local ISO installs the -dev packages; a stable ISO the plain ones.
+# The edge/dev/local ISO installs the -dev packages, as builder/build-iso.sh
+# picks them; a stable ISO the plain ones.
 detect_packages() {
   RUNTIME_PACKAGE=omarchy-dev
   SETTINGS_PACKAGE=omarchy-settings-dev
-  if [[ $(basename "$ISO") != *dev* && $(basename "$ISO") != *local* && $(basename "$ISO") != *pr* ]]; then
+  if [[ $(basename "$ISO") != *edge* && $(basename "$ISO") != *dev* && $(basename "$ISO") != *local* && $(basename "$ISO") != *pr* ]]; then
     RUNTIME_PACKAGE=omarchy
     SETTINGS_PACKAGE=omarchy-settings
   fi
+}
+
+# The firmware names what it starts on the serial port: the ISO's medium while
+# the installer runs, the installed disk's Limine once the install is over.
+installed_system_started() {
+  grep -aq 'starting Boot.*"Limine"' "$1" 2>/dev/null
 }
 
 install_phase() {
@@ -534,7 +541,7 @@ install_phase() {
     -device usb-storage,drive=cidata
 
   log "Waiting for the unattended install to finish (timeout ${INSTALL_TIMEOUT}s)"
-  local waited=0 text progress_name
+  local waited=0 text progress_name first_boot_at=""
   while true; do
     # An unattended install reboots on its own; SSH answering means the
     # installed system is up (cidata's authorized_keys enables sshd).
@@ -575,7 +582,20 @@ install_phase() {
       printf -v progress_name 'success-install-progress-%04ds' "$waited"
       capture_console "$progress_name"
     fi
-    ((waited % 30 == 0)) && echo "    ... installing (${waited}s)"
+    # Once the installed system has started, the install is over and what is
+    # being waited for is the first boot: say so, or a hung first boot reads
+    # as a slow install.
+    if [[ -z $first_boot_at ]] && installed_system_started "$RUN_DIR/install-serial.log"; then
+      first_boot_at=$waited
+      log "Install finished after about ${waited}s. Waiting for the installed system's first boot."
+    fi
+    if ((waited % 30 == 0)); then
+      if [[ -n $first_boot_at ]]; then
+        echo "    ... first boot ($((waited - first_boot_at))s, install took about ${first_boot_at}s)"
+      else
+        echo "    ... installing (${waited}s)"
+      fi
+    fi
 
     sleep 10
     ((waited += 10))

@@ -238,17 +238,32 @@ if [[ $MEDIA_MODE == netinstall ]]; then
   sed -i "s|^pacman_conf=.*|pacman_conf=\"pacman-online-${OMARCHY_MIRROR}.conf\"|" \
     "$build_cache_dir/profiledef.sh"
 
-  # pacstrap verifies package signatures against the LIVE keyring (pacman -r
-  # relocates the root but not GpgDir), and the network mirrors are signed —
-  # unlike the bundled mirror, which ships with SigLevel = Never precisely so
-  # that installs do not have to wait for archiso's boot-time
-  # pacman-init.service. That service generates and populates the keyring on
-  # the target machine, which on USB hardware takes minutes, and waiting on it
-  # once stalled installs at 5%. Ship the container's keyring instead: it
-  # already holds archlinux and the Omarchy key lsigned above, so the live
-  # system can verify what it downloads from the first second of boot.
-  rm -rf "$build_cache_dir/airootfs/etc/pacman.d/gnupg"
-  cp -a /etc/pacman.d/gnupg "$build_cache_dir/airootfs/etc/pacman.d/gnupg"
+  # netinstall installs from signed repositories, which the mirrored medium
+  # never has to (its bundled repo ships SigLevel = Never). Archiso generates
+  # the live keyring at boot, into a tmpfs it mounts over /etc/pacman.d/gnupg:
+  # that hides anything the ISO carries at that path, and it is slow enough on
+  # USB hardware that waiting for it is what once stalled installs at 5%. So
+  # carry a populated keyring where pacman-init cannot shadow it, remove
+  # pacman-init so nothing regenerates one, and let the installer put the
+  # carried keyring in place before it needs it (_seed_live_keyring). The
+  # keyring is the build container's, which holds the Arch keys plus the
+  # Omarchy key lsigned above; --populate archlinux keeps it in step with the
+  # archlinux-keyring package this container upgraded to.
+  pacman-key --populate archlinux
+  keyring_dir="$build_cache_dir/airootfs/usr/share/omarchy-iso/pacman-keyring"
+  mkdir -p "$keyring_dir"
+  cp -a /etc/pacman.d/gnupg/. "$keyring_dir/"
+  # Build-time sockets and locks mean nothing on the medium.
+  rm -rf "$keyring_dir"/S.* "$keyring_dir"/*.lock
+  rm -f "$build_cache_dir/airootfs/etc/systemd/system/pacman-init.service" \
+    "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/pacman-init.service"
+  # The weekly key-signature sync writes into the live keyring over the
+  # network. Before the installer seeds one there is nothing there to sync,
+  # and afterwards it would only race that copy.
+  mkdir -p "$build_cache_dir/airootfs/etc/systemd/system"
+  for unit in archlinux-keyring-wkd-sync.service archlinux-keyring-wkd-sync.timer; do
+    ln -sf /dev/null "$build_cache_dir/airootfs/etc/systemd/system/$unit"
+  done
 else
 # Collect every package we want available in the offline mirror.
 declare -a all_packages

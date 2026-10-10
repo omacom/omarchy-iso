@@ -141,7 +141,26 @@ class PopulateTargetKeyringTest(unittest.TestCase):
         return mock.patch.object(Path, "exists", exists)
 
     def populated(self):
-        return [cmd[cmd.index("--populate") + 1] for cmd in self.commands]
+        return [cmd[cmd.index("--populate") + 1] for cmd in self.commands if "--populate" in cmd]
+
+    def initialized(self):
+        return [cmd for cmd in self.commands if "--init" in cmd]
+
+    def test_an_uninitialised_target_keyring_is_initialised_first(self):
+        with self.keyring_files({"archlinux.gpg", "omarchy.gpg"}):
+            phases_impl._populate_target_keyring(self.ctx)
+
+        self.assertEqual(len(self.initialized()), 1)
+
+    def test_an_initialised_target_keyring_is_left_alone(self):
+        gnupg = self.ctx.target / "etc" / "pacman.d" / "gnupg"
+        gnupg.mkdir(parents=True)
+        (gnupg / "pubring.gpg").touch()
+
+        with self.keyring_files({"archlinux.gpg", "omarchy.gpg"}):
+            phases_impl._populate_target_keyring(self.ctx)
+
+        self.assertEqual(self.initialized(), [])
 
     def test_both_keyrings_are_populated(self):
         with self.keyring_files({"archlinux.gpg", "omarchy.gpg"}):
@@ -158,6 +177,47 @@ class PopulateTargetKeyringTest(unittest.TestCase):
             phases_impl._populate_target_keyring(self.ctx)
 
         self.assertEqual(self.populated(), ["archlinux"])
+
+
+class SeedLiveKeyringTest(unittest.TestCase):
+    """The live keyring comes off the medium, as a copy, before pacstrap."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.seed = Path(self.tmp.name) / "seed"
+        self.live = Path(self.tmp.name) / "live"
+        (self.seed / "private-keys-v1.d").mkdir(parents=True)
+        (self.seed / "pubring.gpg").write_bytes(b"keys")
+        (self.seed / "trustdb.gpg").write_bytes(b"trust")
+        (self.seed / "private-keys-v1.d" / "key").write_bytes(b"secret")
+
+        env = mock.patch.dict(
+            "os.environ",
+            {
+                "OMARCHY_KEYRING_SEED_DIR": str(self.seed),
+                "OMARCHY_LIVE_KEYRING_DIR": str(self.live),
+            },
+        )
+        env.start()
+        self.addCleanup(env.stop)
+
+        info_patch = mock.patch.object(phases_impl, "info")
+        info_patch.start()
+        self.addCleanup(info_patch.stop)
+
+    def test_the_carried_keyring_is_copied_in(self):
+        phases_impl._seed_live_keyring()
+
+        self.assertEqual((self.live / "pubring.gpg").read_bytes(), b"keys")
+        self.assertEqual((self.live / "trustdb.gpg").read_bytes(), b"trust")
+        self.assertEqual((self.live / "private-keys-v1.d" / "key").read_bytes(), b"secret")
+
+    def test_a_medium_without_a_keyring_fails_loudly(self):
+        self.seed.rename(self.seed.with_name("moved"))
+
+        with self.assertRaises(RuntimeError):
+            phases_impl._seed_live_keyring()
 
 
 class PrepareTargetSetupTest(unittest.TestCase):

@@ -35,6 +35,17 @@ if [[ ! -r $DISK_PARTITIONING ]]; then
 fi
 source "$DISK_PARTITIONING"
 
+# Networking helpers (the Wi-Fi step netinstall media need), shared with
+# test/unit/netinstall-network-test.sh.
+NETWORK_HELPERS="${NETWORK_HELPERS:-/usr/share/omarchy-iso/network.sh}"
+[[ -r $NETWORK_HELPERS ]] ||
+  NETWORK_HELPERS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../usr/share/omarchy-iso/network.sh"
+if [[ ! -r $NETWORK_HELPERS ]]; then
+  echo "ERROR: networking helpers not found at $NETWORK_HELPERS" >&2
+  exit 1
+fi
+source "$NETWORK_HELPERS"
+
 LOGO_WIDTH=$(awk '{ if (length > max) max = length } END { print max+0 }' "$LOGO_PATH")
 
 export GUM_CONFIRM_PROMPT_FOREGROUND="6"
@@ -1044,6 +1055,12 @@ wait_for_stable_terminal
 greeter
 
 keyboard_form
+
+# netinstall media install from the network, so the connection has to exist
+# before the install begins; the step returns immediately when it already does,
+# and does nothing at all on media that carry their packages. It comes after
+# the keyboard so a Wi-Fi password is typed under the layout just chosen.
+network_step
 
 # Normal install: keyboard (loaded above, so the LUKS passphrase is typed under
 # the right layout) → user → disk → install mode. The user step can unwind to

@@ -215,6 +215,7 @@ def prepare_live(ctx: InstallContext) -> None:
     ctx.state["mirror_handler"] = arch.make_mirror_handler(offline=not _is_netinstall())
     if _is_netinstall():
         info("› netinstall media: packages come from the network mirrors, not the ISO")
+        _seed_live_keyring()
 
 
 def _install_disk(ctx: InstallContext) -> str | None:
@@ -1046,6 +1047,36 @@ def _debug_run(ctx: InstallContext, cmd: list[str]) -> None:
 # _populate_target_keyring).
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _seed_live_keyring() -> None:
+    """Put the keyring this ISO carries into the live pacman keyring.
+
+    netinstall media install from signed repositories, and pacstrap verifies
+    those signatures against the LIVE keyring (pacman -r relocates the root but
+    not GpgDir). archiso generates that keyring at boot, into a tmpfs it mounts
+    over /etc/pacman.d/gnupg — which hides anything the ISO carries at that
+    path, and is slow enough on USB hardware that waiting for it is what once
+    stalled installs at 5%. The medium carries a populated keyring instead
+    (Arch's keys and Omarchy's), so putting it in place is a copy rather than a
+    key generation.
+    """
+    seed = Path(
+        os.environ.get("OMARCHY_KEYRING_SEED_DIR", "/usr/share/omarchy-iso/pacman-keyring")
+    )
+    live = Path(os.environ.get("OMARCHY_LIVE_KEYRING_DIR", "/etc/pacman.d/gnupg"))
+    if not seed.is_dir():
+        raise RuntimeError(f"netinstall media carries no keyring at {seed}")
+
+    live.mkdir(parents=True, exist_ok=True)
+    for entry in seed.iterdir():
+        destination = live / entry.name
+        if entry.is_dir():
+            shutil.copytree(entry, destination, dirs_exist_ok=True)
+        else:
+            shutil.copy2(entry, destination)
+
+    info("› live pacman keyring seeded from the ISO")
+
+
 def _populate_target_keyring(ctx: InstallContext) -> None:
     """Give the target the keys its own pacman.conf asks it to verify.
 
@@ -1053,13 +1084,20 @@ def _populate_target_keyring(ctx: InstallContext) -> None:
     (SigLevel = Never), so the target keyring is never consulted. netinstall
     installs from signed network repositories instead, and every pacman run
     inside the chroot — the Omarchy install scripts, the first update — verifies
-    against the TARGET keyring. pacstrap -K leaves that keyring holding the Arch
-    keys alone, so the Omarchy keyring is brought over as well. Both keyrings are
-    installed in the live system, which is where pacman-key reads them from; the
-    live system's own keyring is what pacstrap verifies against.
+    against the TARGET keyring. pacstrap -K leaves that keyring EMPTY (it only
+    initialises one; the Arch keys are what the *host* keyring copy would have
+    brought, and -K implies -G to skip that), so both keyrings are imported
+    here. Both are installed in the live system, which is where pacman-key reads
+    them from; the live system's own keyring is what pacstrap verifies against.
     """
     gnupg = ctx.target / "etc" / "pacman.d" / "gnupg"
     gnupg.mkdir(parents=True, exist_ok=True)
+    if not (gnupg / "pubring.gpg").exists():
+        # pacstrap -K initialises an empty target keyring, and archinstall calls
+        # it that way. Say so explicitly rather than relying on it: pacman-key
+        # --populate needs a master key to trust what it imports, and an
+        # uninitialised keyring has none.
+        subprocess.run(["pacman-key", "--gpgdir", str(gnupg), "--init"], check=True)
 
     for keyring in ("archlinux", "omarchy"):
         if not Path(f"/usr/share/pacman/keyrings/{keyring}.gpg").exists():

@@ -29,6 +29,14 @@ while [[ $# -gt 0 ]]; do
     OMARCHY_MIRROR=edge
     shift
     ;;
+  --netinstall)
+    # Leave the bundled offline mirror out of the ISO (roughly two thirds of
+    # its bytes) and install from the network instead, so the image fits a
+    # nominal 4 GB USB stick. Needs a working internet connection at install
+    # time; see builder/build-iso.sh.
+    OMARCHY_MEDIA=netinstall
+    shift
+    ;;
   --local-source)
     LOCAL_OMARCHY_PATH="${2:-}"
     LOCAL_PKGS_PATH="${3:-}"
@@ -57,7 +65,7 @@ while [[ $# -gt 0 ]]; do
     ;;
   *)
     echo "Unknown option: $1"
-    echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
+    echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--netinstall] [--local-source <omarchy-checkout> <pkgs-checkout>]"
     exit 1
     ;;
   esac
@@ -125,6 +133,7 @@ DOCKER_ARGS=(
   --privileged
   -e "OMARCHY_ISO_REF=$OMARCHY_ISO_REF"
   -e "OMARCHY_MIRROR=$OMARCHY_MIRROR"
+  -e "OMARCHY_MEDIA=${OMARCHY_MEDIA:-offline}"
   -e "OMARCHY_INSTALL_DEBUG=${OMARCHY_INSTALL_DEBUG:-}"
   -e "HOST_UID=$(id -u)"
   -e "HOST_GID=$(id -g)"

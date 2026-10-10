@@ -56,6 +56,26 @@ def _iso_ref() -> str:
     return "stable"
 
 
+def _media_mode() -> str:
+    """Which install medium this is: "offline" or "netinstall".
+
+    builder/build-iso.sh writes /root/omarchy_media. An ISO built before that
+    marker existed carries the bundled mirror, so anything unreadable or
+    unrecognised means "offline" — the behaviour every ISO had until now.
+    """
+    marker = Path(os.environ.get("OMARCHY_MEDIA_FILE", "/root/omarchy_media"))
+    try:
+        mode = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "offline"
+
+    return mode if mode in {"offline", "netinstall"} else "offline"
+
+
+def _is_netinstall() -> bool:
+    return _media_mode() == "netinstall"
+
+
 def _default_package_targets() -> dict[str, str]:
     if _iso_ref() in {"dev", "local"}:
         return {
@@ -188,7 +208,13 @@ def prepare_live(ctx: InstallContext) -> None:
     ctx.state["arch_config_handler"] = arch.load_arch_config(
         ctx.arch_config_path, ctx.creds_path
     )
-    ctx.state["mirror_handler"] = arch.make_mirror_handler(offline=True)
+    # offline: the ISO's own repo is the only source, and archinstall's mirror
+    # handling must not go looking for mirrors it cannot reach. netinstall: the
+    # target is installed from the network, so mirrors are exactly what it
+    # needs.
+    ctx.state["mirror_handler"] = arch.make_mirror_handler(offline=not _is_netinstall())
+    if _is_netinstall():
+        info("› netinstall media: packages come from the network mirrors, not the ISO")
 
 
 def _install_disk(ctx: InstallContext) -> str | None:
@@ -298,10 +324,11 @@ def arch_install_system(ctx: InstallContext) -> None:
             info("› installing Omarchy runtime + omarchy-base.packages")
             installer.add_additional_packages(_runtime_package_list(ctx))
 
-            # Tailscale is bundled in the offline mirror but only installed
-            # when an autoinstall drive staged an auth key; must happen here,
-            # while the mirror is still bind-mounted, not in the phase that
-            # configures the join.
+            # Tailscale is installed on demand rather than as part of the base
+            # set, and only when an autoinstall drive staged an auth key. It
+            # has to happen here, with the package source still reachable — the
+            # bundled mirror bind-mounted, or the network mirrors on netinstall
+            # media — and not in the phase that configures the join.
             if ctx.tailscale_authkey_path is not None:
                 info("› installing tailscale (auth key staged for first boot)")
                 installer.add_additional_packages(["tailscale"])
@@ -656,6 +683,10 @@ def _mount_offline_package_cache(ctx: InstallContext) -> None:
     """
     source = Path("/var/cache/omarchy/mirror/offline")
     target = ctx.target / "var" / "cache" / "pacman" / "pkg"
+    if _is_netinstall():
+        # Nothing is bundled to mount: pacstrap downloads into the target's
+        # package cache the ordinary way.
+        return
     if not source.is_dir():
         raise RuntimeError(f"offline package cache missing: {source}")
 
@@ -665,6 +696,8 @@ def _mount_offline_package_cache(ctx: InstallContext) -> None:
 
 
 def _unmount_offline_package_cache(ctx: InstallContext) -> None:
+    if _is_netinstall():
+        return
     target = str(ctx.target / "var" / "cache" / "pacman" / "pkg")
     subprocess.run(["umount", target], check=True)
     try:
@@ -1001,12 +1034,43 @@ def _debug_run(ctx: InstallContext, cmd: list[str]) -> None:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Target setup phases:
-#  1. point the target at the offline pacman.conf
+#  1. point the target at the installer's pacman.conf
 #  2. bind-mount the offline mirror + /opt/packages into /mnt for target pacman
 #     and bundled language runtimes
 #  3. arch-chroot as root → omarchy-apply-system --first-install
 #  4. arch-chroot as user → omarchy-provision-user --first-install
+#
+# On netinstall media there is no bundled mirror to bind-mount: the target
+# pacman.conf points at the network mirrors, and the target keyring those signed
+# repositories are verified against is populated first (see
+# _populate_target_keyring).
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _populate_target_keyring(ctx: InstallContext) -> None:
+    """Give the target the keys its own pacman.conf asks it to verify.
+
+    The mirrored medium installs unsigned packages out of the ISO
+    (SigLevel = Never), so the target keyring is never consulted. netinstall
+    installs from signed network repositories instead, and every pacman run
+    inside the chroot — the Omarchy install scripts, the first update — verifies
+    against the TARGET keyring. pacstrap -K leaves that keyring holding the Arch
+    keys alone, so the Omarchy keyring is brought over as well. Both keyrings are
+    installed in the live system, which is where pacman-key reads them from; the
+    live system's own keyring is what pacstrap verifies against.
+    """
+    gnupg = ctx.target / "etc" / "pacman.d" / "gnupg"
+    gnupg.mkdir(parents=True, exist_ok=True)
+
+    for keyring in ("archlinux", "omarchy"):
+        if not Path(f"/usr/share/pacman/keyrings/{keyring}.gpg").exists():
+            info(f"› {keyring} keyring files absent; nothing to populate")
+            continue
+        info(f"› trusting the {keyring} keyring in the target")
+        subprocess.run(
+            ["pacman-key", "--gpgdir", str(gnupg), "--populate", keyring],
+            check=True,
+        )
+
 
 def _prepare_target_setup(ctx: InstallContext) -> None:
     if ctx.state.get("target_setup_prepared"):
@@ -1014,10 +1078,17 @@ def _prepare_target_setup(ctx: InstallContext) -> None:
 
     shutil.copy("/etc/pacman.conf", str(ctx.target / "etc" / "pacman.conf"))
 
-    bind_mounts = [
-        ("/var/cache/omarchy/mirror/offline", "/var/cache/omarchy/mirror/offline"),
-        ("/opt/packages", "/opt/packages"),
-    ]
+    bind_mounts = [("/opt/packages", "/opt/packages")]
+    if _is_netinstall():
+        # Nothing bundled to bind-mount; the target verifies signed network
+        # repos instead, so it needs the keys those repos are signed with.
+        _populate_target_keyring(ctx)
+    else:
+        bind_mounts.insert(
+            0,
+            ("/var/cache/omarchy/mirror/offline", "/var/cache/omarchy/mirror/offline"),
+        )
+
     ctx.state.setdefault("bind_mounts", [])
     mounted = set(ctx.state["bind_mounts"])
     for src, dst in bind_mounts:

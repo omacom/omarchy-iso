@@ -26,6 +26,7 @@ set -uo pipefail
 
 TARGET_PACKAGE_CACHE="${OMARCHY_TARGET_PACKAGE_CACHE:-/mnt/var/cache/pacman/pkg}"
 OFFLINE_MIRROR="${OMARCHY_OFFLINE_MIRROR:-/var/cache/omarchy/mirror/offline}"
+MEDIA_MODE_FILE="${OMARCHY_MEDIA_FILE:-/root/omarchy_media}"
 
 if (( $# == 0 )); then
   echo "Usage: omarchy-install-diagnose-media <log-file>..." >&2
@@ -86,6 +87,26 @@ fi
 # backslash that the renderer would read as an escape. Strip anything a package
 # filename has no business containing before printing it.
 display_package="${package//[^A-Za-z0-9._+:@%-]/}"
+
+# Which medium this is decides what a corrupt package means. On the mirrored
+# medium the bytes came off the ISO, so only the stick or the write can be at
+# fault. netinstall media bundle no packages at all: everything was downloaded
+# during the install, and a corrupt package there says the download was cut
+# short. Sending someone to re-write a USB stick they did not corrupt helps
+# nobody, so that verdict comes first.
+media_mode=""
+if [[ -f $MEDIA_MODE_FILE ]]; then
+  read -r media_mode <"$MEDIA_MODE_FILE" || media_mode=""
+fi
+if [[ $media_mode == netinstall ]]; then
+  echo "The download was incomplete"
+  echo "This package was fetched over the network during this install:"
+  echo "$display_package"
+  echo
+  echo "Check this machine's connection and run the install again"
+  echo "A captive portal, a proxy, or a link that drops is the usual cause"
+  exit 0
+fi
 
 expected=$(expected_checksum "$package")
 actual=$(actual_checksum "$package")

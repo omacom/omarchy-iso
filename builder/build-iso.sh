@@ -5,6 +5,22 @@ set -e
 OMARCHY_ISO_REF="${OMARCHY_ISO_REF:-quattro}"
 OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
 
+# offline (default) — the ISO carries the whole package set in a bundled
+# mirror, so installing needs no network at all.
+# netinstall — the bundled mirror is left out and the live system's pacman
+# points at the network mirrors instead, so the target install pulls packages
+# as it goes. That is most of the image's bytes (the bundled mirror is ~4.5 of
+# ~6 GB), which is what lets the result fit a nominal 4 GB USB stick. The
+# install itself then needs a working internet connection.
+MEDIA_MODE="${OMARCHY_MEDIA:-offline}"
+case "$MEDIA_MODE" in
+  offline | netinstall) ;;
+  *)
+    echo "ERROR: OMARCHY_MEDIA must be 'offline' or 'netinstall' (got '$MEDIA_MODE')" >&2
+    exit 1
+    ;;
+esac
+
 # Edge, dev, and local-source ISOs install the dev packages explicitly. Those
 # package recipes track the quattro branch. This avoids relying on pacman's
 # provides=omarchy resolution and shows the real package names being tested in
@@ -83,6 +99,9 @@ cp -r /configs/* "$build_cache_dir/"
 mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
 echo "$OMARCHY_MIRROR" > "$build_cache_dir/airootfs/root/omarchy_mirror"
 echo "$OMARCHY_ISO_REF" > "$build_cache_dir/airootfs/root/omarchy_iso_ref"
+# Which medium this is: the installer reads it to know whether the bundled
+# mirror it would otherwise install from is present.
+echo "$MEDIA_MODE" > "$build_cache_dir/airootfs/root/omarchy_media"
 cat > "$build_cache_dir/airootfs/usr/share/omarchy-iso/package-targets" <<EOF
 OMARCHY_RUNTIME_PACKAGE=$OMARCHY_RUNTIME_PACKAGE
 OMARCHY_SETTINGS_PACKAGE=$OMARCHY_SETTINGS_PACKAGE
@@ -203,6 +222,34 @@ if [[ ! -f $setup_form ]]; then
 fi
 cp "$setup_form" "$build_cache_dir/airootfs/usr/share/omarchy-iso/setup-form.sh"
 
+# netinstall leaves the bundled mirror out entirely and points the live system
+# at the network mirrors, which is where the target install then pulls its
+# packages from. Everything the installer reads off the medium (the package
+# lists, the setup form, the configurator) is built above and is unaffected.
+if [[ $MEDIA_MODE == netinstall ]]; then
+  echo "netinstall media: no bundled mirror; the live and target pacman use the $OMARCHY_MIRROR network mirrors"
+
+  # The live system's pacman.conf is also the conf the target gets: the
+  # orchestrator copies it into /mnt, and pacstrap runs against the live copy.
+  install -m 644 "/configs/pacman-online-${OMARCHY_MIRROR}.conf" \
+    "$build_cache_dir/airootfs/etc/pacman.conf"
+
+  # The live root is built from the network too, not from a bundled mirror.
+  sed -i "s|^pacman_conf=.*|pacman_conf=\"pacman-online-${OMARCHY_MIRROR}.conf\"|" \
+    "$build_cache_dir/profiledef.sh"
+
+  # pacstrap verifies package signatures against the LIVE keyring (pacman -r
+  # relocates the root but not GpgDir), and the network mirrors are signed —
+  # unlike the bundled mirror, which ships with SigLevel = Never precisely so
+  # that installs do not have to wait for archiso's boot-time
+  # pacman-init.service. That service generates and populates the keyring on
+  # the target machine, which on USB hardware takes minutes, and waiting on it
+  # once stalled installs at 5%. Ship the container's keyring instead: it
+  # already holds archlinux and the Omarchy key lsigned above, so the live
+  # system can verify what it downloads from the first second of boot.
+  rm -rf "$build_cache_dir/airootfs/etc/pacman.d/gnupg"
+  cp -a /etc/pacman.d/gnupg "$build_cache_dir/airootfs/etc/pacman.d/gnupg"
+else
 # Collect every package we want available in the offline mirror.
 declare -a all_packages
 mapfile -t all_packages < <(
@@ -312,7 +359,13 @@ bash /builder/index-offline-mirror.sh "$offline_mirror_dir"
 # container (the airootfs path); symlink rather than duplicate.
 mkdir -p /var/cache/omarchy/mirror
 ln -sf "$offline_mirror_dir" /var/cache/omarchy/mirror/offline
+fi
 
+# The netinstall medium has no bundled mirror to resolve against, and what it
+# installs is pulled from the network, so there is no fixed denominator to
+# ship. The dashboard falls back to its time-based curve, exactly as it does
+# when a resolved count lands outside the expected range.
+if [[ $MEDIA_MODE != netinstall ]]; then
 # Denominator for the install dashboard's progress bar. Resolving the mirror's
 # own package lists against the mirror we just indexed, with an empty local db,
 # is the question pacstrap asks at install time — same resolver, same repo, same
@@ -376,9 +429,13 @@ else
     >"$build_cache_dir/airootfs/usr/share/omarchy-iso/expected-packages"
   echo "Target install resolves to $expected_packages packages."
 fi
+fi
 
-# Live ISO uses the same offline pacman.conf.
-cp "$build_cache_dir/pacman-offline.conf" "$build_cache_dir/airootfs/etc/pacman.conf"
+# Live ISO uses the same offline pacman.conf. netinstall installed the online
+# conf in its branch above instead — that is the conf the target is given too.
+if [[ $MEDIA_MODE != netinstall ]]; then
+  cp "$build_cache_dir/pacman-offline.conf" "$build_cache_dir/airootfs/etc/pacman.conf"
+fi
 
 # Build the ISO.
 mkarchiso -v -w "$build_cache_dir/work/" -o /out/ "$build_cache_dir/"

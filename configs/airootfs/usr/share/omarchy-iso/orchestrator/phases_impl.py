@@ -438,12 +438,6 @@ def _register_limine_efi_entry(
     pre_state: dict | None = None,
 ) -> None:
     pre_state = pre_state or _read_efibootmgr()
-    stale_limine = _find_label_entries(pre_state["entries"], "Limine")
-    for num in stale_limine:
-        subprocess.run(
-            ["efibootmgr", "--bootnum", num, "--delete-bootnum"],
-            check=False, capture_output=True,
-        )
 
     subprocess.run(
         [
@@ -460,10 +454,28 @@ def _register_limine_efi_entry(
     )
 
     post_state = _read_efibootmgr()
-    new_limine = _find_label_entries(post_state["entries"], "Limine")
-    if not new_limine:
-        raise RuntimeError("efibootmgr --create reported success but no Limine entry found")
-    limine_num = new_limine[0]
+    new_entries = [num for num in post_state["entries"] if num not in pre_state["entries"]]
+    if len(new_entries) != 1:
+        # Firmware reused an existing entry or added its own; efibootmgr has
+        # already put its entry first, so leave the rest alone.
+        info(f"warning: expected one new EFI boot entry, found {len(new_entries)}; not replacing old Limine entries")
+        return
+    limine_num = new_entries[0]
+
+    # Retire only entries identical to the new one (same label, partition and
+    # loader). Other disks may also have a boot entry named Limine. Without a
+    # device path the listing cannot tell them apart, so delete nothing.
+    target = post_state["entries"][limine_num].lower()
+    stale_limine = []
+    if "hd(" in target:
+        stale_limine = [num for num, text in pre_state["entries"].items() if text.lower() == target]
+    for num in stale_limine:
+        res = subprocess.run(
+            ["efibootmgr", "--bootnum", num, "--delete-bootnum"],
+            check=False, capture_output=True,
+        )
+        if res.returncode != 0:
+            info(f"warning: failed to delete old EFI boot entry {num}")
 
     keep = [
         num
@@ -902,7 +914,7 @@ _BOOT_ORDER_RE = re.compile(r"^BootOrder:\s*(.*)$")
 
 
 def _read_efibootmgr() -> dict:
-    res = capture(["efibootmgr"], check=True)
+    res = capture(["efibootmgr", "--verbose"], check=True)
     entries: dict[str, str] = {}
     order: list[str] = []
     for line in res.stdout.splitlines():

@@ -1115,8 +1115,10 @@ def _seed_live_keyring() -> None:
         destination = live / entry.name
         if entry.is_dir():
             shutil.copytree(entry, destination, dirs_exist_ok=True)
-        else:
+        elif entry.is_file() or entry.is_symlink():
             shutil.copy2(entry, destination)
+        # Anything else is a socket or a fifo — an agent's leftovers — which is
+        # not something to be copied, and which would fail the copy if it were.
 
     keys, secret, trusted = _keyring_counts(live)
     if keys == 0 or secret == 0:

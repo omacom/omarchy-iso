@@ -253,15 +253,17 @@ if [[ $MEDIA_MODE == netinstall ]]; then
   keyring_dir="$build_cache_dir/airootfs/usr/share/omarchy-iso/pacman-keyring"
   mkdir -p "$keyring_dir"
   cp -a /etc/pacman.d/gnupg/. "$keyring_dir/"
-  # Build-time sockets and locks mean nothing on the medium.
-  rm -rf "$keyring_dir"/S.* "$keyring_dir"/*.lock
   # A keyring the live system cannot use is worse than none: pacman verifies
   # against it, and a key that is merely present rather than trusted is refused
   # as "unknown trust" several phases into an install. Check what is being
-  # shipped here instead, where the build fails and says so.
-  keyring_keys=$(gpg --homedir "$keyring_dir" --with-colons --list-keys 2>/dev/null | grep -c '^pub:')
-  keyring_secret=$(gpg --homedir "$keyring_dir" --with-colons --list-secret-keys 2>/dev/null | grep -c '^sec:')
-  keyring_trusted=$(gpg --homedir "$keyring_dir" --with-colons --list-keys 2>/dev/null |
+  # shipped here, where the build fails and says so.
+  #
+  # --no-autostart keeps gpg from starting an agent to answer these questions.
+  # An agent with this homedir leaves its sockets in the directory that is about
+  # to be shipped, and that directory is copied onto the live system.
+  keyring_keys=$(gpg --homedir "$keyring_dir" --no-autostart --with-colons --list-keys 2>/dev/null | grep -c '^pub:')
+  keyring_secret=$(gpg --homedir "$keyring_dir" --no-autostart --with-colons --list-secret-keys 2>/dev/null | grep -c '^sec:')
+  keyring_trusted=$(gpg --homedir "$keyring_dir" --no-autostart --with-colons --list-keys 2>/dev/null |
     awk -F: '/^pub:/ { print $2 }' | grep -c '[fum]')
   echo "netinstall keyring: $keyring_keys keys, $keyring_trusted trusted, $keyring_secret secret"
   if ((keyring_keys == 0 || keyring_secret == 0 || keyring_trusted == 0)); then
@@ -271,6 +273,11 @@ if [[ $MEDIA_MODE == netinstall ]]; then
     echo "       install would fail with 'unknown trust'." >&2
     exit 1
   fi
+  # Sockets and locks from this build mean nothing on the medium, and the copy
+  # the installer makes would fail on them — so they go last, after anything
+  # above that might have created them.
+  rm -rf "$keyring_dir"/S.* "$keyring_dir"/*.lock "$keyring_dir"/.#*
+  find "$keyring_dir" ! -type f ! -type d -delete
   rm -f "$build_cache_dir/airootfs/etc/systemd/system/pacman-init.service" \
     "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/pacman-init.service"
   # The weekly key-signature sync writes into the live keyring over the

@@ -257,6 +257,21 @@ class SeedLiveKeyringTest(unittest.TestCase):
         self.assertEqual(cmd[1:], ["--kill", "gpg-agent"])
         self.assertEqual(kwargs["env"]["GNUPGHOME"], str(self.live))
 
+    def test_an_agents_socket_is_not_copied(self):
+        # The build's own check can leave a gpg-agent's socket in the seed, and
+        # a socket is not a file: copying it fails the install outright.
+        import socket as socket_module
+
+        path = self.seed / "S.gpg-agent"
+        sock = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+        sock.bind(str(path))
+        self.addCleanup(sock.close)
+
+        phases_impl._seed_live_keyring()
+
+        self.assertFalse((self.live / "S.gpg-agent").exists())
+        self.assertEqual((self.live / "pubring.gpg").read_bytes(), b"keys")
+
     def test_a_keyring_with_no_keys_fails_loudly(self):
         self.counts.return_value = (0, 0, 0)
 

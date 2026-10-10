@@ -1047,17 +1047,47 @@ def _debug_run(ctx: InstallContext, cmd: list[str]) -> None:
 # _populate_target_keyring).
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _keyring_counts(gnupg: Path) -> tuple[int, int, int]:
+    """Count public keys, secret keys, and trusted keys in a keyring."""
+
+    def records(*args: str) -> list[str]:
+        result = subprocess.run(
+            ["gpg", "--homedir", str(gnupg), "--with-colons", *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.stdout.splitlines()
+
+    keys = [line for line in records("--list-keys") if line.startswith("pub:")]
+    secret = [line for line in records("--list-secret-keys") if line.startswith("sec:")]
+    # The second field of a pub record is the calculated validity: 'u' for the
+    # local master key, 'f' for a key that has been locally signed, '-' for one
+    # that is merely present. pacman refuses signatures from the last kind.
+    trusted = [line for line in keys if line.split(":")[1] not in ("", "-")]
+    return len(keys), len(secret), len(trusted)
+
+
 def _seed_live_keyring() -> None:
     """Put the keyring this ISO carries into the live pacman keyring.
 
     netinstall media install from signed repositories, and pacstrap verifies
     those signatures against the LIVE keyring (pacman -r relocates the root but
-    not GpgDir). archiso generates that keyring at boot, into a tmpfs it mounts
-    over /etc/pacman.d/gnupg — which hides anything the ISO carries at that
-    path, and is slow enough on USB hardware that waiting for it is what once
-    stalled installs at 5%. The medium carries a populated keyring instead
-    (Arch's keys and Omarchy's), so putting it in place is a copy rather than a
-    key generation.
+    not GpgDir). pacman requires the signing key to be *trusted*, not merely
+    present. archiso generates such a keyring at boot, into a tmpfs it mounts
+    over /etc/pacman.d/gnupg: that hides anything the ISO carries at that path,
+    and it is slow enough on USB hardware that waiting for it is what once
+    stalled installs at 5%. So the medium carries a populated keyring — the
+    keys, the master key that signed them, and the trust database recording it
+    — and putting it in place is a copy rather than a key generation.
+
+    The directory is replaced rather than merged into, because everything
+    already in it wins otherwise: the gpg-agent started at boot, its sockets,
+    and whatever keyring format GnuPG has already decided on. GnuPG prefers a
+    keybox over a legacy pubring.gpg, so a directory holding both reads as a
+    keyring with no usable keys, and the failure surfaces several phases later
+    as "signature from ... is unknown trust" during pacstrap. What lands here
+    is checked, so a medium that cannot install signed packages says so now.
     """
     seed = Path(
         os.environ.get("OMARCHY_KEYRING_SEED_DIR", "/usr/share/omarchy-iso/pacman-keyring")
@@ -1066,7 +1096,21 @@ def _seed_live_keyring() -> None:
     if not seed.is_dir():
         raise RuntimeError(f"netinstall media carries no keyring at {seed}")
 
+    # The agent from boot is holding the empty keyring it started with, and its
+    # sockets live in the directory about to be replaced.
+    subprocess.run(
+        ["gpgconf", "--kill", "gpg-agent"],
+        env={**os.environ, "GNUPGHOME": str(live)},
+        check=False,
+    )
+
     live.mkdir(parents=True, exist_ok=True)
+    for entry in live.iterdir():
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink(missing_ok=True)
+
     for entry in seed.iterdir():
         destination = live / entry.name
         if entry.is_dir():
@@ -1074,7 +1118,19 @@ def _seed_live_keyring() -> None:
         else:
             shutil.copy2(entry, destination)
 
-    info("› live pacman keyring seeded from the ISO")
+    keys, secret, trusted = _keyring_counts(live)
+    if keys == 0 or secret == 0:
+        raise RuntimeError(
+            f"the keyring this medium carries did not load: {keys} keys and "
+            f"{secret} secret keys in {live}"
+        )
+    if trusted == 0:
+        raise RuntimeError(
+            f"none of the {keys} keys in {live} is trusted, so signed packages "
+            "could not be verified and this medium cannot install"
+        )
+
+    info(f"› live pacman keyring seeded from the ISO ({keys} keys, {trusted} trusted)")
 
 
 def _populate_target_keyring(ctx: InstallContext) -> None:

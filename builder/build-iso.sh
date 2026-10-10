@@ -255,6 +255,22 @@ if [[ $MEDIA_MODE == netinstall ]]; then
   cp -a /etc/pacman.d/gnupg/. "$keyring_dir/"
   # Build-time sockets and locks mean nothing on the medium.
   rm -rf "$keyring_dir"/S.* "$keyring_dir"/*.lock
+  # A keyring the live system cannot use is worse than none: pacman verifies
+  # against it, and a key that is merely present rather than trusted is refused
+  # as "unknown trust" several phases into an install. Check what is being
+  # shipped here instead, where the build fails and says so.
+  keyring_keys=$(gpg --homedir "$keyring_dir" --with-colons --list-keys 2>/dev/null | grep -c '^pub:')
+  keyring_secret=$(gpg --homedir "$keyring_dir" --with-colons --list-secret-keys 2>/dev/null | grep -c '^sec:')
+  keyring_trusted=$(gpg --homedir "$keyring_dir" --with-colons --list-keys 2>/dev/null |
+    awk -F: '/^pub:/ { print $2 }' | grep -c '[fum]')
+  echo "netinstall keyring: $keyring_keys keys, $keyring_trusted trusted, $keyring_secret secret"
+  if ((keyring_keys == 0 || keyring_secret == 0 || keyring_trusted == 0)); then
+    echo "ERROR: the keyring going onto this netinstall medium is unusable" >&2
+    echo "       ($keyring_keys keys, $keyring_trusted trusted, $keyring_secret secret)." >&2
+    echo "       The live system verifies signed packages against it, so the" >&2
+    echo "       install would fail with 'unknown trust'." >&2
+    exit 1
+  fi
   rm -f "$build_cache_dir/airootfs/etc/systemd/system/pacman-init.service" \
     "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/pacman-init.service"
   # The weekly key-signature sync writes into the live keyring over the

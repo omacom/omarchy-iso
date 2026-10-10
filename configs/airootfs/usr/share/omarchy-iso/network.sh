@@ -62,9 +62,29 @@ wireless_device() {
 }
 
 # The SSIDs iwd can see, one per line. iwd's table is the interface here — the
-# live environment has no other way to enumerate networks — so a format the
-# parsing does not recognise yields nothing and the step falls back to its
-# manual options rather than pretending there is no Wi-Fi.
+# live environment has no other way to enumerate networks — so the parse follows
+# the layout iwd 3.12 writes (client/display.c display_table_header and
+# display_table_row, client/station.c ordered_networks_display), confirmed
+# against the bytes a real iwctl writes:
+#
+#                                 Available networks
+#     --------------------------------------------------------------------------
+#           Network name                      Security            Signal
+#     --------------------------------------------------------------------------
+#             >   CasaVerde                     psk                 ****
+#
+# The name is a 32-column field starting at column 7 — after the margin, the
+# two-column marker and its separator — so it is read by position rather than by
+# runs of spaces. Two things rule out splitting on whitespace: the marker iwd
+# writes for the network already connected (">", which would read as an SSID of
+# its own), and the signal column, which is drawn from asterisks.
+#
+# An empty table is not empty: iwd prints "No networks available" in the body,
+# where a name would otherwise be read out of the middle of that sentence.
+#
+# Hidden networks are listed by iwd under the name "hidden". They are not
+# entries for the picker (an SSID nobody can see is not a name to choose), and
+# the step offers to type one in instead.
 wifi_networks() {
   local dev=$1
 
@@ -73,14 +93,14 @@ wifi_networks() {
   iwctl station "$dev" get-networks 2>/dev/null |
     sed -e 's/\x1b\[[0-9;]*m//g' |
     awk '
+      /No networks available/ { next }
       /Network name/ { header = 1; next }
       header && /^-+$/ { body = 1; next }
-      body && /^[[:space:]]*[^[:space:]]/ {
-        sub(/^[[:space:]]+/, "")
-        sub(/[[:space:]]{2,}.*$/, "")
-        print
+      body {
+        name = substr($0, 7, 32)
+        sub(/[[:space:]]+$/, "", name)
+        if (name != "" && name != "hidden") print name
       }' |
-    grep -v '^$' |
     sort -u
 }
 
@@ -91,6 +111,18 @@ join_wifi() {
     iwctl --passphrase "$passphrase" station "$dev" connect "$ssid"
   else
     iwctl station "$dev" connect "$ssid"
+  fi
+}
+
+# An SSID the scan did not offer: a hidden network, or one the radio missed.
+# iwd has a separate call for that, which does not wait for a scan to list it.
+join_unlisted_wifi() {
+  local dev=$1 ssid=$2 passphrase=$3
+
+  if [[ -n $passphrase ]]; then
+    iwctl --passphrase "$passphrase" station "$dev" connect-hidden "$ssid"
+  else
+    iwctl station "$dev" connect-hidden "$ssid"
   fi
 }
 
@@ -129,7 +161,8 @@ network_step() {
     notice "Scanning for wireless networks" "$WIFI_SCAN_WAIT"
     mapfile -t networks < <(wifi_networks "$dev")
 
-    choice=$(printf '%s\n' "${networks[@]}" "Rescan" "Open iwctl" "Quit to shell" |
+    choice=$(printf '%s\n' "${networks[@]}" "Other network (hidden or unlisted)" \
+      "Rescan" "Open iwctl" "Quit to shell" |
       gum choose --header "Wireless networks on $dev") ||
       abort "This ISO needs a network connection to install."
 
@@ -137,6 +170,21 @@ network_step() {
     Rescan) continue ;;
     "Open iwctl") iwctl && continue ;;
     "Quit to shell") abort "This ISO needs a network connection to install." ;;
+    "Other network (hidden or unlisted)")
+      # A network the scan cannot show: hidden, or too weak to have been listed
+      # yet. iwd has a call for that, which does not wait on a scan.
+      ssid=$(gum input --placeholder "Network name (SSID)") ||
+        abort "This ISO needs a network connection to install."
+      [[ -n $ssid ]] || continue
+      passphrase=$(gum input --password \
+        --placeholder "Password for $ssid (empty for an open network)") ||
+        abort "This ISO needs a network connection to install."
+
+      notice "Connecting to $ssid" 1
+      join_unlisted_wifi "$dev" "$ssid" "$passphrase" ||
+        say "Could not join $ssid. Check the name and password and try again."
+      continue
+      ;;
     esac
 
     ssid=$choice

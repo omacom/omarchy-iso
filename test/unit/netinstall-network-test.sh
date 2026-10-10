@@ -5,10 +5,11 @@
 #
 # Every case runs in a sandbox with pacman, iwctl and gum stubbed: pacman's
 # answers are dealt from a queue so a test can say when the mirrors start
-# answering, iwctl prints a table shaped like the real one and records what it
-# was asked to connect to, and gum deals its answers from a queue so a test can
-# say what the user chooses and types. The step is always called in a subshell,
-# because abort() exits.
+# answering, iwctl prints the table iwd 3.12 actually writes — captured off a
+# live ISO with a mac80211_hwsim radio and a hostapd access point, colours and
+# all — and records what it was asked to connect to, and gum deals its answers
+# from a queue so a test can say what the user chooses and types. The step is
+# always called in a subshell, because abort() exits.
 
 set -euo pipefail
 
@@ -69,21 +70,48 @@ fi
 exit "$code"
 STUB
 
+# iwctl's three table shapes, byte for byte as iwd 3.12 writes them: a 32-column
+# name field starting at column 7, the "> " marker of the connected network in
+# the two columns before it, and "No networks available" in the body when the
+# list is empty. IWCTL_TABLE picks which one answers a scan.
 cat >"$stubs/iwctl" <<'STUB'
 #!/bin/bash
 printf '%s\n' "$*" >>"$IWCTL_LOG"
 
+table_disconnected() {
+  printf '                               Available networks\033[1;90m                              \033[0m\n'
+  printf '\033[90m--------------------------------------------------------------------------------\033[0m\n'
+  printf '\033[0m\033[1;90m      Network name                      Security            Signal\n'
+  printf '\033[0m\033[90m--------------------------------------------------------------------------------\033[0m\n'
+  printf '\033[0m      CasaVerde                         psk                 ****    \n'
+  printf '      Cafe Guest                        open                ***     \n'
+  printf '      CasaVerde                         psk                 **      \n'
+  printf '      hidden                            psk                 *       \n'
+  printf '\n'
+}
+
+table_connected() {
+  printf '                               Available networks\033[1;90m                              \033[0m\n'
+  printf '\033[90m--------------------------------------------------------------------------------\033[0m\n'
+  printf '\033[0m\033[1;90m      Network name                      Security            Signal\n'
+  printf '\033[0m\033[90m--------------------------------------------------------------------------------\033[0m\n'
+  printf '\033[0m  \033[1;90m> \033[0m  CasaVerde                         psk                 ****    \n'
+  printf '      Cafe Guest                        open                ***     \n'
+  printf '\n'
+}
+
+table_empty() {
+  printf '                               Available networks\033[1;90m                              \033[0m\n'
+  printf '\033[90m--------------------------------------------------------------------------------\033[0m\n'
+  printf '\033[0m\033[1;90m      Network name                      Security            Signal\n'
+  printf '\033[0m\033[90m--------------------------------------------------------------------------------\033[0m\n'
+  printf '\033[0mNo networks available\n'
+  printf '\n'
+}
+
 case "$*" in
 *get-networks*)
-  # Shaped like iwd's own table, colours included.
-  printf '\n'
-  printf '%s\n' '                              Available networks'
-  printf '%s\n' '--------------------------------------------------------------------------------'
-  printf '      %s\n' 'Network name                      Security            Signal'
-  printf '%s\n' '--------------------------------------------------------------------------------'
-  printf '\033[36m      CasaVerde                         psk                 ****\033[0m\n'
-  printf '\033[36m      Cafe Guest                        open                ***\033[0m\n'
-  printf '\033[36m      CasaVerde                         psk                 **\033[0m\n'
+  "table_${IWCTL_TABLE:-disconnected}"
   exit 0
   ;;
 esac
@@ -138,6 +166,7 @@ PACMAN_CONF="$work/pacman.conf"
 NETWORK_CHECK_DB="$work/netcheck"
 SYSFS_NET="$work/sysfs/class/net"
 printf '[options]\n' >"$PACMAN_CONF"
+mkdir -p "$work/sysfs/class/net/wlan0/wireless"
 
 # ── which medium asks at all ────────────────────────────────────────────────
 printf 'offline\n' >"$MEDIA_MODE_FILE"
@@ -148,6 +177,29 @@ rm -f "$MEDIA_MODE_FILE"
 installs_from_network && fail "an ISO with no marker is not netinstall media"
 
 pass "only netinstall media ask for a connection"
+
+# ── reading iwd's table ─────────────────────────────────────────────────────
+export IWCTL_TABLE=disconnected
+mapfile -t scanned < <(wifi_networks wlan0)
+[[ ${#scanned[@]} == 2 ]] || fail "duplicates collapse and hidden networks drop" "${scanned[*]}"
+[[ ${scanned[0]} == "Cafe Guest" && ${scanned[1]} == "CasaVerde" ]] ||
+  fail "a name is read from its own column, a space in an SSID included" "${scanned[*]}"
+
+# The connected network carries a "> " marker in the two columns before its
+# name. Read by position, that marker is not part of the name.
+export IWCTL_TABLE=connected
+mapfile -t scanned < <(wifi_networks wlan0)
+[[ ${#scanned[@]} == 2 ]] || fail "the connected table lists its networks" "${scanned[*]}"
+[[ ${scanned[1]} == "CasaVerde" ]] ||
+  fail "the connected network is named, not read as the marker" "${scanned[*]}"
+
+# An empty table says so in the body, where a name would otherwise be read out
+# of the middle of the sentence.
+export IWCTL_TABLE=empty
+mapfile -t scanned < <(wifi_networks wlan0)
+[[ ${#scanned[@]} == 0 ]] || fail "an empty table offers nothing" "${scanned[*]}"
+
+pass "iwd's table is read for what it is: names, once each, marker and all"
 
 # ── the step itself ─────────────────────────────────────────────────────────
 
@@ -185,8 +237,10 @@ pass "the step is invisible unless the connection is actually missing"
 reset_logs
 set_mirrors 1 0
 printf 'yes\n' >"$GUM_QUEUE"
+rm -rf "$work/sysfs/class/net/wlan0"
 run_step || fail "a cable plugged in during the retry passes the step"
 grep -q '^yes$' "$TEST_LOG" || fail "the retry prompt is asked" "$(cat "$TEST_LOG")"
+mkdir -p "$work/sysfs/class/net/wlan0/wireless"
 
 # 4. No cable and no patience: the step refuses to continue.
 reset_logs
@@ -200,19 +254,18 @@ pass "a machine with no radio is told to plug in, and cannot proceed without it"
 
 # 5. Wireless available: the scanned list is offered, the password is asked for
 #    and reaches iwctl, and the step returns once the mirrors answer.
-mkdir -p "$work/sysfs/class/net/wlan0/wireless"
 reset_logs
 set_mirrors 1
 printf 'CasaVerde\ncorrect horse\n' >"$GUM_QUEUE"
 run_step || fail "joining a network passes the step"
 grep -q '^CasaVerde$' "$TEST_LOG" ||
-  fail "the scanned SSIDs are offered, without duplicates or a header" "$(cat "$TEST_LOG")"
+  fail "the scanned SSIDs are offered" "$(cat "$TEST_LOG")"
 grep -q -- '--passphrase correct horse station wlan0 connect CasaVerde' "$IWCTL_LOG" ||
   fail "the password reaches iwctl for the chosen network" "$(cat "$IWCTL_LOG")"
 
 pass "a wireless machine can be brought online from the wizard"
 
-# 6. A join that fails is reported and the wizard asks again.
+# 6. A password the network refuses is reported, and the wizard asks again.
 reset_logs
 set_mirrors 1
 printf 'CasaVerde\nwrong\nQuit to shell\n' >"$GUM_QUEUE"
@@ -226,17 +279,20 @@ unset IWCTL_REJECT_SSID
 
 pass "a wrong password is reported and re-asked"
 
-# 7. A wireless interface is found through the kernel, not through iwd.
-printf '' >"$work/sysfs/class/net/wlan0/bogus"
+# 7. A network the scan cannot show — hidden, or too weak to be listed yet — is
+#    joined through iwd's call for exactly that.
+reset_logs
+set_mirrors 1
+printf 'Other network (hidden or unlisted)\nUni-WiFi\nhunter2\n' >"$GUM_QUEUE"
+run_step || fail "joining an unlisted network passes the step"
+grep -q -- '--passphrase hunter2 station wlan0 connect-hidden Uni-WiFi' "$IWCTL_LOG" ||
+  fail "the typed name and password reach iwd's hidden-network call" "$(cat "$IWCTL_LOG")"
+
+pass "a hidden network can be typed in"
+
+# 8. A wireless interface is found through the kernel, not through iwd.
 [[ $(wireless_device) == wlan0 ]] || fail "the wireless device is found in sysfs"
 rm -rf "$work/sysfs/class/net/wlan0"
 if wireless_device >/dev/null; then fail "no wireless interface reports none"; fi
-mkdir -p "$work/sysfs/class/net/wlan0/wireless"
 
-# 8. The scan list is what iwd prints, stripped of colour and duplicates.
-mapfile -t scanned < <(wifi_networks wlan0)
-[[ ${#scanned[@]} == 2 ]] || fail "duplicate SSIDs collapse to one each" "${scanned[*]}"
-[[ ${scanned[0]} == "Cafe Guest" && ${scanned[1]} == "CasaVerde" ]] ||
-  fail "SSIDs survive as printed, an SSID with a space included" "${scanned[*]}"
-
-pass "iwd's table is read for what it is: names, once each"
+pass "the radio is discovered without asking a daemon"

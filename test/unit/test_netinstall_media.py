@@ -180,7 +180,7 @@ class PopulateTargetKeyringTest(unittest.TestCase):
 
 
 class SeedLiveKeyringTest(unittest.TestCase):
-    """The live keyring comes off the medium, as a copy, before pacstrap."""
+    """The live keyring is replaced wholesale, and what lands is verified."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -206,12 +206,70 @@ class SeedLiveKeyringTest(unittest.TestCase):
         info_patch.start()
         self.addCleanup(info_patch.stop)
 
-    def test_the_carried_keyring_is_copied_in(self):
+        self.runs = []
+        run_patch = mock.patch.object(
+            phases_impl.subprocess,
+            "run",
+            side_effect=lambda cmd, *a, **k: self.runs.append((cmd, k)),
+        )
+        run_patch.start()
+        self.addCleanup(run_patch.stop)
+
+        # gpg is not run against a fake keyring here; what it would report is
+        # what the medium is judged on, so it is answered directly.
+        counts_patch = mock.patch.object(
+            phases_impl, "_keyring_counts", return_value=(185, 1, 86)
+        )
+        self.counts = counts_patch.start()
+        self.addCleanup(counts_patch.stop)
+
+    def gpgconf_calls(self):
+        return [(cmd, kwargs) for cmd, kwargs in self.runs if cmd and cmd[0] == "gpgconf"]
+
+    def test_the_carried_keyring_is_put_in_place(self):
         phases_impl._seed_live_keyring()
 
         self.assertEqual((self.live / "pubring.gpg").read_bytes(), b"keys")
         self.assertEqual((self.live / "trustdb.gpg").read_bytes(), b"trust")
         self.assertEqual((self.live / "private-keys-v1.d" / "key").read_bytes(), b"secret")
+
+    def test_what_is_already_there_is_replaced_not_merged(self):
+        # GnuPG prefers a keybox over a legacy pubring.gpg, so anything stale in
+        # the directory — a half-migrated keyring, the sockets of the agent that
+        # was started with it — has to go, or the seeded keys are ignored.
+        (self.live / "etc-pacman.d").mkdir(parents=True)
+        (self.live / "pubring.kbx").write_bytes(b"stale")
+        (self.live / "S.gpg-agent").touch()
+        (self.live / "etc-pacman.d" / "stale").write_bytes(b"stale")
+
+        phases_impl._seed_live_keyring()
+
+        self.assertFalse((self.live / "pubring.kbx").exists())
+        self.assertFalse((self.live / "S.gpg-agent").exists())
+        self.assertFalse((self.live / "etc-pacman.d").exists())
+
+    def test_the_boot_time_agent_is_stopped_for_this_keyring(self):
+        phases_impl._seed_live_keyring()
+
+        calls = self.gpgconf_calls()
+        self.assertEqual(len(calls), 1)
+        cmd, kwargs = calls[0]
+        self.assertEqual(cmd[1:], ["--kill", "gpg-agent"])
+        self.assertEqual(kwargs["env"]["GNUPGHOME"], str(self.live))
+
+    def test_a_keyring_with_no_keys_fails_loudly(self):
+        self.counts.return_value = (0, 0, 0)
+
+        with self.assertRaises(RuntimeError):
+            phases_impl._seed_live_keyring()
+
+    def test_a_keyring_with_no_trusted_keys_fails_loudly(self):
+        # Keys that are present but unsiged by the local master key are the
+        # failure this is here to catch: pacman refuses them as "unknown trust".
+        self.counts.return_value = (185, 1, 0)
+
+        with self.assertRaises(RuntimeError):
+            phases_impl._seed_live_keyring()
 
     def test_a_medium_without_a_keyring_fails_loudly(self):
         self.seed.rename(self.seed.with_name("moved"))

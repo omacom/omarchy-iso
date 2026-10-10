@@ -143,6 +143,10 @@ chmod +x vm-boot
 
 To get the URL of the edge ISO, run `jq -r .url` on the same `latest.json`.
 
+## Locale profiles
+
+Use `./bin/omarchy-iso-make --locale ja` for Japanese input and user locale defaults. Add `--with-dictation` to include offline Japanese dictation. See [locale profiles](locales/README.md) for the build options and scope, and the [Japanese profile](locales/ja/README.md) for a downloadable image built from this implementation and its verification limits.
+
 ## Autoinstall
 
 The [manual's page](https://omarchy.org/manual/unattended-installs/) is the one for users; this is the same feature in full.

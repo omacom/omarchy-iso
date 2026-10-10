@@ -271,15 +271,17 @@ jobs:
       # it had stored the file, and the publish only passed on rclone's retry.
       # 1.60 sends "x-amz-acl: private" with each upload; current rclone does
       # not send it to Cloudflare.
+      # Not RCLONE_VERSION: rclone reads every RCLONE_<FLAG> variable as that
+      # flag, and "--version=v1.75.2" stops it before it does anything.
       - name: rclone
         env:
-          RCLONE_VERSION: v1.75.2
-          RCLONE_SHA256: efbfe852181f7191eb3c9043ed1ab49c9b2d0ba045c61c926a5da111c939ec5c
+          PINNED_RCLONE: v1.75.2
+          PINNED_RCLONE_SHA256: efbfe852181f7191eb3c9043ed1ab49c9b2d0ba045c61c926a5da111c939ec5c
         run: |
           set -euo pipefail
           [ -n "$RCLONE_CONFIG_R2_ACCESS_KEY_ID" ] || { echo "::error::the nightly environment has no bucket key"; exit 1; }
-          curl -fsSL --retry 3 -o rclone.deb "https://github.com/rclone/rclone/releases/download/$RCLONE_VERSION/rclone-$RCLONE_VERSION-linux-amd64.deb"
-          echo "$RCLONE_SHA256  rclone.deb" | sha256sum -c -
+          curl -fsSL --retry 3 -o rclone.deb "https://github.com/rclone/rclone/releases/download/$PINNED_RCLONE/rclone-$PINNED_RCLONE-linux-amd64.deb"
+          echo "$PINNED_RCLONE_SHA256  rclone.deb" | sha256sum -c -
           sudo dpkg -i rclone.deb >/dev/null
           rclone version | head -1
 

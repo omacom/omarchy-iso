@@ -249,6 +249,14 @@ bash /root/linux-aarch64-live.sh
 bash /root/qualcomm-live-uki.sh
 rm -f /root/linux-aarch64-live.sh /root/qualcomm-live-uki.sh
 CUSTOMIZE
+    # The DSP driver stays out of the live initramfs (see grub.cfg). On the one
+    # laptop it is tested on, this starts it once the live root is in RAM, for
+    # USB hotplug and the battery reading.
+    install -Dm0755 /builder/qualcomm/omarchy-live-dsp "$build_cache_dir/airootfs/usr/local/bin/omarchy-live-dsp"
+    install -Dm0644 /builder/qualcomm/omarchy-live-dsp.service "$build_cache_dir/airootfs/etc/systemd/system/omarchy-live-dsp.service"
+    mkdir -p "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants"
+    ln -sf /etc/systemd/system/omarchy-live-dsp.service "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/omarchy-live-dsp.service"
+    printf '%s\n' 'file_permissions["/usr/local/bin/omarchy-live-dsp"]="0:0:755"' >>"$build_cache_dir/profiledef.sh"
   fi
   rm -rf "$build_cache_dir/syslinux" "$build_cache_dir/efiboot"
 else

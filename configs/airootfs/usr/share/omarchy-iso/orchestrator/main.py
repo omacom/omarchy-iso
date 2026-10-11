@@ -32,6 +32,7 @@ def build_phases(ctx: InstallContext):
         prepare_live,
         prepare_install_target,
         arch_install_system,
+        add_parent_disk_key,
         configure_hibernation,
         run_system_finalizer,
         stage_provisioning_state,
@@ -49,6 +50,9 @@ def build_phases(ctx: InstallContext):
         ("Preparing live environment", prepare_live),
         ("Preparing install target",   prepare_install_target),
         ("Installing Arch + Omarchy",  arch_install_system),
+        # Child installs only: the parent password becomes a second LUKS key,
+        # while the kid's passphrase from the format can still open the add.
+        ("Adding the parent disk key",  add_parent_disk_key),
         ("Configuring hibernation",    configure_hibernation),
         ("Configuring system",         run_system_finalizer),
         # Before finalize_limine_boot: the deferred-provisioning cryptkey drop-in and keyfile

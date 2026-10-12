@@ -51,6 +51,7 @@ class InstallContext:
         creds_path = Path(creds_str)
         user_configuration = json.loads(config_path.read_text())
         omarchy_install = user_configuration.get("omarchy_install") or _default_omarchy_install(user_configuration)
+        _resolve_install_devices(user_configuration)
 
         # Autoinstall configs may omit kernels, which makes archinstall default
         # to stock linux. Apply the same hardware default as the configurator,
@@ -212,6 +213,22 @@ def _default_omarchy_install(user_configuration: dict) -> dict[str, Any]:
         },
         "storage": {},
     }
+
+
+def _resolve_install_devices(configuration: dict) -> None:
+    """archinstall looks up device_modifications[].device by kernel name
+    (/dev/nvme0n1) and silently skips any other spelling, so an autoinstall
+    config naming a stable /dev/disk/by-id/ link partitions nothing and the
+    install later fails with a full airootfs. Resolve links up front, and stop
+    if the disk is not there at all."""
+    for modification in (configuration.get("disk_config") or {}).get("device_modifications") or []:
+        device = modification.get("device")
+        if not device:
+            continue
+        resolved = os.path.realpath(device)
+        if not Path(resolved).exists():
+            raise RuntimeError(f"install disk not found: {device}")
+        modification["device"] = resolved
 
 
 def _optional_path(path: str | None) -> Path | None:

@@ -1,6 +1,7 @@
 #!/usr/bin/ash
 # Opt-in live-image candidate, not a USB-ready ABI. Start the firmware before
-# normal udev coldplug, and refuse all Archiso disk searches if startup failed.
+# normal udev coldplug when firmware is present. Otherwise keep legacy startup;
+# a failure after starting still prevents all Archiso disk searches.
 
 qcom_startup_log() {
     printf 'qcom-startup: %s\n' "$*"
@@ -24,7 +25,7 @@ qcom_startup_select() {
     qcom_startup_owner=''
     qcom_startup_profile=''
     [ -r /proc/device-tree/compatible ] || return 0
-    for utility in cat grep readlink; do
+    for utility in cat grep readlink tr; do
         command -v "$utility" >/dev/null 2>&1 || {
             qcom_startup_fail "missing early-boot utility: $utility"; return 1;
         }
@@ -49,12 +50,58 @@ qcom_startup_select() {
         qcom_startup_profile=$profile
     done
     [ "$found" -le 1 ] || { qcom_startup_fail 'ambiguous firmware owners'; return 1; }
-    if [ "$found" -eq 0 ]; then
-        if grep -Fq 'qcom,' /proc/device-tree/compatible; then
-            qcom_startup_fail 'unsupported Qualcomm firmware topology'
-            return 1
+}
+
+qcom_startup_legacy() {
+    # Fallback is allowed only before loading drivers or triggering coldplug.
+    case ",$(getarg modprobe.blacklist)," in
+        *,qcom_q6v5_pas,*|*,qcom-q6v5-pas,*) ;;
+        *) qcom_startup_fail 'legacy path requires the firmware-driver blacklist'; return 1 ;;
+    esac
+    [ ! -d /sys/module/qcom_q6v5_pas ] || {
+        qcom_startup_fail 'cannot fall back after the firmware driver loaded'; return 1;
+    }
+    qcom_startup_log "keeping legacy startup: $*"
+    qcom_startup_active=0
+}
+
+qcom_startup_firmware_present() {
+    local directory suffix
+    for directory in "/usr/lib/firmware/updates/$qcom_startup_release" /usr/lib/firmware/updates "/usr/lib/firmware/$qcom_startup_release" /usr/lib/firmware; do
+        for suffix in '' .xz .zst; do
+            [ ! -s "$directory/$1$suffix" ] || return 0
+        done
+    done
+    return 1
+}
+
+qcom_startup_preflight() {
+    local names firmware count=0
+    # SOCCP attaches to firmware already supplied by UEFI on Glymur.
+    [ "$qcom_startup_profile" = adsp ] || return 0
+    read -r qcom_startup_release </proc/sys/kernel/osrelease || {
+        qcom_startup_fail 'cannot read kernel release'; return 1;
+    }
+    [ -r "$qcom_startup_owner/firmware-name" ] || {
+        qcom_startup_legacy 'no ADSP firmware names in the device tree'; return;
+    }
+    names=$(tr '\000' '\n' <"$qcom_startup_owner/firmware-name") || {
+        qcom_startup_fail 'cannot read ADSP firmware names'; return 1;
+    }
+    while IFS= read -r firmware; do
+        [ -n "$firmware" ] || continue
+        case "$firmware" in
+            /*|../*|*/../*|*/..) qcom_startup_fail 'invalid ADSP firmware name'; return 1 ;;
+        esac
+        count=$((count + 1))
+        if ! qcom_startup_firmware_present "$firmware"; then
+            qcom_startup_legacy "missing $firmware"
+            return
         fi
-    fi
+    done <<EOF
+$names
+EOF
+    [ "$count" -ne 0 ] || qcom_startup_legacy 'empty ADSP firmware list'
 }
 
 qcom_startup_state() {
@@ -97,25 +144,34 @@ run_earlyhook() {
     qcom_startup_active=1
     qcom_startup_failed=''
     qcom_startup_select || return 1
-    [ -n "$qcom_startup_owner" ] || { qcom_startup_active=0; return 0; }
+    if [ -z "$qcom_startup_owner" ]; then
+        if grep -Fq 'qcom,' /proc/device-tree/compatible; then
+            qcom_startup_legacy 'no supported firmware owner'
+        else
+            qcom_startup_active=0
+        fi
+        return
+    fi
     timeout=$(getarg omarchy.qcom_timeout 30)
     case "$timeout" in ''|*[!0-9]*) qcom_startup_fail 'invalid firmware timeout'; return 1 ;; esac
     [ "$timeout" -ge 1 ] && [ "$timeout" -le 120 ] || {
         qcom_startup_fail 'firmware timeout must be 1..120 seconds'; return 1;
     }
     qcom_startup_timeout=$timeout
-    # Fail closed if an entry accidentally retains either kind of blacklist.
-    case ",$(getarg modprobe.blacklist),$(getarg module_blacklist)," in
+    # A kernel-enforced ban cannot be overridden by an explicit modprobe.
+    case ",$(getarg module_blacklist)," in
         *,qcom_q6v5_pas,*|*,qcom-q6v5-pas,*)
             qcom_startup_fail 'firmware driver remains blacklisted'; return 1 ;;
     esac
+    qcom_startup_preflight || return 1
+    [ "$qcom_startup_active" = 1 ] || return 0
     # Providers from the source image's normal preload list must bind too.
     # A failed optional preload is diagnosed by the required processor check.
     if [ -n "${MODULES:-}" ]; then
         modprobe -qab $MODULES || qcom_startup_log 'some source preload modules were unavailable'
     fi
-    # qrtr must not wait for the Wi-Fi driver to happen to load it. modprobe
-    # loads the dependency chain; built-in drivers are accepted normally.
+    # Explicit modprobe bypasses the alias blacklist; automatic coldplug keeps
+    # respecting it on the legacy path. Load QRTR without waiting for Wi-Fi.
     for module in qrtr qrtr_smd qcom_pd_mapper qcom_q6v5_pas pmic_glink pmic_glink_altmode ucsi_glink; do
         modprobe "$module" || {
             qcom_startup_fail "cannot load $module"; return 1;

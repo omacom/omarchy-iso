@@ -233,10 +233,12 @@ bash /root/qualcomm-live-uki.sh $OMARCHY_KERNEL
 rm -f /root/linux-aarch64-live.sh /root/qualcomm-live-uki.sh
 CUSTOMIZE
   chmod 0755 "$build_cache_dir/airootfs/root/customize_airootfs.sh"
-  # A reused profile must not retain the superseded late-start service.
-  rm -f "$build_cache_dir/airootfs/usr/local/bin/omarchy-live-dsp" \
-    "$build_cache_dir/airootfs/etc/systemd/system/omarchy-live-dsp.service" \
-    "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/omarchy-live-dsp.service"
+  # Keep the existing late-start path when early firmware is unavailable.
+  install -Dm0755 /builder/qualcomm/omarchy-live-dsp "$build_cache_dir/airootfs/usr/local/bin/omarchy-live-dsp"
+  install -Dm0644 /builder/qualcomm/omarchy-live-dsp.service "$build_cache_dir/airootfs/etc/systemd/system/omarchy-live-dsp.service"
+  mkdir -p "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants"
+  ln -sf /etc/systemd/system/omarchy-live-dsp.service "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/omarchy-live-dsp.service"
+  printf '%s\n' 'file_permissions["/usr/local/bin/omarchy-live-dsp"]="0:0:755"' >>"$build_cache_dir/profiledef.sh"
   install -Dm0755 /builder/qualcomm/early-startup-install "$build_cache_dir/airootfs/usr/lib/initcpio/install/qcom_early_startup"
   install -Dm0755 /builder/qualcomm/early-startup "$build_cache_dir/airootfs/usr/lib/initcpio/hooks/qcom_early_startup"
   install -Dm0644 /builder/qualcomm/early-firmware.py "$build_cache_dir/airootfs/usr/lib/initcpio/qcom-early-firmware.py"

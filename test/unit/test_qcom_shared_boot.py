@@ -121,9 +121,9 @@ else:
         self.assertFalse((self.root/'mkinitcpio-call.json').exists())
         self.assertFalse((self.root/'ukify-call.json').exists())
 
-    def test_staging_removes_cached_late_start_service(self):
+    def test_staging_preserves_legacy_service_alongside_early_hook(self):
         builder=(ROOT/'builder/build-iso.sh').read_text()
-        start=builder.index('  # A reused profile must not retain')
+        start=builder.index('  # Keep the existing late-start path')
         end=builder.index('  rm -rf "$build_cache_dir/syslinux"',start)
         block=builder[start:end].replace('/builder/qualcomm/',str(ROOT/'builder/qualcomm')+'/')
         old=('usr/local/bin/omarchy-live-dsp','etc/systemd/system/omarchy-live-dsp.service','etc/systemd/system/multi-user.target.wants/omarchy-live-dsp.service')
@@ -131,7 +131,9 @@ else:
             path=self.root/'airootfs'/name; path.parent.mkdir(parents=True,exist_ok=True); path.write_text('old')
         result=subprocess.run(['bash','-c','build_cache_dir="$TEST_ROOT"\n'+block],env=self.env,capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)
-        for name in old: self.assertFalse((self.root/'airootfs'/name).exists())
+        self.assertEqual((self.root/'airootfs'/old[0]).read_text(),(ROOT/'builder/qualcomm/omarchy-live-dsp').read_text())
+        self.assertEqual((self.root/'airootfs'/old[1]).read_text(),(ROOT/'builder/qualcomm/omarchy-live-dsp.service').read_text())
+        self.assertTrue((self.root/'airootfs'/old[2]).is_symlink())
         for name in ('hooks/qcom_early_startup','install/qcom_early_startup','qcom-early-firmware.py'):
             self.assertTrue((self.root/'airootfs/usr/lib/initcpio'/name).is_file())
 
@@ -164,7 +166,7 @@ build
             self.assertNotEqual(failed.returncode,0)
             self.assertNotIn('RUNSCRIPT',failed.stdout)
         env['FAIL_MODULE']=''
-        for binary in ('cat','grep','readlink','sleep'):
+        for binary in ('cat','grep','readlink','sleep','tr'):
             env['FAIL_BINARY']='/usr/bin/'+binary
             failed=subprocess.run(['bash','-c',harness],env=env,capture_output=True,text=True)
             self.assertNotEqual(failed.returncode,0)

@@ -7,7 +7,7 @@ build() {
     for module in qrtr qrtr_smd qcom_pd_mapper qcom_q6v5_pas pmic_glink pmic_glink_altmode ucsi_glink; do
         add_module "$module" || return 1
     done
-    for module in cat grep readlink sleep; do
+    for module in cat grep readlink sleep tr; do
         add_binary "/usr/bin/$module" || return 1
     done
     [[ -n ${OMARCHY_QCOM_DTBS_FILE:-} && -r $OMARCHY_QCOM_DTBS_FILE ]] || {

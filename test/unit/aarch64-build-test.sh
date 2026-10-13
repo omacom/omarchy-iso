@@ -176,9 +176,7 @@ if [[ ! -d /boot/dtbs/qcom ]]; then
 fi
 grep -Fq "chainloader /%INSTALL_DIR%/boot/%ARCH%/omarchy-live.efi" "$ROOT/configs/grub/grub.cfg" || fail "GRUB does not chainload the live UKI"
 grep -F 'chainloader /%INSTALL_DIR%/boot/%ARCH%/omarchy-live.efi' "$ROOT/configs/grub/grub.cfg" | grep -Fq 'omarchy.qcom_early=1' || fail "the live UKI does not enable early Qualcomm startup"
-if grep -F 'chainloader /%INSTALL_DIR%/boot/%ARCH%/omarchy-live.efi' "$ROOT/configs/grub/grub.cfg" | grep -q 'blacklist='; then
-  fail "the live UKI still blacklists firmware startup"
-fi
+grep -F 'chainloader /%INSTALL_DIR%/boot/%ARCH%/omarchy-live.efi' "$ROOT/configs/grub/grub.cfg" | grep -Fq 'modprobe.blacklist=qcom_q6v5_pas' || fail "the live UKI must protect the legacy path from automatic DSP startup"
 grep -F 'omarchy-live.efi' "$ROOT/configs/grub/grub.cfg" | grep -Fq ' iommu.passthrough=0 ' || fail "the live UKI entry leaves device memory access untranslated"
 grep -Fq '[[ ! -d /boot/dtbs/$1/qcom ]] || dtb_dir=/boot/dtbs/$1/qcom' "$uki" || fail "the live UKI ignores the device trees a kernel keeps under its own name"
 # mkarchiso copies the UKI onto the ISO only with this patch, applied after the GRUB one.

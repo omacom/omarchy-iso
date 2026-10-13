@@ -82,7 +82,7 @@ class KeyboardConfigurationTest(unittest.TestCase):
                 )
 
     def test_input_choice_survives_while_console_keymap_stays_real(self):
-        for method, keymap, layout in (("mozc", "jp106", ""), ("mozc", "us", ""), ("hangul", "us", "kr"), ("hangul", "us", "kr:kr104"), ("none", "us", "la"), ("pinyin", "us", ""), ("chewing", "us", ""), ("cangjie5", "us", "")):
+        for method, keymap, layout in (("mozc", "jp106", ""), ("mozc", "us", ""), ("hangul", "us", "kr"), ("hangul", "us", "kr:kr104"), ("none", "us", "la"), ("none", "us", "ir"), ("pinyin", "us", ""), ("chewing", "us", ""), ("cangjie5", "us", "")):
             with self.subTest(method=method), tempfile.TemporaryDirectory() as directory:
                 target = self.target(directory)
                 self.assertTrue(KEYBOARD.configure_keyboard(target, keymap, method, layout))

@@ -52,6 +52,16 @@ if (( ${#dtbs[@]} > 90 )); then
   exit 1
 fi
 
+# The direct-boot initramfs remains untouched. The Qualcomm UKI needs its
+# firmware drivers and DT-named blobs before it can find USB installation media.
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+printf '%s\n' "${dtbs[@]}" >"$work/dtbs.list"
+OMARCHY_QCOM_DTBS_FILE="$work/dtbs.list" mkinitcpio \
+  -k "$kernel" -c /etc/mkinitcpio.conf.d/archiso.conf \
+  -A qcom_early_startup -g "$work/initramfs.img"
+initrd="$work/initramfs.img"
+
 args=()
 for dtb in "${dtbs[@]}"; do
   args+=("--devicetree-auto=$dtb")

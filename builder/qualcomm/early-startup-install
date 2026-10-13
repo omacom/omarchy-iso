@@ -1,0 +1,29 @@
+#!/bin/bash
+
+build() {
+    local module firmware names
+    # Explicit dependencies are needed before udev has discovered Wi-Fi or
+    # brought up the firmware transport. mkinitcpio handles built-in modules.
+    for module in qrtr qrtr_smd qcom_pd_mapper qcom_q6v5_pas pmic_glink pmic_glink_altmode ucsi_glink; do
+        add_module "$module" || return 1
+    done
+    for module in cat grep readlink sleep; do
+        add_binary "/usr/bin/$module" || return 1
+    done
+    [[ -n ${OMARCHY_QCOM_DTBS_FILE:-} && -r $OMARCHY_QCOM_DTBS_FILE ]] || {
+        error 'The Qualcomm live UKI must provide its device-tree list'
+        return 1
+    }
+    # These drivers obtain firmware names from DT, so modinfo alone cannot
+    # include the blobs. Keep mkinitcpio's normal updates/compression lookup.
+    names=$(python3 /usr/lib/initcpio/qcom-early-firmware.py "$OMARCHY_QCOM_DTBS_FILE") || return 1
+    while IFS= read -r firmware; do
+        [[ -n $firmware ]] || continue
+        add_firmware "$firmware" || warning "Qualcomm device-tree firmware unavailable: $firmware"
+    done <<<"$names"
+    add_runscript
+}
+
+help() {
+    echo 'Start the Qualcomm firmware owner before the live-medium search.'
+}

@@ -56,7 +56,7 @@ PY
 }
 
 start=$(date +%s)
-qemu-system-aarch64 -machine "${MACHINE:-virt,gic-version=3,its=off,acpi=off}" -accel kvm -cpu host \
+qemu-system-aarch64 -machine "${MACHINE:-virt,gic-version=3,msi=gicv2m,acpi=off}" -accel kvm -cpu host \
   -smp "${SMP:-4}" -m "${MEM:-8G}" \
   -drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$state/vars.fd" \
   -device virtio-scsi-pci -drive "file=$iso,format=raw,if=none,id=iso,media=cdrom,readonly=on" \

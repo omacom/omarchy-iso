@@ -86,7 +86,7 @@ cp "$vars" "$state/vars.fd"
 : >"$out/serial.log"
 # The empty disk is first in the boot order: the firmware falls through to the
 # ISO now and finds Limine there after the install.
-qemu-system-aarch64 -machine "${MACHINE:-virt,gic-version=3,its=off,acpi=off}" -accel kvm -cpu host \
+qemu-system-aarch64 -machine "${MACHINE:-virt,gic-version=3,msi=gicv2m,acpi=off}" -accel kvm -cpu host \
   -smp "${SMP:-8}" -m "${MEM:-12G}" \
   -drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$state/vars.fd" \
   -drive "file=$state/target.qcow2,format=qcow2,if=none,id=target" -device virtio-blk-pci,drive=target,bootindex=0 \

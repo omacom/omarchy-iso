@@ -51,13 +51,18 @@ SYNC_DIR=""
 SYNC_ALL=false
 
 KEYBOARD_LABEL="English (US)"
+# The row the ISO's installer preselects: English (US), or a preset's choice.
+KEYBOARD_DEFAULT="English (US)"
+KEYBOARD_CHOSEN=false
+PRESET=""
 GUEST_USER="omarchy"
 GUEST_PASSWORD="omarchy"
 GUEST_HOSTNAME="omarchy-test"
 
 while (($#)); do
   case "$1" in
-    --keyboard) KEYBOARD_LABEL="$2"; shift ;;
+    --keyboard) KEYBOARD_LABEL="$2"; KEYBOARD_CHOSEN=true; shift ;;
+    --preset) PRESET="$2"; shift ;;
     --encrypt) ENCRYPT=true ;;
     --provision) PROVISION=true ;;
     --reuse-base) REUSE_BASE=true ;;
@@ -87,6 +92,15 @@ if [[ ! -f ${ISO:-} ]]; then
   echo "No ISO to test. Pass one explicitly or put it in release/." >&2
   echo "Usage: omarchy-iso-test [release/omarchy.iso] [options]" >&2
   exit 1
+fi
+
+# A preset ISO preselects its own keyboard row; unless --keyboard picks
+# another, the run takes the preset's choice as a user would.
+if [[ -n $PRESET ]]; then
+  preset_file="$REPO_DIR/configs/presets/$PRESET.json"
+  [[ -f $preset_file ]] || { echo "Unknown preset: $PRESET" >&2; exit 1; }
+  KEYBOARD_DEFAULT=$(jq -r '.keyboard // "English (US)"' "$preset_file")
+  $KEYBOARD_CHOSEN || KEYBOARD_LABEL=$KEYBOARD_DEFAULT
 fi
 
 case "$KEYBOARD_LABEL" in
@@ -624,10 +638,10 @@ audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel|omarchy.audio'
 # ----------------------------------------------------- driving the installer
 
 select_keyboard() {
-  local label="$1" index direction="down"
+  local label="$1" default="${2:-English (US)}" index direction="down"
   # gum choose uses arrows, not a searchable text field. Read the same ordered
   # choices the ISO vendors from the runtime rather than hard-code row numbers.
-  index=$(OMARCHY_TEST_KEYBOARD="$label" python - <<'PYTHON'
+  index=$(OMARCHY_TEST_KEYBOARD="$label" OMARCHY_TEST_KEYBOARD_DEFAULT="$default" python - <<'PYTHON'
 import os, re
 from pathlib import Path
 source = Path(os.environ.get("OMARCHY_PATH", "")) / "install/provisioning/setup-form.sh"
@@ -639,7 +653,7 @@ labels = [row.split("|")[0] for row in rows]
 label = os.environ["OMARCHY_TEST_KEYBOARD"]
 if label not in labels:
     raise SystemExit(f"Keyboard choice is absent from the ISO source: {label}")
-print(labels.index(label) - labels.index("English (US)"))
+print(labels.index(label) - labels.index(os.environ["OMARCHY_TEST_KEYBOARD_DEFAULT"]))
 PYTHON
   ) || return 1
   if (( index < 0 )); then
@@ -693,8 +707,8 @@ drive_configurator() {
     return 0
   fi
 
-  if [[ $KEYBOARD_LABEL != "English (US)" ]]; then
-    select_keyboard "$KEYBOARD_LABEL"
+  if [[ $KEYBOARD_LABEL != "$KEYBOARD_DEFAULT" ]]; then
+    select_keyboard "$KEYBOARD_LABEL" "$KEYBOARD_DEFAULT"
     capture_console "success-installer-01-selected-keyboard"
   fi
   press ret
@@ -790,7 +804,10 @@ drive_provision_owner() {
   press ret
 
   wait_for_screen "keyboard layout" 120
-  if [[ $KEYBOARD_LABEL == "English (US)" ]]; then
+  if [[ -n $PRESET ]]; then
+    # Owner setup preselects the preset's row too (/etc/omarchy/form-defaults).
+    select_keyboard "$KEYBOARD_LABEL" "$KEYBOARD_DEFAULT"
+  elif [[ $KEYBOARD_LABEL == "English (US)" ]]; then
     press down # preserve the harness's default UK provisioning coverage
   else
     select_keyboard "$KEYBOARD_LABEL"
@@ -1141,6 +1158,38 @@ sync_omarchy() {
   fi
 }
 
+# What a preset install must have left behind, read off the running system.
+# The checks run in the guest as one script, with the expected values passed
+# as arguments, so nothing in them is expanded on this side.
+verify_preset_install() {
+  [[ -n $PRESET ]] || return 0
+  local language region locale method=""
+  language=$(jq -r '.language // empty' "$preset_file")
+  region=$(jq -r '.region // empty' "$preset_file")
+  locale=$(jq -r --arg c "$language" '.[$c].locale' "$OMARCHY_PATH/default/i18n/locales.json")
+  # The preset's keyboard row names its input method unless --keyboard chose another row.
+  if [[ $KEYBOARD_LABEL == "$KEYBOARD_DEFAULT" ]]; then
+    method=$(grep -F "$KEYBOARD_DEFAULT|" "$OMARCHY_PATH/install/provisioning/setup-form.sh" | head -1 | cut -d'|' -f3)
+  fi
+  ssh_guest "bash -s -- '$region' '$language' '$locale' '$method'" <<'GUEST'
+region=$1 language=$2 locale=$3 method=$4 failures=0
+[[ -n $region && -n $language && -n $locale ]] || { echo "preset checks need a region, language and locale" >&2; exit 2; }
+check() {
+  if eval "$2" >/dev/null 2>&1; then echo "preset ok: $1"; else echo "preset FAILED: $1" >&2; failures=1; fi
+}
+check "region marker is $region" '[[ $(cat /etc/omarchy/region) == "$region" ]]'
+check "language marker is $language" '[[ $(cat /etc/omarchy/language) == "$language" ]]'
+check "the user's language is $language" '[[ $(omarchy-language) == "$language" ]]'
+check "the session LANG is $locale" 'grep -qxF "export LANG=$locale" ~/.config/uwsm/env.d/50-omarchy-language'
+check "the $locale locale is generated" 'locale -a | grep -qix "${locale%.UTF-8}.utf8"'
+check "the system locale stays English" 'grep -qx LANG=en_US.UTF-8 /etc/locale.conf'
+check "pacman uses the region's [omarchy] mirror" 'grep -A1 -xF "[omarchy]" /etc/pacman.conf | grep -q "omarchy\.cn/"'
+check "the Downloads folder keeps its English name" 'grep -qxF "XDG_DOWNLOAD_DIR=\"\$HOME/Downloads\"" ~/.config/user-dirs.dirs && [[ ! -e ~/下载 ]]'
+[[ -z $method ]] || check "the input method is $method" 'grep -qx "INPUT_METHOD=$method" /etc/omarchy/input-method'
+exit $failures
+GUEST
+}
+
 acceptance_phase() {
   log "Booting acceptance VM from base image overlay"
 
@@ -1151,6 +1200,7 @@ acceptance_phase() {
   sync_omarchy
 
   local status=0
+  verify_preset_install || status=1
   shortcut_smoke_phase || status=1
 
   # The synced tree is a full checkout under --sync-all; run the host-style

@@ -29,4 +29,10 @@ if (set -e; select_keyboard "Missing") 2>"$work/error"; then
   exit 1
 fi
 grep -q 'Keyboard choice is absent' "$work/error"
-echo "ok - VM keyboard choices are relative to the default and reject absent rows"
+pressed=()
+select_keyboard "Japanese" "Chinese (Simplified, Pinyin)"
+[[ ${pressed[*]} == "down down" ]]
+pressed=()
+select_keyboard "Chinese (Simplified, Pinyin)" "Chinese (Simplified, Pinyin)"
+(( ${#pressed[@]} == 0 ))
+echo "ok - VM keyboard choices are relative to the default or a preset's, and reject absent rows"

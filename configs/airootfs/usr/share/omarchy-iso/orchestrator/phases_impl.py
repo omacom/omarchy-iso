@@ -36,6 +36,7 @@ from . import archinstall_adapter as arch
 from .command import capture, capture_identifier, require_text
 from .context import InstallContext
 from .keyboard import configure_keyboard
+from .region import GLOBAL
 from .ui import error, info
 
 
@@ -297,6 +298,10 @@ def arch_install_system(ctx: InstallContext) -> None:
 
             info("› installing Omarchy runtime + omarchy-base.packages")
             installer.add_additional_packages(_runtime_package_list(ctx))
+
+            _write_region_marker(ctx)
+            _write_language_marker(ctx)
+            _write_form_defaults(ctx)
 
             # Tailscale is bundled in the offline mirror but only installed
             # when an autoinstall drive staged an auth key; must happen here,
@@ -726,6 +731,42 @@ def _unmask_mkinitcpio_pacman_hooks(
                 backup.rename(path)
         except OSError as exc:
             info(f"warning: failed to restore pacman hook mask for {name}: {exc}")
+
+
+def _write_region_marker(ctx: InstallContext) -> None:
+    """Tell the runtime's pacman finalizer which profile to apply. Global
+    installs write nothing, so they stay identical to a region-less install."""
+    if ctx.region == GLOBAL:
+        return
+    marker = ctx.target / "etc/omarchy/region"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(ctx.region + "\n")
+    marker.chmod(0o644)
+
+
+def _write_language_marker(ctx: InstallContext) -> None:
+    """Hand a preset desktop language to the runtime's finalizers, which
+    generate its locale and set it per user. No preset writes nothing."""
+    language = ctx.omarchy_install.get("language")
+    if not language:
+        return
+    marker = ctx.target / "etc/omarchy/language"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(language + "\n")
+    marker.chmod(0o644)
+
+
+def _write_form_defaults(ctx: InstallContext) -> None:
+    """Leave preset media's keyboard and timezone for a first-boot owner
+    setup to preselect, as plain KEY=value data. No preset writes nothing."""
+    defaults = ctx.omarchy_install.get("form_defaults") or {}
+    lines = [f"{key.upper()}={defaults[key]}" for key in ("keyboard", "timezone", "region") if "\n" not in defaults.get(key, "\n")]
+    if not lines:
+        return
+    marker = ctx.target / "etc/omarchy/form-defaults"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("\n".join(lines) + "\n")
+    marker.chmod(0o644)
 
 
 def _runtime_package_list(ctx: InstallContext) -> list[str]:

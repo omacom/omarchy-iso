@@ -24,6 +24,19 @@ if [[ ! -r $SETUP_FORM ]]; then
 fi
 source "$SETUP_FORM"
 
+# Preset install media (omarchy-iso-make --preset) preselect the keyboard and
+# timezone; the orchestrator applies the preset's language and region. Every
+# choice stays the user's to change; without a preset this is the global one.
+ISO_PRESET="${ISO_PRESET:-/usr/share/omarchy-iso/preset.json}"
+ORCHESTRATOR_DIR="${ORCHESTRATOR_DIR:-/usr/share/omarchy-iso}"
+preset_region=""
+if [[ -r $ISO_PRESET ]]; then
+  OMARCHY_FORM_KEYBOARD_DEFAULT=$(jq -r '.keyboard // empty' "$ISO_PRESET")
+  OMARCHY_FORM_TIMEZONE_DEFAULT=$(jq -r '.timezone // empty' "$ISO_PRESET")
+  export OMARCHY_FORM_KEYBOARD_DEFAULT OMARCHY_FORM_TIMEZONE_DEFAULT
+  preset_region=$(jq -r '.region // empty' "$ISO_PRESET")
+fi
+
 # Partition creation helpers, shared with test/partition-numbering-test.sh so
 # the numbering logic can be exercised without a real disk.
 DISK_PARTITIONING="${DISK_PARTITIONING:-/usr/share/omarchy-iso/disk-partitioning.sh}"
@@ -290,6 +303,14 @@ user_step() {
       continue
     fi
 
+    # The timezone selects the region (mirrors and repositories), using the
+    # same lookup as the orchestrator. Global installs get no extra row.
+    region=$(cd "$ORCHESTRATOR_DIR" 2>/dev/null && python -m orchestrator.region "$timezone" "$preset_region") || region="global"
+    region_row=""
+    if [[ $region != "global" ]]; then
+      region_row="\nRegion,$region"
+    fi
+
     # Add manual padding since gum table -p doesn't respect padding
     echo -e "Field,Value
 Username,$username
@@ -297,7 +318,7 @@ Password,$(printf "%${#password}s" | tr ' ' '*')
 Full name,${full_name:-[Skipped]}
 Email address,${email_address:-[Skipped]}
 Hostname,$hostname
-Timezone,$timezone
+Timezone,$timezone$region_row
 Keyboard,$keyboard" |
       gum table -s "," -p | sed "s/^/${PADDING_LEFT_SPACES}/"
 

@@ -89,6 +89,19 @@ OMARCHY_SETTINGS_PACKAGE=$OMARCHY_SETTINGS_PACKAGE
 OMARCHY_NVIM_PACKAGE=$OMARCHY_NVIM_PACKAGE
 EOF
 
+# A preset build (omarchy-iso-make --preset china) preselects the installer's
+# choices for one market and names the ISO after it; without one, the ISO and
+# its installer are exactly the global build.
+if [[ -n ${OMARCHY_ISO_PRESET:-} ]]; then
+  if [[ ! $OMARCHY_ISO_PRESET =~ ^[a-z]+$ || ! -f /configs/presets/$OMARCHY_ISO_PRESET.json ]]; then
+    echo "ERROR: unknown ISO preset: $OMARCHY_ISO_PRESET" >&2
+    exit 1
+  fi
+  cp "/configs/presets/$OMARCHY_ISO_PRESET.json" "$build_cache_dir/airootfs/usr/share/omarchy-iso/preset.json"
+  sed -i "s/^iso_name=\"omarchy\"$/iso_name=\"omarchy-$OMARCHY_ISO_PRESET\"/" "$build_cache_dir/profiledef.sh"
+fi
+rm -rf "$build_cache_dir/presets"
+
 if [[ ${OMARCHY_INSTALL_DEBUG:-} == "1" ]]; then
   touch "$build_cache_dir/airootfs/usr/share/omarchy-iso/install-debug"
   {
@@ -155,6 +168,7 @@ sed -i -E '/^(linux|broadcom-wl)$/d' "$build_cache_dir/packages.x86_64"
 # already in the mirror and we filter them out below. Without it, pacman -Syw
 # pulls the published omarchy* from the network mirror like any other package.
 if [[ -d /omarchy-source ]]; then
+  regions_source=/omarchy-source/default/regions
   base_pkg_lists=(/omarchy-source/install/omarchy-base.packages /omarchy-source/install/omarchy-other.packages)
   setup_form=/omarchy-source/install/provisioning/setup-form.sh
 else
@@ -177,6 +191,17 @@ else
   # build here (set -e) with a bare "Not found in archive" instead of the
   # actionable error below.
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/setup-form.sh 2>/dev/null || true
+  # Region profiles live under default/, which the settings package ships,
+  # not the runtime. Its own cache dir keeps the runtime lookup above from
+  # ever matching it.
+  settings_cache_dir="$bootstrap_cache_dir/settings"
+  mkdir -p "$settings_cache_dir"
+  pacman --config /configs/pacman-online-${OMARCHY_MIRROR}.conf --noconfirm -Syw "$OMARCHY_SETTINGS_PACKAGE" --cachedir "$settings_cache_dir" --dbpath /tmp/offlinedb-bootstrap >/dev/null
+  regions_source=$(find "$settings_cache_dir" -maxdepth 1 -type f -name "$OMARCHY_SETTINGS_PACKAGE-*.pkg.tar.zst" | sort | head -1)
+  if [[ -z $regions_source ]]; then
+    echo "ERROR: downloaded package for $OMARCHY_SETTINGS_PACKAGE not found in $settings_cache_dir" >&2
+    exit 1
+  fi
   setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
 fi
 
@@ -202,6 +227,21 @@ if [[ ! -f $setup_form ]]; then
   exit 1
 fi
 cp "$setup_form" "$build_cache_dir/airootfs/usr/share/omarchy-iso/setup-form.sh"
+
+# Region profiles only reorder mirrors of repositories every install already
+# uses, so they add nothing to download and no key to trust here.
+bash /builder/prepare-regions.sh "$regions_source" "$build_cache_dir/airootfs/usr/share/omarchy-iso"
+
+# Profiles ship in the settings package, but the finalizer that applies them
+# ships in the runtime. A runtime without it would ignore the region marker,
+# leaving regional targets on the global mirrors without saying so.
+if [[ -n ${omarchy_pkg:-} && -d $build_cache_dir/airootfs/usr/share/omarchy-iso/regions ]]; then
+  runtime_listing=$(bsdtar -tf "$omarchy_pkg")
+  if ! grep -qx 'usr/bin/omarchy-apply-pacman' <<<"$runtime_listing"; then
+    echo "ERROR: $OMARCHY_SETTINGS_PACKAGE ships region profiles, but $OMARCHY_RUNTIME_PACKAGE lacks omarchy-apply-pacman to apply them." >&2
+    exit 1
+  fi
+fi
 
 # Collect every package we want available in the offline mirror.
 declare -a all_packages

@@ -273,6 +273,12 @@ mkdir -p "$omarchy_share"
   printf 'logo bottom row%*s\n' 66 ''
 } >"$omarchy_share/logo.txt"
 
+# The ISO vendors the runtime's setup form; the dashboard only needs its text lookup.
+cat >"$work/setup-form.sh" <<'FORM'
+declare -gA OMARCHY_ZH=()
+omarchy_text() { local text=$1; shift; printf -- "$text" "$@"; }
+FORM
+
 run_dashboard() {
   local install_log="$1"
 
@@ -284,7 +290,7 @@ run_dashboard() {
              "error": "Pacstrap failed. See /var/log/archinstall.log"}]}
 STATE
   : >"$screen"
-  script -qefc "stty rows 40 cols 120; PATH='$stubs:$PATH' OMARCHY_PATH='$omarchy_share' OMARCHY_UI_INTERACTIVE=no OMARCHY_UI_FAILURE_ACTION=exit OMARCHY_FAILURE_TAIL_LOG='$install_log' '$DASHBOARD' '$install_log' '$state_file' -- bash -c 'exit 1'" \
+  script -qefc "stty rows 40 cols 120; PATH='$stubs:$PATH' OMARCHY_PATH='$omarchy_share' SETUP_FORM='$work/setup-form.sh' OMARCHY_UI_INTERACTIVE=no OMARCHY_UI_FAILURE_ACTION=exit OMARCHY_FAILURE_TAIL_LOG='$install_log' '$DASHBOARD' '$install_log' '$state_file' -- bash -c 'exit 1'" \
     "$screen" >/dev/null 2>&1
 }
 

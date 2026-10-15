@@ -24,6 +24,72 @@ if [[ ! -r $SETUP_FORM ]]; then
 fi
 source "$SETUP_FORM"
 
+# Chinese text for OMARCHY_INSTALL_LANG=zh; disk-step failures stay English for support logs.
+OMARCHY_ZH+=(
+  ["Aborted installation"]="安装已中止"
+  ["You can retry later by running: ./.automated_script.sh"]="稍后可运行 ./.automated_script.sh 重试"
+  ["Let's setup your machine..."]="开始设置这台机器……"
+  ["Press Ctrl+C to prepare this machine for another owner."]="按 Ctrl+C 为另一位使用者准备这台机器。"
+  ["This prepares the machine for another owner."]="这会为另一位使用者准备这台机器。"
+  ["The system installs now, but setup is delayed until first boot."]="系统现在安装，设置留到首次开机。"
+  ["Yes, prepare for another owner"]="是，为他人准备"
+  ["No, keep setting up"]="否，继续设置"
+  ["Prepare this machine for another owner?"]="为另一位使用者准备这台机器？"
+  ["Let's setup your user account..."]="开始设置用户账户……"
+  ["Field"]="项目"
+  ["Value"]="值"
+  ["Username"]="用户名"
+  ["Password"]="密码"
+  ["Full name"]="姓名"
+  ["Email address"]="邮箱"
+  ["Hostname"]="主机名"
+  ["Keyboard"]="键盘"
+  ["Region"]="区域"
+  ["[Skipped]"]="[已跳过]"
+  ["Yes"]="是"
+  ["No, change it"]="否，去修改"
+  ["Does this look right?"]="以上信息正确吗？"
+  ["Not enough free space on %s"]="%s 的空闲空间不足"
+  ["%s has %s of usable free space; Omarchy needs at least 32GB."]="%s 有 %s 可用空闲空间；Omarchy 至少需要 32GB。"
+  ["Open the partition tool to free at least 32GB on %s, then try again."]="打开分区工具，在 %s 上腾出至少 32GB，然后重试。"
+  ["Back"]="返回"
+  ["Open partition tool"]="打开分区工具"
+  ["Return to installation mode?"]="返回安装方式选择？"
+  ["Checking for BitLocker on %s"]="检查 %s 上的 BitLocker"
+  ["BitLocker signature detected on %s."]="在 %s 上发现 BitLocker 签名。"
+  ["Turn BitLocker off in Windows and wait for the drive to finish decrypting, then try again."]="在 Windows 中关闭 BitLocker，等磁盘解密完成后重试。"
+  ["Suspending BitLocker is not enough — the drive stays encrypted."]="只暂停 BitLocker 不够，磁盘仍是加密的。"
+  ["Aborted: BitLocker is enabled on this disk."]="已中止：这块磁盘开启了 BitLocker。"
+  ["Checking existing EFI partitions on %s"]="检查 %s 上已有的 EFI 分区"
+  ["Found a Windows ESP at %s — leaving it untouched."]="在 %s 发现 Windows ESP，保持不动。"
+  ["Omarchy will create its own dedicated EFI partition in free space."]="Omarchy 会在空闲空间中创建自己的 EFI 分区。"
+  ["A new EFI partition will be created in free space."]="会在空闲空间中新建 EFI 分区。"
+  ["Analyzing free space on %s"]="分析 %s 的空闲空间"
+  ["Install Omarchy in the %s of free space."]="在 %s 空闲空间中安装 Omarchy。"
+  ["Press Ctrl+C for unencrypted install."]="按 Ctrl+C 改为不加密安装。"
+  ["Yes, install"]="是，开始安装"
+  ["Yes, install without encryption"]="是，不加密安装"
+  ["Confirm installing on %s"]="确认安装到 %s"
+  ["Creating partitions on %s"]="在 %s 上创建分区"
+  ["Setting up LUKS2 on %s"]="在 %s 上设置 LUKS2 加密"
+  ["Creating Btrfs filesystem and subvolumes"]="创建 Btrfs 文件系统和子卷"
+  ["Let's select where to install Omarchy..."]="选择 Omarchy 的安装位置……"
+  ["Select install disk"]="选择安装磁盘"
+  ["Partition tool for %s"]="%s 的分区工具"
+  ["Create unallocated free space for Omarchy, then write changes and quit."]="为 Omarchy 腾出未分配空间，然后写入更改并退出。"
+  ["Do not create an Omarchy partition here — leave the target area as Free space."]="不要在这里创建 Omarchy 分区，目标区域保持为 Free space。"
+  ["Tip: free-space install needs at least 32GB unallocated, plus 2GB more if no ESP already exists."]="提示：空闲空间安装至少需要 32GB 未分配空间；没有 ESP 时再加 2GB。"
+  ["Open cfdisk"]="打开 cfdisk"
+  ["Open partition tool for %s?"]="打开 %s 的分区工具？"
+  ["Full disk install"]="整盘安装"
+  ["Free space install (alongside existing data)"]="空闲空间安装（保留现有数据）"
+  ["Choose a different disk"]="换一块磁盘"
+  ["Let's select how to install Omarchy..."]="选择 Omarchy 的安装方式……"
+  ["Select installation mode on %s"]="选择 %s 上的安装方式"
+  ["Everything will be overwritten. There is no recovery possible."]="磁盘上的一切都会被覆盖，无法恢复。"
+  ["Confirm overwriting %s"]="确认覆盖 %s"
+)
+
 # Partition creation helpers, shared with test/partition-numbering-test.sh so
 # the numbering logic can be exercised without a real disk.
 DISK_PARTITIONING="${DISK_PARTITIONING:-/usr/share/omarchy-iso/disk-partitioning.sh}"
@@ -176,9 +242,9 @@ greeter() {
 }
 
 abort() {
-  gum style "${1:-Aborted installation}"
+  gum style "${1:-$(omarchy_text "Aborted installation")}"
   echo
-  gum style "You can retry later by running: ./.automated_script.sh"
+  gum style "$(omarchy_text "You can retry later by running: ./.automated_script.sh")"
   exit 1
 }
 
@@ -203,6 +269,30 @@ notice() {
 
 # STEP 1: KEYBOARD LAYOUT
 
+# The target's LANG follows the language picked on the first screen.
+target_lang() {
+  if [[ $language == "zh" ]]; then
+    echo zh_CN.UTF-8
+  else
+    echo en_US.UTF-8
+  fi
+}
+
+# .automated_script.sh moves Chinese into the CJK console and English back to the VT, which applies keymaps.
+apply_language() {
+  if [[ $language == "zh" && -n ${OMARCHY_CJK_RELAUNCH:-} ]]; then
+    exit "$OMARCHY_CJK_RELAUNCH"
+  fi
+  if [[ $language == "en" && -n ${OMARCHY_VT_RETURN:-} ]]; then
+    exit "$OMARCHY_VT_RETURN"
+  fi
+  if [[ $language == "zh" && -n ${OMARCHY_CJK_CONSOLE:-} ]]; then
+    export OMARCHY_INSTALL_LANG=zh
+  else
+    unset OMARCHY_INSTALL_LANG
+  fi
+}
+
 keyboard_form() {
   # Ctrl+C is the hidden entry into deferred provisioning, offered on every
   # visit: the user step unwinds back here and nothing is on disk yet. Callers
@@ -212,11 +302,24 @@ keyboard_form() {
   while true; do
     clear_logo
     echo
-    say "Let's setup your machine..."
-    say --foreground 8 "Press Ctrl+C to prepare this machine for another owner."
+    say "$(omarchy_text "Let's setup your machine...")"
+    say --foreground 8 "$(omarchy_text "Press Ctrl+C to prepare this machine for another owner.")"
     echo
 
-    omarchy_prompt_keyboard && status=0 || status=$?
+    status=0
+    if ! $language_chosen; then
+      omarchy_prompt_language && status=0 || status=$?
+      ((status == 0)) && apply_language
+    fi
+    # Esc, Ctrl+C or a later "No, change it" asks the language again.
+    language_chosen=false
+    if ((status == 0)); then
+      local layouts=$OMARCHY_KEYBOARD_LAYOUTS selected="English (US)"
+      [[ $language == "zh" ]] && selected="Chinese (Simplified, Pinyin)"
+      # cage keeps its US layout, so the CJK console offers only US-keymap keyboards.
+      [[ -n ${OMARCHY_CJK_CONSOLE:-} ]] && layouts=$(awk -F'|' '$2 == "us"' <<<"$layouts")
+      OMARCHY_KEYBOARD_LAYOUTS=$layouts omarchy_prompt_keyboard "$selected" && status=0 || status=$?
+    fi
     ((status == 0)) && break
 
     # Esc means "back", and nothing precedes the first screen, so re-ask.
@@ -245,11 +348,11 @@ keyboard_form() {
 confirm_prepare_for_another_owner() {
   clear_logo
   echo
-  say "This prepares the machine for another owner."
-  say --foreground 8 "The system installs now, but setup is delayed until first boot."
+  say "$(omarchy_text "This prepares the machine for another owner.")"
+  say --foreground 8 "$(omarchy_text "The system installs now, but setup is delayed until first boot.")"
   echo
-  gum confirm --affirmative "Yes, prepare for another owner" --negative "No, keep setting up" \
-    "Prepare this machine for another owner?"
+  gum confirm --affirmative "$(omarchy_text "Yes, prepare for another owner")" --negative "$(omarchy_text "No, keep setting up")" \
+    "$(omarchy_text "Prepare this machine for another owner?")"
 }
 
 # The user step. Deferred-provisioning installs skip it entirely — the machine's first owner
@@ -257,7 +360,7 @@ confirm_prepare_for_another_owner() {
 # operator sets nothing user-specific.
 
 user_form() {
-  step "Let's setup your user account..."
+  step "$(omarchy_text "Let's setup your user account...")"
 
   # Each prompt reports 0 (set), OMARCHY_FORM_BACK (Esc), or OMARCHY_FORM_SIGNAL
   # (Ctrl+C). Both non-zero cases unwind to user_step, which decides what they
@@ -290,19 +393,29 @@ user_step() {
       continue
     fi
 
+    # The timezone selects the region (mirrors and repositories), using the
+    # same lookup as the orchestrator. Global installs get no extra row.
+    region=$(cd /usr/share/omarchy-iso 2>/dev/null && python -m orchestrator.region "$timezone") || region="global"
+    region_row=""
+    if [[ $region != "global" ]]; then
+      region_row="\n$(omarchy_text Region),$region"
+    fi
+
     # Add manual padding since gum table -p doesn't respect padding
-    echo -e "Field,Value
-Username,$username
-Password,$(printf "%${#password}s" | tr ' ' '*')
-Full name,${full_name:-[Skipped]}
-Email address,${email_address:-[Skipped]}
-Hostname,$hostname
-Timezone,$timezone
-Keyboard,$keyboard" |
+    local skipped
+    skipped=$(omarchy_text "[Skipped]")
+    echo -e "$(omarchy_text Field),$(omarchy_text Value)
+$(omarchy_text Username),$username
+$(omarchy_text Password),$(printf "%${#password}s" | tr ' ' '*')
+$(omarchy_text "Full name"),${full_name:-$skipped}
+$(omarchy_text "Email address"),${email_address:-$skipped}
+$(omarchy_text Hostname),$hostname
+$(omarchy_text Timezone),$timezone$region_row
+$(omarchy_text Keyboard),\"$keyboard_label\"" |
       gum table -s "," -p | sed "s/^/${PADDING_LEFT_SPACES}/"
 
     echo
-    if gum confirm --negative "No, change it" "Does this look right?"; then
+    if gum confirm --affirmative "$(omarchy_text "Yes")" --negative "$(omarchy_text "No, change it")" "$(omarchy_text "Does this look right?")"; then
       break
     else
       keyboard_form
@@ -504,11 +617,11 @@ print_dry_run_files() {
 # action so users have a way to actually fix the situation.
 not_enough_space() {
   local available="${1:-0}"
-  step "Not enough free space on $disk"
-  say --foreground 1 "$disk has $(to_gb $available) of usable free space; Omarchy needs at least 32GB."
-  say "Open the partition tool to free at least 32GB on $disk, then try again."
+  step "$(omarchy_text "Not enough free space on %s" "$disk")"
+  say --foreground 1 "$(omarchy_text "%s has %s of usable free space; Omarchy needs at least 32GB." "$disk" "$(to_gb $available)")"
+  say "$(omarchy_text "Open the partition tool to free at least 32GB on %s, then try again." "$disk")"
   echo
-  if ! gum confirm --affirmative "Back" --negative "Open partition tool" "Return to installation mode?"; then
+  if ! gum confirm --affirmative "$(omarchy_text "Back")" --negative "$(omarchy_text "Open partition tool")" "$(omarchy_text "Return to installation mode?")"; then
     open_partition_tool
   fi
   return 1
@@ -518,14 +631,14 @@ not_enough_space() {
 # encryption confirm. Sets the globals run_partition_execute needs. Returns 1
 # to fall back to the install-mode picker.
 run_partition_decide() {
-  step "Checking for BitLocker on $disk"
+  step "$(omarchy_text "Checking for BitLocker on %s" "$disk")"
   local bl_part
   bl_part=$(detect_bitlocker || true)
   if [[ -n "$bl_part" ]]; then
-    say --foreground 1 "BitLocker signature detected on $bl_part."
-    say "Turn BitLocker off in Windows and wait for the drive to finish decrypting, then try again."
-    say "Suspending BitLocker is not enough — the drive stays encrypted."
-    abort "Aborted: BitLocker is enabled on this disk."
+    say --foreground 1 "$(omarchy_text "BitLocker signature detected on %s." "$bl_part")"
+    say "$(omarchy_text "Turn BitLocker off in Windows and wait for the drive to finish decrypting, then try again.")"
+    say "$(omarchy_text "Suspending BitLocker is not enough — the drive stays encrypted.")"
+    abort "$(omarchy_text "Aborted: BitLocker is enabled on this disk.")"
   fi
 
   # Omarchy always creates its own dedicated ESP in free space and never
@@ -534,17 +647,17 @@ run_partition_decide() {
   # Windows ESP is far too small for our Unified Kernel Images, and a shared
   # ESP forces the install unencrypted. A separate Linux ESP keeps Windows
   # and Omarchy fully isolated and keeps LUKS on the table.
-  step "Checking existing EFI partitions on $disk"
+  step "$(omarchy_text "Checking existing EFI partitions on %s" "$disk")"
   local detected_win_esp
   detected_win_esp=$(detect_windows_esp || true)
   if [[ -n "$detected_win_esp" ]]; then
-    say "Found a Windows ESP at $detected_win_esp — leaving it untouched."
-    say "Omarchy will create its own dedicated EFI partition in free space."
+    say "$(omarchy_text "Found a Windows ESP at %s — leaving it untouched." "$detected_win_esp")"
+    say "$(omarchy_text "Omarchy will create its own dedicated EFI partition in free space.")"
   else
-    say "A new EFI partition will be created in free space."
+    say "$(omarchy_text "A new EFI partition will be created in free space.")"
   fi
 
-  step "Analyzing free space on $disk"
+  step "$(omarchy_text "Analyzing free space on %s" "$disk")"
   partprobe "$disk" 2>/dev/null || true
   sleep 1
 
@@ -619,21 +732,21 @@ run_partition_decide() {
   while true; do
     clear_logo
     echo
-    say "Install Omarchy in the $(to_gb $INSTALL_MAX_B) of free space."
+    say "$(omarchy_text "Install Omarchy in the %s of free space." "$(to_gb $INSTALL_MAX_B)")"
 
     case $mode in
       encrypted)
-        say --foreground 8 "Press Ctrl+C for unencrypted install."
-        affirmative="Yes, install"
+        say --foreground 8 "$(omarchy_text "Press Ctrl+C for unencrypted install.")"
+        affirmative="$(omarchy_text "Yes, install")"
         ;;
       unencrypted)
-        affirmative="Yes, install without encryption"
+        affirmative="$(omarchy_text "Yes, install without encryption")"
         ;;
     esac
     echo
 
-    gum confirm --affirmative "$affirmative" --negative "No, change it" \
-      "Confirm installing on $disk"
+    gum confirm --affirmative "$affirmative" --negative "$(omarchy_text "No, change it")" \
+      "$(omarchy_text "Confirm installing on %s" "$disk")"
     confirm_status=$?
 
     case $confirm_status in
@@ -691,7 +804,7 @@ run_partition_execute() {
     say "[dry] partition numbers are assigned by parted at creation, then read back"
     say "[dry] encrypted=$encrypt_installation kernel=$kernel_choice"
   else
-    step "Creating partitions on $disk"
+    step "$(omarchy_text "Creating partitions on %s" "$disk")"
     if $needs_mklabel; then
       disk_step "initializing GPT on $disk" parted --script "$disk" mklabel gpt
       partprobe "$disk" 2>/dev/null || true
@@ -729,7 +842,7 @@ run_partition_execute() {
     disk_step "clearing stale signatures on $root_partition_device" wipefs -af "$root_partition_device"
 
     if [[ "$encrypt_installation" == "true" ]]; then
-      step "Setting up LUKS2 on $root_partition_device"
+      step "$(omarchy_text "Setting up LUKS2 on %s" "$root_partition_device")"
       # Kept as pipes rather than routed through disk_step: the passphrase must
       # not become an argv the process table can show. Folding stderr into
       # stdout still lands any error in the install log.
@@ -746,7 +859,7 @@ run_partition_execute() {
       root_mapper="$root_partition_device"
     fi
 
-    step "Creating Btrfs filesystem and subvolumes"
+    step "$(omarchy_text "Creating Btrfs filesystem and subvolumes")"
     disk_step "creating the Btrfs filesystem on $root_mapper" \
       mkfs.btrfs -f -L OMARCHY "$root_mapper"
     wait_for_device "$root_mapper" || disk_abort_hook "Root device $root_mapper never appeared"
@@ -834,7 +947,7 @@ run_partition_execute() {
     "locale_config": {
         "kb_layout": "$keyboard",
         "sys_enc": "UTF-8",
-        "sys_lang": "en_US.UTF-8"
+        "sys_lang": "$(target_lang)"
     },
     "mirror_config": {
         "custom_repositories": [],
@@ -864,7 +977,7 @@ _EOF_
 }
 
 disk_form() {
-  step "Let's select where to install Omarchy..."
+  step "$(omarchy_text "Let's select where to install Omarchy...")"
 
   # Don't offer the install media as an option (Arch ISO mounts it here)
   local boot_source
@@ -890,19 +1003,19 @@ disk_form() {
     fi
   done <<<"$available_disks"
 
-  selected_display=$(echo "$disk_options" | gum choose --header "Select install disk") || abort
+  selected_display=$(echo "$disk_options" | gum choose --header "$(omarchy_text "Select install disk")") || abort
   disk=$(echo "$selected_display" | awk '{print $1}')
 }
 
 # STEP 4: INSTALL MODE
 
 open_partition_tool() {
-  step "Partition tool for $disk"
-  gum style "Create unallocated free space for Omarchy, then write changes and quit."
-  gum style --foreground 8 "Do not create an Omarchy partition here — leave the target area as Free space."
-  gum style --foreground 8 "Tip: free-space install needs at least 32GB unallocated, plus 2GB more if no ESP already exists."
+  step "$(omarchy_text "Partition tool for %s" "$disk")"
+  gum style "$(omarchy_text "Create unallocated free space for Omarchy, then write changes and quit.")"
+  gum style --foreground 8 "$(omarchy_text "Do not create an Omarchy partition here — leave the target area as Free space.")"
+  gum style --foreground 8 "$(omarchy_text "Tip: free-space install needs at least 32GB unallocated, plus 2GB more if no ESP already exists.")"
   echo
-  gum confirm --affirmative "Open cfdisk" --negative "Back" "Open partition tool for $disk?" || return 0
+  gum confirm --affirmative "$(omarchy_text "Open cfdisk")" --negative "$(omarchy_text "Back")" "$(omarchy_text "Open partition tool for %s?" "$disk")" || return 0
 
   clear
   cfdisk "$disk" || true
@@ -935,17 +1048,17 @@ requires_full_disk_install() {
 }
 
 install_mode_form() {
-  local choices=("Full disk install")
+  local choices=("$(omarchy_text "Full disk install")")
 
   # The free-space/protected path registers an EFI boot entry and is UEFI-only.
   # Full-disk installs still support BIOS through the orchestrator's BIOS branch.
   if [[ -d /sys/firmware/efi ]] && ! $full_disk_only; then
-    choices+=("Free space install (alongside existing data)")
+    choices+=("$(omarchy_text "Free space install (alongside existing data)")")
   fi
-  choices+=("Choose a different disk")
+  choices+=("$(omarchy_text "Choose a different disk")")
 
-  step "Let's select how to install Omarchy..."
-  install_mode=$(gum choose --header "Select installation mode on $disk" "${choices[@]}") || abort
+  step "$(omarchy_text "Let's select how to install Omarchy...")"
+  install_mode=$(gum choose --header "$(omarchy_text "Select installation mode on %s" "$disk")" "${choices[@]}") || abort
 }
 
 confirm_disk_overwrite() {
@@ -955,17 +1068,17 @@ confirm_disk_overwrite() {
   while true; do
     clear_logo
     echo
-    say "Everything will be overwritten. There is no recovery possible."
+    say "$(omarchy_text "Everything will be overwritten. There is no recovery possible.")"
 
     if [[ $mode == "encrypted" ]]; then
-      say --foreground 8 "Press Ctrl+C for unencrypted install."
-      affirmative="Yes, install"
+      say --foreground 8 "$(omarchy_text "Press Ctrl+C for unencrypted install.")"
+      affirmative="$(omarchy_text "Yes, install")"
     else
-      affirmative="Yes, install without encryption"
+      affirmative="$(omarchy_text "Yes, install without encryption")"
     fi
 
     echo
-    gum confirm --affirmative "$affirmative" --negative "No, change it" "Confirm overwriting ${disk}"
+    gum confirm --affirmative "$affirmative" --negative "$(omarchy_text "No, change it")" "$(omarchy_text "Confirm overwriting %s" "$disk")"
     confirm_status=$?
 
     case $confirm_status in
@@ -1004,13 +1117,13 @@ select_installation() {
     # With no free-space option to offer, a full-disk install is the only
     # mode, so skip the picker and go straight to the overwrite confirm.
     if $full_disk_only; then
-      install_mode="Full disk install"
+      install_mode=$(omarchy_text "Full disk install")
     else
       install_mode_form
     fi
 
     case "$install_mode" in
-      "Full disk install")
+      "$(omarchy_text "Full disk install")")
         if confirm_disk_overwrite; then
           install_target="full_disk"
           return 0
@@ -1019,13 +1132,13 @@ select_installation() {
         # wants a different disk.
         $full_disk_only && disk_form
         ;;
-      "Free space install"*)
+      "$(omarchy_text "Free space install (alongside existing data)")")
         if run_partition_decide; then
           install_target="free_space"
           return 0
         fi
         ;;
-      "Choose a different disk")
+      "$(omarchy_text "Choose a different disk")")
         disk_form
         ;;
     esac
@@ -1036,12 +1149,20 @@ select_installation() {
 
 defer_provisioning=false
 install_target="full_disk"
+# A rerun arrives with the language chosen; otherwise English.
+language="${OMARCHY_INSTALL_LANGUAGE:-en}"
+language_chosen=false
 
 # Let the live VT reach its settled width before the first screen so the logo
 # isn't measured against the transient 80-column boot console.
 wait_for_stable_terminal
 
-greeter
+if [[ -n ${OMARCHY_INSTALL_LANGUAGE:-} ]]; then
+  apply_language
+  language_chosen=true
+else
+  greeter
+fi
 
 keyboard_form
 
@@ -1227,7 +1348,7 @@ cat <<-_EOF_ >user_configuration.json
     "locale_config": {
         "kb_layout": "$keyboard",
         "sys_enc": "UTF-8",
-        "sys_lang": "en_US.UTF-8"
+        "sys_lang": "$(target_lang)"
     },
     "mirror_config": {
         "custom_repositories": [],

@@ -179,6 +179,8 @@ When `authorized_keys` is present, autoinstall installs it as the user's `~/.ssh
 
 When `tailscale_authkey` is present (one key, blank lines and `#` comments ignored), the install adds the `tailscale` package from the ISO's bundled mirror — nothing is fetched from the network at install or boot — and stages the join for first boot: the key lands at `/etc/tailscale/authkey` (root-only), `tailscaled` is enabled, ufw allows traffic in on `tailscale0`, and a background unit runs `tailscale up` once the network is actually up, retrying until it succeeds without holding up the boot. After a successful join the key is deleted and the unit disables itself; until then both survive reboots, so a machine installed offline joins whenever it first gets connectivity. The node appears on the tailnet under the configured hostname. Use a reusable, pre-authorized (tagged) key so one drive image serves many machines — or an ephemeral key for disposable VMs.
 
+The region follows `timezone`, exactly as in an interactive install: a timezone listed in one of the runtime's region profiles (`default/regions/*/timezones`, such as `Asia/Shanghai` for `cn`) selects that profile's mirrors and repositories, and anything else is global. Set `omarchy_install.region` in `user_configuration.json` to pick one explicitly, for example `"cn"` on a deferred-provisioning install, which carries `UTC` until first boot. Every ISO bundles every profile's packages, so a regional install still needs no network.
+
 ### Building the drive
 
 ```bash
@@ -218,6 +220,8 @@ For local development, build the ISO from sibling checkouts:
 ```
 
 Despite the local folder name, the first argument is the Omarchy source checkout (runtime commands, configs, setup scripts, themes, shell, migrations). The installer itself lives in this ISO repo.
+
+The configurator asks for the language on its first screen: English or Simplified Chinese. Chinese reruns the installer in cage + foot, a console that draws Chinese, with Noto Sans Mono CJK unpacked from the offline mirror's `noto-fonts-cjk`. It opens on the keyboard screen, offers only keyboards with a US keymap (cage keeps a US layout) and preselects Chinese (Simplified, Pinyin); every later screen and the install progress read in Chinese. Esc there goes back to a bilingual language screen, where English returns to the VT, which applies the chosen keymap. Without a working display or the font, Chinese continues in English on the VT. Either way a Chinese install sets the target's `LANG` to `zh_CN.UTF-8` through archinstall's `locale_config`. The language never decides the region: that follows the timezone. The Chinese text lives in `OMARCHY_ZH` tables beside the English it replaces.
 
 Use `--dev` or `--rc` to build against those package channels. Both `--dev` and `--edge` select the dev packages from the edge mirror.
 

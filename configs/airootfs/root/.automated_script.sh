@@ -10,7 +10,10 @@
 #   - COLUMNS/LINES so gum picks up real terminal size
 set -euo pipefail
 
-[[ $(tty) == /dev/tty1 ]] || exit 0
+[[ $(tty) == /dev/tty1 || -n ${OMARCHY_CJK_CONSOLE:-} ]] || exit 0
+if [[ -n ${OMARCHY_CJK_CONSOLE:-} ]]; then
+  touch "$XDG_RUNTIME_DIR/cjk-console-started"
+fi
 
 export OMARCHY_MIRROR="$(cat /root/omarchy_mirror)"
 if [[ -f /root/omarchy_iso_ref ]]; then
@@ -39,7 +42,8 @@ set_tokyo_night_colors() {
   echo -en "\033[0m"
   clear
 }
-set_tokyo_night_colors
+# foot sets the same palette from foot.ini; these escapes are VT-only.
+[[ -n ${OMARCHY_CJK_CONSOLE:-} ]] || set_tokyo_night_colors
 
 mkdir -p /var/log
 touch "$OMARCHY_INSTALL_LOG_FILE"
@@ -90,6 +94,16 @@ warm_offline_mirror &
 warm_pid=$!
 trap 'kill "$warm_pid" 2>/dev/null' EXIT
 
+# The CJK console's font comes from the offline mirror's noto-fonts-cjk, not the live image.
+unpack_cjk_font() {
+  local packages=(/var/cache/omarchy/mirror/offline/noto-fonts-cjk-*.pkg.tar.zst)
+  if ((${#packages[@]} != 1)) || [[ ! -f ${packages[0]} ]]; then
+    echo "Expected one noto-fonts-cjk package in the offline mirror, found: ${packages[*]}" >&2
+    return 1
+  fi
+  bsdtar -xf "${packages[0]}" -C / usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc
+}
+
 cd /root
 # Autoinstall: a cidata drive carrying the configurator's own output files
 # stands in for the wizard. omarchy-cidata-load copies them into /root and
@@ -98,7 +112,43 @@ if /usr/local/bin/omarchy-cidata-load; then
   echo "Autoinstall configuration found on cidata drive; skipping the configurator."
   export OMARCHY_UI_INTERACTIVE=no
 else
-  ./configurator
+  # Chinese moves to cage + foot, which draw Chinese; English moves back to the VT, which applies keymaps.
+  cjk_relaunch=10
+  vt_return=11
+  if [[ -n ${OMARCHY_CJK_CONSOLE:-} ]]; then
+    export OMARCHY_VT_RETURN=$vt_return
+  elif command -v cage >/dev/null; then
+    export OMARCHY_CJK_RELAUNCH=$cjk_relaunch
+  fi
+  ./configurator && status=0 || status=$?
+  while ((status == cjk_relaunch)); do
+    cjk_runtime=/run/omarchy-cjk-console
+    mkdir -p -m 700 "$cjk_runtime"
+    rm -f "$cjk_runtime/cjk-console-started" "$cjk_runtime/return-to-vt"
+    if ! unpack_cjk_font; then
+      echo "The Chinese font could not be unpacked from the offline mirror; continuing in English."
+      unset OMARCHY_CJK_RELAUNCH
+      OMARCHY_INSTALL_LANGUAGE=zh ./configurator && status=0 || status=$?
+      continue
+    fi
+    cage_status=0
+    env -u OMARCHY_CJK_RELAUNCH XDG_RUNTIME_DIR=$cjk_runtime OMARCHY_CJK_CONSOLE=1 OMARCHY_INSTALL_LANGUAGE=zh \
+      LANG=C.UTF-8 WLR_RENDERER=pixman cage -- foot -c /usr/share/omarchy-iso/foot.ini "$0" || cage_status=$?
+    if [[ -f $cjk_runtime/return-to-vt ]]; then
+      OMARCHY_INSTALL_LANGUAGE=en ./configurator && status=0 || status=$?
+    elif [[ -f $cjk_runtime/cjk-console-started ]]; then
+      exit "$cage_status"
+    else
+      echo "The Chinese console could not start (cage exit $cage_status); continuing in English."
+      unset OMARCHY_CJK_RELAUNCH
+      OMARCHY_INSTALL_LANGUAGE=zh ./configurator && status=0 || status=$?
+    fi
+  done
+  if [[ -n ${OMARCHY_CJK_CONSOLE:-} ]] && ((status == vt_return)); then
+    touch "$XDG_RUNTIME_DIR/return-to-vt"
+    exit 0
+  fi
+  ((status == 0)) || exit "$status"
 fi
 
 # Deferred-provisioning installs skip the celebration/reboot prompt and reboot on
@@ -109,6 +159,11 @@ fi
 if [[ -f /root/defer-provisioning ]] ||
   [[ "$(jq -r '.omarchy_install.defer_provisioning // false' /root/user_configuration.json 2>/dev/null)" == "true" ]]; then
   export OMARCHY_UI_DEFER_PROVISIONING=yes
+fi
+
+# Only Chinese reaches the install from the CJK console; English returns to the VT.
+if [[ -n ${OMARCHY_CJK_CONSOLE:-} ]]; then
+  export OMARCHY_INSTALL_LANG=zh
 fi
 
 # The foreground dashboard is now the sole visible install UI owner. It starts

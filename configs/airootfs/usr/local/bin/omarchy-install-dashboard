@@ -88,6 +88,81 @@ tips=(
   "Keep the system fresh with Update in the Omarchy menu"
 )
 
+# omarchy_text and its Chinese table come from the setup form the configurator uses.
+SETUP_FORM="${SETUP_FORM:-/usr/share/omarchy-iso/setup-form.sh}"
+[[ -r $SETUP_FORM ]] || SETUP_FORM="${OMARCHY_PATH:-/usr/share/omarchy}/install/provisioning/setup-form.sh"
+source "$SETUP_FORM"
+OMARCHY_ZH+=(
+  ["Tip: %s"]="提示：%s"
+  ["Installed Omarchy"]="Omarchy 安装完成"
+  ["Installed Omarchy in %s"]="Omarchy 安装完成，用时 %s"
+  ["Reboot Now"]="立即重启"
+  ["Last log lines:"]="日志末尾："
+  ["Last target log lines:"]="目标系统日志末尾："
+  ["Press Enter to continue…"]="按回车继续……"
+  ["No log uploader is available in this environment."]="这个环境没有日志上传工具。"
+  ["Install log: %s"]="安装日志：%s"
+  ["Target log: %s"]="目标系统日志：%s"
+  ["Omarchy installation stopped"]="Omarchy 安装已停止"
+  ["Installer exited with status %s"]="安装程序退出，状态码 %s"
+  ["Get help at https://omarchy.org/discord"]="求助：https://omarchy.org/discord"
+  ["What would you like to do?"]="接下来做什么？"
+  ["Upload log for support"]="上传日志求助"
+  ["View full log"]="查看完整日志"
+  ["Drop to shell"]="进入 shell"
+  ["Reboot"]="重启"
+  ["Power off"]="关机"
+  ["The install medium was misread"]="安装介质读取出错"
+  ["This package is intact on this ISO, so the download and the write were fine:"]="这个软件包在 ISO 中完好，下载和写入都没有问题："
+  ["Try another USB port or another stick, and test this machine's memory"]="换一个 USB 口或换一个 U 盘，并检测这台机器的内存"
+  ["The install medium is damaged"]="安装介质已损坏"
+  ["This package no longer matches the checksum it was built with:"]="这个软件包和构建时的校验和不再一致："
+  ["Re-download the ISO, verify it with sha256sum, and write the USB again"]="重新下载 ISO，用 sha256sum 校验，再重新写入 U 盘"
+  ["If a verified ISO fails here too, the USB stick itself is the problem"]="如果校验过的 ISO 在这里也失败，问题出在 U 盘本身"
+  ["The install medium is damaged or misread"]="安装介质已损坏或读取出错"
+  ["pacman rejected this package, read straight off this ISO:"]="pacman 拒绝了这个直接从 ISO 读出的软件包："
+  ["Verify your download with sha256sum, then write the USB again"]="用 sha256sum 校验下载的文件，再重新写入 U 盘"
+  ["If the download verifies, the stick or this machine's memory is at fault"]="如果下载校验无误，问题出在 U 盘或这台机器的内存"
+)
+
+if [[ ${OMARCHY_INSTALL_LANG:-} == "zh" ]]; then
+  whimsy=(
+    "备好贴心的默认设置"
+    "省掉装机的折腾"
+    "挑选打磨过的软件包"
+    "调配协调的配色"
+    "准备悦目的像素"
+    "唤醒 Hyprland"
+    "接好顺手的界面"
+    "搭起漂亮的系统"
+    "写好趁手的命令"
+    "让机器焕然一新"
+    "擦亮每一个像素"
+    "调好终端的品味"
+    "织出流畅的工作流"
+  )
+  tips=(
+    "Super + Space 打开 Omarchy 菜单：应用、设置等"
+    "Super + K 查看全部快捷键"
+    "Super 是键盘上的 Windows 或 Command 键"
+    "用 Xournal++ 给 PDF 签名"
+    "用 LocalSend 和手机、电脑互传文件"
+    "菜单 安装 > 网页应用 把任意网站变成应用"
+    "Super + Return 打开终端，Super + Shift + Return 打开浏览器"
+    "图片用 Pinta，视频用 Kdenlive，文档用 LibreOffice"
+    "Super + Ctrl + Print 用 OCR 抓取屏幕文字"
+    "Print 截屏，Alt + Print 录屏"
+    "Super + Ctrl + R 设置提醒"
+    "菜单 风格 > 主题 切换主题"
+    "双击菜单栏让它透明"
+    "菜单 安装 > Windows 运行完整的 Windows 虚拟机"
+    "Super + Ctrl + V 打开剪贴板管理器"
+    "Super + 1 到 0 切换工作区，加 Shift 带上窗口"
+    "Super + Print 拾取屏幕上任意位置的颜色"
+    "用菜单里的 更新 让系统保持最新"
+  )
+fi
+
 cleanup() {
   printf '%s%s' "$RESET" "$SHOW_CURSOR" >"$TTY_PATH" 2>/dev/null || true
 }
@@ -286,8 +361,8 @@ left_padding() {
 
 visible_len() {
   local text="$1"
-  text="$(printf '%b' "$text" | sed -E $'s/\x1b\\[[0-9;?]*[A-Za-z]//g')"
-  printf '%s' "${#text}"
+  # wc -L counts display columns, so double-width CJK centers too.
+  printf '%b' "$text" | sed -E $'s/\x1b\\[[0-9;?]*[A-Za-z]//g' | wc -L
 }
 
 blank_line() { printf '\r%s\n' "$CLEAR_LINE"; }
@@ -678,7 +753,7 @@ render_dynamic() {
   render_icon "$DISPLAY_PM"
 
   message="$(truncate_for_width "$(current_whimsy)" "$PROGRESS_TEXT_WIDTH")"
-  tip="$(truncate_for_width "Tip: $(current_tip)" "$PROGRESS_TEXT_WIDTH")"
+  tip="$(truncate_for_width "$(omarchy_text "Tip: %s" "$(current_tip)")" "$PROGRESS_TEXT_WIDTH")"
   printf '%s%d;1H' "$CSI" "$((TOP_ROW + ICON_HEIGHT + 1))"
   center "${GREEN}$((DISPLAY_PM / 10))%${RESET}" "$PROGRESS_TEXT_WIDTH"
   center "${GREEN}${message}${RESET}" "$PROGRESS_TEXT_WIDTH"
@@ -718,9 +793,13 @@ install_duration() {
 }
 
 render_finish() {
-  local duration effect_canvas_width title="Installed Omarchy"
+  local duration effect_canvas_width title
   duration="$(install_duration || true)"
-  [[ -n $duration ]] && title+=" in ${duration}"
+  if [[ -n $duration ]]; then
+    title=$(omarchy_text "Installed Omarchy in %s" "$duration")
+  else
+    title=$(omarchy_text "Installed Omarchy")
+  fi
   # ttfx centers its text two columns right of plain centering. A canvas two
   # columns narrower aligns the animation with the title and fallback logo.
   effect_canvas_width="$(term_cols)"
@@ -765,7 +844,7 @@ render_finish() {
 }
 
 reboot_prompt() {
-  local prompt_pad
+  local prompt_pad label
 
   # Nobody to confirm; the OMARCHY_UI_AUTO_REBOOT check at the call site still
   # applies, so setting both stops on the finish screen without a keyboard.
@@ -776,24 +855,31 @@ reboot_prompt() {
   # gum allows. FINISH_HEIGHT budgets for the same three rows.
   printf '%s%d;1H%s' "$CSI" "$((FINISH_TOP_ROW + LOGO_HEIGHT + 2))" "$CLEAR_LINE" >"$TTY_PATH"
 
-  prompt_pad=$(( ( $(term_cols) - 18 ) / 2 ))
+  # gum pads the button label by four columns on each side.
+  label=$(omarchy_text "Reboot Now")
+  prompt_pad=$(( ( $(term_cols) - $(visible_len "$label") - 8 ) / 2 ))
   (( prompt_pad < 0 )) && prompt_pad=0
   gum confirm \
     --padding "0 0 0 $prompt_pad" \
     --show-help=false \
     --default \
-    --affirmative "Reboot Now" \
+    --affirmative "$label" \
     --negative "" \
     "" <"$TTY_PATH" >"$TTY_PATH" 2>&1
 }
 
+# Columns, not characters: each CJK character takes two.
 truncate_for_width() {
   local text="$1" width="$2"
-  if (( ${#text} > width )); then
-    printf '%s…' "${text:0:$((width - 1))}"
-  else
+  if (( $(printf '%s' "$text" | wc -L) <= width )); then
     printf '%s' "$text"
+    return
   fi
+  text=${text:0:$((width - 1))}
+  while (( $(printf '%s' "$text" | wc -L) > width - 1 )); do
+    text=${text%?}
+  done
+  printf '%s…' "$text"
 }
 
 render_failure_log_tail() {
@@ -819,8 +905,8 @@ render_failure_log_tail() {
   fi
   [[ -f $tail_log ]] || return 0
 
-  label="Last log lines:"
-  [[ $tail_log == /mnt/* ]] && label="Last target log lines:"
+  label=$(omarchy_text "Last log lines:")
+  [[ $tail_log == /mnt/* ]] && label=$(omarchy_text "Last target log lines:")
   line_at "$CONTENT_WIDTH" 2 "${DIM}${label}${RESET}"
   printf '\n'
   tail -n "$lines" "$tail_log" 2>/dev/null | while IFS= read -r line; do
@@ -843,7 +929,7 @@ find_log_uploader() {
 }
 
 prompt_enter() {
-  printf '\nPress Enter to continue…' >"$TTY_PATH"
+  printf '\n%s' "$(omarchy_text "Press Enter to continue…")" >"$TTY_PATH"
   IFS= read -r _ <"$TTY_PATH" || true
 }
 
@@ -854,9 +940,9 @@ upload_failure_log() {
     "$uploader" install >"$TTY_PATH" 2>&1 || true
   else
     {
-      echo "No log uploader is available in this environment."
-      echo "Install log: $LOG_FILE"
-      [[ -f /mnt/var/log/omarchy-install.log ]] && echo "Target log: /mnt/var/log/omarchy-install.log"
+      printf '%s\n' "$(omarchy_text "No log uploader is available in this environment.")"
+      printf '%s\n' "$(omarchy_text "Install log: %s" "$LOG_FILE")"
+      [[ -f /mnt/var/log/omarchy-install.log ]] && printf '%s\n' "$(omarchy_text "Target log: %s" /mnt/var/log/omarchy-install.log)"
     } >"$TTY_PATH"
   fi
   prompt_enter
@@ -907,6 +993,8 @@ render_media_diagnosis() {
       blank_line
       continue
     fi
+    # The support log keeps English; the screen shows the translation, and package names pass through.
+    [[ ${OMARCHY_INSTALL_LANG:-} == "zh" ]] && line=${OMARCHY_ZH[$line]:-$line}
     if (( first )); then
       center "${RED}$(truncate_for_width "$line" "$CONTENT_WIDTH")${RESET}" "$CONTENT_WIDTH"
       first=0
@@ -922,8 +1010,8 @@ render_failure() {
   blank_line
   render_logo
   blank_line
-  center "${RED}Omarchy installation stopped${RESET}" "$CONTENT_WIDTH"
-  center "Installer exited with status $status" "$CONTENT_WIDTH"
+  center "${RED}$(omarchy_text "Omarchy installation stopped")${RESET}" "$CONTENT_WIDTH"
+  center "$(omarchy_text "Installer exited with status %s" "$status")" "$CONTENT_WIDTH"
 
   render_media_diagnosis "$media_diagnosis"
 
@@ -938,12 +1026,12 @@ render_failure() {
   blank_line
   render_failure_log_tail "$(media_diagnosis_rows "$media_diagnosis")"
   blank_line
-  center "${DIM}Get help at https://omarchy.org/discord${RESET}" "$CONTENT_WIDTH"
+  center "${DIM}$(omarchy_text "Get help at https://omarchy.org/discord")${RESET}" "$CONTENT_WIDTH"
   blank_line
 }
 
 failure_menu() {
-  local choice uploader
+  local choice uploader actions shown i
 
   [[ ${OMARCHY_UI_FAILURE_ACTION:-} == "exit" ]] && return 0
   # The failure screen and log tail have already rendered; exit with the
@@ -953,26 +1041,20 @@ failure_menu() {
   while true; do
     uploader=""
     uploader=$(find_log_uploader || true)
-    if [[ -n $uploader ]]; then
-      choice=$(gum choose \
-        --height 6 \
-        --header "What would you like to do?" \
-        "Upload log for support" \
-        "View full log" \
-        "Drop to shell" \
-        "Reboot" \
-        "Power off" \
-        <"$TTY_PATH" 2>"$TTY_PATH") || choice="Drop to shell"
-    else
-      choice=$(gum choose \
-        --height 5 \
-        --header "What would you like to do?" \
-        "View full log" \
-        "Drop to shell" \
-        "Reboot" \
-        "Power off" \
-        <"$TTY_PATH" 2>"$TTY_PATH") || choice="Drop to shell"
-    fi
+    actions=("View full log" "Drop to shell" "Reboot" "Power off")
+    [[ -n $uploader ]] && actions=("Upload log for support" "${actions[@]}")
+    shown=()
+    for i in "${!actions[@]}"; do
+      shown+=("$(omarchy_text "${actions[i]}")")
+    done
+    choice=$(gum choose \
+      --height "$((${#actions[@]} + 1))" \
+      --header "$(omarchy_text "What would you like to do?")" \
+      "${shown[@]}" \
+      <"$TTY_PATH" 2>"$TTY_PATH") || choice=""
+    for i in "${!shown[@]}"; do
+      [[ ${shown[i]} == "$choice" ]] && choice=${actions[i]}
+    done
 
     case "$choice" in
       "Upload log for support")

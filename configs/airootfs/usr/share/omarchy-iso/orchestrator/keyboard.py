@@ -69,7 +69,7 @@ def configure_keyboard(target: Path, language: str, input_method: str | None = N
 
 
 def validate_input_selection(input_method: str | None, xkb_layout: str) -> None:
-    if input_method is not None and input_method not in {"none", "mozc", "hangul", "pinyin", "chewing"}:
+    if input_method is not None and input_method not in {"none", "mozc", "hangul", "pinyin", "chewing", "cangjie5"}:
         raise ValueError(f"Unknown input method: {input_method}")
     if xkb_layout not in {"", "kr", "kr:kr104", "la"}:
         raise ValueError(f"Unknown input keyboard layout: {xkb_layout}")

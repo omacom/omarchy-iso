@@ -535,8 +535,10 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   source /builder/aarch64-package-filter.sh
   mapfile -t all_packages < <(filter_aarch64_packages "$OMARCHY_KERNEL" "${all_packages[@]}")
   # The kernel pair and the Limine/Snapper stack the installer adds on aarch64,
-  # and everything in a package bundle (the ASUS ProArt P14's amplifier
-  # firmware, say). Each platform's own packages come from its list above.
+  # everything in a package bundle, and the packages only a board's hardware
+  # setup installs: they are in no list, and an offline install stops on them
+  # (the ASUS ProArt P14's amplifier firmware). Each platform's own packages
+  # come from its list above.
   platform_packages=()
   if [[ -d /packages ]]; then
     mapfile -t platform_packages < <(
@@ -545,7 +547,7 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
       done
     )
   fi
-  all_packages+=("$OMARCHY_KERNEL" "$OMARCHY_KERNEL-headers" "${platform_packages[@]}" archlinuxarm-keyring limine limine-mkinitcpio-hook limine-snapper-sync snapper pciutils)
+  all_packages+=("$OMARCHY_KERNEL" "$OMARCHY_KERNEL-headers" "${platform_packages[@]}" archlinuxarm-keyring limine limine-mkinitcpio-hook limine-snapper-sync snapper pciutils asus-proart-p14-speaker-firmware)
   mapfile -t all_packages < <(printf '%s\n' "${all_packages[@]}" | sort -u)
 fi
 

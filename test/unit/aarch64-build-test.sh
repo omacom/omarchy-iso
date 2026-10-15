@@ -120,6 +120,8 @@ grep -Fq 'pacman -Qqp "$archive"' "$ROOT/builder/build-iso.sh" \
   || fail "the offline mirror does not carry every package in the platform bundle"
 grep -Fq 'archlinuxarm-keyring limine limine-mkinitcpio-hook limine-snapper-sync snapper pciutils' "$ROOT/builder/build-iso.sh" \
   || fail "the offline mirror lacks the Limine/Snapper stack the installer adds"
+grep -Fq 'snapper pciutils asus-proart-p14-speaker-firmware)' "$ROOT/builder/build-iso.sh" \
+  || fail "the offline mirror lacks the ProArt P14's amplifier firmware its hardware setup installs"
 grep -Fq '"${base_pkg_lists[@]}" "${platform_lists[@]}"' "$ROOT/builder/build-iso.sh" \
   || fail "the offline mirror does not carry every platform's own packages"
 

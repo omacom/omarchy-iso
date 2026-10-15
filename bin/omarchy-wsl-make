@@ -1,0 +1,52 @@
+#!/bin/bash
+#
+# Builds a WSL distribution tarball (`.wsl`) from an ISO: unattended install,
+# seal, then tar the sealed disk with the WSL configuration. Output goes into
+# ./release alongside the ISO.
+#
+#   omarchy-wsl-make [release/omarchy.iso] [--reuse-base] [--no-preview]
+#
+# Needs QEMU with /dev/kvm, like ./test/integration does. The install leaves
+# test-runs/<iso>-integration/base.qcow2 behind; --reuse-base skips the
+# install and reseals that base, for a fast loop against the same ISO.
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+ISO="" REUSE_BASE="" PREVIEW_ARGS=()
+for arg in "$@"; do
+  case $arg in
+    --reuse-base) REUSE_BASE=1 ;;
+    --no-preview) PREVIEW_ARGS+=(--no-preview) ;;
+    -*) echo "Usage: omarchy-wsl-make [iso] [--reuse-base] [--no-preview]" >&2; exit 1 ;;
+    *) [[ -z $ISO ]] || { echo "Usage: omarchy-wsl-make [iso] [--reuse-base] [--no-preview]" >&2; exit 1; }
+       ISO=$arg ;;
+  esac
+done
+
+if [[ -z $ISO ]]; then
+  ISO=$(ls -t "$ROOT"/release/*.iso 2>/dev/null | head -n1 || true)
+  [[ -n $ISO ]] || { echo "omarchy-wsl-make: no ISO in release/, pass one" >&2; exit 1; }
+fi
+[[ -f $ISO ]] || { echo "omarchy-wsl-make: no ISO at $ISO" >&2; exit 1; }
+[[ -r /dev/kvm && -w /dev/kvm ]] || { echo "omarchy-wsl-make: /dev/kvm is not usable" >&2; exit 1; }
+
+base_dir=$ROOT/test-runs/$(basename "$ISO" .iso)-integration
+if [[ -z $REUSE_BASE || ! -f $base_dir/base.qcow2 ]]; then
+  "$ROOT/test/integration" "$ISO" boot "${PREVIEW_ARGS[@]}"
+fi
+[[ -f $base_dir/base.qcow2 ]] || { echo "omarchy-wsl-make: no base image at $base_dir/base.qcow2" >&2; exit 1; }
+
+sealed=$ROOT/sealed
+rm -rf "$sealed"
+"$ROOT/test/vm-image/vm-seal" "$base_dir" "$sealed"
+"$ROOT/test/vm-image/vm-verify" "$sealed"
+
+name=$(basename "$ISO" .iso)
+# release/omarchy-4.0.4.iso -> omarchy-4.0.4.wsl; anything else keeps its stem.
+wsl=$ROOT/release/$name.wsl
+"$ROOT/test/vm-image/vm-wsl" "$sealed" "$wsl"
+"$ROOT/test/vm-image/wsl-verify" "$wsl"
+
+echo "WSL distribution: $wsl ($(du -h "$wsl" | cut -f1))"
+echo "Checksum:         $wsl.sha256"
+echo 'Install on Windows with: wsl --install --from-file '"$wsl"

@@ -1,0 +1,174 @@
+#!/bin/bash
+# Turns a sealed Omarchy disk (what vm-seal leaves) into a WSL distribution
+# tarball (a `.wsl` file: a gzipped rootfs tar with WSL configuration).
+#
+#   vm-wsl <sealed_dir> <output.wsl>
+#
+# sealed_dir holds base.qcow2, vmlinuz, initrd and cmdline, as vm-seal leaves
+# them. output.wsl gets the gzipped tar, and output.wsl.sha256 the checksum of
+# that file. The tarball holds the installed system's root filesystem with:
+#
+#   /etc/wsl.conf and /etc/wsl-distribution.conf (root:root 0644),
+#   /usr/lib/wsl/terminal-profile.json,
+#   systemd units that fight WSL masked,
+#   no /etc/resolv.conf (WSL generates it),
+#   an empty /etc/machine-id and no SSH host keys (made per instance),
+#   no /boot kernel or initramfs (WSL brings its own kernel),
+#   no build key, history, logs, or package cache.
+#
+# The image keeps the installer's user and password (GUEST_PASSWORD, default
+# omarchy): first launch signs straight into the provisioned Omarchy desktop
+# under WSLg. Install it on Windows with:
+#
+#   wsl --install --from-file omarchy-<version>.wsl
+#
+# Needs qemu-system-x86_64, qemu-img, ssh and a usable /dev/kvm.
+# Env: GUEST_PASSWORD (omarchy), WSL_FILES_DIR (builder/wsl in this checkout).
+set -euo pipefail
+[[ $# -eq 2 ]] || { sed -n '2,27p' "$0" >&2; exit 2; }
+sealed=$(realpath "$1") out=$(realpath -m "$2")
+pw=${GUEST_PASSWORD:-omarchy}
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+wsl_src=${WSL_FILES_DIR:-$(realpath "$here/../../builder/wsl")}
+fail() { echo "vm-wsl: $*" >&2; exit 1; }
+
+for file in base.qcow2 vmlinuz initrd cmdline; do
+  [[ -s $sealed/$file ]] || fail "the sealed image has no $file"
+done
+for file in wsl.conf wsl-distribution.conf terminal-profile.json; do
+  [[ -s $wsl_src/$file ]] || fail "no WSL file at $wsl_src/$file"
+done
+command -v qemu-system-x86_64 qemu-img ssh gzip >/dev/null || fail "needs qemu-system-x86_64, qemu-img, ssh and gzip"
+[[ -r /dev/kvm && -w /dev/kvm ]] || fail "/dev/kvm is not usable"
+python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$wsl_src/terminal-profile.json" \
+  || fail "$wsl_src/terminal-profile.json is not JSON"
+grep -q '^defaultName=' <(grep -v '^[[:space:]]*#' "$wsl_src/wsl-distribution.conf") \
+  || fail "wsl-distribution.conf names no oobe.defaultName (double-click install needs it)"
+
+state=$(mktemp -d /var/tmp/wsl.XXXXXX)
+cleanup() {
+  local status=$? pid
+  if [[ -f $state/qemu.pid ]]; then
+    pid=$(cat "$state/qemu.pid")
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+  fi
+  rm -rf "$state"
+  exit "$status"
+}
+trap cleanup EXIT
+port=$(( 30000 + RANDOM % 5000 ))
+uuid=$(cat /proc/sys/kernel/random/uuid)
+
+# A key made for this boot only, handed in through the firmware tables as a
+# systemd credential that writes authorized_keys (as test/vm-image/vm-boot).
+ssh-keygen -q -t ed25519 -N '' -C vm-wsl -f "$state/id_ed25519"
+keys=$(printf 'd /home/omarchy/.ssh 0700 omarchy omarchy -\nf+ /home/omarchy/.ssh/authorized_keys 0600 omarchy omarchy - %s\n' \
+  "$(cat "$state/id_ed25519.pub")" | base64 -w0)
+ssh_opts=(-i "$state/id_ed25519" -p "$port" -o BatchMode=yes -o IdentitiesOnly=yes
+  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+  -o ConnectTimeout=2 -o LogLevel=ERROR)
+ssh_vm() {
+  ssh "${ssh_opts[@]}" omarchy@127.0.0.1 "$@"
+}
+# Runs a script as root in the guest; the password goes to sudo on stdin.
+root() {
+  printf '%s\n' "$pw" | ssh_vm "sudo -S -p '' bash -ec $(printf %q "trap 'echo \"vm-wsl: failed in the guest at: \$BASH_COMMAND\" >&2' ERR
+$1")"
+}
+
+# Sends a local file to a path in the guest, owned by root, mode 0644. The
+# payload travels base64-encoded inside the command: root()'s stdin is the
+# password pipe, so a file redirected onto it would never reach the guest
+# (sudo consumes the password, cat sees EOF, the file lands empty).
+send_root() { # local file, remote path
+  local b64 dest=$2
+  b64=$(base64 -w0 "$1")
+  root "printf %s '$b64' | base64 -d >$(printf %q "$dest") && chown 0:0 $(printf %q "$dest") && chmod 0644 $(printf %q "$dest")"
+}
+
+qemu-img create -qf qcow2 -b "$sealed/base.qcow2" -F qcow2 "$state/run.qcow2" >/dev/null
+# shellcheck disable=SC2086
+qemu-system-x86_64 -cpu host -enable-kvm -machine q35,accel=kvm -smp 4 -m 4G \
+  -kernel "$sealed/vmlinuz" -initrd "$sealed/initrd" -append "$(cat "$sealed/cmdline")" \
+  -uuid "$uuid" \
+  -drive "file=$state/run.qcow2,format=qcow2,if=none,id=d0" -device virtio-blk-pci,drive=d0 \
+  -smbios "type=11,value=io.systemd.credential.binary:tmpfiles.extra=$keys" \
+  -device virtio-rng-pci -display none \
+  -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$port-:22" -device virtio-net-pci,netdev=n0 \
+  -pidfile "$state/qemu.pid" -daemonize ${QEMU_EXTRA:-}
+for i in $(seq 1 150); do
+  ssh_vm true 2>/dev/null && break
+  (( i < 150 )) || fail "no ssh on the sealed disk"
+  sleep 2
+done
+ssh_vm 'timeout 180 systemctl is-system-running --wait >/dev/null 2>&1 || true'
+
+# The WSL files go in over SSH (no scp): small, auditable, no new port.
+root 'mkdir -p /usr/lib/wsl'
+for file in wsl.conf wsl-distribution.conf; do
+  send_root "$wsl_src/$file" "/etc/$file"
+done
+send_root "$wsl_src/terminal-profile.json" /usr/lib/wsl/terminal-profile.json
+
+root '
+  [[ $(id -u omarchy) == 1000 ]] || { echo "vm-wsl: omarchy is not uid 1000" >&2; exit 1; }
+  [[ $(id -u root) == 0 ]]
+  grep -q "^root:" /etc/passwd
+
+  # WSL brings the kernel, the network and the name server; units that fight
+  # it stay masked, as Microsoft and Arch document.
+  # https://learn.microsoft.com/en-us/windows/wsl/build-custom-distro#systemd-recommendations
+  # https://wiki.archlinux.org/title/Install_Arch_Linux_on_WSL#Masked_units
+  # Masked, not stopped: this SSH session rides the running network, and the
+  # mask takes effect on the next boot, which is the WSL first launch.
+  systemctl mask \
+    console-getty.service systemd-firstboot.service \
+    systemd-networkd.service systemd-networkd-wait-online.service \
+    systemd-resolved.service NetworkManager.service NetworkManager-wait-online.service \
+    systemd-tmpfiles-clean.service systemd-tmpfiles-clean.timer \
+    systemd-tmpfiles-setup.service systemd-tmpfiles-setup-dev.service \
+    systemd-tmpfiles-setup-dev-early.service tmp.mount >/dev/null 2>&1 || true
+
+  rm -f /etc/resolv.conf
+  : >/etc/machine-id
+  rm -f /var/lib/dbus/machine-id /etc/ssh/ssh_host_*
+  rm -f /home/omarchy/.ssh/authorized_keys /home/omarchy/.bash_history /root/.bash_history
+  rm -f /var/lib/systemd/random-seed /var/lib/systemd/credential.secret
+  rm -f /var/lib/NetworkManager/*.lease /var/lib/NetworkManager/secret_key \
+    /var/lib/NetworkManager/seen-bssids /var/lib/NetworkManager/timestamps \
+    /var/lib/NetworkManager/NetworkManager.state
+  rm -rf /var/cache/pacman/pkg/* /var/log/journal/* /tmp/* /var/tmp/*
+  rm -rf /boot/* /.snapshots /swapfile /swap
+
+  test ! -e /etc/resolv.conf
+  test ! -s /etc/machine-id
+  test -z "$(ls /etc/ssh/ssh_host_* 2>/dev/null)"
+  test ! -e /home/omarchy/.ssh/authorized_keys
+  test -z "$(ls /boot 2>/dev/null)"
+  stat -c "%u:%g %a" /etc/wsl.conf | grep -qx "0:0 644"
+  stat -c "%u:%g %a" /etc/wsl-distribution.conf | grep -qx "0:0 644"
+  grep -q "^defaultName=" <(grep -v "^[[:space:]]*#" /etc/wsl-distribution.conf)
+  sync
+'
+
+mkdir -p "$(dirname "$out")"
+# The root of the tar is the root of the filesystem, as Microsoft documents:
+#   tar --numeric-owner --absolute-names -c * | gzip --best
+# Members are stored without a ./ prefix, so the excludes name them the same
+# way. Pseudo-filesystems and per-boot state stay out; /boot stays out with
+# them (WSL brings its own kernel).
+printf '%s\n' "$pw" | ssh_vm "sudo -S -p '' bash -ec 'cd / && tar --numeric-owner --absolute-names -c \
+  --exclude=boot/\* --exclude=dev/\* --exclude=proc/\* --exclude=sys/\* \
+  --exclude=tmp/\* --exclude=run/\* --exclude=mnt/\* --exclude=media/\* \
+  --exclude=lost+found --exclude=.snapshots \
+  --exclude=var/cache/pacman/pkg/\* --exclude=var/log/journal/\* \
+  --exclude=var/tmp/\* --exclude=etc/resolv.conf \
+  --exclude=home/omarchy/.ssh/authorized_keys \
+  --exclude=root/.bash_history --exclude=home/\*/.bash_history \
+  --exclude=swapfile --exclude=swap \* | gzip --best'" >"$out"
+[[ -s $out ]] || fail "the guest gave no tarball"
+gzip -t "$out" || fail "$out is not gzip"
+
+(cd "$(dirname "$out")" && sha256sum "$(basename "$out")" >"$out.sha256")
+echo "wsl: $out ($(du -h "$out" | cut -f1))"

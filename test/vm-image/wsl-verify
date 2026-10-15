@@ -1,0 +1,76 @@
+#!/bin/bash
+# Checks a `.wsl` tarball without a VM or Windows: it is gzip, its root is the
+# filesystem's root, and it carries what WSL needs (and nothing WSL forbids).
+#
+#   wsl-verify <file.wsl>
+#
+# Exits non-zero on any failed check.
+set -euo pipefail
+[[ $# -eq 1 ]] || { echo "Usage: wsl-verify <file.wsl>" >&2; exit 2; }
+file=$(realpath "$1")
+fail=0
+check() { # description, then a command that must succeed
+  local what=$1; shift
+  if "$@" >/dev/null 2>&1; then echo "ok    $what"; else echo "FAIL  $what"; fail=1; fi
+}
+
+[[ -s $file ]] || { echo "FAIL  the file is missing or empty"; exit 1; }
+check "the file is gzip" gzip -t "$file"
+[[ $file == *.wsl ]] || { echo "FAIL  the file does not end in .wsl"; fail=1; }
+
+members=$(mktemp)
+trap 'rm -f "$members"' EXIT
+tar -tzf "$file" >"$members" || { echo "FAIL  the file does not list as a tar"; exit 1; }
+[[ -s $members ]] || { echo "FAIL  the tar holds no members"; exit 1; }
+
+check "the tar holds etc/wsl.conf at its root" grep -Eq '^(\./)?etc/wsl.conf$' "$members"
+check "the tar holds etc/wsl-distribution.conf at its root" grep -Eq '^(\./)?etc/wsl-distribution.conf$' "$members"
+check "the tar holds etc/passwd at its root" grep -Eq '^(\./)?etc/passwd$' "$members"
+if grep -Eq '^(\./)?etc/resolv.conf$' "$members"; then echo "FAIL  the tar holds etc/resolv.conf (WSL generates it)"; fail=1; else echo "ok    no etc/resolv.conf"; fi
+if grep -E -q '^(\./)?boot/(vmlinuz|initramfs|initrd|EFI/)' "$members"; then echo "FAIL  the tar holds a kernel or initramfs (WSL brings its own)"; fail=1; else echo "ok    no kernel or initramfs in /boot"; fi
+# The root of the tar is the root of the filesystem, not a folder holding it:
+# etc/wsl.conf above already had to match at the top level, so a tar wrapped
+# in a folder fails there and again when its files do not extract.
+if grep -Eq '^[^./][^/]*/etc/wsl.conf$' "$members"; then echo "FAIL  the tar is wrapped in a folder"; fail=1; else echo "ok    the tar root is the filesystem root"; fi
+
+root=$(mktemp -d)
+trap 'rm -f "$members"; rm -rf "$root"' EXIT
+# Members carry a leading ./ when archived as `./etc/...` and none when
+# archived as `etc/...` (Microsoft documents `tar -c *`); tar strips the ./ on
+# extraction, so either spelling lands at $root/etc/... .
+prefix=
+grep -qx '\./etc/wsl.conf' "$members" && prefix=./
+tar -xzf "$file" -C "$root" "${prefix}etc/wsl.conf" "${prefix}etc/wsl-distribution.conf" \
+  "${prefix}etc/passwd" "${prefix}usr/lib/wsl/terminal-profile.json" 2>/dev/null || true
+# Members may carry a leading ./ or /; normalize what tar wrote.
+for want in etc/wsl.conf etc/wsl-distribution.conf etc/passwd usr/lib/wsl/terminal-profile.json; do
+  [[ -f $root/$want ]] || { echo "FAIL  $want does not extract"; fail=1; }
+done
+
+[[ -f $root/etc/wsl.conf ]] && {
+  check "wsl.conf enables systemd" grep -q 'systemd=true' "$root/etc/wsl.conf"
+  check "wsl.conf defaults to omarchy" grep -q 'default=omarchy' "$root/etc/wsl.conf"
+}
+[[ -f $root/etc/wsl-distribution.conf ]] && {
+  check "wsl-distribution.conf names Omarchy for double-click install" grep -q '^defaultName=Omarchy' "$root/etc/wsl-distribution.conf"
+  check "wsl-distribution.conf points at a shipped terminal profile" grep -q '^ProfileTemplate=/usr/lib/wsl/terminal-profile.json' "$root/etc/wsl-distribution.conf"
+}
+[[ -f $root/etc/passwd ]] && {
+  check "the root user is uid 0" grep -q '^root:x:0:0:' "$root/etc/passwd"
+  check "the omarchy user is uid 1000" grep -q '^omarchy:x:1000:1000:' "$root/etc/passwd"
+}
+[[ -f $root/usr/lib/wsl/terminal-profile.json ]] && {
+  check "the terminal profile is JSON" python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$root/usr/lib/wsl/terminal-profile.json"
+}
+
+# Ownership and mode travel in the tar itself.
+listing=$(mktemp)
+trap 'rm -f "$members" "$listing"; rm -rf "$root"' EXIT
+tar --numeric-owner -tvzf "$file" >"$listing" 2>/dev/null || true
+for want in 'etc/wsl.conf' 'etc/wsl-distribution.conf'; do
+  line=$(grep -E "(^| )(\./)?$want\$" "$listing" | head -1 || true)
+  if [[ -z $line ]]; then echo "FAIL  $want has no listing"; fail=1; continue; fi
+  [[ $line =~ ^-rw-r--r--\ 0/0 ]] && echo "ok    $want is root:root 0644" || { echo "FAIL  $want is '$line', not root:root 0644"; fail=1; }
+done
+
+exit $fail

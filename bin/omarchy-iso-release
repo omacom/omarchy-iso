@@ -84,8 +84,56 @@ echo -e "\e[32mSHA256 for $ISO_REF ISO: $iso_sha\e[0m"
 
 omarchy-iso-upload "$release_iso"
 
+# The WSL distribution goes up beside the ISO, under the same version:
+# https://iso.omarchy.org/omarchy-<version>.wsl, installable with
+# `wsl --install --from-file`. It is made from this very ISO through the same
+# unattended install the nightly build seals, so without /dev/kvm there is no
+# .wsl to publish and the ISO release still goes out.
+release_wsl="$BUILD_RELEASE_PATH/omarchy-$BUILD_VERSION$RELEASE_SUFFIX.wsl"
+if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+  echo -e "\e[32mMaking $ISO_REF WSL distribution\e[0m"
+  wsl_before=$(date +%s)
+  if omarchy-wsl-make "$release_iso" --no-preview; then
+    latest_wsl=""
+    for candidate in $(ls -t "$BUILD_RELEASE_PATH"/*.wsl 2>/dev/null || true); do
+      # Only what this release just built, never a stale .wsl beside it.
+      [[ $candidate -nt $release_iso ]] || [[ $candidate == "$release_wsl" ]] || continue
+      [[ $(stat -c %Y "$candidate") -ge $wsl_before ]] || continue
+      latest_wsl=$candidate
+      break
+    done
+    if [[ -n ${latest_wsl:-} ]]; then
+      [[ $latest_wsl == "$release_wsl" ]] || mv -f "$latest_wsl" "$release_wsl"
+    [[ -f $release_wsl.sha256 ]] || (cd "$BUILD_RELEASE_PATH" && sha256sum "${release_wsl##*/}" >"${release_wsl##*/}.sha256")
+
+    echo -e "\e[32mSigning $ISO_REF WSL distribution\e[0m"
+    omarchy-iso-sign "$release_wsl"
+
+    wsl_sha=$(sha256sum "$release_wsl")
+    wsl_sha=${wsl_sha%% *}
+    if [[ -z $wsl_sha ]] || ! printf '%s  %s\n' "$wsl_sha" "${release_wsl##*/}" >"$release_wsl.sha256"; then
+      echo -e "\e[31mCould not write the checksum for $release_wsl\e[0m" >&2
+      exit 1
+    fi
+    echo -e "\e[32mSHA256 for $ISO_REF WSL: $wsl_sha\e[0m"
+
+    omarchy-iso-upload "$release_wsl"
+    else
+      echo -e "\e[33mNo WSL distribution was built; the ISO release stands alone\e[0m" >&2
+    fi
+  else
+    echo -e "\e[33mThe WSL build failed; the ISO release stands alone\e[0m" >&2
+  fi
+else
+  echo -e "\e[33m/dev/kvm is not usable, so no WSL distribution was built; the ISO release stands alone\e[0m" >&2
+fi
+
 # The whole point of a release is handing someone this pair.
 echo -e "\e[32mReleased $ISO_REF ISO $BUILD_VERSION\e[0m"
 echo "  URL:    https://iso.omarchy.org/${release_iso##*/}"
 echo "  SHA256: $iso_sha"
 echo "  Local:  $release_iso"
+if [[ -f $release_wsl ]]; then
+  echo "  WSL:    https://iso.omarchy.org/${release_wsl##*/}"
+  echo "  Local:  $release_wsl"
+fi

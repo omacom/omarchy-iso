@@ -1,8 +1,9 @@
 name: Nightly ISO Build
 
 # Every night, for two channels: installs an ISO unattended and boots what it
-# installed (the install test), turns that installed disk into a VM image, and
-# publishes it with a latest.json saying what is in it.
+# installed (the install test), turns that installed disk into a VM image and
+# a WSL distribution tarball, and publishes them with a latest.json saying
+# what is in them.
 #
 #   edge    the ISO is built here, from the edge channel: its packages, its
 #           mirrors and the edge builds of Omarchy (omarchy-dev)
@@ -13,8 +14,10 @@ name: Nightly ISO Build
 #   https://nightly.omarchy.org/<channel>/latest.json
 #   https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.iso
 #   https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.qcow2
+#   https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.wsl
 #   https://nightly.omarchy.org/edge/<version>/unpacked/    kernel, initramfs, vm-boot
 #   https://nightly.omarchy.org/stable/<version>/<run>/omarchy-<version>.qcow2
+#   https://nightly.omarchy.org/stable/<version>/<run>/omarchy-<version>.wsl
 #   https://nightly.omarchy.org/stable/<version>/<run>/unpacked/
 #
 # Nothing is published unless the ISO installed and the image passed its
@@ -126,7 +129,8 @@ jobs:
           rm -rf "$home" "release/$iso.sig"
 
       # The same install test a pull request gets (install-test.yml), then the
-      # image: the installed disk that test leaves behind, sealed and checked.
+      # image: the installed disk that test leaves behind, sealed and checked,
+      # and the WSL distribution tarball made from that sealed disk.
       - name: Install unattended, boot the installed system, seal it
         run: |
           sudo chmod 0666 /dev/kvm
@@ -160,6 +164,8 @@ jobs:
               ./test/vm-image/vm-verify sealed | tee vm-verify.txt
               ./test/vm-image/vm-boot sealed "pacman -Qq omarchy omarchy-dev 2>/dev/null | xargs pacman -Q; pacman -Qo /usr/lib/modules/\$(uname -r)/pkgbase; uname -r" >vm-packages.txt
               cat vm-packages.txt
+              ./test/vm-image/vm-wsl sealed omarchy.wsl
+              ./test/vm-image/wsl-verify omarchy.wsl | tee wsl-verify.txt
             '
 
       # The container ran as root; what it wrote belongs to root until here.
@@ -167,14 +173,14 @@ jobs:
         if: always()
         run: |
           mkdir -p test-runs sealed
-          sudo chown -R "$(id -u):$(id -g)" test-runs sealed release vm-*.txt 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" test-runs sealed release omarchy.wsl omarchy.wsl.sha256 vm-*.txt wsl-verify.txt 2>/dev/null || true
 
       - name: Lay out the release and describe it
         env:
           ISO_COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
-          ./test/vm-image/nightly-layout "$CHANNEL" "$VERSION" "$RELEASE" release/*.iso sealed vm-packages.txt out
+          ./test/vm-image/nightly-layout "$CHANNEL" "$VERSION" "$RELEASE" release/*.iso sealed vm-packages.txt out omarchy.wsl
           dir=out/$RELEASE
 
           {
@@ -186,6 +192,9 @@ jobs:
             echo
             echo '```'
             cat vm-verify.txt
+            echo '```'
+            echo '```'
+            cat wsl-verify.txt
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
 
@@ -213,6 +222,7 @@ jobs:
             test-runs/*/runs/**/*.log
             vm-verify.txt
             vm-packages.txt
+            wsl-verify.txt
           if-no-files-found: ignore
           retention-days: 14
 

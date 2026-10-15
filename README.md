@@ -45,12 +45,15 @@ The rest of this file covers building, testing and publishing the ISO.
 | What | Where | When |
 | --- | --- | --- |
 | Release ISO | `https://iso.omarchy.org/omarchy-<version>.iso` | Each release |
+| Release WSL distribution | `https://iso.omarchy.org/omarchy-<version>.wsl` | Each release |
 | Edge ISO | `https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.iso` | Every night |
 | VM image of edge | `https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.qcow2` | Every night |
+| WSL distribution of edge | `https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.wsl` | Every night |
 | VM image of the latest release | `https://nightly.omarchy.org/stable/<version>/<run>/omarchy-<version>.qcow2` | Once per release |
+| WSL distribution of the latest release | `https://nightly.omarchy.org/stable/<version>/<run>/omarchy-<version>.wsl` | Once per release |
 | `latest.json` | `https://nightly.omarchy.org/edge/latest.json` and `.../stable/latest.json` | With each nightly build |
 
-Every ISO and every VM image has a `.sha256` file next to it. The release ISO also has a `.sig` file. Each VM image has an `unpacked/` folder next to it.
+Every ISO, every VM image and every WSL distribution has a `.sha256` file next to it. The release ISO and the release WSL distribution also have `.sig` files. Each VM image has an `unpacked/` folder next to it.
 
 On nightly.omarchy.org, a published file is never replaced. Only `latest.json` changes. It is written last, after every file of the version has been fetched back through the CDN and compared.
 
@@ -61,7 +64,7 @@ On nightly.omarchy.org, a published file is never replaced. Only `latest.json` c
 - `edge`: builds the ISO from the edge channel: the edge packages and mirrors, and the edge builds of Omarchy (`omarchy-dev`).
 - `stable`: uses the latest release. The latest release of omacom/omarchy determines the version. The ISO comes from iso.omarchy.org and is used only if its signature matches the release key. A scheduled run skips a release that is already published. A manual run builds it again.
 
-Each ISO goes through the same install test that runs for pull requests: an unattended install, then a boot of the installed system. `test/vm-image/vm-seal` then turns the installed disk into a VM image, and `test/vm-image/vm-verify` boots that image and checks it. Nothing is published unless every check passes.
+Each ISO goes through the same install test that runs for pull requests: an unattended install, then a boot of the installed system. `test/vm-image/vm-seal` then turns the installed disk into a VM image, and `test/vm-image/vm-verify` boots that image and checks it. `test/vm-image/vm-wsl` tars the same sealed disk into a WSL distribution (`.wsl`), and `test/vm-image/wsl-verify` checks that tarball without a VM. Nothing is published unless every check passes.
 
 A separate job publishes. It is the only job with the bucket's key, and it runs only on `quattro`. To try a change, run the workflow manually on a branch. That run builds and checks everything and publishes nothing.
 
@@ -85,6 +88,7 @@ A separate job publishes. It is the only job with the bucket's key, and it runs 
 | `vm.unpacked_files` | Every file in that folder. |
 | `vm.user`, `vm.password` | The account for the desktop and `sudo`. |
 | `vm.ssh` | SSH authentication: keys only. Password authentication is off. |
+| `wsl` | The WSL distribution (`null` when a run published none): its `url`, `sha256` and `size` in bytes, and the `wsl --install --from-file` install command. |
 
 The version is also in the edge ISO's file name.
 
@@ -142,6 +146,35 @@ chmod +x vm-boot
 `vm-boot` makes a new SSH key for each boot. It runs the machine on an overlay under `/var/tmp`, so the downloaded image is never changed, and deletes the overlay on exit. Set `VM_STATE_DIR` to put the overlay somewhere else.
 
 To get the URL of the edge ISO, run `jq -r .url` on the same `latest.json`.
+
+## WSL distributions
+
+A WSL distribution is the same installed Omarchy as the VM image, as one `.wsl` file: a gzipped rootfs tar with the WSL configuration (`/etc/wsl.conf`, `/etc/wsl-distribution.conf`). There is one of the edge channel, rebuilt every night, one of the latest release, and one beside every release ISO on iso.omarchy.org. Like Ubuntu's `.wsl` artifacts, it installs with `wsl --install --from-file` and needs WSL 2.4.8 or later.
+
+The user is `omarchy` and the password is `omarchy`, the same account the ISO installs. `systemd` is on, so the desktop runs under WSLg.
+
+### Install the release on Windows
+
+Run these commands in Windows PowerShell. The first two lines install WSL itself; skip them when `wsl --version` already answers:
+
+```powershell
+wsl --install
+# Restart Windows, then run the rest in PowerShell:
+$version = (Invoke-RestMethod https://api.github.com/repos/omacom/omarchy/releases/latest).tag_name
+$version = $version -replace '^v',''
+curl.exe --fail --show-error --location `
+  --output "$env:USERPROFILE/Downloads/omarchy-$version.wsl" `
+  "https://iso.omarchy.org/omarchy-$version.wsl"
+wsl --install --from-file "$env:USERPROFILE/Downloads/omarchy-$version.wsl"
+```
+
+Or take the nightly instead: `jq -r .wsl.url` on the same `latest.json` above names the edge or stable `.wsl`, with `.wsl.sha256` beside it.
+
+### Build it locally
+
+Run `./bin/omarchy-wsl-make [release/omarchy.iso]`. It installs the ISO unattended (the same install the nightly build seals), seals the disk, and tars it into `release/`. Pass `--reuse-base` to reseal the last install without reinstalling. It needs QEMU with `/dev/kvm`, like `./test/integration` does.
+
+`./bin/omarchy-iso-release VERSION` builds the `.wsl` the same way and uploads it beside the ISO as `omarchy-VERSION.wsl` (with `.sha256` and `.sig`), so a release without `/dev/kvm` still ships its ISO.
 
 ## Autoinstall
 
@@ -306,4 +339,4 @@ Run `./bin/omarchy-iso-upload [release/omarchy.iso]`. This requires rclone confi
 
 ## Full release of the ISO
 
-Run `./bin/omarchy-iso-release VERSION` to create, test, sign, and upload the ISO in one flow. Add `--rc` to release an RC build instead.
+Run `./bin/omarchy-iso-release VERSION` to create, test, sign, and upload the ISO in one flow. Add `--rc` to release an RC build instead. The release builds the WSL distribution from the same ISO and uploads it beside the ISO (skipped without `/dev/kvm`).

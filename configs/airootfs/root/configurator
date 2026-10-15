@@ -290,6 +290,14 @@ user_step() {
       continue
     fi
 
+    # The timezone selects the region (mirrors and repositories), using the
+    # same lookup as the orchestrator. Global installs get no extra row.
+    region=$(cd /usr/share/omarchy-iso 2>/dev/null && python -m orchestrator.region "$timezone") || region="global"
+    region_row=""
+    if [[ $region != "global" ]]; then
+      region_row="\nRegion,$region"
+    fi
+
     # Add manual padding since gum table -p doesn't respect padding
     echo -e "Field,Value
 Username,$username
@@ -297,7 +305,7 @@ Password,$(printf "%${#password}s" | tr ' ' '*')
 Full name,${full_name:-[Skipped]}
 Email address,${email_address:-[Skipped]}
 Hostname,$hostname
-Timezone,$timezone
+Timezone,$timezone$region_row
 Keyboard,$keyboard" |
       gum table -s "," -p | sed "s/^/${PADDING_LEFT_SPACES}/"
 

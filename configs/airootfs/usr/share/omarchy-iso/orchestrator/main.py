@@ -14,6 +14,7 @@ import sys
 from .context import InstallContext
 from .phases import PhaseError, run
 from .ui import error, info
+from .localization import configure_locale, validate_locale_install
 
 
 def build_phases(ctx: InstallContext):
@@ -56,6 +57,7 @@ def build_phases(ctx: InstallContext):
         ("Staging provisioning",          stage_provisioning_state),
         ("Finalizing Limine boot",     finalize_limine_boot),
         ("Finalizing user",            run_chroot_finalizer),
+        ("Configuring user locale",    configure_locale),
         ("Configuring login",          configure_login),
         ("Configuring SSH access",     configure_ssh_access),
         ("Configuring Tailscale",      configure_tailscale),
@@ -68,6 +70,7 @@ def build_phases(ctx: InstallContext):
 def main() -> int:
     try:
         ctx = InstallContext.from_env()
+        validate_locale_install(ctx)
     except RuntimeError as e:
         error(f"Configuration error: {e}")
         return 2

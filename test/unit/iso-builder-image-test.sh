@@ -5,8 +5,9 @@ set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-mkdir -p "$work/repo/bin" "$work/repo/release" "$work/stubs" "$work/home"
+mkdir -p "$work/repo/bin" "$work/repo/configs" "$work/repo/release" "$work/stubs" "$work/home"
 cp "$ROOT/bin/omarchy-iso-make" "$work/repo/bin/"
+cp "$ROOT/configs/profiledef.sh" "$work/repo/configs/"
 
 cat >"$work/stubs/git" <<'STUB'
 #!/bin/bash
@@ -82,7 +83,14 @@ assert_pinned_run
 [[ $(cat "$TEST_SUDO_LOG") == docker\ run* ]] || fail "sudo docker fallback changed"
 printf 'ok - socket denial uses sudo with pinned image\n'
 
-if TEST_DOCKER_FAIL=1 run_builder; then fail "failed docker launch returned success"; fi
+if TEST_DOCKER_FAIL=1 run_builder; then fail "failed warm docker launch returned success"; fi
 assert_pinned_run
-[[ ! -e $TEST_RELEASE/omarchy-quattro.iso ]] || fail "failed launch produced an ISO"
-printf 'ok - failed docker launch stops without image fallback\n'
+if grep -qxF -- '--pull=always' "$TEST_DOCKER_LOG"; then fail "failed warm build pulled unconditionally"; fi
+[[ ! -e $TEST_RELEASE/omarchy-quattro.iso ]] || fail "failed warm launch produced an ISO"
+printf 'ok - failed warm docker launch stops without image fallback\n'
+
+if TEST_DOCKER_FAIL=1 run_builder --no-cache; then fail "failed cold docker launch returned success"; fi
+assert_pinned_run
+grep -qxF -- '--pull=always' "$TEST_DOCKER_LOG" || fail "failed cold build lost pull behavior"
+[[ ! -e $TEST_RELEASE/omarchy-quattro.iso ]] || fail "failed cold launch produced an ISO"
+printf 'ok - failed cold pull stops without image fallback\n'

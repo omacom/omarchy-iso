@@ -313,42 +313,7 @@ Keyboard,$keyboard" |
 
 # STEP 3: DISK
 
-get_disk_info() {
-  local device="$1"
-  local size vendor model label
-
-  # Get basic disk information
-  size=$(lsblk -dno SIZE "$device" 2>/dev/null)
-  vendor=$(lsblk -dno VENDOR "$device" 2>/dev/null | sed 's/ *$//')
-  model=$(lsblk -dno MODEL "$device" 2>/dev/null | sed 's/ *$//')
-
-  # Combine vendor and model, avoiding duplication
-  label=""
-  if [[ -n $vendor && -n $model ]]; then
-    if [[ $model == *$vendor* ]]; then
-      label="$model"
-    else
-      label="$vendor $model"
-    fi
-  elif [[ -n $model ]]; then
-    label="$model"
-  elif [[ -n $vendor ]]; then
-    label="$vendor"
-  fi
-
-  # Format display string
-  local display="$device"
-  [[ -n $size ]] && display="$display ($size)"
-  [[ -n $label ]] && display="$display - $label"
-
-  # Append compact partition summary
-  local part_summary
-  part_summary=$(lsblk -nro TYPE,NAME,FSTYPE,MOUNTPOINT "$device" 2>/dev/null | \
-    awk '$1=="part" { printf "%s%s%s", s, ($3==""?"unknown":$3), ($4==""?"":"("$4")"); s=", " }')
-  [[ -n $part_summary ]] && display+=" [$part_summary]"
-
-  echo "$display"
-}
+# disk info and the picker's options live in disk-partitioning.sh with the other disk helpers
 
 get_root_disk() {
   local device="$1"
@@ -934,14 +899,10 @@ disk_form() {
       { if [[ -n "$exclude_disk" ]]; then grep -Fvx "$exclude_disk"; else cat; fi; }
   )
 
-  # Get available disks and format them with info
-  local disk_options=""
-  while IFS= read -r device; do
-    if [[ -n "$device" ]]; then
-      disk_info=$(get_disk_info "$device")
-      disk_options="$disk_options$disk_info"$'\n'
-    fi
-  done <<<"$available_disks"
+  # Available disks, one picker line each. The list adds a serial when two entries would look the
+  # same, since only the device node would tell them apart otherwise (#112).
+  local disk_options
+  disk_options=$(disk_picker_options <<<"$available_disks")
 
   selected_display=$(echo "$disk_options" | gum choose --header "Select install disk") || abort
   disk=$(echo "$selected_display" | awk '{print $1}')

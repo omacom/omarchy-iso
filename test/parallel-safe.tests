@@ -1,0 +1,14 @@
+# Tests that only touch their own throwaway directory and may run alongside
+# each other. One line per test, relative to the repository root; blank lines
+# and # comments are ignored. Every test under test/unit/ must appear here or
+# in test/serial.tests, or test/all refuses to run.
+test/unit/cidata-load-test.sh
+test/unit/iso-release-checksum-test.sh
+test/unit/partition-numbering-test.sh
+test/unit/test_command_capture.py
+test/unit/test_configure_ssh_access.py
+test/unit/test_configure_tailscale.py
+test/unit/test_keyboard.py
+test/unit/test_offline_mirror_pruning.py
+test/unit/test_provisioning_state.py
+test/unit/test_run_manifest.py

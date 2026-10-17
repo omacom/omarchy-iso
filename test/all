@@ -2,15 +2,27 @@
 #
 # Fast, VM-free tests only. The integration scenarios that boot the ISO in
 # QEMU live in test/integration.d/ and run via ./test/integration.
+#
+# The tests are listed in test/parallel-safe.tests and test/serial.tests and
+# run by test/run-manifest.py: the parallel-safe lane first, several at a
+# time, then the serial lane one at a time. A test present under test/unit/
+# but missing from both manifests is an error, so nothing is silently skipped.
+#
+# Exit status: 0 when every test passed, 1 when any test failed, timed out or
+# was cancelled after another failure, 2 when the runner could not start (a
+# manifest out of step with test/unit/, or another test/all already running).
+#
+#   OMARCHY_TEST_JOBS             parallel-safe tests at once (default 10)
+#   OMARCHY_TEST_TIMEOUT_SECONDS  wall-clock budget per test (default 300)
+#   OMARCHY_TEST_RESULT_LEDGER    JSON summary path (default test-runs/unit-test-results.json)
 
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 
-for test in "$ROOT"/test/unit/*-test.sh; do
-  printf '==> %s\n' "${test#$ROOT/}"
-  bash "$test"
-done
+# The tests run under whichever bash started this script rather than whatever
+# `bash` resolves to inside the runner, so `/opt/homebrew/bin/bash test/all`
+# on macOS gets a modern bash for every test and not just for this file.
+export OMARCHY_TEST_BASH=$BASH
 
-printf '==> test/unit/test_*.py\n'
-python3 -m unittest discover -t "$ROOT" -s "$ROOT/test/unit"
+exec python3 "$ROOT/test/run-manifest.py" "$@"

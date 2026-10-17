@@ -1,0 +1,14 @@
+[Unit]
+Description=Record A16 first-boot kernel and firmware evidence locally
+ConditionPathExists=/var/lib/omarchy/a16-evidence/install-receipt.json
+ConditionPathExists=!/var/lib/omarchy/a16-evidence/first-boot/SHA256SUMS
+After=systemd-udev-trigger.service
+
+[Service]
+Type=idle
+ExecStart=/usr/local/sbin/omarchy-a16-first-boot-evidence
+TimeoutStartSec=180
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

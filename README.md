@@ -235,6 +235,32 @@ Snapdragon laptops get no device tree from their firmware, so the live system al
 
 The runtime the image installs must have the platform detector and the Snapdragon hardware setup (`install/hardware/qualcomm/`), which lists those device trees for the installed system's own UKI. The build refuses a runtime without them. On a laptop that still has Windows, the installer copies the vendor-signed firmware off the Windows partition before the disk is written.
 
+### A16 board support on the shared kernel
+
+Build the audited `linux-omarchy-aarch64` recipe first, then `omarchy-a16-support`, `asus-zenbook-a16-firmware`, `qcom-firmware-extract` and `limine-mkinitcpio-hook` with the normal `omarchy-pkgs/bin/build` pipeline. Retain the package workspace between invocations so the support build resolves the new shared kernel and headers from the build repository:
+
+```bash
+./bin/build --arch aarch64 --package linux-omarchy-aarch64
+OMARCHY_KEEP_BUILD_WORKSPACE=1 ./bin/build --arch aarch64 --package omarchy-a16-support asus-zenbook-a16-firmware qcom-firmware-extract limine-mkinitcpio-hook
+```
+
+Put the resulting kernel, matching headers, support, ASUS firmware, extractor and Limine hook archives in a bundle with a `SHA256SUMS` covering every archive. Build from the sibling runtime and package checkouts using the normal ISO entrypoint:
+
+```bash
+OMARCHY_RUNTIME_PACKAGE=omarchy OMARCHY_SETTINGS_PACKAGE=omarchy-settings \
+  ./bin/omarchy-iso-make --arch aarch64 --edge --no-boot-offer \
+  --package-dir /absolute/path/to/verified-packages \
+  --local-source ../omarchy ../omarchy-pkgs
+```
+
+This uses the shared `linux-omarchy` package and ARM installer. The explicit Omarchy package names build the release recipes from the local checkout; omitting those overrides selects the dev recipes. No board-specific platform manifest is added. The separately named `linux-omarchy-a16` prototype is preserved on the reference branch; this proposal builds only the shared kernel.
+
+The shared kernel exports the audited A16 DSP capability. The support package depends on that capability, rather than a fixed kernel version, and checks that Limine rebuilt a matching kernel, device tree and initramfs after updates. Ongoing upgrades require the recipes to be accepted, signed and published through Omarchy's repository. Hardware testing must cover both installation and a kernel update with snapshot restore before upgrade recovery is considered validated.
+
+The local A16 hardware-test candidate includes `asus-zenbook-a16-firmware`, built from the checksum-pinned official ASUS UX3607OA download without running the Windows executable. DSP files use their board-specific Linux paths. QCC2072 calibration is activated only on an exact A16 device-tree match before driver loading, and the installed symlink follows package updates. Other boards do not receive the ASUS calibration. The installer stages and verifies these files before disk cleanup; it requires neither an existing Linux installation nor access to an encrypted Windows partition. The image retains the public audio topology and audio keep-awake workaround.
+
+This firmware package is for local hardware validation. The changed ADSP/calibration must pass the A16 tests, and redistribution terms for the exact OEM files must be resolved before publishing the package or an image containing it. Keep the earlier BitLocker-import prototype on its reference branch; this candidate does not ask for recovery keys.
+
 ## Testing the ISO
 
 Run `./bin/omarchy-iso-boot [release/omarchy.iso]`.

@@ -195,6 +195,9 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # Drops the x86-only microcode/memdisk hooks and adds the Tegra/MediaTek
   # I2C-HID keyboard modules.
   configure_archiso_aarch64_mkinitcpio "$build_cache_dir/airootfs/etc/mkinitcpio.conf.d/archiso.conf"
+  # The shared image needs A16's dynamically requested GPU firmware too;
+  # the live preset's -c archiso.conf bypasses the other drop-ins.
+  cat /builder/a16-gpu-firmware.conf >> "$build_cache_dir/airootfs/etc/mkinitcpio.conf.d/archiso.conf"
   boot_splash_kernel_options="quiet splash "
   cp "/builder/${OMARCHY_KERNEL}.preset" "$build_cache_dir/airootfs/etc/mkinitcpio.d/${OMARCHY_KERNEL}.preset"
   # The N1x firmware's SPCR serial console would take the console from the
@@ -261,26 +264,27 @@ EOF
 
 if [[ ${OMARCHY_INSTALL_DEBUG:-} == "1" ]]; then
   touch "$build_cache_dir/airootfs/usr/share/omarchy-iso/install-debug"
-  {
-    echo "debug=1"
-    echo "built_at=$(date -Is)"
-    echo "ref=$OMARCHY_ISO_REF"
-    echo "mirror=$OMARCHY_MIRROR"
-    echo "runtime_package=$OMARCHY_RUNTIME_PACKAGE"
-    echo "settings_package=$OMARCHY_SETTINGS_PACKAGE"
-    echo "nvim_package=$OMARCHY_NVIM_PACKAGE"
-    if [[ -d /omarchy-source ]]; then
-      echo "omarchy_source=/omarchy-source"
-      git -c safe.directory=/omarchy-source -C /omarchy-source rev-parse HEAD 2>/dev/null | sed 's/^/omarchy_commit=/' || true
-      git -c safe.directory=/omarchy-source -C /omarchy-source status --short 2>/dev/null | sed 's/^/omarchy_status=/' || true
-    fi
-    if [[ -d /omarchy-pkgs ]]; then
-      echo "omarchy_pkgs_source=/omarchy-pkgs"
-      git -c safe.directory=/omarchy-pkgs -C /omarchy-pkgs rev-parse HEAD 2>/dev/null | sed 's/^/omarchy_pkgs_commit=/' || true
-      git -c safe.directory=/omarchy-pkgs -C /omarchy-pkgs status --short 2>/dev/null | sed 's/^/omarchy_pkgs_status=/' || true
-    fi
-  } > "$build_cache_dir/airootfs/usr/share/omarchy-iso/build-info"
 fi
+{
+  echo "debug=${OMARCHY_INSTALL_DEBUG:-0}"
+  echo "built_at=$(date -Is)"
+  echo "ref=$OMARCHY_ISO_REF"
+  echo "omarchy_iso_commit=${OMARCHY_ISO_COMMIT:-unknown}"
+  echo "mirror=$OMARCHY_MIRROR"
+  echo "runtime_package=$OMARCHY_RUNTIME_PACKAGE"
+  echo "settings_package=$OMARCHY_SETTINGS_PACKAGE"
+  echo "nvim_package=$OMARCHY_NVIM_PACKAGE"
+  if [[ -d /omarchy-source ]]; then
+    echo "omarchy_source=/omarchy-source"
+    git -c safe.directory=/omarchy-source -C /omarchy-source rev-parse HEAD 2>/dev/null | sed 's/^/omarchy_commit=/' || true
+    git -c safe.directory=/omarchy-source -C /omarchy-source status --short 2>/dev/null | sed 's/^/omarchy_status=/' || true
+  fi
+  if [[ -d /omarchy-pkgs ]]; then
+    echo "omarchy_pkgs_source=/omarchy-pkgs"
+    git -c safe.directory=/omarchy-pkgs -C /omarchy-pkgs rev-parse HEAD 2>/dev/null | sed 's/^/omarchy_pkgs_commit=/' || true
+    git -c safe.directory=/omarchy-pkgs -C /omarchy-pkgs status --short 2>/dev/null | sed 's/^/omarchy_pkgs_status=/' || true
+  fi
+} > "$build_cache_dir/airootfs/usr/share/omarchy-iso/build-info"
 
 # When --local-source is in effect, build omarchy* from the mounted source
 # trees and drop them in the offline mirror. Otherwise pacman -Syw below
@@ -328,7 +332,7 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # openssh and pciutils serve the recovery entry and remote debugging.
   # For the Snapdragon laptops: ukify builds the live UKI, and the installer
   # saves a laptop's signed firmware from Windows with qcom-firmware-extract.
-  arch_packages=("$OMARCHY_KERNEL" archlinuxarm-keyring git gum jq openssl openssh pciutils plymouth ttfx tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted systemd-ukify linux-firmware-qcom qcom-firmware-extract python)
+  arch_packages=("$OMARCHY_KERNEL" archlinuxarm-keyring git gum jq openssl openssh pciutils plymouth ttfx tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted systemd-ukify linux-firmware-qcom qcom-firmware-extract asus-zenbook-a16-firmware python)
 else
   arch_packages=(linux-t2 git gum jq openssl plymouth ttfx tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
 fi

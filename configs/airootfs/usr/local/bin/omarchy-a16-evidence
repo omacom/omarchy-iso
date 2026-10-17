@@ -1,0 +1,80 @@
+#!/bin/bash
+# Collect local evidence without changing boot settings or uploading anything.
+set -uo pipefail
+umask 077
+if (( $# != 1 )); then
+  echo "Usage: sudo omarchy-a16-evidence /path/on/persistent/storage/new-evidence-directory" >&2
+  exit 2
+fi
+out=$1
+mkdir -m700 -- "$out" || exit 1
+capture() {
+  local name=$1 status
+  shift
+  timeout 20 "$@" >"$out/$name.txt" 2>&1
+  status=$?
+  printf '\n[exit status: %s]\n' "$status" >>"$out/$name.txt"
+}
+capture date date --iso-8601=seconds
+capture kernel uname -a
+capture running-kernel-image bash -c 'sha256sum "/usr/lib/modules/$(uname -r)/vmlinuz"'
+capture cmdline cat /proc/cmdline
+capture packages pacman -Q
+capture mounts findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS
+capture disks lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS,TRAN,MODEL
+capture memory free -h
+capture modules lsmod
+capture kernel-log journalctl -b -k --no-pager
+capture failed-units systemctl --failed --no-pager
+capture dsp-services journalctl -b --no-pager -u omarchy-live-dsp.service -u zenbook-a16-remoteprocs.service
+capture module-info modinfo qcom_q6v5_pas
+capture device-tree bash -c 'tr "\0" "\n" </proc/device-tree/compatible'
+capture model cat /sys/class/dmi/id/product_name
+capture bios-version cat /sys/class/dmi/id/bios_version /sys/class/dmi/id/bios_date
+capture remoteprocs bash -c 'for d in /sys/class/remoteproc/remoteproc*; do [[ -d $d ]] || continue; printf "%s\n" "$d"; cat "$d/name" "$d/state" "$d/firmware"; done'
+capture soundcards cat /proc/asound/cards /proc/asound/pcm
+capture audio-playback-devices aplay -l
+capture audio-capture-devices arecord -l
+capture audio-controls bash -c 'for d in /sys/class/sound/card[0-9]*; do [[ -d $d ]] || continue; n=${d##*card}; printf "Card %s\n" "$n"; amixer -c "$n" contents; done'
+capture soundwire-power bash -c 'for d in /sys/bus/platform/devices/*.soundwire; do [[ -d $d ]] || continue; printf "%s\n" "$d"; cat "$d/power/control" "$d/power/runtime_status"; [[ ! -e $d/of_node/qcom,keep-runtime-active ]] || echo keep-runtime-active-present; done'
+capture power-supplies bash -c 'for d in /sys/class/power_supply/*; do [[ -d $d ]] || continue; printf "%s\n" "$d"; cat "$d/uevent"; done'
+capture wifi-devices iw dev
+capture firmware-missing qcom-firmware-extract --list-missing
+capture firmware-hashes bash -c 'find /usr/lib/firmware/updates /usr/lib/firmware/qcom/glymur /usr/lib/firmware/ath12k/QCC2072 -type f -exec sha256sum {} + 2>/dev/null'
+for root in '' /mnt; do
+  label=live
+  [[ -z $root ]] || label=target
+  for path in \
+    /usr/share/omarchy-iso/build-info \
+    /usr/share/doc/linux-omarchy/a16-build.json \
+    /usr/share/doc/linux-omarchy/a16-source.json \
+    /usr/share/doc/linux-omarchy/kernel-release \
+    /usr/share/doc/linux-omarchy-a16/source-build.json \
+    /usr/share/doc/linux-omarchy-a16/kernel-release \
+    /usr/share/doc/linux-omarchy-a16/build-artifacts.SHA256SUMS \
+    /usr/share/doc/omarchy-a16-support/topology-build.txt \
+    /var/lib/omarchy/a16-evidence/install-receipt.json \
+    /var/lib/omarchy-a16/boot-pre-update.json \
+    /var/lib/omarchy-a16/boot-post-update.json \
+    /run/omarchy/firmware/manifest \
+    /var/lib/omarchy/firmware-stage/manifest \
+    /var/lib/omarchy/qcom-firmware/manifest \
+    /var/log/omarchy-install.log \
+    /etc/modprobe.d/qualcomm-adsp-nofw.conf \
+    /etc/limine-entry-tool.d/zenbook-a16.conf \
+    /etc/limine-entry-tool.d/zz-zenbook-a16-boot.conf \
+    /etc/mkinitcpio.conf.d/zz-zenbook-a16-dsp.conf \
+    /etc/mkinitcpio.conf.d/zenbook-a16-initramfs.conf; do
+    [[ -f $root$path ]] || continue
+    filename=${path#/}
+    cp -- "$root$path" "$out/$label-${filename//\//_}"
+  done
+done
+if [[ -f /mnt/var/lib/pacman/local/ALPM_DB_VERSION ]]; then
+  capture target-packages pacman --root /mnt -Q
+fi
+(
+  cd -- "$out" || exit 1
+  find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS
+)
+printf 'Evidence saved to %s\nKeep this directory before rebooting. Review logs before sharing them.\n' "$out"

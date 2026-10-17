@@ -204,6 +204,7 @@ DOCKER_ARGS=(
   -e "OMARCHY_MIRROR=$OMARCHY_MIRROR"
   -e "OMARCHY_INSTALL_DEBUG=${OMARCHY_INSTALL_DEBUG:-}"
   -e "OMARCHY_ARCH=$OMARCHY_ARCH"
+  -e "OMARCHY_ISO_COMMIT=$(git -C "$BUILD_ROOT" rev-parse HEAD)"
   -e "OMARCHY_KERNEL=$OMARCHY_KERNEL"
   -e "OMARCHY_N1X_DEV_SSH=${N1X_DEV_SSH_KEY:+1}"
   # Optional overrides of the Omarchy package pair build-iso.sh installs, e.g.

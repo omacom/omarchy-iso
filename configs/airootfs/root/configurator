@@ -388,10 +388,13 @@ detect_bitlocker() {
 }
 
 # Save vendor-signed Qualcomm firmware before a full-disk install removes Windows.
-# Missing firmware does not abort installation.
+# A16 firmware is required; other boards retain optional extraction.
 stage_qualcomm_firmware() {
-  command -v qcom-firmware-extract >/dev/null 2>&1 || return 0
+  [[ ${1:-} == dry ]] && return 0
   [[ -d /sys/firmware/devicetree/base ]] || return 0
+  (cd /usr/share/omarchy-iso && python -m orchestrator.qualcomm_firmware) ||
+    abort "Required hardware firmware could not be prepared. No installation was started."
+  command -v qcom-firmware-extract >/dev/null 2>&1 || return 0
 
   local stage=/run/omarchy/firmware
   local missing saved
@@ -1126,14 +1129,14 @@ if $defer_provisioning; then
   # Jump straight to disk selection + overwrite confirmation (encrypted by
   # default, Ctrl+C toggles unencrypted). deferred provisioning is always a full-disk install.
   disk_form
-  stage_qualcomm_firmware
+  stage_qualcomm_firmware "$@"
   until confirm_disk_overwrite; do
     disk_form
   done
   install_target="full_disk"
 else
   disk_form
-  stage_qualcomm_firmware
+  stage_qualcomm_firmware "$@"
   select_installation
 fi
 

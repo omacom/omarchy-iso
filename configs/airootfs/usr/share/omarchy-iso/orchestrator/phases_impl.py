@@ -38,6 +38,8 @@ from . import archinstall_adapter as arch
 from .command import capture, capture_identifier, require_text
 from .context import InstallContext, hw_platform, iso_kernel
 from .keyboard import configure_keyboard
+from .qualcomm_firmware import is_a16, prepare_a16_stage
+from .a16_evidence import stage_evidence
 from .ui import error, info
 
 
@@ -199,10 +201,17 @@ TARGET_FIRMWARE_STAGE = Path("var/lib/omarchy/firmware-stage")
 def _stage_qualcomm_firmware() -> None:
     tool = shutil.which("qcom-firmware-extract")
     if not tool:
+        if is_a16():
+            raise RuntimeError("A16 firmware staging requires qcom-firmware-extract")
         return
-    info("› saving Qualcomm firmware from Windows before the disk is written")
-    # Firmware extraction is idempotent and optional.
-    subprocess.run([tool, "--stage", str(LIVE_FIRMWARE_STAGE)], check=False)
+    info("› saving Qualcomm firmware before the disk is written")
+    # A16 needs its signed DSP images for the bring-up being validated. Preserve
+    # optional staging on other boards, while stopping A16 before disk cleanup.
+    required = is_a16()
+    if required:
+        prepare_a16_stage(tool, LIVE_FIRMWARE_STAGE)
+    else:
+        subprocess.run([tool, "--stage", str(LIVE_FIRMWARE_STAGE)], check=False)
 
 
 def _copy_firmware_stage_into_target(ctx: InstallContext) -> None:
@@ -1873,6 +1882,8 @@ def validate_boot(ctx: InstallContext) -> None:
         _validate_provisioning_state(ctx)
 
     _validate_package_signing(ctx)
+    if iso_kernel() == "linux-omarchy" and is_a16():
+        stage_evidence(ctx.target, esp_mount, kernel=iso_kernel())
 
 
 OFFLINE_MIRROR = Path("/var/cache/omarchy/mirror/offline")

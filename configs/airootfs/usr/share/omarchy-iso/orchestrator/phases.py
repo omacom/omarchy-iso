@@ -10,7 +10,7 @@ import traceback
 from collections.abc import Callable
 from pathlib import Path
 
-from .context import InstallContext
+from .context import InstallContext, hw_platform
 from .ui import error, info
 
 
@@ -89,8 +89,13 @@ def _installed_package_count(target: Path) -> int:
         return 0
 
 
-def _expected_package_count() -> int:
-    path = Path("/usr/share/omarchy-iso/expected-packages")
+def _expected_package_count(share: Path = Path("/usr/share/omarchy-iso")) -> int:
+    # The count for the default set this machine's platform gets, where the
+    # image carries one; the plain set's otherwise.
+    detected = hw_platform()
+    path = share / f"expected-packages.{detected}"
+    if not (detected and path.is_file()):
+        path = share / "expected-packages"
     try:
         return int(path.read_text().split()[0])
     except (OSError, ValueError, IndexError):

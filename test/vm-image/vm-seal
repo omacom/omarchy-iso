@@ -1,0 +1,148 @@
+#!/bin/bash
+# Turns an installed Omarchy disk (test/integration's base image) into an image anyone can
+# download and boot: every boot is its own machine, nothing of the build is
+# left in it, and it boots straight into its kernel, so a boot takes seconds.
+#
+#   vm-seal <installed_dir> <sealed_dir>
+#
+# installed_dir holds base.qcow2, OVMF_VARS.4m.fd and id_ed25519, which is
+# what test/integration leaves in test-runs/<iso>-integration once its install
+# has passed. sealed_dir gets a standalone, zstd-compressed base.qcow2, which
+# boots by itself through UEFI, and the UKI's vmlinuz, initrd and cmdline for
+# booting it directly. It holds no key: each boot is handed one (see vm-boot).
+#
+# The image keeps the installer's user and password (GUEST_PASSWORD, default
+# omarchy) for the desktop and sudo. SSH takes keys only.
+set -euo pipefail
+[[ $# -eq 2 ]] || { echo "Usage: vm-seal <installed_dir> <sealed_dir>" >&2; exit 2; }
+in=$(realpath "$1") out=$(realpath -m "$2")
+pw=${GUEST_PASSWORD:-omarchy}
+for fw in /usr/share/edk2/x64/OVMF_CODE.4m.fd /usr/share/OVMF/OVMF_CODE_4M.fd; do
+  [[ -f $fw ]] && { fw_code=$fw; break; }
+done
+: "${fw_code:?no OVMF firmware found}"
+
+state=$(mktemp -d /var/tmp/seal.XXXXXX)
+cleanup() {
+  local status=$? pid
+  if [[ -f $state/qemu.pid ]]; then
+    pid=$(cat "$state/qemu.pid")
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+  fi
+  rm -rf "$state"
+  exit "$status"
+}
+trap cleanup EXIT
+port=$(( 30000 + RANDOM % 5000 ))
+
+ssh_vm() {
+  ssh -i "$in/id_ed25519" -p "$port" -o BatchMode=yes -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=2 -o LogLevel=ERROR omarchy@127.0.0.1 "$@"
+}
+# Runs a script as root in the guest and fails if any line of it fails. The
+# password goes to sudo on stdin, never into a command line.
+root() {
+  printf '%s\n' "$pw" | ssh_vm "sudo -S -p '' bash -ec $(printf %q "trap 'echo \"vm-seal: failed in the guest at: \$BASH_COMMAND\" >&2' ERR
+$1")"
+}
+
+qemu-img create -qf qcow2 -b "$in/base.qcow2" -F qcow2 "$state/edit.qcow2"
+cp "$in/OVMF_VARS.4m.fd" "$state/vars.fd"
+qemu-system-x86_64 -cpu host -enable-kvm -machine q35,accel=kvm -smp 4 -m 4G \
+  -drive if=pflash,format=raw,readonly=on,file="$fw_code" \
+  -drive if=pflash,format=raw,file="$state/vars.fd" \
+  -drive "file=$state/edit.qcow2,format=qcow2,if=virtio,discard=unmap" -display none \
+  -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$port-:22" -device virtio-net-pci,netdev=n0 \
+  -pidfile "$state/qemu.pid" -daemonize
+for i in $(seq 1 150); do
+  ssh_vm true 2>/dev/null && break
+  (( i < 150 )) || { echo "vm-seal: no ssh on the installed disk" >&2; exit 1; }
+  sleep 2
+done
+# Let first-boot work finish before taking it apart.
+ssh_vm 'timeout 180 systemctl is-system-running --wait >/dev/null 2>&1 || true'
+
+mkdir -p "$out"
+# The kernel that is running: edge installs linux-omarchy-bore where stable
+# installs linux-omarchy, and the boot entry, not the UKI, may hold the
+# command line.
+kernel=$(ssh_vm 'cat "/usr/lib/modules/$(uname -r)/pkgbase"')
+root "cat /boot/EFI/Linux/omarchy_$kernel.efi" >"$state/uki.efi"
+ssh_vm 'cat /proc/cmdline' >"$state/cmdline"
+
+root '
+  # The ISO writes autologin only for encrypted installs; a test has nobody at
+  # SDDM, and a desktop check that skips for want of a session reads as a pass.
+  printf "[Autologin]\nUser=omarchy\nSession=omarchy.desktop\n" >/etc/sddm.conf.d/autologin.conf
+
+  # The image is public and its password is too, so SSH takes keys only. sshd
+  # keeps the first value it reads, hence a name that sorts first.
+  printf "PasswordAuthentication no\nKbdInteractiveAuthentication no\nAuthenticationMethods publickey\n" \
+    >/etc/ssh/sshd_config.d/00-omarchy-vm.conf
+  ssh-keygen -A >/dev/null   # sshd -T needs host keys to parse; they go below
+  sshd -T | grep -qix "passwordauthentication no"
+  sshd -T | grep -qix "authenticationmethods publickey"
+
+  # Empty, not "uninitialized": that string marks a first boot, and a first boot
+  # applies unit presets, which on Arch disable everything not listed. Empty lets
+  # systemd take the VM SMBIOS UUID (qemu -uuid) as this boot machine ID.
+  # Host keys come back from sshdgenkeys.service before sshd starts.
+  : >/etc/machine-id
+  rm -f /var/lib/dbus/machine-id /etc/ssh/ssh_host_*
+  rm -f /home/omarchy/.ssh/authorized_keys /home/omarchy/.bash_history /root/.bash_history
+
+  # The factory snapshot the installer took carries the same machine ID.
+  mkdir -p /run/seal-top
+  mount -o subvolid=5 "$(findmnt -no SOURCE / | sed "s/\[.*//")" /run/seal-top
+  if [ -f /run/seal-top/@factory/etc/machine-id ]; then
+    ro=$(btrfs property get -ts /run/seal-top/@factory ro)
+    [ "$ro" = ro=false ] || btrfs property set -ts /run/seal-top/@factory ro false
+    : >/run/seal-top/@factory/etc/machine-id
+    [ "$ro" = ro=false ] || btrfs property set -ts /run/seal-top/@factory ro true
+  fi
+  umount /run/seal-top
+
+  # Stopping the unit saves a seed; with it stopped, shutdown saves none.
+  systemctl stop systemd-random-seed.service
+  rm -f /var/lib/systemd/random-seed /var/lib/systemd/credential.secret
+
+  # Leases and the key NetworkManager derives stable addresses from.
+  systemctl stop NetworkManager.service
+  rm -f /var/lib/NetworkManager/*.lease /var/lib/NetworkManager/secret_key \
+    /var/lib/NetworkManager/seen-bssids /var/lib/NetworkManager/timestamps \
+    /var/lib/NetworkManager/NetworkManager.state
+
+  # Vacuuming leaves the active journal. Send journald to /run, then the
+  # build logs on disk can go, and shutdown writes nothing back.
+  journalctl --relinquish-var
+  rm -rf /var/log/journal/*
+
+  test ! -s /etc/machine-id
+  test -z "$(ls /etc/ssh/ssh_host_* /var/lib/NetworkManager/*.lease /var/log/journal/* 2>/dev/null)"
+  test ! -e /home/omarchy/.ssh/authorized_keys
+  test ! -e /var/lib/systemd/random-seed
+
+  sync
+  # Hand freed blocks back to the disk image, so the copy skips them.
+  fstrim -av >/dev/null
+  (sleep 1; systemctl poweroff) >/dev/null 2>&1 &'
+
+# The key that let us in is gone, so the poweroff above was the last word.
+pid=$(cat "$state/qemu.pid")
+for _ in $(seq 1 120); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+if kill -0 "$pid" 2>/dev/null; then echo "vm-seal: the VM did not power off" >&2; exit 1; fi
+rm -f "$state/qemu.pid"
+
+# Direct boot skips the firmware and Limine, which spend most of a boot reading
+# and hashing the UKI. resume= points at the image's own swap, so drop it.
+objcopy -O binary --only-section=.linux "$state/uki.efi" "$out/vmlinuz"
+objcopy -O binary --only-section=.initrd "$state/uki.efi" "$out/initrd"
+tr -d '\0' <"$state/cmdline" | tr ' ' '\n' | { grep -vE '^(resume|resume_offset)=|^$' || true; } | paste -sd' ' >"$out/cmdline"
+[[ -s $out/vmlinuz && -s $out/initrd && -s $out/cmdline ]] || { echo "vm-seal: the UKI gave no kernel, initrd or cmdline" >&2; exit 1; }
+
+# zstd clusters: QEMU reads them as they are, so the download boots as it is.
+qemu-img convert -c -O qcow2 -o compression_type=zstd -m 16 -W "$state/edit.qcow2" "$out/base.qcow2"
+( cd "$out" && sha256sum base.qcow2 vmlinuz initrd cmdline >SHA256SUMS )
+echo "sealed: $out ($(du -sh "$out/base.qcow2" | cut -f1)); cmdline: $(cat "$out/cmdline")"

@@ -184,6 +184,11 @@ class StageProvisioningStateTest(unittest.TestCase):
         info_patch.start()
         self.addCleanup(info_patch.stop)
 
+        # The fixtures are x86_64 ones; the Node build chosen follows the host.
+        machine_patch = mock.patch.object(phases_impl.platform, "machine", return_value="x86_64")
+        machine_patch.start()
+        self.addCleanup(machine_patch.stop)
+
         # A fake bundled Node tarball on the "live ISO".
         self.packages = Path(self.tmp.name) / "opt-packages"
         self.packages.mkdir()

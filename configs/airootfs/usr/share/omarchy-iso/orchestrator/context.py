@@ -3,13 +3,17 @@ mutable `state` dict for objects that live across phases (e.g., the
 archinstall config handler and mirror list handler)."""
 
 from __future__ import annotations
+import platform
 
 import json
 import os
 import secrets
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from .keyboard import validate_input_selection
 
 
 @dataclass
@@ -56,6 +60,8 @@ class InstallContext:
         if not user_configuration.get("kernels"):
             kernel = (omarchy_install.get("storage") or {}).get("kernel") or _default_kernel()
             user_configuration["kernels"] = [kernel]
+
+        validate_input_selection(omarchy_install.get("input_method"), omarchy_install.get("input_xkb_layout", ""))
 
         # Deferred provisioning: the whole system installs but user creation is deferred to
         # first boot. Selected by the configurator (omarchy_install.defer_provisioning) or by
@@ -182,7 +188,41 @@ def _inject_provisioning_encryption_password(arch_configuration: dict, user_cred
     user_credentials["encryption_password"] = password
 
 
-def _default_kernel(pci_devices: Path = Path("/sys/bus/pci/devices")) -> str:
+# One aarch64 image serves every board, so the installer asks the machine which
+# one it is. build-iso.sh ships the runtime's own detector beside the package
+# lists; it names aarch64, aarch64-qualcomm, aarch64-n1x or aarch64-gb10.
+# x86_64 images carry none.
+HW_PLATFORM_DETECTOR = Path("/usr/share/omarchy-iso/omarchy-hw-platform")
+
+
+def hw_platform(detector: Path = HW_PLATFORM_DETECTOR) -> str:
+    if not detector.is_file():
+        return ""
+    # The detector refuses a Bash that was not started in privileged mode.
+    result = subprocess.run(["/bin/bash", "-p", str(detector)], capture_output=True, text=True)
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+# build-iso.sh records the kernel an aarch64 image installs; x86_64 images
+# carry an empty file and pick per machine.
+ISO_KERNEL_FILE = Path("/root/omarchy_kernel")
+
+
+def iso_kernel(path: Path = ISO_KERNEL_FILE) -> str:
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return ""
+
+
+def _default_kernel(pci_devices: Path = Path("/sys/bus/pci/devices"), platform_kernel: str | None = None) -> str:
+    # An aarch64 image boots and installs one kernel and nothing else boots;
+    # the configurator's detect_kernel makes the same choice.
+    platform_kernel = iso_kernel() if platform_kernel is None else platform_kernel
+    if platform_kernel:
+        return platform_kernel
     for device in pci_devices.glob("*"):
         try:
             vendor = (device / "vendor").read_text().strip().lower()
@@ -203,7 +243,7 @@ def _default_omarchy_install(user_configuration: dict) -> dict[str, Any]:
         "boot": {
             "esp_mount": "/boot",
             "esp_path": "/EFI/limine",
-            "efi_binary": "limine_x64.efi",
+            "efi_binary": "limine_aa64.efi" if platform.machine() == "aarch64" else "limine_x64.efi",
             "enable_fallback": mode == "full_disk",
         },
         "storage": {},

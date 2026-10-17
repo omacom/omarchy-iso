@@ -1,0 +1,70 @@
+name: Install test comment
+
+# Posts the install test's numbers on the pull request as one comment for
+# every architecture, kept up to date on every run, next to quattro's latest
+# numbers. GitHub runs workflow_run
+# workflows from the default branch, with write access even for
+# pull requests from forks, so this job never checks out or runs pull request
+# code: it runs the default branch's test/install-test-comment on the finished
+# run's artifacts, as data.
+
+on:
+  workflow_run:
+    workflows: ["Install test"]
+    types: [completed]
+
+permissions:
+  actions: read
+  pull-requests: write
+
+jobs:
+  comment:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-26.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+    steps:
+      # The default branch's copy: the script that writes the comment.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A rerun keeps earlier attempts' artifacts under the same run, so take
+      # exactly the attempt that finished (and the baseline's latest attempt).
+      - name: Fetch this run's numbers and quattro's latest
+        env:
+          ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          gh run download "$RUN_ID" -R "$REPO" -p "install-test-$RUN_ID-$ATTEMPT*" -D "$RUNNER_TEMP/pr" || true
+          base=$(gh run list -R "$REPO" --workflow install-test.yml --branch quattro --event push \
+            --status success -L 1 --json databaseId -q '.[0].databaseId')
+          if [ -n "$base" ]; then
+            base_attempt=$(gh api "repos/$REPO/actions/runs/$base" -q .run_attempt)
+            gh run download "$base" -R "$REPO" -p "install-test-$base-$base_attempt*" -D "$RUNNER_TEMP/base" || true
+          fi
+
+      - name: Comment on the pull request
+        run: |
+          set -euo pipefail
+          # The number comes from the pull request's own run, so trust it only
+          # when that pull request's head is the commit this run tested.
+          pr=$({ find "$RUNNER_TEMP/pr" -name pr-number -exec cat {} + 2>/dev/null || true; } | head -1 | tr -dc 0-9)
+          [ -n "$pr" ] || { echo "No pull request number in the artifact"; exit 0; }
+          [ "$(gh api "repos/$REPO/pulls/$pr" -q .head.sha)" = "$HEAD_SHA" ] ||
+            { echo "PR #$pr has moved past $HEAD_SHA; not commenting"; exit 0; }
+
+          ./test/install-test-comment "$RUNNER_TEMP/pr" "$RUNNER_TEMP/base" "$CONCLUSION" "$RUN_URL" "$HEAD_SHA" >"$RUNNER_TEMP/comment.md"
+
+          existing=$(gh api "repos/$REPO/issues/$pr/comments" --paginate \
+            -q '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- omarchy-install-test -->"))) | .id' | head -1)
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$existing" -F body=@"$RUNNER_TEMP/comment.md" >/dev/null
+          else
+            gh api "repos/$REPO/issues/$pr/comments" -F body=@"$RUNNER_TEMP/comment.md" >/dev/null
+          fi
+          cat "$RUNNER_TEMP/comment.md"

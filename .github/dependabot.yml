@@ -1,0 +1,12 @@
+# Every action is pinned to a commit, so nothing updates by itself. Once a
+# week Dependabot proposes the newer releases in one pull request, moving each
+# commit and the version in its comment together.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

@@ -1,0 +1,8 @@
+# mkinitcpio preset for the N1x live kernel.
+
+PRESETS=('archiso')
+
+ALL_kver='/boot/vmlinuz-linux-omarchy'
+archiso_config='/etc/mkinitcpio.conf.d/archiso.conf'
+
+archiso_image='/boot/initramfs-linux-omarchy.img'

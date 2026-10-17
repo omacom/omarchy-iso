@@ -1,0 +1,270 @@
+#!/bin/bash
+#
+# Takes an installed Omarchy, as a user's machine holds it, moves it to another
+# channel the way a user would, reboots it, and checks what came back.
+#
+#   test/upgrade-test <installed_dir> <channel> <evidence_dir>
+#
+# installed_dir is what test/integration leaves once its install has passed,
+# test-runs/<iso>-integration: base.qcow2, OVMF_VARS.4m.fd and id_ed25519. It is
+# not written to; the machine runs on an overlay. channel is edge or rc.
+#
+# The machine boots through the firmware and the boot loader, so the reboot
+# after the update starts whatever kernel the update installed. Commands run
+# in a login shell, as a user's terminal does: Omarchy's commands need its
+# environment.
+#
+# evidence_dir gets before.png and after.png (the desktop, unlocked), the
+# update's output, the facts before and after, and report.md; stuck.png too if
+# the reboot did not come back by itself. The exit status is 0 only if every
+# check passed.
+#
+# Needs qemu-system-x86_64, qemu-img, ssh, python3 and a usable /dev/kvm.
+# Env: SMP (4), MEM (8G), SSH_PORT (2422), GUEST_PASSWORD (omarchy),
+#      UPDATE_TIMEOUT (seconds, 1800), EXTRA_MIGRATIONS (migration files to put
+#      in place before the update, to try a fix that is not released yet).
+set -uo pipefail
+[[ $# -eq 3 ]] || { sed -n '3,24p' "$0" >&2; exit 2; }
+in=$(realpath "$1") channel=$2 out=$(realpath -m "$3")
+pw=${GUEST_PASSWORD:-omarchy} port=${SSH_PORT:-2422}
+[[ $channel == edge || $channel == rc ]] || { echo "upgrade-test: channel is edge or rc" >&2; exit 2; }
+for f in base.qcow2 OVMF_VARS.4m.fd id_ed25519; do
+  [[ -s $in/$f ]] || { echo "upgrade-test: $in/$f is missing" >&2; exit 1; }
+done
+[[ -r /dev/kvm && -w /dev/kvm ]] || { echo "upgrade-test: /dev/kvm is not usable" >&2; exit 1; }
+for fw in /usr/share/edk2/x64/OVMF_CODE.4m.fd /usr/share/OVMF/OVMF_CODE_4M.fd; do
+  [[ -f $fw ]] && { fw_code=$fw; break; }
+done
+: "${fw_code:?no UEFI firmware found}"
+
+mkdir -p "$out"
+state=$(mktemp -d "${VM_STATE_DIR:-/var/tmp}/upgrade-test.XXXXXX")
+cleanup() {
+  local status=$? pid
+  if [[ -f $state/qemu.pid ]]; then
+    pid=$(cat "$state/qemu.pid")
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+  fi
+  rm -rf "$state"
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+log() { printf '==> %s\n' "$*"; }
+install -m600 "$in/id_ed25519" "$state/key"
+ssh_opts=(-i "$state/key" -p "$port" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=3)
+guest() { ssh "${ssh_opts[@]}" omarchy@127.0.0.1 "bash -lc $(printf %q "$1")" </dev/null; }
+wait_ssh() { # seconds
+  local start=$SECONDS
+  until ssh "${ssh_opts[@]}" omarchy@127.0.0.1 true </dev/null 2>/dev/null; do
+    kill -0 "$(cat "$state/qemu.pid")" 2>/dev/null || { echo "upgrade-test: qemu exited" >&2; return 1; }
+    (( SECONDS - start < $1 )) || return 1
+    sleep 1
+  done
+}
+qmp() { # shot <file> | key <qcode>...
+  python3 - "$state/qmp.sock" "$@" <<'PY'
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(20); s.connect(sys.argv[1]); f = s.makefile("rw"); f.readline()
+def run(command):
+    f.write(json.dumps(command) + "\n"); f.flush()
+    while "return" not in (reply := json.loads(f.readline())):
+        if "error" in reply: sys.exit(reply["error"]["desc"])
+run({"execute": "qmp_capabilities"})
+if sys.argv[2] == "shot":
+    run({"execute": "screendump", "arguments": {"filename": sys.argv[3], "format": "png"}})
+else:
+    for key in sys.argv[3:]:
+        run({"execute": "send-key", "arguments": {"keys": [{"type": "qcode", "data": key}]}})
+PY
+}
+# The session starts locked. Type the password, as its owner would, and wait
+# for the desktop to draw.
+desktop_shot() { # file
+  local key keys=()
+  for (( key = 0; key < ${#pw}; key++ )); do keys+=("${pw:key:1}"); done
+  qmp key "${keys[@]}" ret || true
+  sleep 8
+  qmp shot "$1" || echo "upgrade-test: no screenshot" >&2
+}
+# One fact per line, name=value, the same names before and after.
+facts() { # file
+  guest '
+    link=~/.local/state/omarchy/current/background; target=$(readlink -f "$link" 2>/dev/null)
+    echo "omarchy=$(pacman -Qq omarchy omarchy-dev 2>/dev/null | sort -u | xargs -r pacman -Q 2>/dev/null | paste -sd, -)"
+    echo "channel=$(omarchy-channel-current 2>/dev/null)"
+    echo "kernel=$(uname -r)"
+    echo "kernel_is_installed=$([[ -d /usr/lib/modules/$(uname -r)/kernel ]] && echo yes || echo no)"
+    echo "systemd=$(systemctl --version | sed -n "1s/^systemd \([0-9.]*\).*/\1/p")"
+    echo "hyprland=$(pacman -Q hyprland 2>/dev/null | cut -d" " -f2)"
+    echo "system_state=$(systemctl is-system-running 2>/dev/null)"
+    # A manager that cannot be asked is not a manager with nothing failed.
+    units=$(systemctl --failed --no-legend --plain 2>/dev/null) && units=$(awk "{print \$1}" <<<"$units" | paste -sd, -) || units="could not ask systemd"
+    user_units=$(systemctl --user --failed --no-legend --plain 2>/dev/null) && user_units=$(awk "{print \$1}" <<<"$user_units" | paste -sd, -) || user_units="could not ask the user manager"
+    echo "failed_units=$units"
+    echo "failed_user_units=$user_units"
+    echo "hyprland_running=$(pgrep -c -x Hyprland)"
+    echo "migrations_run=$(find ~/.local/state/omarchy/migrations -maxdepth 1 -name "*.sh" | wc -l)"
+    echo "migrations_skipped=$(find ~/.local/state/omarchy/migrations/skipped -name "*.sh" 2>/dev/null | wc -l)"
+    echo "wallpaper=${target##*/}"
+    echo "wallpaper_exists=$([[ -n $target && -e $target ]] && echo yes || echo no)"
+    echo "boot_entry_groups=$(sudo grep -c "^/+" /boot/limine.conf 2>/dev/null)"
+    echo "boot_id=$(cut -c1-8 /proc/sys/kernel/random/boot_id)"
+  ' 2>/dev/null | grep -E '^[a-z_]+=' >"$1"
+}
+fact() { sed -n "s/^$2=//p" "$1" | head -n 1; }
+
+qemu-img create -qf qcow2 -b "$in/base.qcow2" -F qcow2 "$state/run.qcow2"
+cp "$in/OVMF_VARS.4m.fd" "$state/vars.fd"
+: >"$out/serial.log"
+qemu-system-x86_64 -cpu host -enable-kvm -machine q35,accel=kvm -smp "${SMP:-4}" -m "${MEM:-8G}" \
+  -drive "if=pflash,format=raw,readonly=on,file=$fw_code" -drive "if=pflash,format=raw,file=$state/vars.fd" \
+  -drive "file=$state/run.qcow2,format=qcow2,if=none,id=d0" -device virtio-blk-pci,drive=d0 \
+  -device virtio-vga -device virtio-rng-pci -display none -usb -device usb-kbd -serial "file:$out/serial.log" \
+  -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$port-:22" -device virtio-net-pci,netdev=n0 \
+  -qmp "unix:$state/qmp.sock,server,nowait" -pidfile "$state/qemu.pid" -daemonize
+
+log "Booting the installed system"
+wait_ssh 300 || { echo "upgrade-test: the installed system did not come up" >&2; exit 1; }
+# The overlay is thrown away: let sudo through without asking, so a long
+# update does not stop at a password prompt nobody is there to answer.
+# sudo takes the last rule that matches, and reads this folder in name order:
+# the name has to sort after the install's own rule for the wheel group.
+ssh "${ssh_opts[@]}" omarchy@127.0.0.1 "echo $(printf %q "$pw") | sudo -S -p '' sh -c 'printf \"%s\\n\" \"omarchy ALL=(ALL:ALL) NOPASSWD: ALL\" \"Defaults:omarchy !authenticate\" >/etc/sudoers.d/zzz-upgrade-test'" </dev/null
+# "sudo -v" is the hard one: it asks unless every rule for the user lets it
+# through, which is why the rule alone is not enough.
+ssh "${ssh_opts[@]}" omarchy@127.0.0.1 'sudo -k; sudo -n true && sudo -n -v' </dev/null ||
+  { echo "upgrade-test: sudo still asks for a password in the guest" >&2; exit 1; }
+guest 'timeout 180 systemctl is-system-running --wait >/dev/null 2>&1 || true'
+facts "$out/before.txt"
+desktop_shot "$out/before.png"
+log "Before: $(fact "$out/before.txt" omarchy), kernel $(fact "$out/before.txt" kernel), channel $(fact "$out/before.txt" channel)"
+
+for migration in ${EXTRA_MIGRATIONS:-}; do
+  log "Putting $(basename "$migration") in place before the update"
+  ssh "${ssh_opts[@]}" omarchy@127.0.0.1 "sudo tee /usr/share/omarchy/migrations/$(basename "$migration") >/dev/null" <"$migration"
+done
+
+# A channel that offers what the machine already has, or something older, is
+# no upgrade. Say so now: the release's own updater, run with nothing to do,
+# ends at a prompt nobody is there to answer.
+case $channel in edge) package=omarchy-dev ;; *) package=omarchy ;; esac
+# A server that cannot be reached, or does not answer in time, is not a channel
+# with nothing on offer: that is a failure of its own, said as one.
+if ! offered=$(guest "set -o pipefail; curl -fsSL --connect-timeout 20 --max-time 120 --retry 2 https://pkgs.omarchy.org/$channel/\$(uname -m)/omarchy.db | bsdtar -xOf - '$package-[0-9]*/desc' | sed -n '/^%VERSION%\$/{n;p;}' | head -n 1" 2>"$out/probe.log") || [[ -z $offered ]]; then
+  {
+    echo "**The $channel channel could not be asked what it offers.** The test did not run."
+    echo
+    echo '```'
+    tail -n 5 "$out/probe.log"
+    echo '```'
+  } >"$out/report.md"
+  cat "$out/report.md"
+  exit 1
+fi
+installed=$(guest "pacman -Q $package 2>/dev/null | cut -d' ' -f2" 2>/dev/null)
+log "The $channel channel offers $package $offered; installed: ${installed:-none}"
+# pacman's own ordering: 0 for the same version, below 0 for an older offer.
+newer=1
+[[ -z $installed ]] || newer=$(guest "vercmp $(printf %q "$offered") $(printf %q "$installed")" 2>/dev/null)
+if (( ${newer:-0} <= 0 )); then
+  {
+    echo "**Nothing to upgrade to.** The $channel channel offers \`$package $offered\`, and the machine has \`$(fact "$out/before.txt" omarchy)\`."
+    echo
+    echo "The test did not run: point it at a channel that holds a newer Omarchy."
+  } >"$out/report.md"
+  cat "$out/report.md"
+  exit 1
+fi
+
+log "omarchy-channel-set $channel"
+update_start=$SECONDS
+guest "timeout ${UPDATE_TIMEOUT:-1800} omarchy-channel-set $channel" >"$out/update.log" 2>&1
+update_status=$?
+update_seconds=$(( SECONDS - update_start ))
+sed -i 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\r/\n/g' "$out/update.log"
+migrations_in_update=$(grep -c '^Running migration' "$out/update.log" || true)
+log "The update exited $update_status after $update_seconds s, $migrations_in_update migrations"
+
+log "Rebooting"
+guest 'sudo systemctl reboot' >/dev/null 2>&1 || true
+# Wait for the old boot to go away first: its sshd answers for a moment yet.
+for _ in $(seq 1 90); do
+  ssh "${ssh_opts[@]}" -o ConnectTimeout=2 omarchy@127.0.0.1 true </dev/null 2>/dev/null || break
+  sleep 1
+done
+rebooted=no
+if wait_ssh 150; then
+  rebooted=yes
+else
+  # A boot that sits there until a key is pressed is a failure, and a known
+  # kind: keep what the screen showed, then press Enter to find out whether
+  # that was it, and to have a system to collect the rest from.
+  qmp shot "$out/stuck.png" || true
+  qmp key ret || true
+  if wait_ssh 150; then rebooted="only after a key was pressed"; fi
+fi
+if [[ $rebooted != no ]]; then
+  guest 'timeout 180 systemctl is-system-running --wait >/dev/null 2>&1 || true'
+  facts "$out/after.txt"
+  desktop_shot "$out/after.png"
+else
+  : >"$out/after.txt"
+  qmp shot "$out/after.png" || true
+fi
+log "After: $(fact "$out/after.txt" omarchy), kernel $(fact "$out/after.txt" kernel), channel $(fact "$out/after.txt" channel)"
+
+failures=0
+rows=()
+check() { # description, command...
+  local what=$1; shift
+  if "$@"; then rows+=("| ✅ | $what |"); else rows+=("| ❌ | $what |"); failures=$((failures + 1)); fi
+}
+b() { fact "$out/before.txt" "$1"; }
+a() { fact "$out/after.txt" "$1"; }
+check "The update finished without an error (exit $update_status)" test "$update_status" = 0
+check "No migration was skipped ($(a migrations_skipped) skipped)" test "$(a migrations_skipped)" = 0
+check "The system came back from the reboot by itself (came back: $rebooted)" test "$rebooted" = yes
+check "It is a new boot (boot ID $(b boot_id) → $(a boot_id))" test -n "$(a boot_id)" -a "$(a boot_id)" != "$(b boot_id)"
+check "It is on the $channel channel (got: $(a channel))" test "$(a channel)" = "$channel"
+# A channel that holds what the machine already had upgrades nothing, and
+# every other check would pass on a machine that was only rebooted.
+check "Omarchy itself changed ($(b omarchy) → $(a omarchy))" test -n "$(a omarchy)" -a "$(a omarchy)" != "$(b omarchy)"
+check "The running kernel is an installed one ($(a kernel))" test "$(a kernel_is_installed)" = yes
+check "systemd reports the system running (got: $(a system_state))" test "$(a system_state)" = running
+failed="$(a failed_units) $(a failed_user_units)"
+failed=$(xargs <<<"$failed")
+check "No failed units (${failed:-none})" test -z "$failed"
+check "The desktop is up (Hyprland processes: $(a hyprland_running))" test "$(a hyprland_running)" = 1
+# The same picture, whatever format it is kept in now: an update may convert
+# the bundled images, and may not swap the one the user chose for another.
+before_wallpaper=$(b wallpaper) after_wallpaper=$(a wallpaper)
+check "The wallpaper is the one the user had, and exists ($before_wallpaper → $after_wallpaper)" \
+  test "$(a wallpaper_exists)" = yes -a -n "$after_wallpaper" -a "${after_wallpaper%.*}" = "${before_wallpaper%.*}"
+check "The boot menu has one Omarchy group ($(a boot_entry_groups))" test "$(a boot_entry_groups)" = 1
+
+row() { printf '| %s | %s | %s |\n' "$1" "$(b "$2")" "$(a "$2")"; }
+{
+  if (( failures )); then echo "**$failures of ${#rows[@]} checks failed.**"; else echo "**All ${#rows[@]} checks passed.**"; fi
+  echo
+  echo "| | Before | After the update and a reboot |"
+  echo "| --- | --- | --- |"
+  row "Omarchy" omarchy
+  row "Channel" channel
+  row "Kernel running" kernel
+  row "systemd" systemd
+  row "Hyprland" hyprland
+  row "Migrations run" migrations_run
+  row "Wallpaper" wallpaper
+  echo
+  echo "The update took $update_seconds s and ran $migrations_in_update migrations."
+  echo
+  echo "| | Check |"
+  echo "| --- | --- |"
+  printf '%s\n' "${rows[@]}"
+} >"$out/report.md"
+cat "$out/report.md"
+(( failures == 0 ))

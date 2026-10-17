@@ -107,7 +107,7 @@ class KernelSelectionTest(unittest.TestCase):
                     )
                     ctx = types.SimpleNamespace(
                         state={"arch_config_handler": types.SimpleNamespace(config=config), "mirror_handler": None},
-                        target=Path("/unused"), tailscale_authkey_path=None,
+                        target=Path("/unused"), tailscale_authkey_path=None, omarchy_install={},
                     )
                     for name in ("_mount_offline_package_cache", "_mask_mkinitcpio_pacman_hooks",
                                  "_configure_limine_boot", "_write_pre_mounted_fstab"):
@@ -119,6 +119,7 @@ class KernelSelectionTest(unittest.TestCase):
                     stack.enter_context(mock.patch.object(phases_impl, "_runtime_package_list", return_value=["omarchy"]))
                     stack.enter_context(mock.patch.object(phases_impl.arch, "is_pre_mount", return_value=True, create=True))
                     stack.enter_context(mock.patch.object(phases_impl.arch, "root_user", return_value=None, create=True))
+                    stack.enter_context(mock.patch.object(phases_impl.arch, "sanity_check", create=True))
                     opened = stack.enter_context(mock.patch.object(phases_impl.arch, "open_installer", create=True))
                     opened.return_value.__enter__.return_value = installer
                     if fail_headers:
@@ -153,6 +154,31 @@ class KernelSelectionTest(unittest.TestCase):
                 header_release.write_text("7.2-test\n")
                 phases_impl._validate_kernel_headers(ctx)
 
+    def test_a_kernel_without_a_pkgbase_is_the_one_the_image_installs(self):
+        # Arch Linux ARM's linux-aarch64 records no pkgbase next to its modules.
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            ctx = types.SimpleNamespace(target=target)
+            modules = target / "usr/lib/modules/7.2.9-1-aarch64-ARCH"
+            modules.mkdir(parents=True)
+            (modules / "modules.builtin").write_text("kernel/fs/ext4/ext4.ko\n")
+            # Out-of-tree leftovers are not a kernel.
+            (target / "usr/lib/modules/7.2.8-gone/updates/dkms").mkdir(parents=True)
+
+            with mock.patch.object(phases_impl, "iso_kernel", return_value=""):
+                self.assertEqual(phases_impl._installed_kernels(ctx), [])
+                with self.assertRaisesRegex(RuntimeError, "no installed kernel"):
+                    phases_impl._validate_kernel_headers(ctx)
+
+            with mock.patch.object(phases_impl, "iso_kernel", return_value="linux-aarch64"):
+                self.assertEqual(phases_impl._installed_kernels(ctx), ["linux-aarch64"])
+                with self.assertRaisesRegex(RuntimeError, r"linux-aarch64 \(7\.2\.9-1-aarch64-ARCH\) has no kernel headers"):
+                    phases_impl._validate_kernel_headers(ctx)
+                header_release = modules / "build/include/config/kernel.release"
+                header_release.parent.mkdir(parents=True)
+                header_release.write_text("7.2.9-1-aarch64-ARCH\n")
+                phases_impl._validate_kernel_headers(ctx)
+
     def test_boot_validation_uses_default_or_explicit_kernel(self):
         for storage, configuration, expected in [
             ({}, {}, "linux-omarchy"),
@@ -160,7 +186,9 @@ class KernelSelectionTest(unittest.TestCase):
             ({"kernel": "linux-t2"}, {"kernels": ["linux-omarchy"]}, "linux-t2"),
             ({}, {"kernels": ["linux-lts"]}, "linux-lts"),
         ]:
-            with self.subTest(kernel=expected, storage=storage), tempfile.TemporaryDirectory() as tmp:
+            # The fixtures are x86_64 ones; the Limine binary checked follows the host.
+            with self.subTest(kernel=expected, storage=storage), tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(phases_impl.platform, "machine", return_value="x86_64"):
                 target = Path(tmp)
                 files = {
                     f"usr/lib/modules/7.2-test/pkgbase": expected + "\n",
@@ -181,6 +209,7 @@ class KernelSelectionTest(unittest.TestCase):
                     is_protected=False, defer_provisioning=False,
                 )
                 with mock.patch.object(phases_impl, "_assert_boot_hooks_restored"), \
+                     mock.patch.object(phases_impl, "_validate_package_signing"), \
                      mock.patch.object(phases_impl.arch, "has_uefi", return_value=True, create=True), \
                      mock.patch.object(phases_impl, "_read_efibootmgr", return_value={
                          "entries": {"0001": "Limine\tHD(1,GPT,test)"},

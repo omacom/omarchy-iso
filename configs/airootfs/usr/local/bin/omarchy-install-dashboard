@@ -236,7 +236,18 @@ FINISH_TOP_ROW=2
 # reachable values and stops moving. No give-up predicate: two discontinuous
 # curves behind a monotonic clamp freeze. With no signal the floor alone still
 # finishes the band.
-EXPECTED_PACKAGES_FILE="${OMARCHY_EXPECTED_PACKAGES_FILE:-/usr/share/omarchy-iso/expected-packages}"
+EXPECTED_PACKAGES_FILE="${OMARCHY_EXPECTED_PACKAGES_FILE:-}"
+if [[ -z $EXPECTED_PACKAGES_FILE ]]; then
+  # The count for the default set this machine's platform gets, where the image
+  # carries one; the plain set's otherwise.
+  EXPECTED_PACKAGES_FILE=/usr/share/omarchy-iso/expected-packages
+  if [[ -f /usr/share/omarchy-iso/omarchy-hw-platform ]]; then
+    hw_platform=$(/bin/bash -p /usr/share/omarchy-iso/omarchy-hw-platform 2>/dev/null || true)
+    if [[ -n $hw_platform && -f $EXPECTED_PACKAGES_FILE.$hw_platform ]]; then
+      EXPECTED_PACKAGES_FILE=$EXPECTED_PACKAGES_FILE.$hw_platform
+    fi
+  fi
+fi
 PKG_TOTAL=0
 if [[ -r $EXPECTED_PACKAGES_FILE ]]; then
   read -r PKG_TOTAL _ <"$EXPECTED_PACKAGES_FILE" 2>/dev/null || PKG_TOTAL=0

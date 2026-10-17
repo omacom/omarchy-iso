@@ -937,6 +937,19 @@ unlock_luks() {
   done
 }
 
+# QMP types on a US virtual keyboard. Keep the Japanese console's punctuation
+# usable for bootstrap without changing its persistent map or desktop layout.
+prepare_console_keyboard() {
+  if [[ $KEYBOARD_LABEL == "Japanese" ]]; then
+    type_text "sudo -k loadkeys us"
+    press ret
+    sleep 1
+    type_text "$GUEST_PASSWORD"
+    press ret
+    sleep 1
+  fi
+}
+
 # Log into a spare console TTY as the user and authorize the harness SSH key —
 # the same thing a person would do to give themselves remote access.
 bootstrap_ssh() {
@@ -972,6 +985,7 @@ EOF
     type_text "$GUEST_PASSWORD"
     press ret
     sleep 4
+    prepare_console_keyboard
     type_text "curl -fsS http://10.0.2.2:$HTTP_PORT/bootstrap -o /tmp/bs && bash /tmp/bs"
     capture_console "success-first-boot-05-bootstrap-command"
     press ret
@@ -1148,6 +1162,12 @@ acceptance_phase() {
   start_vm "$RUN_DIR/run.qcow2" "$RUN_DIR/serial.log"
 
   establish_session
+  # Long CLI/shell runs provide no input and otherwise lock the disposable VM.
+  if ! ssh_session 'omarchy-toggle-idle stay-awake' >/dev/null; then
+    capture_console "failure-acceptance-stay-awake"
+    echo "Could not keep the acceptance VM awake" >&2
+    return 1
+  fi
   sync_omarchy
 
   local status=0

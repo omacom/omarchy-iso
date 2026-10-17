@@ -116,6 +116,80 @@ create_partition() {
   created_partition_number="$num"
 }
 
+# Start sector and size in bytes for every partition, one "start size" line.
+# Start is the identity cfdisk Resize preserves (it changes the end, not the
+# start), so a later comparison can tell a shrink from a delete or a new
+# partition in free space. parted rather than lsblk so this works against
+# image files in tests, the same way partition_numbers does.
+partition_starts_and_sizes() {
+  local out
+  # Judge parted by its exit status, not by what it printed. Reading the table
+  # can fail, and a failure that arrives as empty output is indistinguishable
+  # from a disk with no partitions — which reads as "nothing shrank" and is
+  # exactly how a guard like this fails open. Capture first so the status is
+  # parted's own and not awk's.
+  out=$(parted -ms "$1" unit B print 2>/dev/null) || return 1
+  printf '%s\n' "$out" | tail -n +3 | awk -F: '
+    $1 ~ /^[0-9]+$/ {
+      start=$2; size=$4;
+      gsub(/B/, "", start);
+      gsub(/B/, "", size);
+      print start, size
+    }'
+}
+
+# Lines of "start old_size new_size" for partitions that shrank by more than
+# 1MiB. Matched by start sector so a delete (start gone) or a newly created
+# partition (start unseen) is not a shrink. The 1MiB slack is the same
+# alignment tolerance create_partition uses.
+shrunk_partition_lines() {
+  local before="$1" after="$2"
+  awk -v tol=$((1024 * 1024)) '
+    NR == FNR { old[$1] = $2; next }
+    ($1 in old) && ((old[$1] - $2) > tol) { print $1, old[$1], $2 }
+  ' <(printf '%s\n' "$before") <(printf '%s\n' "$after")
+}
+
+# Snapshot the GPT so a later cfdisk session can be undone. Fails when sfdisk
+# fails or writes nothing usable (no table, sfdisk unavailable, unreadable
+# disk): a partial dump would restore a table nobody verified, so the caller
+# must treat a false here as "do not let cfdisk near this disk".
+save_partition_table() {
+  local disk="$1" dest="$2" status=0
+  sfdisk -d "$disk" >"$dest" 2>/dev/null || status=$?
+  (( status == 0 )) && [[ -s $dest ]]
+}
+
+# Rewrite the GPT from an sfdisk dump. Used to undo a cfdisk Resize: that
+# command only changes the partition table, so putting the original table
+# back is a full recovery as long as nothing has been written into the gap.
+restore_partition_table() {
+  local disk="$1" src="$2" output status=0
+  output=$(sfdisk --force "$disk" <"$src" 2>&1) || status=$?
+  [[ -n $output ]] && printf '%s\n' "$output"
+  partprobe "$disk" 2>/dev/null || true
+  return "$status"
+}
+
+# If any existing partition shrank, restore dump and return 0. Return 1 when
+# the table is fine (delete/create/grow/no-op). Return 2 when a shrink was
+# found but the dump could not be written back. Return 3 when the edit cannot
+# be judged at all: no usable snapshot to compare against or restore from, or
+# a table that no longer reads back.
+#
+# 3 must never collapse into 1. "Cannot tell" is precisely the state in which
+# a shrink is invisible, and answering "the table is fine" there hands the
+# installer a disk whose existing filesystem may already be past its new end.
+restore_shrunk_partitions() {
+  local disk="$1" dump="$2" before="$3" after shrunk
+  [[ -n $dump && -s $dump ]] || return 3
+  after=$(partition_starts_and_sizes "$disk") || return 3
+  shrunk=$(shrunk_partition_lines "$before" "$after")
+  [[ -n $shrunk ]] || return 1
+  restore_partition_table "$disk" "$dump" || return 2
+  return 0
+}
+
 # Undo the partitions this run created, highest number first. Scoped strictly
 # to created_parts: without this, a failed install leaves the user's freed
 # space occupied by orphans, and the retry reports "not enough free space"

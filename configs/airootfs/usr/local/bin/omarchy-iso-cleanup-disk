@@ -42,6 +42,18 @@ while read -r dev type; do
   [[ $type == crypt ]] && cryptsetup close "$dev" 2>/dev/null || true
 done < <(lsblk -rnpo PATH,TYPE "$disk")
 
+# Releasing the holders leaves what was written on the disk: a LUKS header from an older install
+# reaches archinstall, whose own wipefs on that partition exits 1 and aborts a full install whose
+# whole intent was to erase the disk (#137). Only reached when the disk is being wiped - protected
+# mode returns above - so the signatures are exactly what should go. Devices before the disk, so
+# each partition is wiped while it still exists; wiping the disk takes the table last.
+while read -r dev; do
+  [[ $dev == "$disk" ]] && continue
+  [[ -b $dev ]] || continue
+  wipefs --all --force "$dev" >/dev/null 2>&1 || true
+done < <(lsblk -rnpo PATH "$disk")
+wipefs --all --force "$disk" >/dev/null 2>&1 || true
+
 blockdev --flushbufs "$disk" 2>/dev/null || true
 partprobe "$disk" 2>/dev/null || true
 udevadm settle || true

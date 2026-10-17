@@ -167,7 +167,7 @@ These are the configurator's own output files, so the way to get a starting set 
 
 Both required files must be present or the installer falls back to the configurator. (A `defer-provisioning` marker file can stand in for `user_credentials.json`: user creation is then deferred to first boot.) Generate the password hash for `user_credentials.json` with `openssl passwd -6 "yourpassword"`.
 
-Encryption itself is configured by the `disk_encryption` block inside `user_configuration.json` — which carries the passphrase in plaintext, so treat a drive built from an encrypted install accordingly. The flag file must match it: it drives the encrypted install's SDDM autologin and the final boot validation, not the encryption.
+Encryption itself is configured by the `disk_encryption` block inside `user_configuration.json`, which names the partitions to encrypt. The passphrase goes at the top level of `user_credentials.json` as `encryption_password`: archinstall reads it there and ignores the copy the configurator writes into the block, so a cidata drive built from an encrypted install should be treated as the secret it is. The flag file must match the configuration: it drives the encrypted install's SDDM autologin and the final boot validation, not the encryption.
 
 `authorized_keys` is the same file sshd reads — copy your own or write one key per line:
 

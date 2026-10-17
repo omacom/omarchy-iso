@@ -90,6 +90,13 @@ class InstallContext:
         arch_configuration = dict(user_configuration)
         arch_configuration.pop("omarchy_install", None)
 
+        # archinstall looks devices up in a dict keyed by /dev/nvme0n1-style
+        # paths, so a /dev/disk/by-id/... link finds no device and the
+        # modification is dropped without a message -- the install then fills
+        # the live ISO's own root. Resolve the links before archinstall reads
+        # the config, as the configurator already does for the boot medium.
+        _resolve_disk_device_paths(arch_configuration)
+
         if defer_provisioning:
             # The userless invariant covers the archinstall config too: a
             # combined/legacy config could carry account authentication that
@@ -168,6 +175,16 @@ def _strip_account_fields(arch_configuration: dict) -> None:
     if isinstance(auth, dict):
         for key in ("users", "root_enc_password"):
             auth.pop(key, None)
+
+
+def _resolve_disk_device_paths(arch_configuration: dict) -> None:
+    """Replace each disk device with the kernel path it points at. Mutates in
+    place; arch_configuration shares the list with user_configuration."""
+    disk_config = arch_configuration.get("disk_config") or {}
+    for mod in disk_config.get("device_modifications") or []:
+        device = mod.get("device")
+        if device:
+            mod["device"] = os.path.realpath(device)
 
 
 def _inject_provisioning_encryption_password(arch_configuration: dict, user_credentials: dict) -> None:

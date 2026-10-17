@@ -333,32 +333,37 @@ EOF
   (cd "$BASE_DIR/www" && exec python3 -m http.server "$HTTP_PORT" --bind 127.0.0.1 >/dev/null 2>&1) &
   HTTP_PID=$!
 
-  local waited=0
-  while true; do
-    press ctrl-alt-f3
-    sleep 4
-    ocr_screen | grep -qi "login:" && break
-    ((waited += 8))
-
-    if ((waited >= 300)); then
-      capture_console "failure-console-timeout"
-      echo "Timed out waiting for a console login prompt" >&2
+  # First-boot finalization ends by starting the desktop session, which can
+  # take the screen back from the TTY at any point of this login. So every
+  # round returns to the TTY and answers the prompt it shows last, until SSH
+  # answers: a login prompt gets the user, a password prompt the password,
+  # and a shell the (repeatable) bootstrap.
+  local waited=0 prompt
+  until ssh_guest true 2>/dev/null; do
+    if ! vm_running; then
+      echo "VM exited while authorizing SSH" >&2
       return 1
     fi
+    if ((waited >= 420)); then
+      capture_console "failure-bootstrap-ssh-timeout"
+      echo "Timed out authorizing SSH via console login" >&2
+      return 1
+    fi
+
+    press ctrl-alt-f3
     sleep 4
+    prompt=$(ocr_screen | awk 'NF { last = $0 } END { print tolower(last) }')
+    if [[ $prompt == *login:* ]]; then
+      type_text "$GUEST_USER"
+    elif [[ $prompt == *password* ]]; then
+      type_text "$GUEST_PASSWORD"
+    elif [[ -n $prompt ]]; then
+      type_text "curl -fsS http://10.0.2.2:$HTTP_PORT/bootstrap -o /tmp/bs && bash /tmp/bs"
+    fi
+    press ret
+    sleep 6
+    ((waited += 10))
   done
-
-  type_text "$GUEST_USER"
-  press ret
-  wait_for_screen "Password" 60
-  type_text "$GUEST_PASSWORD"
-  press ret
-  sleep 3
-
-  type_text "curl -fsS http://10.0.2.2:$HTTP_PORT/bootstrap -o /tmp/bs && bash /tmp/bs"
-  press ret
-
-  wait_for_ssh 360 "failure-bootstrap-ssh-timeout"
   capture_console "success-bootstrap-ssh"
 
   kill "$HTTP_PID" 2>/dev/null || true

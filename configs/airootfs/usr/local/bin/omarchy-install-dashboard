@@ -97,6 +97,7 @@ tips=(
 )
 
 cleanup() {
+  omi_stop
   printf '%s%s' "$RESET" "$SHOW_CURSOR" >"$TTY_PATH" 2>/dev/null || true
 }
 
@@ -136,60 +137,6 @@ trap 'interrupt 143' TERM
 
 term_size() { stty size 2>/dev/null <"$TTY_PATH" || printf '24 80\n'; }
 term_cols() { local size; size="$(term_size)"; printf '%s\n' "${size#* }"; }
-
-# Read the actual character dimensions instead of assuming an 8 x 16 font.
-# Linux VTs expose the font through KDFONTOP; desktop terminals may expose
-# pixels in their window size or answer the standard cell-size query.
-term_cell_size() {
-  python3 - "$TTY_PATH" <<'PY'
-import fcntl
-import os
-import re
-import select
-import struct
-import sys
-import termios
-import time
-import tty
-
-with open(sys.argv[1], "r+b", buffering=0) as terminal:
-    fd = terminal.fileno()
-    rows, cols, width, height = struct.unpack(
-        "HHHH", fcntl.ioctl(fd, termios.TIOCGWINSZ, bytes(8)))
-    if rows and cols and width and height:
-        print(round(width / cols), round(height / rows))
-        sys.exit()
-    try:
-        font = bytearray(struct.pack("@5IP", 1, 0, 0, 0, 0, 0))
-        fcntl.ioctl(fd, 0x4B72, font)  # KDFONTOP / KD_FONT_OP_GET, no glyph data
-        _, _, width, height, _ = struct.unpack_from("@5I", font)
-        if width and height:
-            print(width, height)
-            sys.exit()
-    except OSError:
-        pass
-
-    settings = termios.tcgetattr(fd)
-    try:
-        tty.setcbreak(fd, termios.TCSANOW)
-        os.write(fd, b"\x1b[16t")
-        response = b""
-        deadline = time.monotonic() + 0.15
-        while select.select([fd], [], [], max(0, deadline - time.monotonic()))[0]:
-            response += os.read(fd, 64)
-            match = re.search(rb"\x1b\[6;(\d+);(\d+)t", response)
-            if match:
-                height, width = map(int, match.groups())
-                if width and height:
-                    print(width, height)
-                    sys.exit()
-            if time.monotonic() >= deadline:
-                break
-    finally:
-        termios.tcsetattr(fd, termios.TCSANOW, settings)
-    print(8, 16)  # Conventional console font when dimensions aren't available.
-PY
-}
 
 logo_width() {
   if [[ -f $LOGO_PATH ]]; then
@@ -338,161 +285,204 @@ render_logo() {
   fi
 }
 
-# The icon uses half-block glyphs, scaled to the terminal's actual cell aspect
-# ratio so its square silhouette stays square. No graphics protocol is needed.
-# Coordinates follow the 15 x 15 grid of Omarchy's icon.svg. Each segment
-# paints the full stroke width, starting at the bottom middle of the outer ring.
-ICON_WIDTH=30
-ICON_HEIGHT=15
-CELL_WIDTH=8
-CELL_HEIGHT=16
-ICON_LEFT=1
-ICON_STEPS=0
-ICON_DRAWN=0
-DISPLAY_PM=0
-ICON_FRAME=""
-declare -a ICON_ORDER=() ICON_TRACE=() ICON_FILL=()
+DISPLAY_PM=0           # the percentage shown, easing toward LAST_PM
 
-icon_segment() {
-  local scale="$1" x1="$2" y1="$3" x2="$4" y2="$5"
-  local x y from to
-  if (( y1 == y2 )); then
-    from=$(( (x1 * ICON_WIDTH + 14) / 15 ))
-    to=$(( ((x2 + 1) * ICON_WIDTH + 14) / 15 ))
-    if (( x2 < x1 )); then
-      from=$(( ((x1 + 1) * ICON_WIDTH + 14) / 15 - 1 ))
-      to=$(( (x2 * ICON_WIDTH + 14) / 15 - 1 ))
+# ── Omi ──────────────────────────────────────────────────────────────────────
+#
+# Omi, the Omarchy mascot, plays above the progress. omi.awk, the Omi player of
+# the omi repo's bash example, draws it from the kit (omi.json, a copy of an
+# omi-kit release, beside it in the repo) in the console's own green and
+# grey. It runs beside this process for the whole install: each frame this
+# tells it the time, reads back Omi's rows and prints the ones that changed,
+# so only this process writes to the console. A frame costs the player a
+# couple of milliseconds, nothing next to pacstrap.
+#
+# Omi starts as the plain Omarchy logo, opens its eyes (idle) and plays that
+# loop once, then takes turns at OMI_TURNS for as long as the install runs,
+# each for at least OMI_TURN seconds, and a success once it's done (for the
+# moment the progress takes to finish: the install never waits on Omi, and its
+# end cuts Omi off wherever it is). A turn ends with its loop, so Omi stays
+# calm however long the install takes on a slow machine.
+#
+# The console has only its 16 colors, so a faded pixel needs a slot of its own.
+# The progress screen draws in just four: the background (0), green (2), text
+# (7) and the dim tips (8). While Omi plays, the other twelve hold Omi's green
+# faded into the background in even steps, and the player draws fades in them,
+# so a blink, a sweep or a morph fades as it does anywhere else. Tokyo Night's
+# colors go back in before the finish and failure screens, which use them.
+OMI_DIR="${OMARCHY_OMI_DIR:-/usr/share/omarchy-iso/omi}"
+OMI_MODES="logo,idle,thinking,download,working,peek,success"
+OMI_TURNS=(thinking download working peek)
+OMI_TURN="${OMARCHY_OMI_TURN:-15}"  # seconds a turn lasts, at least
+OMI_UP=0               # whether the player is running
+OMI_KIT_TSV=""         # the kit as the player reads it (omi.jq's lines)
+OMI_W=0                # Omi's size in cells, and where it's drawn
+OMI_H=0
+OMI_LEFT=1
+OMI_NOW=0              # the clock, in hundredths of a second (/proc/uptime)
+OMI_T0=-1              # when Omi started
+OMI_MODE="logo"        # the mode the player says is on screen
+OMI_MORPHING=0
+OMI_LOOPS=0            # how many loops of it have played
+OMI_SINCE=0            # when it came on
+OMI_ASKED="logo"       # the mode last asked for
+OMI_OPENED=0           # the logo and its eyes are done
+OMI_PALETTE=0          # whether the shades are in the palette
+declare -a OMI_SHOWN=()
+# slot, Omi's shade in it (most opaque first) and what Tokyo Night has there
+OMI_SLOTS=(
+  10 94c065 9ece6a 11 8ab260 e0af68 12 80a55a 7aa2f7 13 759755 bb9af7
+  14 6b8950 7dcfff 15 617b4b c0caf5 9 576e45 f7768e 1 4d6040 f7768e
+  3 43523b e0af68 4 384436 7aa2f7 5 2e3730 bb9af7 6 24292b 7dcfff
+)
+# the same slots as the player draws in them (SGR), most opaque first
+OMI_SHADES="92,93,94,95,96,97,91,31,33,34,35,36"
+
+# Set the slots to Omi's shades (on) or back to Tokyo Night (off): the Linux
+# console's own sequence, or the standard one in a terminal (the preview).
+omi_palette() {
+  local on="$1" i out=""
+  for ((i = 0; i < ${#OMI_SLOTS[@]}; i += 3)); do
+    local slot=${OMI_SLOTS[i]} hex=${OMI_SLOTS[i + 2 - on]}
+    if [[ ${TERM:-linux} == linux ]]; then
+      printf -v out '%s\e]P%X%s' "$out" "$slot" "$hex"
+    else
+      printf -v out '%s\e]4;%d;#%s\a' "$out" "$slot" "$hex"
     fi
-    for ((x=from; x!=to; x+=(x2 >= x1 ? 1 : -1))); do
-      for ((y=y1 * scale; y<(y1 + 1) * scale; y++)); do
-        icon_pixel "$((y * ICON_WIDTH + x))"
-      done
-    done
-  else
-    from=$(( y1 * scale ))
-    to=$(( (y2 + 1) * scale ))
-    if (( y2 < y1 )); then
-      from=$(( (y1 + 1) * scale - 1 ))
-      to=$(( y2 * scale - 1 ))
-    fi
-    for ((y=from; y!=to; y+=(y2 >= y1 ? 1 : -1))); do
-      for ((x=(x1 * ICON_WIDTH + 14) / 15; x<((x1 + 1) * ICON_WIDTH + 14) / 15; x++)); do
-        icon_pixel "$((y * ICON_WIDTH + x))"
-      done
-    done
-  fi
-}
-
-icon_pixel() {
-  local pixel="$1"
-  if [[ ! -v ICON_TRACE[pixel] ]]; then
-    ICON_ORDER+=("$pixel")
-    ICON_TRACE[pixel]=${#ICON_ORDER[@]}
-  fi
-}
-
-build_icon() {
-  local scale="$1" x y row
-  local -a mask=(
-    111111111111111
-    100000010000001
-    101111110001101
-    101000000000101
-    101000000000101
-    101000000000101
-    101000000000101
-    111000000000101
-    101000000000101
-    101000000000101
-    101000000000101
-    101000000000101
-    101111111111101
-    100000010000001
-    111111110111111
-  )
-  ICON_WIDTH=$(( (15 * scale * CELL_HEIGHT + CELL_WIDTH) / (2 * CELL_WIDTH) ))
-  ICON_HEIGHT=$(((15 * scale + 1) / 2))
-  ICON_ORDER=() ICON_TRACE=() ICON_FILL=()
-  ICON_DRAWN=0
-  # Start at the bottom middle, follow the outer left edge to the top cross,
-  # then descend into the inner shape. Fill its two bridges as we reach them.
-  icon_segment "$scale" 7 14 0 14
-  icon_segment "$scale" 0 14 0 0
-  icon_segment "$scale" 0 0 7 0
-  icon_segment "$scale" 7 0 7 2
-  icon_segment "$scale" 7 2 2 2
-  icon_segment "$scale" 2 2 2 7
-  icon_segment "$scale" 2 7 0 7
-  icon_segment "$scale" 2 7 2 12
-  icon_segment "$scale" 2 12 7 12
-  icon_segment "$scale" 7 12 7 14
-  icon_segment "$scale" 7 12 12 12
-  icon_segment "$scale" 12 12 12 2
-  icon_segment "$scale" 12 2 11 2
-  # Finish from the top cross: right along the outside, down, then left.
-  icon_segment "$scale" 7 0 14 0
-  icon_segment "$scale" 14 0 14 14
-  icon_segment "$scale" 14 14 9 14
-  ICON_STEPS=${#ICON_ORDER[@]}
-  for ((y=0; y<15 * scale; y++)); do
-    row=${mask[y / scale]}
-    for ((x=0; x<ICON_WIDTH; x++)); do
-      ICON_FILL[y * ICON_WIDTH + x]=${row:x * 15 / ICON_WIDTH:1}
-    done
   done
+  printf '%b' "$out" >"$TTY_PATH" 2>/dev/null || true
+  OMI_PALETTE=$on
 }
 
-# Append one cell with independently colored upper/lower pixels. This also
-# handles a green tracing tip sharing a cell with the still-dark outline.
-icon_cell() {
-  local pixel="$1" drawn="$2" solid="$3" upper=0 lower=0 step
-  if (( solid )); then
-    (( ICON_FILL[pixel] )) && upper=32
-    (( ${ICON_FILL[pixel + ICON_WIDTH]:-0} )) && lower=32
-  else
-    step=${ICON_TRACE[pixel]:-0}
-    (( step > 0 )) && upper=90
-    (( step > 0 && step <= drawn )) && upper=32
-    step=${ICON_TRACE[pixel + ICON_WIDTH]:-0}
-    (( step > 0 )) && lower=90
-    (( step > 0 && step <= drawn )) && lower=32
+omi_clock() {
+  local up rest
+  read -r up rest </proc/uptime 2>/dev/null || up=0.00
+  OMI_NOW=$((10#${up/./}))
+}
+
+# Start the player, if it and the kit are on the image and jq and awk are too.
+omi_start() {
+  [[ -r $OMI_DIR/omi.awk && -r $OMI_DIR/omi.jq && -r $OMI_DIR/omi.json ]] || return 0
+  OMI_KIT_TSV="$(mktemp)"
+  if ! jq -r -f "$OMI_DIR/omi.jq" "$OMI_DIR/omi.json" >"$OMI_KIT_TSV" 2>/dev/null; then
+    dashboard_log "Omi skipped (its kit didn't read)"
+    return 0
   fi
-  if (( upper == 0 && lower == 0 )); then
-    ICON_FRAME+="${RESET} "
-  elif (( upper == lower )); then
-    ICON_FRAME+="${CSI}${upper};49m█"
-  elif (( lower == 0 )); then
-    ICON_FRAME+="${CSI}${upper};49m▀"
-  elif (( upper == 0 )); then
-    ICON_FRAME+="${CSI}${lower};49m▄"
-  else
-    ICON_FRAME+="${CSI}${upper};$((lower + 10))m▀"
+  omi_palette 1
+  coproc OMI_PLAYER {
+    LC_ALL=C exec awk -v kitfile="$OMI_KIT_TSV" -v drive=1 -v colors=shades -v shades="$OMI_SHADES" \
+      -v only="$OMI_MODES" -v bounce=0 -f "$OMI_DIR/omi.awk" 2>/dev/null
+  }
+  OMI_UP=1
+  omi_say "now logo"
+}
+
+omi_stop() {
+  if (( OMI_UP )) && [[ -n ${OMI_PLAYER_PID:-} ]]; then
+    kill "$OMI_PLAYER_PID" 2>/dev/null || true
+  fi
+  (( OMI_PALETTE )) && omi_palette 0
+  OMI_UP=0
+  [[ -n $OMI_KIT_TSV ]] && rm -f "$OMI_KIT_TSV"
+  return 0
+}
+
+# A line to the player; if it has gone, Omi just stops.
+omi_say() {
+  (( OMI_UP )) || return 1
+  if ! printf '%s\n' "$1" >&"${OMI_PLAYER[1]}" 2>/dev/null; then
+    OMI_UP=0
+    return 1
   fi
 }
 
-render_icon() {
-  local pm="$1" full="${2:-0}" drawn i pixel row col
-  drawn=$((pm * ICON_STEPS / 1000))
-  ICON_FRAME=""
-  if (( full || pm == 1000 )); then
-    for ((row=0; row<ICON_HEIGHT; row++)); do
-      ICON_FRAME+="${CSI}$((TOP_ROW + row));${ICON_LEFT}H"
-      for ((col=0; col<ICON_WIDTH; col++)); do
-        icon_cell "$((row * 2 * ICON_WIDTH + col))" "$drawn" "$((pm == 1000))"
-      done
-    done
-  else
-    # Between layout changes, repaint only newly traced pixels. This keeps the
-    # animation cheap even while pacstrap saturates the disk.
-    for ((i=ICON_DRAWN; i<drawn; i++)); do
-      pixel=${ICON_ORDER[i]}
-      row=$((pixel / ICON_WIDTH / 2)) col=$((pixel % ICON_WIDTH))
-      ICON_FRAME+="${CSI}$((TOP_ROW + row));$((ICON_LEFT + col))H"
-      icon_cell "$((row * 2 * ICON_WIDTH + col))" "$drawn" 0
+omi_hear() {
+  if ! IFS= read -r -t 2 "$1" <&"${OMI_PLAYER[0]}" 2>/dev/null; then
+    OMI_UP=0
+    dashboard_log "Omi stopped (its player didn't answer)"
+    return 1
+  fi
+}
+
+# The largest Omi that takes at most half the screen's height and fits with the
+# text rows below it. A logo cell is 4, 2 or 1 pixels at these sizes, a pixel
+# half a character, so every cell is drawn alike and Omi is drawn as designed:
+# 44 is the size on most consoles (21 rows), 88 only on very tall ones.
+omi_resize() {
+  local rows="$1" cols="$2" px reply w h
+  for px in 88 44 22; do
+    omi_say "size $px" && omi_hear reply || return 0
+    read -r _ w h <<<"$reply"
+    (( h * 2 <= rows && h + 6 <= rows && w <= cols - 4 )) && break
+  done
+  OMI_W=$w OMI_H=$h
+  OMI_SHOWN=()
+}
+
+# The mode for where the install is.
+omi_want() {
+  local want i
+  if (( OMI_T0 < 0 )); then
+    OMI_T0=$OMI_NOW
+  fi
+  if (( !OMI_OPENED )); then
+    # The plain logo for a second, then its eyes, until their loop has played.
+    if (( OMI_NOW - OMI_T0 < 100 )); then
+      want=logo
+    elif [[ $OMI_MODE == idle ]] && (( !OMI_MORPHING && OMI_LOOPS >= 1 )); then
+      OMI_OPENED=1
+    else
+      want=idle
+    fi
+  fi
+  if [[ $PHASE_NAME == "Installation complete" ]]; then
+    want=success
+  elif (( OMI_OPENED )); then
+    # The turns, in order and round again: the one playing until it has had
+    # its time, then the next.
+    want=${OMI_TURNS[0]}
+    for i in "${!OMI_TURNS[@]}"; do
+      [[ $OMI_MODE == "${OMI_TURNS[i]}" ]] || continue
+      want=$OMI_MODE
+      (( OMI_NOW - OMI_SINCE >= OMI_TURN * 100 )) && want=${OMI_TURNS[(i + 1) % ${#OMI_TURNS[@]}]}
+      break
     done
   fi
-  printf '%s%s' "$ICON_FRAME" "$RESET"
-  ICON_DRAWN=$drawn
+  if [[ $want != "$OMI_ASKED" ]]; then
+    OMI_ASKED=$want
+    # Done is done: the success starts now; the rest wait for the loop to end.
+    if [[ $want == success ]]; then
+      omi_say "now $want"
+    else
+      omi_say "next $want"
+    fi
+  fi
+}
+
+# A frame: the time to the player, its rows to the screen (every row, or only
+# the rows that changed).
+omi_frame() {
+  local full="${1:-0}" status mode morphing loops r line out="" at
+  (( OMI_UP )) || return 0
+  omi_clock
+  omi_want
+  printf -v at '%d.%02d' "$((OMI_NOW / 100))" "$((OMI_NOW % 100))"
+  omi_say "tick $at" && omi_hear status || return 0
+  read -r _ mode morphing loops <<<"$status"
+  if [[ $mode != "$OMI_MODE" ]]; then
+    OMI_MODE=$mode
+    OMI_SINCE=$OMI_NOW
+  fi
+  OMI_MORPHING=$morphing
+  OMI_LOOPS=$loops
+  for ((r = 0; r < OMI_H; r++)); do
+    omi_hear line || return 0
+    if (( full )) || [[ ${OMI_SHOWN[r]-} != "$line" ]]; then
+      out+="${CSI}$((TOP_ROW + r));${OMI_LEFT}H$line"
+      OMI_SHOWN[r]=$line
+    fi
+  done
+  printf '%s%s' "$out" "$RESET"
 }
 
 # Packages libalpm has finished installing. local/ holds one directory per
@@ -649,19 +639,13 @@ centered_top_row() {
 }
 
 measure_progress_layout() {
-  local rows cols scale=1
+  local rows cols
   LAST_SIZE="$(term_size)"
   read -r rows cols <<<"$LAST_SIZE"
-  read -r CELL_WIDTH CELL_HEIGHT < <(term_cell_size 2>/dev/null || printf '8 16\n')
-  (( rows >= 34 && cols >= 49 )) && scale=2
-  (( rows >= 50 && cols >= 64 )) && scale=3
-  while (( scale > 1 && (15 * scale * CELL_HEIGHT + CELL_WIDTH) / (2 * CELL_WIDTH) > cols - 4 )); do
-    scale=$((scale - 1))
-  done
-  build_icon "$scale"
-  TOP_ROW="$(centered_top_row "$((ICON_HEIGHT + 6))")"
-  ICON_LEFT=$(( (cols - ICON_WIDTH) / 2 + 1 ))
-  (( ICON_LEFT < 1 )) && ICON_LEFT=1
+  (( OMI_UP )) && omi_resize "$rows" "$cols"
+  TOP_ROW="$(centered_top_row "$((OMI_H + 6))")"
+  OMI_LEFT=$(( (cols - OMI_W) / 2 + 1 ))
+  (( OMI_LEFT < 1 )) && OMI_LEFT=1
   PROGRESS_TEXT_WIDTH=$((cols - 2))
   (( PROGRESS_TEXT_WIDTH > CONTENT_WIDTH )) && PROGRESS_TEXT_WIDTH=$CONTENT_WIDTH
   return 0
@@ -670,7 +654,8 @@ measure_progress_layout() {
 render_static() {
   measure_progress_layout
   printf '%s' "$CLEAR"
-  render_icon "$DISPLAY_PM" 1
+  omi_frame 1
+  return 0
 }
 
 update_progress() {
@@ -690,15 +675,15 @@ render_dynamic() {
   # The framebuffer can settle late in VMs. Rebuild at the new size, preserving
   # progress, instead of leaving the drawing at the old screen coordinates.
   [[ "$(term_size)" == "$LAST_SIZE" ]] || render_static
-  # Ease phase jumps over several frames, with the percentage following the
-  # same position as the trace. The measured progress still never goes back.
+  # Ease phase jumps over several frames. The measured progress still never
+  # goes back.
   step=$(( (LAST_PM - DISPLAY_PM + 3) / 4 ))
   DISPLAY_PM=$((DISPLAY_PM + step))
-  render_icon "$DISPLAY_PM"
+  omi_frame
 
   message="$(truncate_for_width "$(current_whimsy)" "$PROGRESS_TEXT_WIDTH")"
   tip="$(truncate_for_width "$(t progress.tipLine "$(current_tip)")" "$PROGRESS_TEXT_WIDTH")"
-  printf '%s%d;1H' "$CSI" "$((TOP_ROW + ICON_HEIGHT + 1))"
+  printf '%s%d;1H' "$CSI" "$((TOP_ROW + OMI_H + 1))"
   center "${GREEN}$((DISPLAY_PM / 10))%${RESET}" "$PROGRESS_TEXT_WIDTH"
   center "${GREEN}${message}${RESET}" "$PROGRESS_TEXT_WIDTH"
   blank_line
@@ -1044,16 +1029,18 @@ launch_child() {
 
 [[ -e $TTY_PATH ]] || exit 2
 printf '%s' "$HIDE_CURSOR" >"$TTY_PATH"
-render_static >"$TTY_PATH"
 set_now
 DASH_T0=$NOW
 PHASE_T0=$NOW
 PKG_LAST_CHANGE=$NOW
 launch_child
+# Omi starts once the installer has: it never holds the install up.
+omi_start
+render_static >"$TTY_PATH"
 
 frame=0
 while jobs -pr | grep -qx "$child_pid"; do
-  # Keep package counting/state reads at 2 Hz; animate the trace at 10 Hz.
+  # Keep package counting/state reads at 2 Hz; animate Omi at 10 Hz.
   (( frame % 5 == 0 )) && update_progress
   render_dynamic >"$TTY_PATH" 2>/dev/null || true
   frame=$((frame + 1))
@@ -1070,7 +1057,7 @@ child_pgid=""
 dashboard_log "installer child exited with status $status"
 
 if (( status == 0 )); then
-  # Finish the trace even when a short-lived child exits between state polls.
+  # Finish the progress even when a short-lived child exits between state polls.
   LAST_PM=1000
   PHASE_NAME="Installation complete"
   while (( DISPLAY_PM < 999 )); do
@@ -1081,6 +1068,10 @@ if (( status == 0 )); then
   render_dynamic >"$TTY_PATH" 2>/dev/null || true
   sleep 0.4
 fi
+
+# Omi is done, wherever it is in its loop: the install never waits on it. The
+# screens from here on have Tokyo Night's palette back.
+omi_stop
 
 if (( status != 0 )); then
   failure_status="$status"

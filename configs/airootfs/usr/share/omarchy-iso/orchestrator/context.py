@@ -14,6 +14,33 @@ from pathlib import Path
 from typing import Any
 
 from .keyboard import validate_input_selection
+from .region import GLOBAL, region_for_timezone, resolve_region
+
+LANGUAGES = Path("/usr/share/omarchy/default/i18n/locales.json")
+
+
+def validate_language(language: Any, registry: Path | None = None) -> None:
+    """The installer's language is a registry code, checked before any disk is
+    touched; the target only ever reads it back as data."""
+    registry = registry or LANGUAGES
+    if language is None or language in ("", "en"):
+        return
+    if not isinstance(language, str) or not registry.is_file() or language not in json.loads(registry.read_text()):
+        raise RuntimeError(f"Unsupported language: {language!r}")
+
+
+PRESET = Path("/usr/share/omarchy-iso/preset.json")
+
+
+def load_preset(path: Path | None = None) -> dict[str, str]:
+    """The choices a market's install media were built with (omarchy-iso-make
+    --preset), the file the configurator's language picker reads too. Applied
+    here as well, so unattended installs from the same media get them."""
+    path = path or PRESET
+    if not path.is_file():
+        return {}
+    data = json.loads(path.read_text())
+    return {key: data[key] for key in ("keyboard", "timezone", "language", "region") if isinstance(data.get(key), str)}
 
 
 @dataclass
@@ -31,6 +58,7 @@ class InstallContext:
     arch_config_path: Path
     omarchy_install: dict[str, Any]
     defer_provisioning: bool = False
+    region: str = GLOBAL
 
     target: Path = Path("/mnt")
     omarchy_path: Path = Path("/usr/share/omarchy")
@@ -62,6 +90,22 @@ class InstallContext:
             user_configuration["kernels"] = [kernel]
 
         validate_input_selection(omarchy_install.get("input_method"), omarchy_install.get("input_xkb_layout", ""))
+
+        # Resolved before any disk is touched, so an autoinstall naming a
+        # region this ISO lacks fails without wiping anything.
+        # A preset fills in only what the install configuration leaves unset.
+        preset = load_preset()
+        if preset.get("language") and not omarchy_install.get("language"):
+            omarchy_install["language"] = preset["language"]
+        explicit_region = omarchy_install.get("region") not in (None, "")
+        region = resolve_region(omarchy_install, user_configuration.get("timezone"), preset=preset.get("region"))
+        omarchy_install["region"] = region
+        validate_language(omarchy_install.get("language"))
+        omarchy_install["form_defaults"] = {key: preset[key] for key in ("keyboard", "timezone") if key in preset}
+        # A region the preset supplied because the timezone named none is
+        # settled again by a first-boot owner setup once the owner picks one.
+        if not explicit_region and region == preset.get("region") and region_for_timezone(user_configuration.get("timezone")) == GLOBAL:
+            omarchy_install["form_defaults"]["region"] = region
 
         # Deferred provisioning: the whole system installs but user creation is deferred to
         # first boot. Selected by the configurator (omarchy_install.defer_provisioning) or by
@@ -127,6 +171,7 @@ class InstallContext:
             arch_config_path=arch_config_path,
             omarchy_install=omarchy_install,
             defer_provisioning=defer_provisioning,
+            region=region,
             state_dir=state_dir,
         )
         disk_config = user_configuration.get("disk_config", {})

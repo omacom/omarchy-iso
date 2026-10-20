@@ -108,6 +108,7 @@ class KernelSelectionTest(unittest.TestCase):
                     ctx = types.SimpleNamespace(
                         state={"arch_config_handler": types.SimpleNamespace(config=config), "mirror_handler": None},
                         target=Path("/unused"), tailscale_authkey_path=None, omarchy_install={},
+                        region="global",
                     )
                     for name in ("_mount_offline_package_cache", "_mask_mkinitcpio_pacman_hooks",
                                  "_configure_limine_boot", "_write_pre_mounted_fstab"):

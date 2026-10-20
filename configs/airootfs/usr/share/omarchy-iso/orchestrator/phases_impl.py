@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import subprocess
+import tarfile
 import textwrap
 import time
 from dataclasses import replace
@@ -38,6 +39,7 @@ from . import archinstall_adapter as arch
 from .command import capture, capture_identifier, require_text
 from .context import InstallContext, hw_platform, iso_kernel
 from .keyboard import configure_keyboard
+from .region import GLOBAL, region_packages
 from .ui import error, info
 
 
@@ -336,6 +338,10 @@ def arch_install_system(ctx: InstallContext) -> None:
             base_pkgs_file = _base_package_file()
             info(f"› installing Omarchy runtime + {base_pkgs_file.name}")
             installer.add_additional_packages(_runtime_package_list(ctx, base_pkgs_file))
+
+            _write_language_marker(ctx)
+            _write_region_marker(ctx)
+            _write_form_defaults(ctx)
 
             # Tailscale is bundled in the offline mirror but only installed
             # when an autoinstall drive staged an auth key; must happen here,
@@ -806,6 +812,30 @@ def _unmask_mkinitcpio_pacman_hooks(
             info(f"warning: failed to restore pacman hook mask for {name}: {exc}")
 
 
+def _write_region_marker(ctx: InstallContext) -> None:
+    """Tell the runtime's pacman finalizer which profile to apply. Global
+    installs write nothing, so they stay identical to a region-less install."""
+    if ctx.region == GLOBAL:
+        return
+    marker = ctx.target / "etc/omarchy/region"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(ctx.region + "\n")
+    marker.chmod(0o644)
+
+
+def _write_form_defaults(ctx: InstallContext) -> None:
+    """Leave preset media's keyboard and timezone for a first-boot owner
+    setup to preselect, as plain KEY=value data. No preset writes nothing."""
+    defaults = ctx.omarchy_install.get("form_defaults") or {}
+    lines = [f"{key.upper()}={defaults[key]}" for key in ("keyboard", "timezone", "region") if "\n" not in defaults.get(key, "\n")]
+    if not lines:
+        return
+    marker = ctx.target / "etc/omarchy/form-defaults"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("\n".join(lines) + "\n")
+    marker.chmod(0o644)
+
+
 def _base_package_file(share: Path = Path("/usr/share/omarchy-iso")) -> Path:
     """The default set for the platform this machine is, where the image
     carries one for it; the plain list for every other machine."""
@@ -814,6 +844,19 @@ def _base_package_file(share: Path = Path("/usr/share/omarchy-iso")) -> Path:
     if detected and platform_list.is_file():
         return platform_list
     return share / "omarchy-base.packages"
+
+
+def _write_language_marker(ctx: InstallContext) -> None:
+    """Hand the installer's language to the runtime's finalizers, which
+    generate its locale and set it per user. English writes nothing, so an
+    English install stays exactly what it was."""
+    language = ctx.omarchy_install.get("language")
+    if not language or language == "en":
+        return
+    marker = ctx.target / "etc/omarchy/language"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(language + "\n")
+    marker.chmod(0o644)
 
 
 def _runtime_package_list(ctx: InstallContext, base_pkgs_file: Path | None = None) -> list[str]:
@@ -844,7 +887,30 @@ def _runtime_package_list(ctx: InstallContext, base_pkgs_file: Path | None = Non
         for s in ("limine", "limine-mkinitcpio-hook", "limine-snapper-sync", "snapper"):
             if s not in already_installed and s not in pkgs:
                 pkgs.append(s)
+    # A region's profile can leave defaults out and add its own apps; an
+    # addition this ISO does not carry is skipped rather than failing the install.
+    skip, add = region_packages(getattr(ctx, "region", GLOBAL))
+    pkgs = [s for s in pkgs if s not in skip]
+    if add:
+        carried = _offline_package_names()
+        for s in add:
+            if s in already_installed or s in pkgs:
+                continue
+            if s in carried:
+                pkgs.append(s)
+            else:
+                info(f"› {s} is not on this ISO; leaving it out")
     return pkgs
+
+
+def _offline_package_names(mirror: Path | None = None) -> set[str]:
+    """Package names the ISO's offline repository indexes."""
+    db = (mirror or OFFLINE_MIRROR) / "offline.db.tar.gz"
+    if not db.is_file():
+        return set()
+    with tarfile.open(db) as archive:
+        entries = {member.name.split("/", 1)[0] for member in archive.getmembers()}
+    return {entry.rsplit("-", 2)[0] for entry in entries if entry.count("-") >= 2}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -753,8 +753,21 @@ for base_list in "$build_cache_dir"/airootfs/usr/share/omarchy-iso/omarchy-base*
   fi
 done
 
-# Live ISO uses the same offline pacman.conf.
+# Live ISO uses the same offline pacman.conf, plus the build's own online
+# servers behind the bundled mirror. pacman only reaches them for a package the
+# cache lacks, which on the ISO means one pacstrap deleted after reading it
+# corrupt off a flaky stick; the installer then retries once and the package
+# comes back over the network. offline.db still pins every sha256, so the
+# refetch must be the very file the ISO shipped. file:// servers are the
+# build's own bundle and mean nothing on the ISO.
 cp "$build_cache_dir/pacman-offline.conf" "$build_cache_dir/airootfs/etc/pacman.conf"
+awk '
+  /^\[/ { repo = substr($0, 2, length($0) - 2); next }
+  repo != "options" && /^Server *=/ && !/file:\/\// {
+    url = $0; sub(/^Server *= */, "", url); gsub(/\$repo/, repo, url)
+    print "Server = " url
+  }
+' "$online_pacman_conf" >>"$build_cache_dir/airootfs/etc/pacman.conf"
 
 # Build the ISO. profiledef.sh reads OMARCHY_ARCH for the archiso arch/bootmodes.
 "$mkarchiso_command" -v -w "$build_cache_dir/work/" -o /out/ "$build_cache_dir/"

@@ -1,0 +1,72 @@
+#!/bin/bash
+# Root-only storage test. Every write targets a disposable, file-backed loop
+# device; no ISO or physical disk is needed. This does not test booting an ISO.
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+source "$ROOT/configs/airootfs/usr/share/omarchy-iso/disk-partitioning.sh"
+
+(( EUID == 0 )) || { echo "Run with sudo (file-backed loop devices only)." >&2; exit 1; }
+for cmd in losetup parted partprobe mkfs.ext4 mkfs.fat mount umount sha256sum; do
+  command -v "$cmd" >/dev/null || { echo "Missing: $cmd" >&2; exit 1; }
+done
+
+WORK=$(mktemp -d)
+loop=""
+cleanup() {
+  mountpoint -q "$WORK/source" && umount "$WORK/source"
+  [[ -z $loop ]] || losetup -d "$loop"
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+mkdir "$WORK/source"
+MIB=$((1024 * 1024))
+
+for sector in 512 4096; do
+  echo "==> mounted source, $sector-byte logical sectors"
+  truncate -s 1G "$WORK/disk.img"
+  loop=$(losetup --find --show --partscan --sector-size "$sector" "$WORK/disk.img")
+  [[ $loop == /dev/loop[0-9]* ]] || exit 1
+  parted -s "$loop" mklabel gpt
+  parted -s "$loop" mkpart INSTALLER ext4 1MiB 65MiB
+  partprobe "$loop"
+  wait_for_device "${loop}p1"
+  mkfs.ext4 -q -F "${loop}p1"
+  mount "${loop}p1" "$WORK/source"
+  printf 'live installer payload\n' >"$WORK/source/payload"
+  umount "$WORK/source"
+  before=$(sha256sum "${loop}p1" | cut -d' ' -f1)
+  mount -o ro,noload "${loop}p1" "$WORK/source"
+
+  protect_existing_partitions "$loop"
+  created_parts=()
+  create_partition "$loop" "$((80 * MIB))" "$((144 * MIB - 1))" fat32 OMARCHY_EFI
+  esp=$created_partition_number
+  create_partition "$loop" "$((160 * MIB))" "$((480 * MIB - 1))" ext4 OMARCHY_ROOT
+  root=$created_partition_number
+  partprobe "$loop"
+  for num in "$esp" "$root"; do
+    wait_for_device "${loop}p$num"
+    verify_partition_device "$loop" "$num" "${loop}p$num"
+  done
+  verify_existing_partitions "$loop"
+  mkfs.fat -F 32 "${loop}p$esp" >/dev/null
+  mkfs.ext4 -q -F "${loop}p$root"
+
+  # A stale/wrong device must fail even if its partition number was created.
+  if verify_partition_device "$loop" "$root" "${loop}p1"; then
+    echo "Wrong kernel device accepted" >&2
+    exit 1
+  fi
+  verify_existing_partitions "$loop"
+  [[ $(cat "$WORK/source/payload") == 'live installer payload' ]]
+  [[ $(sha256sum "${loop}p1" | cut -d' ' -f1) == "$before" ]]
+  rollback_created_parts "$loop"
+  [[ $(partition_numbers "$loop") == 1 ]]
+  [[ $(sha256sum "${loop}p1" | cut -d' ' -f1) == "$before" ]]
+  umount "$WORK/source"
+  losetup -d "$loop"
+  loop=""
+  rm "$WORK/disk.img"
+done
+echo "PASS: mounted source preserved through creation, formatting and rollback"

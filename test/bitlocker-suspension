@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Check the real cryptsetup probe against disposable upstream BitLocker images.
+
+Run as root with cryptsetup >= 2.8.6 and the extracted bitlk-images directory
+from cryptsetup v2.8.6's tests/bitlk-images.tar.xz. No Windows disk is accessed.
+"""
+
+import hashlib
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from unit.test_install_media import functions
+
+
+def digest(path):
+    with path.open("rb") as image:
+        return hashlib.file_digest(image, "sha256").hexdigest()
+
+
+def check(path, expected):
+    if not path.is_file():
+        raise RuntimeError(f"Expected a regular fixture file: {path}")
+    before = digest(path)
+    mappings = set(Path("/dev/mapper").glob("omarchy-bitlocker-check-*"))
+    result = subprocess.run(
+        ["bash", "-c", functions("bitlocker_is_suspended") +
+         '\nbitlocker_is_suspended "$1"', "test", str(path)], timeout=30,
+    )
+    assert (result.returncode == 0) == expected, (path.name, result.returncode)
+    assert digest(path) == before, f"Fixture modified: {path}"
+    assert set(Path("/dev/mapper").glob("omarchy-bitlocker-check-*")) == mappings
+    print(f"PASS: {path.name} {'accepted' if expected else 'blocked'}, unchanged, no mapping left")
+
+
+if os.geteuid() != 0 or len(sys.argv) != 2:
+    sys.exit("Usage: sudo python3 test/bitlocker-suspension /path/to/bitlk-images")
+
+fixtures = Path(sys.argv[1]).resolve()
+for name, allowed in [
+    ("bitlk-aes-xts-128-clearkey-only.img", True),
+    ("bitlk-aes-xts-128.img", False),
+    ("bitlk-partially-encrypted-aes-cbc-128.img", False),
+]:
+    check(fixtures / name, allowed)
+
+with tempfile.TemporaryDirectory(prefix="omarchy-bitlocker-") as work:
+    corrupt = Path(work) / "corrupt.img"
+    shutil.copyfile(fixtures / "bitlk-aes-xts-128-clearkey-only.img", corrupt)
+    # Keep the BitLocker signature but remove the metadata needed to unlock.
+    with corrupt.open("r+b") as image:
+        image.truncate(4096)
+    check(corrupt, False)

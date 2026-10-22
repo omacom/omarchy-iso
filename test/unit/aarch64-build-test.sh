@@ -305,3 +305,24 @@ done
 [[ " $live_modules " != *" qcom_q6v5_pas"* ]] || fail "the live initramfs loads the DSP driver"
 
 echo "aarch64 build overlay tests passed"
+
+# Public images must never install the private A16 firmware package.
+if grep -Eq 'arch_packages=.*asus-zenbook-a16-firmware' "$ROOT/builder/build-iso.sh"; then
+  fail 'private A16 firmware is still included in the public image'
+fi
+source "$ROOT/builder/qualcomm/public-firmware.sh"
+public_root=$(mktemp -d)
+check_public_a16_firmware "$public_root" || fail 'clean public root rejected'
+mkdir -p "$public_root/usr/lib/firmware/updates/qcom/glymur/ASUSTeK/UX3607OA"
+echo private > "$public_root/usr/lib/firmware/updates/qcom/glymur/ASUSTeK/UX3607OA/qcadsp8480.mbn"
+if check_public_a16_firmware "$public_root" 2>/dev/null; then
+  fail 'public image accepted an OEM DSP payload'
+fi
+rm -rf "$public_root"
+mkdir -p "$public_root/offline"
+touch "$public_root/offline/asus-zenbook-a16-firmware-1-aarch64.pkg.tar.zst"
+if check_public_a16_firmware "$public_root" 2>/dev/null; then
+  fail 'public image accepted a private firmware archive'
+fi
+rm -rf "$public_root"
+echo 'public image excludes the private package and refuses OEM firmware'

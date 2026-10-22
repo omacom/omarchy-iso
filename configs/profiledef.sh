@@ -42,6 +42,7 @@ file_permissions=(
   ["/root/.gnupg"]="0:0:700"
   ["/root/configurator"]="0:0:755"
   ["/usr/local/bin/choose-mirror"]="0:0:755"
+  ["/usr/local/bin/omarchy-a16-evidence"]="0:0:755"
   ["/usr/local/bin/omarchy-cidata-load"]="0:0:755"
   ["/usr/local/bin/omarchy-iso-cleanup-disk"]="0:0:755"
   ["/usr/local/bin/omarchy-install-dashboard"]="0:0:755"

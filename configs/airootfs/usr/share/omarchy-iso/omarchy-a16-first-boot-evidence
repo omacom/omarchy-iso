@@ -1,0 +1,12 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+state=/var/lib/omarchy/a16-evidence
+[[ ! -f $state/first-boot/SHA256SUMS ]] || exit 0
+tr '\0' '\n' < /sys/firmware/devicetree/base/compatible |
+  grep -Fqix -e asus,zenbook-a16-ux3607oa -e asus,ux3607oa || exit 0
+temporary=$(mktemp -d "$state/.capture.XXXXXX")
+trap 'rm -rf -- "$temporary"' EXIT
+/usr/local/bin/omarchy-a16-evidence "$temporary/first-boot"
+mv -T -- "$temporary/first-boot" "$state/first-boot"
+echo "A16 boot evidence and SHA256SUMS saved in $state/first-boot"

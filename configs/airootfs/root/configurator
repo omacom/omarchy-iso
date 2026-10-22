@@ -374,24 +374,14 @@ get_root_disk() {
 
 # partition_path lives in disk-partitioning.sh alongside the creation helpers.
 
-# BitLocker writes the "-FVE-FS-" signature at offset 3 of the partition.
-detect_bitlocker() {
-  local p sig
-  for p in $(lsblk -lnpo NAME,TYPE "$disk" | awk '$2=="part"{print $1}'); do
-    sig=$(dd if="$p" bs=1 skip=3 count=8 status=none 2>/dev/null)
-    if [[ "$sig" == "-FVE-FS-" ]]; then
-      echo "$p"
-      return 0
-    fi
-  done
-  return 1
-}
-
 # Save vendor-signed Qualcomm firmware before a full-disk install removes Windows.
-# Missing firmware does not abort installation.
+# A16 firmware is required; other boards retain optional extraction.
 stage_qualcomm_firmware() {
-  command -v qcom-firmware-extract >/dev/null 2>&1 || return 0
+  [[ ${1:-} == dry ]] && return 0
   [[ -d /sys/firmware/devicetree/base ]] || return 0
+  (cd /usr/share/omarchy-iso && python -m orchestrator.qualcomm_firmware) ||
+    abort "Required hardware firmware could not be prepared. No installation was started."
+  command -v qcom-firmware-extract >/dev/null 2>&1 || return 0
 
   local stage=/run/omarchy/firmware
   local missing saved
@@ -399,7 +389,8 @@ stage_qualcomm_firmware() {
   ((missing > 0)) || return 0
 
   step "Saving Qualcomm firmware from Windows"
-  qcom-firmware-extract --stage "$stage" >/run/omarchy/firmware-stage.log 2>&1 || true
+  qcom-firmware-extract --stage "$stage" --unlock-bitlocker >/run/omarchy/firmware-stage.log 2>&1 ||
+    abort "Windows firmware access was cancelled or failed. No installation was started."
   saved=$(grep -c . "$stage/manifest" 2>/dev/null || true)
   if ((saved >= missing)); then
     say "Saved $saved firmware files from Windows for the install."
@@ -408,7 +399,7 @@ stage_qualcomm_firmware() {
   else
     say --foreground 1 "No Windows firmware found on this machine."
     if grep -q BitLocker /run/omarchy/firmware-stage.log 2>/dev/null; then
-      say "The Windows partition is BitLocker-encrypted. Turn BitLocker off in Windows to let the firmware be read."
+      say "Windows firmware could not be read. Retry with its recovery key or a readable driver-store copy."
     fi
     say "Installation can continue, but GPU acceleration, audio and battery reporting may need"
     say "\`sudo qcom-firmware-extract\` afterwards with a Windows driver store of this laptop model."
@@ -573,16 +564,7 @@ not_enough_space() {
 # encryption confirm. Sets the globals run_partition_execute needs. Returns 1
 # to fall back to the install-mode picker.
 run_partition_decide() {
-  step "Checking for BitLocker on $disk"
-  local bl_part
-  bl_part=$(detect_bitlocker || true)
-  if [[ -n "$bl_part" ]]; then
-    say --foreground 1 "BitLocker signature detected on $bl_part."
-    say "Turn BitLocker off in Windows and wait for the drive to finish decrypting, then try again."
-    say "Suspending BitLocker is not enough — the drive stays encrypted."
-    abort "Aborted: BitLocker is enabled on this disk."
-  fi
-
+  # This mode uses unallocated space; encrypted Windows partitions stay intact.
   # Omarchy always creates its own dedicated ESP in free space and never
   # adopts an existing (Windows) ESP. Sharing the Windows ESP is fragile:
   # Windows Update/repair can reclaim or reformat it, the typical 100-260MiB
@@ -1126,14 +1108,14 @@ if $defer_provisioning; then
   # Jump straight to disk selection + overwrite confirmation (encrypted by
   # default, Ctrl+C toggles unencrypted). deferred provisioning is always a full-disk install.
   disk_form
-  stage_qualcomm_firmware
+  stage_qualcomm_firmware "$@"
   until confirm_disk_overwrite; do
     disk_form
   done
   install_target="full_disk"
 else
   disk_form
-  stage_qualcomm_firmware
+  stage_qualcomm_firmware "$@"
   select_installation
 fi
 

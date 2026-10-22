@@ -237,6 +237,50 @@ Snapdragon laptops get no device tree from their firmware, so the live system al
 
 The runtime the image installs must have the platform detector and the Snapdragon hardware setup (`install/hardware/qualcomm/`), which lists those device trees for the installed system's own UKI. The build refuses a runtime without them. On a laptop that still has Windows, the installer copies the vendor-signed firmware off the Windows partition before the disk is written.
 
+### A16 board support on the shared kernel
+
+Build `linux-omarchy-aarch64`, then `omarchy-a16-support`,
+`qcom-firmware-extract` and `limine-mkinitcpio-hook` through the normal package
+pipeline. Retain the build workspace so support resolves the shared kernel:
+
+```bash
+./bin/build --arch aarch64 --package linux-omarchy-aarch64
+OMARCHY_KEEP_BUILD_WORKSPACE=1 ./bin/build --arch aarch64 --package omarchy-a16-support qcom-firmware-extract limine-mkinitcpio-hook
+```
+
+Publish the kernel, headers and matching `linux-omarchy-aarch64-source` split
+package together. The source package carries the complete upstream tarball,
+patches, configuration, signatures, public verification keys and build recipe.
+Keep all three available for every distributed binary revision.
+
+Put the public package archives in a bundle with `SHA256SUMS` covering each
+archive, then build with the sibling runtime and package checkouts:
+
+```bash
+OMARCHY_RUNTIME_PACKAGE=omarchy OMARCHY_SETTINGS_PACKAGE=omarchy-settings \
+  ./bin/omarchy-iso-make --arch aarch64 --edge --no-boot-offer \
+  --package-dir /absolute/path/to/verified-public-packages \
+  --local-source ../omarchy ../omarchy-pkgs
+```
+
+Public packages and images exclude owner-only ASUS DSP, Bluetooth and Wi-Fi
+calibration files. The builder rejects the private ASUS package and known OEM
+payload paths, including archives in an offline bundle. Start with clean distro
+roots and audited package inputs; this guard is not a general license scanner.
+The live A16 entry keeps DSP disabled. Public audio topology and support scripts
+remain available, without an OEM firmware dependency.
+
+Before disk cleanup, the installer must stage and validate the owner's compatible
+firmware using the extractor's supported installed-files or Windows-driver-store
+source. It fails if the required files are missing. Direct ASUS downloads are
+not implemented by the extractor. An ASUS download or ownership of the laptop
+is not permission to redistribute its files in a public package or image.
+
+The shared kernel exports the audited A16 DSP capability; support checks that
+Limine rebuilds matching kernel, DTB and initramfs after updates. Official clean
+CI, A16 installation and update/rollback tests, and existing-board regression
+checks remain required. VM validation does not establish physical acceptance.
+
 ## Testing the ISO
 
 Run `./bin/omarchy-iso-boot [release/omarchy.iso]`.

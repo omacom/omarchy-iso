@@ -137,3 +137,69 @@ rollback_created_parts() {
   partprobe "$disk" 2>/dev/null || true
   created_parts=()
 }
+
+# One line per disk, as the installer's picker shows it: device, size, vendor/model, the partitions
+# already on it, and - when that is not enough to tell two disks apart - the serial.
+#
+# Size and model are identical on twin drives, and "/dev/sda vs /dev/sdb" is not a stable identity
+# for the disk about to be wiped; the serial is what you can read off the drive itself (#112).
+get_disk_info() {
+  local device="$1" with_serial="${2:-}"
+  local size vendor model label
+
+  size=$(lsblk -dno SIZE "$device" 2>/dev/null)
+  vendor=$(lsblk -dno VENDOR "$device" 2>/dev/null | sed 's/ *$//')
+  model=$(lsblk -dno MODEL "$device" 2>/dev/null | sed 's/ *$//')
+
+  # Combine vendor and model, avoiding duplication
+  label=""
+  if [[ -n $vendor && -n $model ]]; then
+    if [[ $model == *$vendor* ]]; then
+      label="$model"
+    else
+      label="$vendor $model"
+    fi
+  elif [[ -n $model ]]; then
+    label="$model"
+  elif [[ -n $vendor ]]; then
+    label="$vendor"
+  fi
+
+  local display="$device"
+  [[ -n $size ]] && display="$display ($size)"
+  [[ -n $label ]] && display="$display - $label"
+
+  local part_summary
+  part_summary=$(lsblk -nro TYPE,NAME,FSTYPE,MOUNTPOINT "$device" 2>/dev/null | \
+    awk '$1=="part" { printf "%s%s%s", s, ($3==""?"unknown":$3), ($4==""?"":"("$4")"); s=", " }')
+  [[ -n $part_summary ]] && display+=" [$part_summary]"
+
+  if [[ $with_serial == true ]]; then
+    local serial
+    serial=$(lsblk -dno SERIAL "$device" 2>/dev/null | sed 's/ *$//')
+    [[ -n $serial ]] && display+=" [$serial]"
+  fi
+
+  printf '%s\n' "$display"
+}
+
+# The picker's options, one per device read from stdin. The serial is added only when two disks
+# would otherwise render the same line, so the usual three-disk machine stays as short as it was.
+disk_picker_options() {
+  local devices device identities="" ambiguous=false
+
+  devices=$(cat)
+  while IFS= read -r device; do
+    [[ -n $device ]] || continue
+    identities+="$(get_disk_info "$device" | sed 's/^[^ ]* //')"$'\n'
+  done <<<"$devices"
+
+  if [[ -n $(sort <<<"$identities" | uniq -d | head -1) ]]; then
+    ambiguous=true
+  fi
+
+  while IFS= read -r device; do
+    [[ -n $device ]] || continue
+    get_disk_info "$device" "$ambiguous"
+  done <<<"$devices"
+}

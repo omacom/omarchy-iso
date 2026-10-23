@@ -102,6 +102,8 @@ for cfg in grub.cfg loopback.cfg; do
   grep -Fq '%BOOT_SPLASH_KERNEL_OPTIONS%%KERNEL_OPTIONS%' "$src" || fail "$cfg does not template boot options"
   grep -Fq -- "--id 'n1x-recovery'" "$src" || fail "$cfg lacks the N1x recovery entry"
   grep -Fq 'omarchy.n1x_recovery=1 acpi=nospcr' "$src" || fail "$cfg recovery entry lacks acpi=nospcr"
+  grep -Fq "if [ \"\${product_name}\" == '83SS' ]; then" "$src" || fail "$cfg does not limit acpi_osi=! to the Lenovo Pro 9"
+  grep -Fq '${lenovo_osi}' "$src" || fail "$cfg does not pass the Lenovo OSI parameter"
   source "$ROOT/builder/grub-platform.sh"
   for platform in x86_64 aarch64; do
     cp "$src" "$fixture/$platform-$cfg"

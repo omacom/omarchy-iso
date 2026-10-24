@@ -110,6 +110,28 @@ class LanguageDefaultsTest(unittest.TestCase):
     def setUp(self):
         self.defaults = json.loads((SHARE / "language-defaults.json").read_text())
 
+    def form_environment(self, *languages):
+        # The configurator runs its screens when sourced, so take the two functions out of it.
+        configurator = SOURCES[0].read_text()
+        functions = "\n".join(re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", configurator, re.MULTILINE | re.DOTALL).group(0)
+                              for name in ("language_default", "set_form_language"))
+        steps = "".join(f'language={code}; set_form_language; env | grep "^OMARCHY_FORM_" | sort; echo --;' for code in languages)
+        output = subprocess.run(
+            ["bash", "-c", f"{functions}\n{steps}"],
+            env={"PATH": os.environ["PATH"], "LANGUAGE_DEFAULTS": str(SHARE / "language-defaults.json")},
+            capture_output=True, text=True, check=True,
+        ).stdout
+        return [dict(line.split("=", 1) for line in block.strip().splitlines()) for block in output.split("--\n")[:-1]]
+
+    def test_the_setup_form_gets_the_language_and_its_defaults(self):
+        polish, arabic, unknown = self.form_environment("pl", "ar", "xx")
+        self.assertEqual(polish, {"OMARCHY_FORM_LANGUAGE": "pl", "OMARCHY_FORM_KEYBOARD_DEFAULT": "Polish",
+                                  "OMARCHY_FORM_TIMEZONE_FALLBACK": "Europe/Warsaw"})
+        # Picking again replaces the fallback, and a language with no home country has none.
+        self.assertEqual(arabic, {"OMARCHY_FORM_LANGUAGE": "ar", "OMARCHY_FORM_KEYBOARD_DEFAULT": "English (US)",
+                                  "OMARCHY_FORM_TIMEZONE_FALLBACK": ""})
+        self.assertEqual(unknown["OMARCHY_FORM_KEYBOARD_DEFAULT"], "English (US)")
+
     def test_every_language_in_the_picker_has_defaults(self):
         self.assertLessEqual(set(catalogs()), set(self.defaults))
         registry = omarchy_file("default/i18n/locales.json")

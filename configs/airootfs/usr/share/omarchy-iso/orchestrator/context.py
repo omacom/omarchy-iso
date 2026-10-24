@@ -244,7 +244,9 @@ def _default_omarchy_install(user_configuration: dict) -> dict[str, Any]:
             "esp_mount": "/boot",
             "esp_path": "/EFI/limine",
             "efi_binary": "limine_aa64.efi" if platform.machine() == "aarch64" else "limine_x64.efi",
-            "enable_fallback": mode == "full_disk",
+            # Both modes install to an Omarchy-owned ESP, so the removable
+            # path is ours to claim in either. See _boot_intent.
+            "enable_fallback": True,
         },
         "storage": {},
     }

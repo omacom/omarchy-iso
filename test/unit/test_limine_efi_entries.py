@@ -30,9 +30,13 @@ class LimineEFIEntriesTest(unittest.TestCase):
     def run_registration(self, run=None):
         with mock.patch.object(phases, "_read_efibootmgr", return_value=self.after), \
              mock.patch.object(phases, "info"), \
-             mock.patch.object(phases.subprocess, "run", side_effect=run) as calls:
+             mock.patch.object(phases.subprocess, "run", side_effect=run or self.succeed) as calls:
             phases._register_limine_efi_entry(Path("/dev/nvme0n1"), 3, LOADER, pre_state=self.before)
             return [call.args[0] for call in calls.call_args_list]
+
+    @staticmethod
+    def succeed(command, **kwargs):
+        return types.SimpleNamespace(returncode=0, stderr="")
 
     def deleted(self, calls):
         return [c[2] for c in calls if "--delete-bootnum" in c]
@@ -45,18 +49,16 @@ class LimineEFIEntriesTest(unittest.TestCase):
         self.assertEqual(calls[-1], ["efibootmgr", "--bootorder", "0006,0003,0001,0004,0005"])
 
     def test_creation_failure_does_not_delete_existing_entries(self):
-        calls = []
         def fail(command, **kwargs):
-            calls.append(command)
-            raise subprocess.CalledProcessError(1, command)
-        with self.assertRaises(subprocess.CalledProcessError):
-            self.run_registration(fail)
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="No space left on device")
+        with mock.patch.object(phases, "error"):
+            calls = self.run_registration(fail)
         self.assertEqual(len(calls), 1)
         self.assertIn("--create", calls[0])
 
     def test_failed_cleanup_does_not_abort_installation(self):
         def run(command, **kwargs):
-            return types.SimpleNamespace(returncode=1 if "--delete-bootnum" in command else 0)
+            return types.SimpleNamespace(returncode=1 if "--delete-bootnum" in command else 0, stderr="")
         calls = self.run_registration(run)
         self.assertEqual(self.deleted(calls), ["0002"])
         self.assertEqual(calls[-1][-1], "0006,0003,0001,0004,0005")

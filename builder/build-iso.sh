@@ -341,6 +341,23 @@ else
   # linux-t2 is the live kernel on a Mac (configs/grub/grub.cfg).
   arch_packages=("$OMARCHY_KERNEL" linux-t2 git gum jq openssl plymouth ttfx tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
 fi
+# Use the installed system's networking stack in the live environment too.
+# NetworkManager supplies nmtui for connecting before a support log upload.
+arch_packages+=(networkmanager)
+live_units="$build_cache_dir/airootfs/etc/systemd/system"
+rm -f \
+  "$live_units/multi-user.target.wants/iwd.service" \
+  "$live_units/multi-user.target.wants/systemd-networkd.service" \
+  "$live_units/sockets.target.wants/systemd-networkd.socket" \
+  "$live_units/network-online.target.wants/systemd-networkd-wait-online.service" \
+  "$live_units/dbus-org.freedesktop.network1.service"
+for unit in iwd.service systemd-networkd.service systemd-networkd-wait-online.service \
+  systemd-networkd.socket systemd-networkd-varlink.socket \
+  systemd-networkd-varlink-metrics.socket systemd-networkd-resolve-hook.socket; do
+  ln -sf /dev/null "$live_units/$unit"
+done
+ln -sf /usr/lib/systemd/system/NetworkManager.service \
+  "$live_units/multi-user.target.wants/NetworkManager.service"
 live_packages_file="$build_cache_dir/packages.$OMARCHY_ARCH"
 printf '%s\n' "${arch_packages[@]}" >> "$live_packages_file"
 
@@ -351,7 +368,8 @@ printf '%s\n' "${arch_packages[@]}" >> "$live_packages_file"
 # the only releng package that does, so pacman would drag the kernel straight back
 # in. broadcom-wl is a prebuilt module for stock linux and cannot load on the
 # kernel we boot, so it has done nothing since we started booting T2 anyway. The
-# install is entirely offline and the live environment needs no Wi-Fi driver.
+# install is entirely offline; live Wi-Fi uses the selected kernel's drivers
+# and the firmware inherited from releng.
 #
 # Anchored so linux-omarchy, linux-t2 and linux-firmware are untouched.
 sed -i -E '/^(linux|broadcom-wl)$/d' "$live_packages_file"

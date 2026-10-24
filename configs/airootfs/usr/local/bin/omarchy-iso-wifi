@@ -1,0 +1,25 @@
+#!/bin/bash
+# Connect the live ISO to Wi-Fi, from the failure menu or another TTY.
+set -euo pipefail
+
+if ! systemctl --no-ask-password start NetworkManager; then
+  echo "Could not start networking. Check systemctl status NetworkManager."
+  exit 1
+fi
+
+if ! nmcli -t -f TYPE device status | grep -qx 'wifi'; then
+  echo "No Wi-Fi adapter is available. Its driver or firmware may be missing."
+  echo "Try Ethernet or USB phone tethering to get online."
+  exit 1
+fi
+
+if ! nmcli radio wifi on; then
+  echo "Could not enable Wi-Fi. Check your laptop's wireless switch."
+  echo "You can also use Ethernet or USB phone tethering."
+  exit 1
+fi
+
+# Restore the terminal even if the picker exits before its own cleanup runs.
+terminal_state=$(stty -g)
+trap 'stty "$terminal_state"' EXIT
+nmtui-connect

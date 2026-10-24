@@ -14,6 +14,19 @@ The Omarchy ISO is the only supported way to install Omarchy. It includes the Om
 
 The install takes under a minute on the fastest machines and up to 5 minutes on an older computer.
 
+### Get online to share logs
+
+Installation works offline. If it fails, choose **Connect to Wi-Fi** to select a network in nmtui, then press `Esc` to return and choose **Upload log for support**. Uploading also offers to connect when it cannot reach the log service.
+
+From another console (`Ctrl + Alt + F2`), log in as `root` and run:
+
+```bash
+omarchy-iso-wifi
+omarchy-upload-log install
+```
+
+The uploader prints a URL to share with support. If no Wi-Fi adapter is available, try Ethernet or USB phone tethering.
+
 ### Verify the download
 
 Verify the ISO before you write it to the stick. Otherwise, a corrupted download causes a pacman "invalid or corrupted package" error several minutes into the install.

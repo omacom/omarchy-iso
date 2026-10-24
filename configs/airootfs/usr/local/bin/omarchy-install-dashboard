@@ -812,6 +812,11 @@ render_failure_log_tail() {
   # does not know about, so the tail gives way rather than pushing the top of
   # the screen off a short console.
   local reserved="${1:-0}" rows lines width line tail_log label
+  # Leave room for the Wi-Fi action and gum's header/footer when the failure
+  # menu is shown. An unattended failure only prints the log and exits.
+  if interactive; then
+    (( reserved += 4 ))
+  fi
   rows=$(term_size)
   rows=${rows%% *}
   lines=$((rows - LOGO_HEIGHT - 18 - reserved))
@@ -858,11 +863,44 @@ prompt_enter() {
   IFS= read -r _ <"$TTY_PATH" || true
 }
 
+connect_wifi() {
+  printf '%s%s' "$SHOW_CURSOR" "$CLEAR" >"$TTY_PATH" 2>/dev/null || true
+  if omarchy-iso-wifi <"$TTY_PATH" >"$TTY_PATH" 2>&1; then
+    printf '%s%s%s' "$RESET" "$SHOW_CURSOR" "$CLEAR" >"$TTY_PATH" 2>/dev/null || true
+    return 0
+  else
+    prompt_enter
+    return 1
+  fi
+}
+
+can_reach_log_service() {
+  # Test the service we need, rather than assuming an address or an ICMP
+  # reply means uploading works. Keep an offline attempt short.
+  curl -fsS --connect-timeout 5 --max-time 10 -o /dev/null \
+    https://logs.omarchy.org/ >/dev/null 2>&1
+}
+
 upload_failure_log() {
   local uploader
   printf '%s%s' "$SHOW_CURSOR" "$CLEAR" >"$TTY_PATH" 2>/dev/null || true
   if uploader=$(find_log_uploader); then
-    "$uploader" install >"$TTY_PATH" 2>&1 || true
+    if ! can_reach_log_service; then
+      echo "Cannot reach logs.omarchy.org." >"$TTY_PATH"
+      if gum confirm "Connect to Wi-Fi and upload the log?" <"$TTY_PATH" >"$TTY_PATH" 2>&1; then
+        connect_wifi || return 0
+        if ! can_reach_log_service; then
+          echo "Still unable to reach logs.omarchy.org. Try Ethernet or USB phone tethering." >"$TTY_PATH"
+          prompt_enter
+          return 0
+        fi
+      else
+        return 0
+      fi
+    fi
+    if ! timeout 60 "$uploader" install >"$TTY_PATH" 2>&1; then
+      echo "Log upload failed. Check your connection and try again." >"$TTY_PATH"
+    fi
   else
     {
       echo "No log uploader is available in this environment."
@@ -966,9 +1004,10 @@ failure_menu() {
     uploader=$(find_log_uploader || true)
     if [[ -n $uploader ]]; then
       choice=$(gum choose \
-        --height 6 \
+        --height 7 \
         --header "What would you like to do?" \
         "Upload log for support" \
+        "Connect to Wi-Fi" \
         "View full log" \
         "Drop to shell" \
         "Reboot" \
@@ -976,8 +1015,9 @@ failure_menu() {
         <"$TTY_PATH" 2>"$TTY_PATH") || choice="Drop to shell"
     else
       choice=$(gum choose \
-        --height 5 \
+        --height 6 \
         --header "What would you like to do?" \
+        "Connect to Wi-Fi" \
         "View full log" \
         "Drop to shell" \
         "Reboot" \
@@ -986,6 +1026,10 @@ failure_menu() {
     fi
 
     case "$choice" in
+      "Connect to Wi-Fi")
+        connect_wifi || true
+        render_failure "${failure_status:-1}" "${failure_summary:-}" "${failure_media_diagnosis:-}" >"$TTY_PATH" 2>/dev/null || true
+        ;;
       "Upload log for support")
         upload_failure_log
         render_failure "${failure_status:-1}" "${failure_summary:-}" "${failure_media_diagnosis:-}" >"$TTY_PATH" 2>/dev/null || true

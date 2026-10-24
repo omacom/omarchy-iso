@@ -238,43 +238,33 @@ notice() {
 # their English name and only set the installed system's language.
 
 LANGUAGES_JSON="${LANGUAGES_JSON:-$OMARCHY_PATH/default/i18n/locales.json}"
-ISO_PRESET="${ISO_PRESET:-/usr/share/omarchy-iso/preset.json}"
+language="en"
 
-# Install media built for one market can preselect a language, or set it outright
-# with "language_prompt": false. A code the registry lacks falls back to English.
-language=$(jq -r '.language // empty' "$ISO_PRESET" 2>/dev/null)
-jq -e --arg code "$language" 'has($code)' "$LANGUAGES_JSON" >/dev/null 2>&1 || language="en"
-ask_language=true
-[[ $(jq -r '.language_prompt' "$ISO_PRESET" 2>/dev/null) == "false" ]] && ask_language=false
-
-# The keyboard list preselects the layout that goes with the language, unless the
-# media's preset names a keyboard of its own. OMARCHY_FORM_KEYBOARD_DEFAULT is the
-# setup form's own default (omacom/omarchy#15522); gum() covers a form without it.
+# The keyboard list preselects the layout that goes with the language.
+# OMARCHY_FORM_KEYBOARD_DEFAULT is the setup form's own default
+# (omacom/omarchy#15522); gum() covers a form without it.
 LANGUAGE_DEFAULTS="${LANGUAGE_DEFAULTS:-$OMARCHY_ISO_SHARE/language-defaults.json}"
-preset_keyboard=$(jq -r '.keyboard // empty' "$ISO_PRESET" 2>/dev/null)
-preset_timezone=$(jq -r '.timezone // empty' "$ISO_PRESET" 2>/dev/null)
 
 language_default() {
   jq -r --arg code "$language" --arg field "$1" '.[$code][$field] // empty' "$LANGUAGE_DEFAULTS" 2>/dev/null
 }
 
 default_keyboard_for_language() {
-  OMARCHY_FORM_KEYBOARD_DEFAULT=${preset_keyboard:-$(language_default keyboard)}
+  OMARCHY_FORM_KEYBOARD_DEFAULT=$(language_default keyboard)
   OMARCHY_FORM_KEYBOARD_DEFAULT=${OMARCHY_FORM_KEYBOARD_DEFAULT:-English (US)}
   export OMARCHY_FORM_KEYBOARD_DEFAULT
 }
 
-# The timezone list preselects where the network says this machine is. A
-# preset's timezone wins, and when the guess fails (offline, say) the language's
-# country stands in; languages with no single home country have none. The
+# The timezone list preselects where the network says this machine is. When
+# the guess fails (offline, say) the language's country stands in; languages with no single home country have none. The
 # setup form takes it as OMARCHY_FORM_TIMEZONE_DEFAULT; one that predates that
 # asks tzupdate instead, so tzupdate answers with the same guess. The network
 # is asked once, when the timezone screen first opens.
 timezone_guessed=false
 default_timezone() {
   if ! $timezone_guessed; then
-    local zone=$preset_timezone
-    [[ -n $zone ]] || zone=$(curl -fsS --max-time 5 https://geo.omarchy.org/ 2>/dev/null | jq -r '.timezone // empty' 2>/dev/null) || zone=""
+    local zone
+    zone=$(curl -fsS --max-time 5 https://geo.omarchy.org/ 2>/dev/null | jq -r '.timezone // empty' 2>/dev/null) || zone=""
     OMARCHY_ISO_TIMEZONE_GUESS=$zone
     timezone_guessed=true
   fi
@@ -314,7 +304,7 @@ language_rows() {
 language_form() {
   local choice status
 
-  if $ask_language && [[ -r $LANGUAGES_JSON ]]; then
+  if [[ -r $LANGUAGES_JSON ]]; then
     while true; do
       clear_logo
       echo
@@ -346,11 +336,6 @@ keyboard_form() {
   while true; do
     clear_logo
     echo
-    # Without the language screen, this is the first one and carries its intro.
-    if ! $ask_language; then
-      say "$(t keyboard.intro)"
-      say --foreground 8 "$(t keyboard.anotherOwner)"
-    fi
     if ! i18n_translated "$language"; then
       # English on purpose: there is no catalog for this language to say it in.
       say --foreground 8 "The installer stays in English. Omarchy will be in $(language_label "$language") once installed."
@@ -367,13 +352,7 @@ keyboard_form() {
       continue
     fi
 
-    if ((status == OMARCHY_FORM_SIGNAL)); then
-      if ! $ask_language && confirm_prepare_for_another_owner; then
-        defer_provisioning=true
-        return 0
-      fi
-      continue
-    fi
+    ((status == OMARCHY_FORM_SIGNAL)) && continue
     abort
   done
 

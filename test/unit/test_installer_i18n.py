@@ -78,8 +78,6 @@ class CatalogTest(unittest.TestCase):
                     self.assertLessEqual(len(text), max(80, len(self.english[key]) + 10))
                     if key.startswith("summary.") and key != "summary.prompt":
                         self.assertNotIn(",", text, "the summary is a comma-separated gum table")
-                    if key.startswith("form.") and key.endswith(".prompt"):
-                        self.assertTrue(text.endswith("> "))
 
     def test_tips_fit_the_progress_screen_without_truncation(self):
         # The dashboard cuts the tip line at the logo's 81 columns.
@@ -105,16 +103,7 @@ class CatalogTest(unittest.TestCase):
             used |= set(re.findall(r"\bt ([a-z][A-Za-z]*(?:\.[A-Za-z]+)+)", text))
             used |= set(re.findall(r"^\s+(progress\.(?:whimsy|tip)\.[A-Za-z]+)$", text, re.MULTILINE))
         self.assertEqual(used - set(self.english), set())
-        self.assertEqual({key for key in self.english if not key.startswith("form.")} - used, set())
-
-    def test_form_strings_match_the_setup_form_they_translate(self):
-        form = omarchy_file("install/provisioning/setup-form.sh")
-        if form is None:
-            self.skipTest("no Omarchy runtime to read the setup form from")
-        text = form.read_text()
-        for key, english in self.english.items():
-            if key.startswith("form."):
-                self.assertIn(f'"{english}"', text, key)
+        self.assertEqual(set(self.english) - used, set())
 
 
 class LanguageDefaultsTest(unittest.TestCase):
@@ -246,14 +235,13 @@ class ShellLookupTest(unittest.TestCase):
             capture_output=True, text=True, check=True,
         ).stdout
 
-    def test_placeholders_fallback_and_form_text(self):
+    def test_placeholders_and_english_fallback(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
-            (directory / "en.json").write_text(json.dumps({"a.b": "Disk %1 has %2", "a.only": "English only", "form.x": "Username> "}))
-            (directory / "da.json").write_text(json.dumps({"a.b": "%2 på %1 & mere", "form.x": "Brugernavn> "}))
+            (directory / "en.json").write_text(json.dumps({"a.b": "Disk %1 has %2", "a.only": "English only"}))
+            (directory / "da.json").write_text(json.dumps({"a.b": "%2 på %1 & mere"}))
             self.assertEqual(self.lookup('i18n_load da; t a.b /dev/sda 32GB', directory), "32GB på /dev/sda & mere")
             self.assertEqual(self.lookup('i18n_load da; t a.only', directory), "English only")
-            self.assertEqual(self.lookup('i18n_load da; printf %s "${OMARCHY_ISO_FORM_TEXT["Username> "]}"', directory), "Brugernavn> ")
             self.assertEqual(self.lookup('i18n_load ../da; t a.b x y', directory), "Disk x has y")
 
 

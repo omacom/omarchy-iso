@@ -8,16 +8,12 @@ OMARCHY_ISO_SHARE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 OMARCHY_ISO_I18N_DIR=${OMARCHY_ISO_I18N_DIR:-$OMARCHY_ISO_SHARE/i18n}
 
 declare -gA OMARCHY_ISO_TEXT=()
-declare -gA OMARCHY_ISO_FORM_TEXT=()
 
-# The setup form is vendored from Omarchy in English, so its strings are
-# translated by their English text as they reach gum (see gum() in the configurator).
 i18n_load() {
   local code=en file key value
   i18n_translated "${1:-}" && code=$1
 
   OMARCHY_ISO_TEXT=()
-  OMARCHY_ISO_FORM_TEXT=()
   for file in "$OMARCHY_ISO_I18N_DIR/en.json" "$OMARCHY_ISO_I18N_DIR/$code.json"; do
     [[ -r $file ]] || continue
     while IFS=$'\t' read -r key value; do
@@ -25,9 +21,6 @@ i18n_load() {
     done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' "$file")
   done
 
-  while IFS=$'\t' read -r key value; do
-    OMARCHY_ISO_FORM_TEXT[$value]=${OMARCHY_ISO_TEXT[$key]}
-  done < <(jq -r 'to_entries[] | select(.key | startswith("form.")) | [.key, .value] | @tsv' "$OMARCHY_ISO_I18N_DIR/en.json" 2>/dev/null)
 }
 
 i18n_translated() {

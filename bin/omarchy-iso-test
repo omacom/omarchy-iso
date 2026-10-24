@@ -794,30 +794,6 @@ drive_provision_owner() {
   type_text "$GUEST_PASSWORD"
   press ret
 
-  # Omarchy packages from before git setup moved to first login still ask for
-  # a name and email here; current ones go straight to the hostname.
-  wait_for_screen "Full name\|Hostname" 60
-  if ocr_screen | grep -qi "Full name"; then
-    type_text "Omarchy Test"
-    press ret
-
-    wait_for_screen "Email address" 60
-    # The keyboard step above applied English (UK), where '@' is Shift+' (not
-    # Shift+2 as on US); send that keycode so the typed email is correct under
-    # the new layout — itself further proof the deferred keymap took effect.
-    type_text "test"
-    if [[ $KEYBOARD_LABEL == "English (US)" || $KEYBOARD_LABEL == "English (UK)" ]]; then
-      press shift-apostrophe
-    elif [[ $KEYBOARD_LABEL == "Japanese" ]]; then
-      press bracket_left
-    else
-      press shift-2
-    fi
-    type_text "omarchy.org"
-    capture_console "success-provision-04-email"
-    press ret
-  fi
-
   # Hostname is deferred to first boot too.
   wait_for_screen "Hostname" 60
   type_text "$GUEST_HOSTNAME"

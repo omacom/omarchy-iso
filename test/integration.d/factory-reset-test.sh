@@ -202,10 +202,6 @@ drive_first_boot() {
       step="confirm"; [[ -v answered[$step] ]] || { type_text "$GUEST_PASSWORD"; press ret; }
     elif grep -qi "Password" <<<"$text"; then
       step="password"; [[ -v answered[$step] ]] || { type_text "$GUEST_PASSWORD"; press ret; }
-    elif grep -qi "Full name" <<<"$text"; then
-      step="fullname"; [[ -v answered[$step] ]] || { type_text "Omarchy Test"; press ret; }
-    elif grep -qi "Email address" <<<"$text"; then
-      step="email"; [[ -v answered[$step] ]] || { type_text "test@omarchy.org"; press ret; }
     elif grep -qi "Hostname" <<<"$text"; then
       step="hostname"; [[ -v answered[$step] ]] || { type_text "$GUEST_HOSTNAME"; capture_console "success-firstboot-02-form"; press ret; }
     elif grep -qi "Timezone" <<<"$text"; then

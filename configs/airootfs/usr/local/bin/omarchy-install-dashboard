@@ -287,18 +287,43 @@ set_now() {
   return 0
 }
 
-left_padding() {
-  local width="${1:-$CONTENT_WIDTH}" cols pad
-  cols="$(term_cols)"
-  pad=$(( (cols - width) / 2 ))
-  (( pad < 0 )) && pad=0
-  printf '%*s' "$pad" ''
+# Sets PADDING to the columns left of a block of the given width centered on
+# the console. It reads the size on every call, as term_cols does, with one
+# fork, for stty: center() runs three times a frame. Without the exec, bash
+# forks again to run a command with redirections in $(...).
+measure_padding() {
+  local width="$1" size cols
+  size="$(exec stty size 2>/dev/null <"$TTY_PATH")" || size="24 80"
+  cols="${size#* }"
+  PADDING=$(( (cols - width) / 2 ))
+  (( PADDING < 0 )) && PADDING=0
+  return 0
 }
 
+left_padding() {
+  measure_padding "${1:-$CONTENT_WIDTH}"
+  printf '%*s' "$PADDING" ''
+}
+
+# Sets VISIBLE_LEN to the length of text printed with %b, less the escape
+# sequences the pattern matches. Bash's =~ finds them without a subshell, with
+# the glibc regex sed uses too, so its ranges read the same in every locale.
+# Text with a backslash or a newline still goes through printf and sed: %b can
+# make a NUL of a backslash escape, which $(...) drops and a variable cannot
+# hold, and $(...) drops trailing newlines.
 visible_len() {
-  local text="$1"
-  text="$(printf '%b' "$text" | sed -E $'s/\x1b\\[[0-9;?]*[A-Za-z]//g')"
-  printf '%s' "${#text}"
+  local text="$1" plain="" escape=$'\x1b\\[[0-9;?]*[A-Za-z]'
+  if [[ $text == *\\* || $text == *$'\n'* ]]; then
+    text="$(printf '%b' "$text" | sed -E "s/$escape//g")" || true
+    VISIBLE_LEN=${#text}
+    return 0
+  fi
+  while [[ $text =~ $escape ]]; do
+    plain+=${text%%"${BASH_REMATCH[0]}"*}
+    text=${text#*"${BASH_REMATCH[0]}"}
+  done
+  plain+=$text
+  VISIBLE_LEN=${#plain}
 }
 
 blank_line() { printf '\r%s\n' "$CLEAR_LINE"; }
@@ -311,11 +336,12 @@ line_at() {
 }
 
 center() {
-  local text="$1" width="${2:-$CONTENT_WIDTH}" len inner_pad
-  len="$(visible_len "$text")"
-  inner_pad=$(( (width - len) / 2 ))
+  local text="$1" width="${2:-$CONTENT_WIDTH}" inner_pad
+  visible_len "$text"
+  inner_pad=$(( (width - VISIBLE_LEN) / 2 ))
   (( inner_pad < 0 )) && inner_pad=0
-  printf '\r%s%s%*s%b%s\n' "$CLEAR_LINE" "$(left_padding "$width")" "$inner_pad" '' "$text" "$RESET"
+  measure_padding "$width"
+  printf '\r%s%*s%*s%b%s\n' "$CLEAR_LINE" "$PADDING" '' "$inner_pad" '' "$text" "$RESET"
 }
 
 render_logo() {

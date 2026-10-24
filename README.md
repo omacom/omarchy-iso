@@ -44,6 +44,28 @@ The output must say `Good signature from "Omarchy <pkgs@omarchy.org>"` and show 
 - [Dual-boot install](https://omarchy.org/manual/dual-boot-install/): install Omarchy in the free space of a drive, beside Windows or another OS.
 - [Unattended installs](https://omarchy.org/manual/unattended-installs/): let the ISO install itself from a configuration on a second drive, with no keyboard and no wizard.
 
+## Chroot into an existing installation
+
+Boot an Omarchy ISO that supports the machine. From the normal live shell or the **N1x recovery shell** available in the N1x ISO boot menu, run:
+
+```bash
+omarchy-chroot
+```
+
+Choose the installed root partition and enter its disk password if encrypted. The helper mounts the root, then reads the installed `/etc/fstab` to mount boot/EFI, `/usr`, `/var`, the package cache, logs and snapshots when they have separate filesystems. It exposes the ISO's packages at `/var/cache/omarchy/mirror/offline` inside the chroot shell, without hiding the installed package cache. Type `exit` to unmount the filesystems and close the encryption mapping the helper created.
+
+The helper opens a chroot shell for you to inspect or maintain the installed system. You choose and run any repair commands yourself. The offline mirror is read-only and the installed system is writable. `uname -r` in the shell reports the ISO's running kernel, so use `pacman -Q` to inspect installed kernel packages. Use the N1x platform kernel when replacing that machine's kernel.
+
+For a specific partition or a nonstandard Btrfs root subvolume:
+
+```bash
+omarchy-chroot --list
+omarchy-chroot --root /dev/nvme0n1p2
+omarchy-chroot --root /dev/nvme0n1p2 --subvolume @root
+```
+
+Use `--list --json` for discovery in scripts and `--root DEVICE -- COMMAND` to run a command inside the chroot instead of an interactive shell. The default mount directory is `/mnt`; `--mountpoint` selects another empty directory. Existing mounts are left alone: unmount a manually mounted installation first or use another directory. Btrfs (normally `@`), ext4 and XFS roots are supported. For LVM inside LUKS, unlock and activate the logical volumes first, then select the unmounted root logical volume. Additional encrypted filesystems must also be unlocked first. Network and bind mounts need manual mounting; `/home` is not mounted. If something is still using a mount at exit, the helper leaves it mounted and prints the cleanup commands.
+
 # For maintainers
 
 The rest of this file covers building, testing and publishing the ISO.
@@ -248,6 +270,13 @@ The runtime the image installs must have the platform detector and the Snapdrago
 Run `./bin/omarchy-iso-boot [release/omarchy.iso]`.
 
 Run `./test/all` for the fast, VM-free tests under `test/unit/`, which cover cidata autoinstall loading and the orchestrator's phases without needing a built ISO.
+
+`test/chroot-loopback` checks chroot setup and cleanup with real LUKS, Btrfs subvolumes, a separate boot partition and `arch-chroot`. It creates its own disposable disk image and requires a fresh privileged container; it refuses to run directly on the host:
+
+```bash
+docker run --rm --privileged -v "$PWD:/work:ro" -w /work archlinux/archlinux:latest \
+  bash -euc 'pacman -Syu --noconfirm --needed arch-install-scripts btrfs-progs cryptsetup dosfstools python util-linux; python3 test/chroot-loopback'
+```
 
 To exercise installation alongside existing Windows-style partitions, run
 `./bin/omarchy-iso-test-windows-disk [release/omarchy.iso]`. It creates a

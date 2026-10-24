@@ -38,6 +38,7 @@ from . import archinstall_adapter as arch
 from .command import capture, capture_identifier, require_text
 from .context import InstallContext, hw_platform, iso_kernel
 from .keyboard import configure_keyboard
+from .region import GLOBAL
 from .ui import error, info
 
 
@@ -336,6 +337,8 @@ def arch_install_system(ctx: InstallContext) -> None:
             base_pkgs_file = _base_package_file()
             info(f"› installing Omarchy runtime + {base_pkgs_file.name}")
             installer.add_additional_packages(_runtime_package_list(ctx, base_pkgs_file))
+
+            _write_region_marker(ctx)
 
             # Tailscale is bundled in the offline mirror but only installed
             # when an autoinstall drive staged an auth key; must happen here,
@@ -804,6 +807,17 @@ def _unmask_mkinitcpio_pacman_hooks(
                 backup.rename(path)
         except OSError as exc:
             info(f"warning: failed to restore pacman hook mask for {name}: {exc}")
+
+
+def _write_region_marker(ctx: InstallContext) -> None:
+    """Tell the runtime's pacman finalizer which profile to apply. Global
+    installs write nothing, so they stay identical to a region-less install."""
+    if ctx.region == GLOBAL:
+        return
+    marker = ctx.target / "etc/omarchy/region"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(ctx.region + "\n")
+    marker.chmod(0o644)
 
 
 def _base_package_file(share: Path = Path("/usr/share/omarchy-iso")) -> Path:

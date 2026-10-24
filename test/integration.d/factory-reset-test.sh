@@ -13,6 +13,14 @@
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
+# This scenario is about a shared UEFI ESP (Windows + a foreign Linux under
+# EFI/Linux, efibootmgr entries) — concepts that do not exist on a legacy BIOS
+# install. Skip it there rather than fail its UEFI-specific assertions.
+if [[ $FIRMWARE != uefi ]]; then
+  log "factory-reset is UEFI-only (shared-ESP dual boot); skipping under $FIRMWARE"
+  exit 0
+fi
+
 FOREIGN_ID="fedcfedcfedcfedcfedcfedcfedcfedc"
 
 base_image_ready || { echo "No base image; run this through ./test/integration" >&2; exit 1; }
@@ -52,6 +60,11 @@ CONF
   " >/dev/null
 
   ssh_sudo "cat /boot/limine.conf" >"$RUN_DIR/limine.conf.fixtured"
+  # Every UKI the fixture planted, kept on this side: the reset wipes foreign
+  # boot directories (a known failure), so a list stored on the ESP would
+  # vanish with them and fail the UKI check for the wrong reason.
+  FOREIGN_UKIS=$(ssh_sudo "ls /boot/EFI/Linux/foreign_*.efi" | tr '\r\n' '  ')
+  [[ $FOREIGN_UKIS == *foreign_* ]] || { echo "the fixture planted no foreign UKI" >&2; return 1; }
   log "ESP fixtured as a shared dual-boot ESP (old machine-id $OLD_ID)"
 }
 
@@ -105,6 +118,17 @@ reset_phase() {
   start_vm_from_base
   wait_for_ssh "$BOOT_TIMEOUT"
 
+  # The encrypted variant only reaches here because the boot passphrase was
+  # typed and SSH then answered -- but prove the disk is genuinely encrypted at
+  # rest and unlocked, not just that a prompt appeared. A plain install has no
+  # LUKS volume, so these run only for the encrypted variant.
+  if [[ ${ENCRYPT:-false} == true ]]; then
+    check "disk carries a LUKS volume at rest" \
+      ssh_sudo 'blkid | grep -q crypto_LUKS'
+    check "root runs on an unlocked dm-crypt device" \
+      ssh_sudo 'lsblk -no TYPE | grep -qx crypt'
+  fi
+
   fixture_shared_esp
 
   log "Running omarchy-system-factory-reset"
@@ -112,6 +136,15 @@ reset_phase() {
   wait_for_reset_output "Type 'reset' to continue" 60
   capture_console "success-reset-confirm"
   ssh_guest "printf 'reset\r' >/tmp/reset.in"
+
+  # An encrypted install re-keys its LUKS volume during staging, and asks for
+  # the current passphrase before it will (stage_luks_rekey). Nothing else
+  # answers that prompt, so the reset would sit at it until the timeout below;
+  # a plain install never shows it.
+  if [[ ${ENCRYPT:-false} == true ]]; then
+    wait_for_reset_output "encryption passphrase" 120
+    ssh_guest "printf '%s\r' '$GUEST_PASSWORD' >/tmp/reset.in"
+  fi
 
   # Staging clones @factory, rebuilds the UKI in a chroot, and reworks the
   # ESP; only then does the reboot prompt appear.
@@ -128,7 +161,7 @@ reset_phase() {
   check "foreign boot directory survives staging" \
     ssh_sudo "grep -q foreign-payload /boot/$FOREIGN_ID/marker"
   check "foreign UKI survives staging" \
-    ssh_sudo "test -f /boot/EFI/Linux/foreign_linux.efi"
+    ssh_sudo "for u in $FOREIGN_UKIS; do test -f \$u || exit 1; done"
   check "old omarchy entry is removed by staging" \
     ssh_sudo "! grep -q 'machine-id=$OLD_ID' /boot/limine.conf"
   check "old omarchy boot directory is removed by staging" \
@@ -140,9 +173,13 @@ reset_phase() {
   ssh_sudo "cat /var/log/omarchy-system-factory-reset.log" >"$RUN_DIR/factory-reset.log" || true
   capture_console "success-reset-staged"
 
-  if ((FAILURES > 0)); then
+  # A reset that damaged the shared ESP is not rebooted into: what the first
+  # boot would show depends on the damage. The scenario ends here, failed, or
+  # passed when every failure is a known one.
+  if ((FAILURES > 0 || KNOWN_FAILURES > 0)); then
     log "Staging assertions failed; keeping the VM off the reboot path."
-    return 1
+    finish
+    exit 0
   fi
 
   # Decline the prompt's reboot; reboot deliberately so the ssh session
@@ -184,6 +221,9 @@ drive_first_boot() {
   capture_console "success-firstboot-00-greeter"
   press ret
 
+  # Enter at the keyboard step takes the highlighted layout, English (US),
+  # which the form loads on the console at once and keeps: from there on the
+  # guest reads us, whatever layout the install was given.
   local waited=0 text step
   local -A answered=()
   while true; do
@@ -195,7 +235,7 @@ drive_first_boot() {
       press ret
       break
     elif grep -qi "keyboard layout" <<<"$text"; then
-      step="keyboard"; [[ -v answered[$step] ]] || { capture_console "success-firstboot-01-keyboard"; press ret; }
+      step="keyboard"; [[ -v answered[$step] ]] || { capture_console "success-firstboot-01-keyboard"; press ret; TYPE_LAYOUT=us; }
     elif grep -qi "Username" <<<"$text"; then
       step="username"; [[ -v answered[$step] ]] || { type_text "$GUEST_USER"; press ret; }
     elif grep -qi "Conf *irm" <<<"$text"; then
@@ -270,7 +310,7 @@ first_boot_phase() {
   check "foreign boot directory survives the first boot" \
     ssh_sudo "grep -q foreign-payload /boot/$FOREIGN_ID/marker"
   check "foreign UKI survives the first boot" \
-    ssh_sudo "test -f /boot/EFI/Linux/foreign_linux.efi"
+    ssh_sudo "for u in $FOREIGN_UKIS; do test -f \$u || exit 1; done"
   check "old omarchy identity never returns" \
     ssh_sudo "! grep -q 'machine-id=$OLD_ID' /boot/limine.conf"
   check "the new identity owns a boot entry" \

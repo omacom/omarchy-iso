@@ -288,6 +288,10 @@ STATE
     "$screen" >/dev/null 2>&1
 }
 
+# Checks take the screen as a here-string, never as `visible_screen | grep -q`:
+# under pipefail, grep -q exits at its match, a sed still writing gets SIGPIPE,
+# and the pipeline fails with the text on screen (about one run in eight on
+# loaded runners). For the same reason nothing here ends a pipeline in head.
 visible_screen() {
   # Carriage returns as well as escapes: the pty ends every line with one, and
   # a row that looks blank still carries it.
@@ -318,9 +322,9 @@ set -e
 
 (( dashboard_status == 1 )) ||
   fail "the dashboard still exits with the installer's status" "exit $dashboard_status"
-visible_screen | grep -qF "The install medium is damaged" ||
+grep -qF "The install medium is damaged" <<<"$(visible_screen)" ||
   fail "the failure screen shows the diagnosis" "$(visible_screen | tail -n 25)"
-visible_screen | grep -qF "$PACKAGE" ||
+grep -qF "$PACKAGE" <<<"$(visible_screen)" ||
   fail "the failure screen names the package" "$(visible_screen | tail -n 25)"
 grep -qF "[dashboard] The install medium is damaged" "$dashboard_log" ||
   fail "the diagnosis is written to the support log" "$(tail -n 20 "$dashboard_log")"
@@ -333,7 +337,7 @@ headline_count=$(visible_screen | grep -cF "The install medium is damaged or mis
 
 # The renderer used to drop blank lines, so the break has to be checked where
 # it matters: on the screen, not only in the text the helper produced.
-package_row=$(visible_screen | grep -nF "$PACKAGE" | grep -v "dashboard" | head -n 1 | cut -d: -f1)
+package_row=$(visible_screen | grep -nF "$PACKAGE" | grep -v "dashboard" | sed -n 1p | cut -d: -f1)
 [[ -n $package_row ]] ||
   fail "the screen names the package on its own row" "$(visible_screen | tail -n 25)"
 next_row=$(visible_screen | sed -n "$((package_row + 1))p")
@@ -436,10 +440,10 @@ set +e
 run_dashboard "$work/plain.log"
 set -e
 
-if visible_screen | grep -qF "install medium"; then
+if grep -qF "install medium" <<<"$(visible_screen)"; then
   fail "an unrelated failure gets no media banner" "$(visible_screen | tail -n 25)"
 fi
-visible_screen | grep -qF "Omarchy installation stopped" ||
+grep -qF "Omarchy installation stopped" <<<"$(visible_screen)" ||
   fail "an unrelated failure still renders the normal failure screen" "$(visible_screen | tail -n 25)"
 pass "an unrelated failure renders the failure screen unchanged"
 

@@ -5,7 +5,8 @@ base-devel
 efibootmgr
 intel-ucode
 linux-firmware
-linux
+linux-omarchy
+linux-omarchy-headers
 limine
 omarchy-keyring
 openssh

@@ -150,6 +150,23 @@ class BootValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "missing or empty"):
             phases.validate_boot(self.ctx)
 
+    def test_removable_loader_counts_only_where_this_install_wrote_it(self):
+        # The firmware dropped the "Limine" entry; EFI/BOOT/BOOTX64.EFI is
+        # there. A full-disk install formatted this ESP, so the loader is its
+        # own. A protected target's ESP may be shared, and with the fallback
+        # off that file is another OS's loader, not a route to this install.
+        self.disable_uki()
+        self.write("boot/EFI/BOOT/BOOTX64.EFI", "another loader")
+        with mock.patch.object(phases, "_read_efibootmgr", return_value={"entries": {}}), \
+             mock.patch.object(phases, "_validate_pre_mounted_filesystems"), \
+             mock.patch.object(phases, "error"):
+            phases.validate_boot(self.ctx)
+            self.ctx.is_protected = True
+            with self.assertRaisesRegex(RuntimeError, "no bootable route"):
+                phases.validate_boot(self.ctx)
+            self.ctx.omarchy_install["boot"] = {"enable_fallback": True}
+            phases.validate_boot(self.ctx)
+
 
 if __name__ == "__main__":
     unittest.main()

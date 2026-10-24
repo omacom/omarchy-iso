@@ -87,12 +87,19 @@ class KernelSelectionTest(unittest.TestCase):
                 self.assertEqual(json.loads(ctx.arch_config_path.read_text())["kernels"], expected)
 
     def test_headers_install_before_dkms_packages(self):
+        # The image-based install has no pacstrap of the runtime to order the
+        # headers against: DKMS packages arrive later, from the hardware
+        # scripts. What has to hold here is that every selected kernel has its
+        # headers once this phase is over. The root image carries the default
+        # kernel's, so only a kernel the image lacks (linux-t2) costs a pacman
+        # run, straight after the base delta; and a failure there must still
+        # restore the pacman hooks and release the package cache.
+        in_image = {"linux-omarchy-headers"}
         for kernels in (["linux-omarchy"], ["linux-t2"], ["linux-omarchy", "linux-lts"]):
             for fail_headers in (False, True):
                 with self.subTest(kernels=kernels, fail_headers=fail_headers), ExitStack() as stack:
                     events = []
                     installer = mock.MagicMock()
-                    installer.minimal_installation.side_effect = lambda **kwargs: events.append("base")
 
                     def install_packages(packages):
                         events.append(packages)
@@ -107,30 +114,42 @@ class KernelSelectionTest(unittest.TestCase):
                     )
                     ctx = types.SimpleNamespace(
                         state={"arch_config_handler": types.SimpleNamespace(config=config), "mirror_handler": None},
-                        target=Path("/unused"), tailscale_authkey_path=None, omarchy_install={},
+                        target=Path("/unused"), tailscale_authkey_path=None, defer_provisioning=False,
+                        omarchy_install={},
                     )
+                    # _start_target_keyring_init starts a real systemd-run unit
+                    # on whatever machine runs the tests, left running
+                    # unjoined (ResourceWarning: subprocess is still running).
                     for name in ("_mount_offline_package_cache", "_mask_mkinitcpio_pacman_hooks",
-                                 "_configure_limine_boot", "_write_pre_mounted_fstab"):
+                                 "_configure_limine_boot", "_write_pre_mounted_fstab", "_install_root_image",
+                                 "_start_target_keyring_init"):
                         stack.enter_context(mock.patch.object(phases_impl, name))
                     unmask = stack.enter_context(mock.patch.object(phases_impl, "_unmask_mkinitcpio_pacman_hooks"))
                     unmount = stack.enter_context(mock.patch.object(phases_impl, "_unmount_offline_package_cache"))
                     stack.enter_context(mock.patch.object(phases_impl, "configure_keyboard", return_value=True))
-                    stack.enter_context(mock.patch.object(phases_impl, "_install_early_packages", side_effect=lambda inst: events.append("early")))
-                    stack.enter_context(mock.patch.object(phases_impl, "_runtime_package_list", return_value=["omarchy"]))
                     stack.enter_context(mock.patch.object(phases_impl.arch, "is_pre_mount", return_value=True, create=True))
                     stack.enter_context(mock.patch.object(phases_impl.arch, "root_user", return_value=None, create=True))
+                    stack.enter_context(mock.patch.object(
+                        phases_impl.arch, "sanity_check", create=True,
+                        side_effect=lambda installer: installer.sanity_check(skip_ntp=True, skip_wkd=True),
+                    ))
+                    stack.enter_context(mock.patch.object(
+                        phases_impl.arch, "install_base_delta", create=True,
+                        side_effect=lambda *args, **kwargs: events.append("base")))
+                    stack.enter_context(mock.patch.object(
+                        phases_impl.arch, "target_has_package", create=True,
+                        side_effect=lambda target, name: name in in_image))
                     stack.enter_context(mock.patch.object(phases_impl.arch, "sanity_check", create=True))
                     opened = stack.enter_context(mock.patch.object(phases_impl.arch, "open_installer", create=True))
                     opened.return_value.__enter__.return_value = installer
-                    if fail_headers:
+
+                    missing = [f"{kernel}-headers" for kernel in kernels if f"{kernel}-headers" not in in_image]
+                    if fail_headers and missing:
                         with self.assertRaisesRegex(RuntimeError, "header install failed"):
                             phases_impl.arch_install_system(ctx)
                     else:
                         phases_impl.arch_install_system(ctx)
-                    expected = ["base", [f"{kernel}-headers" for kernel in kernels]]
-                    if not fail_headers:
-                        expected += ["early", ["omarchy"]]
-                    self.assertEqual(events, expected)
+                    self.assertEqual(events, ["base"] + ([missing] if missing else []))
                     unmask.assert_called_once_with(ctx)
                     unmount.assert_called_once_with(ctx)
 
@@ -197,6 +216,9 @@ class KernelSelectionTest(unittest.TestCase):
                     "etc/kernel/cmdline": "root=UUID=test\n",
                     "etc/default/limine": "CUSTOM_UKI_NAME=omarchy\n",
                     "boot/EFI/limine/limine_x64.efi": "bootloader",
+                    # A full-disk install deploys the fallback loader too;
+                    # without it validate_boot warns that none is there.
+                    "boot/EFI/BOOT/BOOTX64.EFI": "bootloader",
                     f"boot/EFI/Linux/omarchy_{expected}.efi": "UKI",
                 }
                 for name, content in files.items():
@@ -212,12 +234,48 @@ class KernelSelectionTest(unittest.TestCase):
                      mock.patch.object(phases_impl, "_validate_package_signing"), \
                      mock.patch.object(phases_impl.arch, "has_uefi", return_value=True, create=True), \
                      mock.patch.object(phases_impl, "_read_efibootmgr", return_value={
-                         "entries": {"0001": "Limine\tHD(1,GPT,test)"},
+                         "entries": {"0001": "Limine\tHD(1,GPT,test)/\\EFI\\limine\\limine_x64.efi"},
                      }):
                     phases_impl.validate_boot(ctx)
                     (target / f"boot/EFI/Linux/omarchy_{expected}.efi").unlink()
                     with self.assertRaisesRegex(RuntimeError, "missing or empty"):
                         phases_impl.validate_boot(ctx)
+
+    def test_boot_validation_requires_the_selected_kernels_own_uki(self):
+        # The image's stock kernel and the selected linux-t2 are both
+        # installed; only the prebuilt stock UKI made it to the ESP.
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            files = {
+                "usr/lib/modules/7.2-omarchy/pkgbase": "linux-omarchy\n",
+                "usr/lib/modules/7.2-omarchy/build/include/config/kernel.release": "7.2-omarchy\n",
+                "usr/lib/modules/7.2-t2/pkgbase": "linux-t2\n",
+                "usr/lib/modules/7.2-t2/build/include/config/kernel.release": "7.2-t2\n",
+                "boot/limine.conf": "/Omarchy\n",
+                "etc/kernel/cmdline": "root=UUID=test\n",
+                "etc/default/limine": "CUSTOM_UKI_NAME=omarchy\n",
+                "boot/EFI/limine/limine_x64.efi": "bootloader",
+                "boot/EFI/BOOT/BOOTX64.EFI": "bootloader",
+                "boot/EFI/Linux/omarchy_linux-omarchy.efi": "UKI",
+            }
+            for name, content in files.items():
+                path = target / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            ctx = types.SimpleNamespace(
+                target=target, omarchy_install={"storage": {"kernel": "linux-t2"}},
+                user_configuration={}, encrypt=False,
+                is_protected=False, defer_provisioning=False,
+            )
+            with mock.patch.object(phases_impl, "_assert_boot_hooks_restored"), \
+                 mock.patch.object(phases_impl.arch, "has_uefi", return_value=True, create=True), \
+                 mock.patch.object(phases_impl, "_read_efibootmgr", return_value={
+                     "entries": {"0001": "Limine\tHD(1,GPT,test)"},
+                 }):
+                with self.assertRaisesRegex(RuntimeError, "omarchy_linux-t2.efi missing or empty"):
+                    phases_impl.validate_boot(ctx)
+                (target / "boot/EFI/Linux/omarchy_linux-t2.efi").write_text("UKI")
+                phases_impl.validate_boot(ctx)
 
 
 if __name__ == "__main__":

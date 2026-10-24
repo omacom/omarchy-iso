@@ -47,6 +47,21 @@ corrupt_package() {
   printf '%s' "$package"
 }
 
+# A retry in the same boot never gets as far as a checksum. The first failure
+# unlinked the package through the bind mount, so pacman now fails opening it,
+# and it names the mirror it read from rather than the cache it writes to.
+deleted_package() {
+  local log match package=""
+
+  for log in "$@"; do
+    [[ -f $log ]] || continue
+    match=$(sed -n "s|.*Could not open file ${OFFLINE_MIRROR}/\([^ ]*\).*|\1|p" "$log" | tail -n 1)
+    [[ -n $match ]] && package="$match"
+  done
+
+  printf '%s' "$package"
+}
+
 expected_checksum() {
   local package="$1" reader
 
@@ -77,7 +92,14 @@ actual_checksum() {
   printf '%s' "${sum%% *}"
 }
 
+# The checksum failure is read first wherever both are in the log: it is the
+# attempt that names the cause, and the open failures after it are its wake.
 package=$(corrupt_package "$@")
+deleted=""
+if [[ -z $package ]]; then
+  package=$(deleted_package "$@")
+  deleted=1
+fi
 if [[ -z $package ]]; then
   exit 1
 fi
@@ -86,6 +108,20 @@ fi
 # backslash that the renderer would read as an escape. Strip anything a package
 # filename has no business containing before printing it.
 display_package="${package//[^A-Za-z0-9._+:@%-]/}"
+
+# Nothing can be weighed here: the bytes that failed are gone, and the copy in
+# the mirror went with them. Say which attempt this is, because the screen
+# otherwise repeats the same unreadable error for every retry and the one that
+# explains it scrolled away with the first.
+if [[ -n $deleted ]]; then
+  echo "An earlier attempt deleted this package"
+  echo "pacman rejected it off this ISO and unlinked it from the mirror:"
+  echo "$display_package"
+  echo
+  echo "Reboot before retrying: the deletion is in RAM, so the ISO's copy returns"
+  echo "The first error after that reboot is the one that names the fault"
+  exit 0
+fi
 
 expected=$(expected_checksum "$package")
 actual=$(actual_checksum "$package")

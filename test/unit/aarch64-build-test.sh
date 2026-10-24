@@ -102,15 +102,42 @@ for cfg in grub.cfg loopback.cfg; do
   grep -Fq '%BOOT_SPLASH_KERNEL_OPTIONS%%KERNEL_OPTIONS%' "$src" || fail "$cfg does not template boot options"
   grep -Fq -- "--id 'n1x-recovery'" "$src" || fail "$cfg lacks the N1x recovery entry"
   grep -Fq 'omarchy.n1x_recovery=1 acpi=nospcr' "$src" || fail "$cfg recovery entry lacks acpi=nospcr"
+  # acpi_osi=! only where the firmware hides SSPM: the Lenovo Pro 9 (83SS)
+  # and the ASUS ProArt P16 (H7607BA), and each assignment directly under its
+  # match.
   grep -Fq "if [ \"\${product_name}\" == '83SS' ]; then" "$src" || fail "$cfg does not limit acpi_osi=! to the Lenovo Pro 9"
-  grep -Fqx 'set lenovo_osi=' "$src" || fail "$cfg does not leave lenovo_osi empty when SMBIOS does not match"
-  grep -Fq "set lenovo_osi='acpi_osi=!'" "$src" || fail "$cfg never assigns acpi_osi=!"
-  awk '/83SS/{p=1} p{print} p && /^[[:space:]]*fi$/{exit}' "$src" | grep -Fq "set lenovo_osi='acpi_osi=!'" \
-    || fail "$cfg assigns acpi_osi=! outside the 83SS match"
+  grep -Fq "elif regexp 'H7607BA' \"\${product_name}\"; then" "$src" || fail "$cfg does not limit acpi_osi=! to the ASUS ProArt P16"
+  # A loopback boot runs in the host's GRUB, so the block loads regexp itself.
+  sed -n '/^set n1x_osi=$/,/^fi$/p' "$src" | grep -Eq '^[[:space:]]*insmod regexp$' \
+    || fail "$cfg matches the ASUS ProArt P16 with regexp without loading it"
+  grep -Fqx 'set n1x_osi=' "$src" || fail "$cfg does not leave n1x_osi empty when SMBIOS does not match"
+  grep -Fq "set n1x_osi='acpi_osi=!'" "$src" || fail "$cfg never assigns acpi_osi=!"
+  matches=$(grep -B1 -F "set n1x_osi='acpi_osi=!'" "$src" | grep -Fv "set n1x_osi='acpi_osi=!'" | grep -vx -- '--' | sed 's/^[[:space:]]*//')
+  [[ $matches == $'if [ "${product_name}" == \'83SS\' ]; then\nelif regexp \'H7607BA\' "${product_name}"; then' ]] \
+    || fail "$cfg assigns acpi_osi=! outside the 83SS and H7607BA matches: $matches"
+  # The same block, run as bash with GRUB's commands stubbed, decides for each
+  # machine. `set var=value` is GRUB's assignment.
+  osi_block=$(sed -n '/^set n1x_osi=$/,/^fi$/p' "$src" | sed -E 's/^([[:space:]]*)set ([[:alnum:]_]+)=/\1\2=/')
+  osi_for() { # grub_cpu, then the SMBIOS product name (none: smbios fails)
+    local grub_cpu=$1 n1x_osi product_name fw_product
+    (( $# > 1 )) && fw_product=$2
+    insmod() { :; }
+    smbios() { [[ -n ${fw_product+set} ]] || return 1; product_name=$fw_product; }
+    regexp() { [[ $2 =~ $1 ]]; }
+    eval "$osi_block"
+    printf '%s' "$n1x_osi"
+  }
+  [[ $(osi_for arm64 83SS) == 'acpi_osi=!' ]] || fail "$cfg does not pass acpi_osi=! on the Lenovo Pro 9"
+  [[ $(osi_for arm64 'ProArt P16 H7607BA') == 'acpi_osi=!' ]] || fail "$cfg does not pass acpi_osi=! on the ASUS ProArt P16"
+  for product in 'ProArt P14 H7407BA' 'XPS 16 DX16263' 'ProArt P16 H7606WI' 83SSX; do
+    [[ -z $(osi_for arm64 "$product") ]] || fail "$cfg passes acpi_osi=! on $product"
+  done
+  [[ -z $(osi_for arm64) ]] || fail "$cfg passes acpi_osi=! without an SMBIOS product name"
+  [[ -z $(osi_for x86_64 'ProArt P16 H7607BA') ]] || fail "$cfg passes acpi_osi=! outside arm64"
   linux_lines=$(grep -E '^[[:space:]]*linux /%INSTALL_DIR%/boot/%ARCH%/vmlinuz-' "$src")
   linux_count=$(printf '%s\n' "$linux_lines" | grep -c .)
-  osi_count=$(printf '%s\n' "$linux_lines" | grep -c ' ${lenovo_osi}$')
-  (( linux_count >= 3 && linux_count == osi_count )) || fail "$cfg does not pass lenovo_osi on every live linux line ($osi_count/$linux_count)"
+  osi_count=$(printf '%s\n' "$linux_lines" | grep -c ' ${n1x_osi}$')
+  (( linux_count >= 3 && linux_count == osi_count )) || fail "$cfg does not pass n1x_osi on every live linux line ($osi_count/$linux_count)"
   source "$ROOT/builder/grub-platform.sh"
   for platform in x86_64 aarch64; do
     cp "$src" "$fixture/$platform-$cfg"

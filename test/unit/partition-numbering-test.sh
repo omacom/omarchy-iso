@@ -124,6 +124,31 @@ create_partition "$IMG" "$((100 * MIB))" "$((300 * MIB))" ext4 OVERLAP
 check "overlapping creation failed" "1" "$?"
 check "nothing tracked" "0" "${#created_parts[@]}"
 
+echo "==> a failed read of the table never makes an existing partition look new"
+# The ESP being created is the size of the ESP an earlier install left, as on
+# any machine that already runs Omarchy. If the read before mkpart fails but
+# the one after succeeds, every existing partition looks new; the size check
+# then accepts the old ESP as the one just made, and preparation formats it.
+rm -f "$IMG"
+truncate -s 8G "$IMG"
+parted --script "$IMG" mklabel gpt
+mkpart_mib existing-esp fat32 1 2049
+created_parts=()
+# A file, not a variable: create_partition reads the table in subshells.
+: >"$WORK/print-calls"
+parted() {
+  if [[ " $* " == *" print"* ]]; then
+    echo >>"$WORK/print-calls"
+    (( $(wc -l <"$WORK/print-calls") == 1 )) && return 1
+  fi
+  command parted "$@"
+}
+create_partition "$IMG" "$((4096 * MIB))" "$((6144 * MIB))" fat32 OMARCHY_EFI
+check "creation refused when the table could not be read" "1" "$?"
+check "the existing ESP is not taken for the new one" "" "$created_partition_number"
+check "nothing tracked for rollback" "0" "${#created_parts[@]}"
+unset -f parted
+
 if (( failures > 0 )); then
   printf '\n%d check(s) failed\n' "$failures"
   exit 1

@@ -199,8 +199,11 @@ if [[ $HOST_ARCH == aarch64 ]]; then
   else
     DISPLAY_ARGS=(-device virtio-gpu-gl-pci -display sdl,gl=on)
   fi
+  # MSIs go through a GICv2m, as in test/arm64-install: nested under Apple's
+  # hypervisor the host GIC has no LPIs, so an emulated ITS's interrupts are
+  # lost, while a GICv2m raises ordinary SPIs that every host delivers.
   taskset -c "$cores" qemu-system-aarch64 \
-    -machine virt,gic-version=host -accel kvm -cpu host,pmu=off \
+    -machine virt,gic-version=host,msi=gicv2m -accel kvm -cpu host,pmu=off \
     -smp "$((core_count < 8 ? core_count : 8))" \
     -m 8192 \
     -drive if=pflash,format=raw,readonly=on,file="$UEFI_CODE" \

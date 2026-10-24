@@ -703,47 +703,29 @@ drive_configurator() {
   fi
   press ret
 
-  # Normal flow: user step comes before disk selection.
-  wait_for_screen "Username" 120
+  # Normal flow: timezone and user step come before disk selection.
+  wait_for_screen "Timezone" 180 # the geo guess can take a moment
+  capture_console "success-installer-02-timezone"
+  press ret
+
+  wait_for_screen "Username" 60
   type_text "$GUEST_USER"
-  capture_console "success-installer-02-username"
+  capture_console "success-installer-03-username"
   press ret
 
   wait_for_screen "Password" 60
   type_text "$GUEST_PASSWORD"
-  capture_console "success-installer-03-password"
+  capture_console "success-installer-04-password"
   press ret
 
   wait_for_screen "Must match" 60
   type_text "$GUEST_PASSWORD"
-  capture_console "success-installer-04-password-confirmation"
-  press ret
-
-  wait_for_screen "Full name" 60
-  type_text "Omarchy Test"
-  capture_console "success-installer-05-full-name"
-  press ret
-
-  wait_for_screen "Email address" 60
-  type_text "test"
-  if [[ $KEYBOARD_LABEL == "Japanese" ]]; then
-    press bracket_left
-  elif [[ $KEYBOARD_LABEL == "English (UK)" ]]; then
-    press shift-apostrophe
-  else
-    press shift-2
-  fi
-  type_text "omarchy.org"
-  capture_console "success-installer-06-email"
+  capture_console "success-installer-05-password-confirmation"
   press ret
 
   wait_for_screen "Hostname" 60
   type_text "$GUEST_HOSTNAME"
   capture_console "success-installer-07-hostname"
-  press ret
-
-  wait_for_screen "Timezone" 180 # tzupdate geo-guess can take a moment
-  capture_console "success-installer-08-timezone"
   press ret
 
   wait_for_screen "look right" 60
@@ -757,7 +739,7 @@ drive_configurator() {
   wait_for_screen "installation mode\|recovery possible" 60
   if ocr_screen | grep -qi "installation mode"; then
     capture_console "success-installer-11-install-mode"
-    press ret # "Full disk install" is preselected
+    press ret # a blank disk: "Full disk install" comes first
   fi
 
   wait_for_screen "recovery possible" 60
@@ -816,26 +798,6 @@ drive_provision_owner() {
   type_text "$GUEST_PASSWORD"
   press ret
 
-  wait_for_screen "Full name" 60
-  type_text "Omarchy Test"
-  press ret
-
-  wait_for_screen "Email address" 60
-  # The keyboard step above applied English (UK), where '@' is Shift+' (not
-  # Shift+2 as on US); send that keycode so the typed email is correct under
-  # the new layout — itself further proof the deferred keymap took effect.
-  type_text "test"
-  if [[ $KEYBOARD_LABEL == "English (US)" || $KEYBOARD_LABEL == "English (UK)" ]]; then
-    press shift-apostrophe
-  elif [[ $KEYBOARD_LABEL == "Japanese" ]]; then
-    press bracket_left
-  else
-    press shift-2
-  fi
-  type_text "omarchy.org"
-  capture_console "success-provision-04-email"
-  press ret
-
   # Hostname is deferred to first boot too.
   wait_for_screen "Hostname" 60
   type_text "$GUEST_HOSTNAME"
@@ -852,7 +814,7 @@ drive_provision_owner() {
   capture_console "success-provision-07-review"
   press ret
 
-  # Finalization (offline Node unpack, LUKS re-key on encrypted installs)
+  # Finalization (user setup, LUKS re-key on encrypted installs)
   # runs before SDDM appears.
   capture_console "success-provision-08-finalizing"
 }

@@ -1,0 +1,45 @@
+#!/usr/bin/ash
+# mkinitcpio's udev hook, waiting for the live medium instead of settling.
+
+run_earlyhook() {
+    local quiet
+    if command -v '/usr/bin/systemd-tmpfiles' >/dev/null 2>&1; then
+        kmod static-nodes --format=tmpfiles --output=/run/tmpfiles.d/kmod.conf
+        '/usr/bin/systemd-tmpfiles' --prefix=/dev --create --boot
+    fi
+    quiet="$(getarg quiet)"
+    if [ "${quiet}" = "y" ]; then
+        '/usr/lib/systemd/systemd-udevd' --daemon --resolve-names=never >/dev/null 2>&1
+    else
+        '/usr/lib/systemd/systemd-udevd' --daemon --resolve-names=never
+    fi
+    # used externally by poll_device()
+    # shellcheck disable=SC2034
+    udevd_running=1
+}
+
+run_hook() {
+    msg ":: Triggering uevents..."
+    udevadm trigger --action=add --type=subsystems
+    udevadm trigger --action=add --type=devices
+    # The live ISO's initramfs needs only its boot medium, which the archiso
+    # hook finds by this UUID. Wait for that one device; settling the whole
+    # queue also waits for every other USB device to enumerate (seconds for a
+    # slow USB audio chip). Settle as mkinitcpio does when there is no UUID
+    # to wait for, when the medium comes over PXE (archiso attaches NBD, NFS
+    # and HTTP media after this hook) or when it does not show up.
+    # shellcheck disable=SC2154
+    if [ -n "${archisosearchuuid}" ] &&
+        [ -z "${archiso_nbd_srv}${archiso_nfs_srv}${archiso_http_srv}" ] &&
+        udevadm wait --timeout=30 "/dev/disk/by-uuid/${archisosearchuuid}" 2>/dev/null; then
+        return 0
+    fi
+    udevadm settle
+}
+
+run_cleanuphook() {
+    udevadm control --exit
+    udevadm info --cleanup-db
+}
+
+# vim: set ft=sh ts=4 sw=4 et:

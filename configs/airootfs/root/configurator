@@ -9,7 +9,7 @@ OMARCHY_SETTINGS_PACKAGE="${OMARCHY_SETTINGS_PACKAGE:-omarchy-settings}"
 
 LOGO_PATH="$OMARCHY_PATH/logo.txt"
 
-# The setup form — keyboard, account, hostname, and timezone questions, plus the
+# The setup form — keyboard, timezone, account, and hostname questions, plus the
 # rules their answers are checked against — shared verbatim with the first-boot
 # owner setup that finishes a deferred install. build-iso.sh vendors it out of
 # the runtime package this ISO bundles, so the two can never offer different
@@ -264,18 +264,30 @@ default_keyboard_for_language() {
   export OMARCHY_FORM_KEYBOARD_DEFAULT
 }
 
-# The setup form preselects the timezone tzupdate guesses from the network. A
+# The timezone list preselects where the network says this machine is. A
 # preset's timezone wins, and when the guess fails (offline, say) the language's
-# country stands in; languages with no single home country have none.
-tzupdate() {
-  if [[ ${1:-} != "-p" ]]; then
-    command tzupdate "$@"
-    return
+# country stands in; languages with no single home country have none. The
+# setup form takes it as OMARCHY_FORM_TIMEZONE_DEFAULT; one that predates that
+# asks tzupdate instead, so tzupdate answers with the same guess. The network
+# is asked once, when the timezone screen first opens.
+timezone_guessed=false
+default_timezone() {
+  if ! $timezone_guessed; then
+    local zone=$preset_timezone
+    [[ -n $zone ]] || zone=$(curl -fsS --max-time 5 https://geo.omarchy.org/ 2>/dev/null | jq -r '.timezone // empty' 2>/dev/null) || zone=""
+    OMARCHY_ISO_TIMEZONE_GUESS=$zone
+    timezone_guessed=true
   fi
-  local zone=$preset_timezone
-  [[ -n $zone ]] || zone=$(command tzupdate -p 2>/dev/null) || zone=""
-  [[ -n $zone ]] || zone=$(language_default timezone)
-  [[ -n $zone ]] && printf '%s\n' "$zone"
+  OMARCHY_FORM_TIMEZONE_DEFAULT=${OMARCHY_ISO_TIMEZONE_GUESS:-$(language_default timezone)}
+  export OMARCHY_FORM_TIMEZONE_DEFAULT
+}
+
+tzupdate() {
+  if [[ ${1:-} == "-p" && -n ${OMARCHY_FORM_TIMEZONE_DEFAULT:-} ]]; then
+    printf '%s\n' "$OMARCHY_FORM_TIMEZONE_DEFAULT"
+  else
+    command tzupdate "$@"
+  fi
 }
 
 language_label() {
@@ -394,15 +406,15 @@ user_form() {
   # Each prompt reports 0 (set), OMARCHY_FORM_BACK (Esc), or OMARCHY_FORM_SIGNAL
   # (Ctrl+C). Both non-zero cases unwind to user_step, which decides what they
   # mean here; the form itself never aborts.
+  default_timezone
+  omarchy_prompt_timezone || return $?
   omarchy_prompt_username || return $?
   omarchy_prompt_password || return $?
 
   # Hash the password with SHA-512 crypt ($6$), which is what openssl passwd offers
   password_hash=$(printf '%s' "$password" | openssl passwd -6 -stdin)
 
-  omarchy_prompt_identity || return $?
   omarchy_prompt_hostname || return $?
-  omarchy_prompt_timezone || return $?
 }
 
 # Returns 0 on confirmed account details, or as soon as the keyboard screen
@@ -424,14 +436,12 @@ user_step() {
 
     # Add manual padding since gum table -p doesn't respect padding
     echo -e "$(t summary.field),$(t summary.value)
+$(t summary.language),$(language_label "$language")
+$(t summary.keyboard),$keyboard
+$(t summary.timezone),$timezone
 $(t summary.username),$username
 $(t summary.password),$(printf "%${#password}s" | tr ' ' '*')
-$(t summary.fullName),${full_name:-$(t summary.skipped)}
-$(t summary.email),${email_address:-$(t summary.skipped)}
-$(t summary.hostname),$hostname
-$(t summary.timezone),$timezone
-$(t summary.keyboard),$keyboard
-$(t summary.language),$(language_label "$language")" |
+$(t summary.hostname),$hostname" |
       gum table -s "," -p | sed "s/^/${PADDING_LEFT_SPACES}/"
 
     echo
@@ -556,7 +566,7 @@ detect_windows_esp() {
   for p in $(blkid -t TYPE=vfat -o device 2>/dev/null); do
     [[ "$p" == "$disk"* ]] || continue
     tmp_mp=$(mktemp -d)
-    if mount -o ro "$p" "$tmp_mp" 2>/dev/null; then
+    if mount -t vfat -o ro "$p" "$tmp_mp" 2>/dev/null; then
       if [[ -d "$tmp_mp/EFI/Microsoft" ]]; then
         umount "$tmp_mp"; rmdir "$tmp_mp"
         echo "$p"
@@ -624,13 +634,12 @@ disk_abort_hook() {
   abort "$1"
 }
 
-# Save the configurator answers the installer consumes: git identity and
-# encryption choice as plain files, account details as archinstall credentials.
+# Save the configurator answers the installer consumes: encryption choice as a
+# plain file, account details as archinstall credentials. The git identity is
+# asked for after first login rather than here.
 # Deferred-provisioning installs defer the user to first boot: no credentials, and on encrypted
 # targets the orchestrator generates a throwaway LUKS passphrase itself.
 write_user_files() {
-  echo "$full_name" >user_full_name.txt
-  echo "$email_address" >user_email_address.txt
   printf '%s\n' "$encrypt_installation" >user_encrypt_installation.txt
 
   if $defer_provisioning; then
@@ -676,16 +685,10 @@ print_dry_run_files() {
   echo -e "\n\nUser Credentials:"
   cat user_credentials.json
 
-  echo -e "\n\nUser Full Name:"
-  cat user_full_name.txt
-
-  echo -e "\nUser Email Address:"
-  cat user_email_address.txt
-
-  echo -e "\nDisk Encryption:"
+  echo -e "\n\nDisk Encryption:"
   cat user_encrypt_installation.txt
 
-  rm -f user_configuration.json user_credentials.json user_full_name.txt user_email_address.txt user_encrypt_installation.txt
+  rm -f user_configuration.json user_credentials.json user_encrypt_installation.txt
 }
 
 # Shared error screen for every "can't fit Omarchy here" outcome of the
@@ -714,7 +717,12 @@ run_partition_decide() {
     say --foreground 1 "$(t bitlocker.found "$bl_part")"
     say "$(t bitlocker.hint)"
     say "$(t bitlocker.suspend)"
-    abort "$(t bitlocker.abort)"
+    echo
+    # Back to the mode picker rather than out of the installer: the free-space
+    # install is the default on a disk with partitions, so Enter lands here.
+    gum confirm --affirmative "$(t common.back)" --negative "$(t bitlocker.quit)" "$(t space.prompt)" ||
+      abort "$(t bitlocker.abort)"
+    return 1
   fi
 
   # Omarchy always creates its own dedicated ESP in free space and never
@@ -741,7 +749,7 @@ run_partition_decide() {
   # synthesize a whole-disk free region and mklabel gpt before mkpart.
   local FREE_SPACE_INFO pt_type disk_size_b
   needs_mklabel=false
-  pt_type=$(lsblk -dno PTTYPE "$disk" 2>/dev/null)
+  pt_type=$(partition_table_type "$disk")
   if [[ -z "$pt_type" ]]; then
     disk_size_b=$(lsblk -bdno SIZE "$disk" 2>/dev/null)
     if [[ -n "$disk_size_b" && "$disk_size_b" -gt 0 ]]; then
@@ -958,7 +966,9 @@ run_partition_execute() {
       mount -o noatime,compress=zstd,subvol=@pkg "$root_mapper" /mnt/var/cache/pacman/pkg
 
     disk_step "creating the ESP filesystem on $efi_dev" mkfs.fat -F32 -n OMARCHY_EFI "$efi_dev"
-    disk_step "mounting the ESP" mount "$efi_dev" /mnt"$esp_mount_in_target"
+    # Typed, not probed: an unrecognised probe walks /proc/filesystems, and on
+    # the live ISO squashfs answers first.
+    disk_step "mounting the ESP" mount -t vfat "$efi_dev" /mnt"$esp_mount_in_target"
 
     # The orchestrator's first act is to verify this handoff. Check it here so
     # a failure names the step that broke rather than surfacing later as
@@ -1059,14 +1069,9 @@ disk_form() {
   boot_source=$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null || true)
   exclude_disk=$(get_root_disk "$boot_source")
 
-  # List all installable disks, excluding the boot device if present
+  # Installable disks, internal ones first, without the boot device
   local available_disks
-  available_disks=$(
-    lsblk -dpno NAME,TYPE |
-      awk '$2=="disk"{print $1}' |
-      grep -E '/dev/(sd|hd|vd|nvme|mmcblk|xv)' |
-      { if [[ -n "$exclude_disk" ]]; then grep -Fvx "$exclude_disk"; else cat; fi; }
-  )
+  available_disks=$(install_disk_candidates "$exclude_disk")
 
   # Get available disks and format them with info
   local disk_options=""
@@ -1102,7 +1107,7 @@ open_partition_tool() {
 # viable paths write the whole disk, so the free-space mode is not offered.
 requires_full_disk_install() {
   local pt_type free_space_b
-  pt_type=$(lsblk -dno PTTYPE "$disk" 2>/dev/null)
+  pt_type=$(partition_table_type "$disk")
 
   # a) No partition table: disk is empty
   [[ -z "$pt_type" ]] && return 0
@@ -1122,14 +1127,18 @@ requires_full_disk_install() {
 }
 
 install_mode_form() {
-  local choices=("$(t mode.fullDisk)"$'\t'full_disk)
+  local free_space_offered=false partitions choice choices=()
 
   # The free-space/protected path registers an EFI boot entry and is UEFI-only.
   # Full-disk installs still support BIOS through the orchestrator's BIOS branch.
   if [[ -d /sys/firmware/efi ]] && ! $full_disk_only; then
-    choices+=("$(t mode.freeSpace)"$'\t'free_space)
+    free_space_offered=true
   fi
-  choices+=("$(t mode.otherDisk)"$'\t'other_disk)
+  partitions=$(partition_numbers "$disk" | grep -c .)
+  local -A labels=([full_disk]="$(t mode.fullDisk)" [free_space]="$(t mode.freeSpace)" [other_disk]="$(t mode.otherDisk)")
+  while read -r choice; do
+    choices+=("${labels[$choice]}"$'\t'"$choice")
+  done < <(install_mode_choices "$free_space_offered" "$partitions")
 
   step "$(t mode.intro)"
   install_mode=$(gum choose --label-delimiter $'\t' --header "$(t mode.header "$disk")" "${choices[@]}") || abort
@@ -1253,8 +1262,6 @@ if $defer_provisioning; then
   username=""
   password=""
   password_hash=""
-  full_name=""
-  email_address=""
   # Neutral defaults for the install; the owner overwrites both in the
   # first-boot OOBE (omarchy-provision-owner).
   hostname="omarchy"

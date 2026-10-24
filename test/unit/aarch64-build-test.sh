@@ -32,7 +32,7 @@ done
 grep -Fq 'sha256sum --check --strict --quiet SHA256SUMS' "$ROOT/bin/omarchy-iso-make" || fail "bundle checksums are not verified on the host"
 grep -Fq -- '-v "$PACKAGE_DIR:/packages:ro"' "$ROOT/bin/omarchy-iso-make" || fail "bundle is not mounted read-only at /packages"
 grep -Fq 'OMARCHY_ARCH == x86_64 && -d /var/cache/pacman/pkg' "$ROOT/bin/omarchy-iso-make" || fail "host pacman cache would leak into aarch64 builds"
-grep -Fq 'builds use the edge or rc channel' "$ROOT/bin/omarchy-iso-make" || fail "aarch64 builds must use the edge or rc channel"
+grep -Fq 'aarch64 builds use the stable, rc or edge channel' "$ROOT/builder/build-iso.sh" || fail "an aarch64 build accepts a channel it has no config for"
 grep -Fq 'OMARCHY_KERNEL=linux-omarchy' "$ROOT/bin/omarchy-iso-make" || fail "an aarch64 image does not boot linux-omarchy"
 grep -Fq -- '--kernel' "$ROOT/bin/omarchy-iso-make" && fail "an aarch64 build still offers a choice of kernel"
 grep -Fq 'OMARCHY_ARM_PLATFORM' "$ROOT/bin/omarchy-iso-make" "$ROOT/builder/build-iso.sh" && fail "an aarch64 build still asks which board it is for"
@@ -40,7 +40,7 @@ grep -Fq "ALL_kver='/boot/vmlinuz-linux-omarchy'" "$ROOT/builder/linux-omarchy.p
 grep -Fq 'echo "$OMARCHY_KERNEL" > "$build_cache_dir/airootfs/root/omarchy_kernel"' "$ROOT/builder/build-iso.sh" || fail "the installer is not told which kernel to install"
 
 # --- builder wiring -----------------------------------------------------------
-grep -Fq 'online_pacman_conf=/configs/pacman-online-aarch64.conf' "$ROOT/builder/build-iso.sh" || fail "aarch64 does not use its own online pacman config"
+grep -Fq 'online_pacman_conf="/configs/pacman-online-aarch64-${OMARCHY_MIRROR}.conf"' "$ROOT/builder/build-iso.sh" || fail "aarch64 does not use its own online pacman config for the channel"
 if grep -Fq 'pacman-online-${OMARCHY_MIRROR}.conf --noconfirm' "$ROOT/builder/build-iso.sh"; then
   fail "a pacman call still hardcodes the x86 mirror config"
 fi
@@ -50,42 +50,44 @@ grep -Fq 'boot_splash_kernel_options="quiet splash "' "$ROOT/builder/build-iso.s
 grep -Fq 'plymouth.enable=0 console=tty0' "$ROOT/builder/build-iso.sh" && fail "aarch64 live boot still turns Plymouth off"
 grep -Fq '"$mkarchiso_command" -v -w' "$ROOT/builder/build-iso.sh" || fail "builder does not use the patched mkarchiso on aarch64"
 # pacman takes the first repository carrying a name: the platform bundle, then
-# Omarchy's edge aarch64 repo, then Arch Linux ARM.
-repos=$(grep -E '^\[|^Server' "$ROOT/configs/pacman-online-aarch64.conf" | grep -v '^\[options\]' | paste -sd' ')
-[[ $repos == '[platform] Server = file:///packages [omarchy] Server = https://pkgs.omarchy.org/edge/$arch [core]'* ]] \
-  || fail "aarch64 repository order is wrong: $repos"
-# An rc build takes [omarchy] from rc and leaves Arch Linux ARM's servers alone.
-rewrite=$(grep -F 'sed -i "s|^Server = https://pkgs\.omarchy\.org/edge/|' "$ROOT/builder/build-iso.sh")
-[[ -n $rewrite ]] || fail "an rc aarch64 build keeps edge's [omarchy] server"
-rc_conf=$(mktemp)
-cp "$ROOT/configs/pacman-online-aarch64.conf" "$rc_conf"
-(OMARCHY_MIRROR=rc online_pacman_conf=$rc_conf; eval "$rewrite")
-grep -Fqx 'Server = https://pkgs.omarchy.org/rc/$arch' "$rc_conf" || fail "an rc aarch64 build does not use the rc [omarchy] server"
-grep -Fq 'pkgs.omarchy.org/edge/' "$rc_conf" && fail "an rc aarch64 build still reaches edge"
-diff <(grep -v 'pkgs.omarchy.org' "$ROOT/configs/pacman-online-aarch64.conf") <(grep -v 'pkgs.omarchy.org' "$rc_conf") >/dev/null \
-  || fail "the rc rewrite changed more than the [omarchy] server"
-rm -f "$rc_conf"
+# Omarchy's aarch64 repo, then Arch Linux ARM. Each channel's config is edge's
+# with that channel's [omarchy] repo and Arch Linux ARM mirror, as x86_64's
+# pacman-online-<channel>.conf are.
+for channel in stable rc edge; do
+  conf=$ROOT/configs/pacman-online-aarch64-$channel.conf
+  [[ -f $conf ]] || fail "no aarch64 online pacman config for $channel"
+  host=arm-mirror.omarchy.org
+  [[ $channel == edge ]] || host=arm-$channel-mirror.omarchy.org
+  repos=$(grep -E '^\[|^Server' "$conf" | grep -v '^\[options\]' | paste -sd' ')
+  [[ $repos == "[platform] Server = file:///packages [omarchy] Server = https://pkgs.omarchy.org/$channel/\$arch [core] Server = https://$host/\$arch/\$repo [extra] Server = https://$host/\$arch/\$repo [alarm] Server = https://$host/\$arch/\$repo [aur] Server = https://$host/\$arch/\$repo" ]] \
+    || fail "aarch64 $channel repositories are wrong: $repos"
+  diff <(grep -Ev '^Server|^#' "$ROOT/configs/pacman-online-aarch64-edge.conf") <(grep -Ev '^Server|^#' "$conf") >/dev/null \
+    || fail "aarch64 $channel config differs from edge's in more than its servers"
+done
+grep -Fq 'sed -i "s|^Server = https://pkgs' "$ROOT/builder/build-iso.sh" && fail "an aarch64 build still rewrites its [omarchy] server"
 grep -Fq 'repo-add -q "$bundle_index/platform.db.tar.gz"' "$ROOT/builder/build-iso.sh" || fail "bundle is not indexed as the [platform] repo"
 grep -Fq 'arch="${OMARCHY_ARCH:-x86_64}"' "$ROOT/configs/profiledef.sh" || fail "profiledef ignores OMARCHY_ARCH"
 
 # --- GRUB templating -----------------------------------------------------------
 for cfg in grub.cfg loopback.cfg; do
   src="$ROOT/configs/grub/$cfg"
-  grep -Fq 'vmlinuz-%KERNEL%' "$src" || fail "$cfg does not template the kernel"
+  grep -Fqx 'set live_kernel=%KERNEL%' "$src" || fail "$cfg does not template the kernel"
+  grep -Fq 'vmlinuz-${live_kernel}' "$src" || fail "$cfg entries do not boot the selected kernel"
+  grep -Fq "if [ \"\${sys_vendor}\" == 'Apple Inc.' ]; then" "$src" || fail "$cfg boots linux-t2 on a machine Apple did not make"
   grep -Fq '%BOOT_SPLASH_KERNEL_OPTIONS%%KERNEL_OPTIONS%' "$src" || fail "$cfg does not template boot options"
   grep -Fq -- "--id 'n1x-recovery'" "$src" || fail "$cfg lacks the N1x recovery entry"
   grep -Fq 'omarchy.n1x_recovery=1 acpi=nospcr' "$src" || fail "$cfg recovery entry lacks acpi=nospcr"
   source "$ROOT/builder/grub-platform.sh"
-  for platform in linux-t2 linux-omarchy; do
+  for platform in x86_64 aarch64; do
     cp "$src" "$fixture/$platform-$cfg"
-    configure_grub_kernel "$fixture/$platform-$cfg" "$platform"
+    configure_grub_platform "$fixture/$platform-$cfg" "$platform"
     sed -i -e 's|%KERNEL%|linux-omarchy|g' -e 's|%BOOT_SPLASH_KERNEL_OPTIONS%|quiet splash |g' -e 's|%KERNEL_OPTIONS%|console=tty0|g' \
-      -e 's|%INSTALL_DIR%|arch|g' -e 's|%ARCH%|aarch64|g' -e 's|%ARCHISO_UUID%|x|g' "$fixture/$platform-$cfg"
+      -e 's|%INSTALL_DIR%|arch|g' -e "s|%ARCH%|$platform|g" -e 's|%ARCHISO_UUID%|x|g' "$fixture/$platform-$cfg"
     if command -v grub-script-check >/dev/null; then
       grub-script-check "$fixture/$platform-$cfg" || fail "$cfg ($platform) is not valid GRUB script"
     fi
-    if [[ $platform == linux-omarchy ]]; then
-      grep -Fq 'n1x-recovery' "$fixture/$platform-$cfg" || fail "the N1x kernel's menu lost the recovery entry in $cfg"
+    if [[ $platform == aarch64 ]]; then
+      grep -Fq 'n1x-recovery' "$fixture/$platform-$cfg" || fail "the aarch64 menu lost the N1x recovery entry in $cfg"
     else
       grep -Fq 'n1x-recovery' "$fixture/$platform-$cfg" && fail "recovery entry leaked into the $platform $cfg"
     fi
@@ -146,7 +148,7 @@ grep -Fq 'kernel_options="console=tty0 acpi=nospcr initramfs_async=0"' "$ROOT/bu
 # Without a bundle the [platform] repo must go: pacman refuses a repo it cannot sync.
 strip=$(grep -F "awk '/^\\[platform\\]$/" "$ROOT/builder/build-iso.sh" | sed -E "s/.*awk '([^']*)'.*/\1/")
 [[ -n $strip ]] || fail "builds without a bundle keep the [platform] repo"
-stripped=$(awk "$strip" "$ROOT/configs/pacman-online-aarch64.conf" | grep -E '^\[' | paste -sd' ')
+stripped=$(awk "$strip" "$ROOT/configs/pacman-online-aarch64-stable.conf" | grep -E '^\[' | paste -sd' ')
 [[ $stripped == '[options] [omarchy] [core] [extra] [alarm] [aur]' ]] || fail "repositories without a bundle are wrong: $stripped"
 # The entrypoint's contract, checked by running it up to its first refusal.
 make_refuses() { # expected message, then arguments
@@ -154,7 +156,6 @@ make_refuses() { # expected message, then arguments
   out=$(cd "$ROOT" && bash bin/omarchy-iso-make "$@" 2>&1) && fail "omarchy-iso-make $* was accepted"
   grep -Fq -- "$want" <<<"$out" || fail "omarchy-iso-make $*: expected '$want', got: $out"
 }
-make_refuses 'builds use the edge or rc channel' --arch aarch64
 make_refuses 'package directory not found' --arch aarch64 --rc --package-dir /nonexistent
 make_refuses 'package directory not found' --arch aarch64 --edge --package-dir /nonexistent
 make_refuses 'Unknown option: --kernel' --arch aarch64 --edge --kernel linux-aarch64
@@ -205,7 +206,7 @@ grep -Fq 'hw_platform=/tmp/omarchy-pkglists/usr/bin/omarchy-hw-platform' "$ROOT/
 # --- package sources ---------------------------------------------------------------
 # Arch Linux ARM's packages come from Omarchy's own mirror of them: for the
 # offline mirror, for the build container, and for the installed system.
-servers=$(grep -E '^Server' "$ROOT/configs/pacman-online-aarch64.conf" | grep -v 'file:///packages' | sort -u)
+servers=$(cat "$ROOT"/configs/pacman-online-aarch64-*.conf | grep -E '^Server' | grep -v 'file:///packages' | sort -u)
 grep -vq 'omarchy\.org/' <<<"$servers" && fail "an aarch64 build downloads from outside Omarchy: $(grep -v 'omarchy\.org/' <<<"$servers")"
 grep -Fq 'Server = https://arm-mirror.omarchy.org/$arch/$repo' <<<"$servers" || fail "aarch64 builds do not use Omarchy's Arch Linux ARM mirror"
 grep -Fq '>/etc/pacman.d/mirrorlist' "$ROOT/builder/build-iso.sh" || fail "the build container keeps the mirror its image came with"

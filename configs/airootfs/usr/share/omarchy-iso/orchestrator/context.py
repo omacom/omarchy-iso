@@ -32,8 +32,6 @@ def validate_language(language: Any, registry: Path | None = None) -> None:
 class InstallContext:
     config_path: Path
     creds_path: Path
-    full_name: str
-    email: str
     encrypt: bool
     authorized_keys_path: Path | None
     tailscale_authkey_path: Path | None
@@ -130,8 +128,6 @@ class InstallContext:
         ctx = cls(
             config_path=config_path,
             creds_path=creds_path,
-            full_name=_read_text(os.environ.get("OMARCHY_INSTALL_FULL_NAME_FILE")),
-            email=_read_text(os.environ.get("OMARCHY_INSTALL_EMAIL_FILE")),
             encrypt=_read_text(os.environ.get("OMARCHY_INSTALL_ENCRYPT_FILE")).lower() in ("true", "yes", "1"),
             authorized_keys_path=_optional_path(os.environ.get("OMARCHY_INSTALL_AUTHORIZED_KEYS_FILE")),
             tailscale_authkey_path=_optional_path(os.environ.get("OMARCHY_INSTALL_TAILSCALE_AUTHKEY_FILE")),

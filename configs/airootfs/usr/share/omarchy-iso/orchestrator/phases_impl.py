@@ -1114,8 +1114,8 @@ def _debug_run(ctx: InstallContext, cmd: list[str]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # Target setup phases:
 #  1. point the target at the offline pacman.conf
-#  2. bind-mount the offline mirror + /opt/packages into /mnt for target pacman
-#     and bundled language runtimes
+#  2. bind-mount the offline mirror into /mnt for target pacman, and the
+#     bundled Node for a runtime from before Omarchy installed Node lazily
 #  3. arch-chroot as root → omarchy-apply-system --first-install
 #  4. arch-chroot as user → omarchy-provision-user --first-install
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1128,8 +1128,10 @@ def _prepare_target_setup(ctx: InstallContext) -> None:
 
     bind_mounts = [
         ("/var/cache/omarchy/mirror/offline", "/var/cache/omarchy/mirror/offline"),
-        ("/opt/packages", "/opt/packages"),
     ]
+    # build-iso.sh bundles Node only for a runtime whose setup still unpacks it.
+    if Path("/opt/packages").is_dir():
+        bind_mounts.append(("/opt/packages", "/opt/packages"))
     ctx.state.setdefault("bind_mounts", [])
     mounted = set(ctx.state["bind_mounts"])
     for src, dst in bind_mounts:
@@ -1209,8 +1211,6 @@ def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str 
         f"OMARCHY_INSTALL_USER={ctx.username}",
         f"OMARCHY_START_TIME={omarchy_start_time}",
         f"OMARCHY_START_EPOCH={omarchy_start_epoch}",
-        f"OMARCHY_USER_NAME={ctx.full_name}",
-        f"OMARCHY_USER_EMAIL={ctx.email}",
         f"OMARCHY_MIRROR={mirror_channel}",
         f"OMARCHY_ISO_REF={_iso_ref()}",
         f"OMARCHY_RUNTIME_PACKAGE={_omarchy_runtime_package()}",
@@ -1218,6 +1218,15 @@ def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str 
         f"OMARCHY_NVIM_PACKAGE={_omarchy_nvim_package()}",
         "OMARCHY_INSTALL_LOG_FILE=/var/log/omarchy-install.log",
         "OMARCHY_LOG_TO_STDOUT=1",
+        # The install must not wait on a network it may not have. mise reshim
+        # resolves the version list of every tool declared in
+        # /etc/mise/conf.d/omarchy-tools.toml, all of them version = "latest":
+        # offline, each lookup waits out mise's HTTP timeout before falling
+        # back, and the user finalizer measured 40.10 s that way (five tools at
+        # 20 s) on a 65 s install. The tools are lazy, so reshim only needs the
+        # declarations; the first real use of a tool installs it later, with a
+        # network. MISE_OFFLINE blocks every HTTP request.
+        "MISE_OFFLINE=1",
     ]
     if _install_debug_enabled():
         env_extras.append("OMARCHY_INSTALL_DEBUG=1")
@@ -1265,12 +1274,10 @@ def run_system_finalizer(ctx: InstallContext) -> None:
 # stage_provisioning_state: produce the on-disk "provisioning state" the runtime's first-boot
 # setup (omarchy-provision-owner) and factory reset (omarchy-system-factory-reset) consume.
 #
-# Every install stashes the bundled Node tarball in /var/lib/omarchy/provisioning/
-# so a later factory reset can finalize the new owner's user offline. deferred-provisioning
-# installs additionally arm the first-boot setup service and, on encrypted
-# targets, stage the throwaway LUKS passphrase: the keyfile embedded in the
-# initramfs auto-unlocks boot during the provisioning window, and first-boot setup
-# re-keys the volume to the owner's password and removes it.
+# Deferred-provisioning installs arm the first-boot setup service and, on
+# encrypted targets, stage the throwaway LUKS passphrase: the keyfile embedded
+# in the initramfs auto-unlocks boot during the provisioning window, and
+# first-boot setup re-keys the volume to the owner's password and removes it.
 #
 # Runs before finalize_limine_boot so the cryptkey cmdline drop-in and the
 # keyfile land in the final UKI build.
@@ -1278,17 +1285,13 @@ def run_system_finalizer(ctx: InstallContext) -> None:
 
 PROVISION_STATE_DIR = "var/lib/omarchy/provisioning"
 PROVISION_KEYFILE = "etc/omarchy/provisioning.key"
-NODE_PACKAGES_DIR = Path("/opt/packages")
 
 
 def stage_provisioning_state(ctx: InstallContext) -> None:
-    # World-readable: first-boot finalization reads the Node tarball as the
-    # new user. The only secret inside (luks-key) is itself 0600 root.
+    # The only secret inside (luks-key) is itself 0600 root.
     provisioning_dir = ctx.target / PROVISION_STATE_DIR
     provisioning_dir.mkdir(parents=True, exist_ok=True)
     provisioning_dir.chmod(0o755)
-
-    _stage_node_tarball(ctx, provisioning_dir)
 
     if not ctx.defer_provisioning:
         return
@@ -1316,31 +1319,6 @@ def stage_provisioning_state(ctx: InstallContext) -> None:
 
     if _provision_install_encrypted(ctx):
         _stage_provisioning_luks_unlock(ctx, provisioning_dir)
-
-
-# Node.js names its builds after the CPU: build-iso.sh bundles the one the
-# live ISO (and so the target) runs on.
-def _node_platform() -> str:
-    return "linux-arm64" if platform.machine() == "aarch64" else "linux-x64"
-
-
-def _stage_node_tarball(ctx: InstallContext, provisioning_dir) -> None:
-    tarballs = sorted(NODE_PACKAGES_DIR.glob(f"node-v*-{_node_platform()}.tar.gz"))
-    if not tarballs:
-        # Hard error on every install, not just deferred-provisioning installs: the stash is what lets a
-        # later factory reset finalize the next owner offline, and an ISO
-        # build always bundles the tarball — its absence means a broken build.
-        raise RuntimeError(
-            f"no bundled Node tarball in {NODE_PACKAGES_DIR} — first-boot setup "
-            "and factory reset could not finalize a user offline"
-        )
-
-    packages_dir = provisioning_dir / "packages"
-    packages_dir.mkdir(parents=True, exist_ok=True)
-    target_tarball = packages_dir / tarballs[0].name
-    if not target_tarball.exists():
-        info("› stashing Node tarball for offline first-boot setup")
-        shutil.copy2(tarballs[0], target_tarball)
 
 
 def _provision_install_encrypted(ctx: InstallContext) -> bool:
@@ -2048,9 +2026,6 @@ def _validate_provisioning_state(ctx: InstallContext) -> None:
     link = ctx.target / "etc/systemd/system/multi-user.target.wants/omarchy-provision-owner.service"
     if not link.is_symlink():
         raise RuntimeError("deferred-provisioning install but omarchy-provision-owner.service is not enabled")
-
-    if not list((provisioning_dir / "packages").glob("node-v*.tar.gz")):
-        raise RuntimeError(f"deferred-provisioning install but no Node tarball staged in {provisioning_dir / 'packages'}")
 
     if _provision_install_encrypted(ctx):
         for required in (provisioning_dir / "luks-key", ctx.target / PROVISION_KEYFILE):

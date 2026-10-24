@@ -12,12 +12,13 @@ on:
     branches: [quattro]
   # By hand, the ISO can be built from another package channel: rc builds a
   # release candidate the way omarchy-release does (omarchy-iso-make --rc), to
-  # test a fresh install of it, on both architectures. stable is x86_64 only;
-  # aarch64 builds from the edge channel for every other channel.
+  # test a fresh install of it, on both architectures, and stable the release
+  # the same way. A pull request builds x86_64 from stable and aarch64 from
+  # edge.
   workflow_dispatch:
     inputs:
       channel:
-        description: "Package channel the ISO is built from (aarch64: rc, or edge)"
+        description: "Package channel the ISO is built from (a pull request: stable on x86_64, edge on aarch64)"
         type: choice
         options: [stable, rc, edge]
         default: stable
@@ -103,19 +104,24 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         if: matrix.arch == 'x86_64'
 
-      # aarch64 installs what the edge channel serves, as the nightly does, on
-      # linux-omarchy: the one kernel for every aarch64 board. Every package
-      # comes from the package repositories, none is built here. An rc run
-      # builds from the rc channel.
+      # A pull request's aarch64 ISO installs what the edge channel serves, as
+      # the nightly does, on linux-omarchy: the one kernel for every aarch64
+      # board. A run by hand builds both from the channel it names. Every
+      # package comes from the package repositories, none is built here.
       - name: Build the ISO
+        env:
+          CHANNEL: ${{ inputs.channel || (matrix.arch == 'aarch64' && 'edge' || 'stable') }}
         run: |
           start=$(date +%s)
-          if [[ ${{ matrix.arch }} == aarch64 && '${{ inputs.channel }}' == rc ]]; then
-            ./bin/omarchy-iso-make --arch aarch64 --rc --no-boot-offer
-          elif [[ ${{ matrix.arch }} == aarch64 ]]; then
-            ./bin/omarchy-iso-make --arch aarch64 --edge --no-boot-offer
+          case $CHANNEL in
+            rc) flag=--rc ;;
+            edge) flag=--edge ;;
+            *) flag= ;;
+          esac
+          if [[ ${{ matrix.arch }} == aarch64 ]]; then
+            ./bin/omarchy-iso-make --arch aarch64 $flag --no-boot-offer
           else
-            NO_BOOT_OFFER=1 ./bin/omarchy-iso-make ${{ inputs.channel == 'rc' && '--rc' || inputs.channel == 'edge' && '--edge' || '' }}
+            NO_BOOT_OFFER=1 ./bin/omarchy-iso-make $flag
           fi
           mkdir -p test-runs && echo $(( $(date +%s) - start )) >test-runs/build-seconds
 
@@ -184,7 +190,7 @@ jobs:
           {
             echo "## Install test"
             echo
-            echo "Channel: \`${{ matrix.arch == 'aarch64' && inputs.channel != 'rc' && 'edge' || inputs.channel || 'stable' }}\`"
+            echo "Channel: \`${{ inputs.channel || (matrix.arch == 'aarch64' && 'edge' || 'stable') }}\`"
             echo
             if [ -f "$base/omarchy-install-timing.json" ]; then
               jq -r '"**Install:** \((.finished_at - .started_at) * 10 | round / 10) s across \(.phases | length) phases"' "$base/omarchy-install-timing.json"

@@ -5,7 +5,7 @@ set -e
 OMARCHY_ISO_REF="${OMARCHY_ISO_REF:-quattro}"
 OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
 OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
-OMARCHY_KERNEL="${OMARCHY_KERNEL:-linux-t2}"
+OMARCHY_KERNEL="${OMARCHY_KERNEL:-linux-omarchy}"
 # profiledef.sh reads both in the mkarchiso environment.
 export OMARCHY_ARCH OMARCHY_KERNEL
 
@@ -14,16 +14,16 @@ source /builder/arm64-kernel-image.sh
 source /builder/archiso-aarch64-mkinitcpio.sh
 source /builder/grub-platform.sh
 
-# The online pacman configuration drives every package download below. On
-# aarch64 it points at Omarchy's aarch64 repository in the build's channel
-# (edge or rc) and Arch Linux ARM, and at a package bundle mounted at
-# /packages first when there is one.
+# The online pacman configuration drives every package download below: one per
+# architecture and channel. On aarch64 it points at Omarchy's aarch64
+# repository and its mirror of Arch Linux ARM in the build's channel, and at a
+# package bundle mounted at /packages first when there is one.
 case "$OMARCHY_ARCH" in
   x86_64)
     online_pacman_conf="/configs/pacman-online-${OMARCHY_MIRROR}.conf"
     ;;
   aarch64)
-    online_pacman_conf=/configs/pacman-online-aarch64.conf
+    online_pacman_conf="/configs/pacman-online-aarch64-${OMARCHY_MIRROR}.conf"
     # One image serves every board, on one kernel.
     if [[ $OMARCHY_KERNEL != linux-omarchy ]]; then
       echo "ERROR: aarch64 builds boot linux-omarchy (got '$OMARCHY_KERNEL')" >&2
@@ -33,8 +33,8 @@ case "$OMARCHY_ARCH" in
       echo "ERROR: the package bundle mounted at /packages needs a SHA256SUMS" >&2
       exit 1
     fi
-    if [[ $OMARCHY_MIRROR != edge && $OMARCHY_MIRROR != rc ]]; then
-      echo "ERROR: aarch64 builds use the edge or rc channel, the ones Omarchy publishes for aarch64 (got '$OMARCHY_MIRROR')" >&2
+    if [[ ! -f $online_pacman_conf ]]; then
+      echo "ERROR: aarch64 builds use the stable, rc or edge channel (got '$OMARCHY_MIRROR')" >&2
       exit 1
     fi
     ;;
@@ -77,7 +77,20 @@ fi
 
 # Packages installed into the Arch container used to build the ISO.
 pacman-key --init
+# The [core] server of an online configuration: the build channel's Omarchy
+# mirror, which the build container installs its own tools from.
+channel_core_server() {
+  local server
+  server=$(awk '/^\[core\]$/ { getline server; print server; exit }' "$1")
+  if [[ $server != "Server = https://"*"mirror.omarchy.org/"* ]]; then
+    echo "ERROR: no Omarchy mirror for [core] in $1" >&2
+    return 1
+  fi
+  printf '%s\n' "$server"
+}
+
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
+  channel_pacman_conf=$online_pacman_conf
   online_pacman_conf=/tmp/pacman-online-aarch64.conf
   if [[ -d /packages ]]; then
     # The platform bundle is the [platform] repo for this build. Verify it and
@@ -96,26 +109,16 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
     done
     repo-add -q "$bundle_index/platform.db.tar.gz" "$bundle_index"/*.pkg.tar.* 2>/dev/null || \
       repo-add "$bundle_index/platform.db.tar.gz" "$bundle_index"/*.pkg.tar.*
-    sed "s|^Server = file:///packages$|Server = file://$bundle_index|" /configs/pacman-online-aarch64.conf > "$online_pacman_conf"
+    sed "s|^Server = file:///packages$|Server = file://$bundle_index|" "$channel_pacman_conf" > "$online_pacman_conf"
   else
     # No bundle, so no [platform] repo: pacman refuses a repo it cannot sync.
     awk '/^\[platform\]$/ { skip = 1; next } /^\[/ { skip = 0 } !skip' \
-      /configs/pacman-online-aarch64.conf > "$online_pacman_conf"
+      "$channel_pacman_conf" > "$online_pacman_conf"
   fi
-  # The config names edge; an rc build takes [omarchy] from rc instead.
-  sed -i "s|^Server = https://pkgs\.omarchy\.org/edge/|Server = https://pkgs.omarchy.org/$OMARCHY_MIRROR/|" "$online_pacman_conf"
-  grep -Fqx "Server = https://pkgs.omarchy.org/$OMARCHY_MIRROR/\$arch" "$online_pacman_conf" || {
-    echo "ERROR: no $OMARCHY_MIRROR [omarchy] server in $online_pacman_conf" >&2
-    exit 1
-  }
 
   # The container image arrives pointed at Arch Linux ARM's own mirrors. Its
   # packages come from the same place the ISO's do: Omarchy's mirror of them.
-  awk '/^\[core\]$/ { getline server; print server; exit }' "$online_pacman_conf" >/etc/pacman.d/mirrorlist
-  grep -q '^Server = https://[a-z-]*mirror\.omarchy\.org/' /etc/pacman.d/mirrorlist || {
-    echo "ERROR: no Omarchy mirror for [core] in $online_pacman_conf" >&2
-    exit 1
-  }
+  channel_core_server "$online_pacman_conf" >/etc/pacman.d/mirrorlist || exit 1
   pacman --noconfirm -Sy archlinuxarm-keyring
   pacman-key --populate archlinuxarm
   # Arch Linux ARM does not publish archiso. Install its runtime dependencies
@@ -131,6 +134,11 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   patch --batch --forward --fuzz=0 "$mkarchiso_command" </builder/archiso-v87-aarch64-boot-efi.patch
   chmod 0755 "$mkarchiso_command"
 else
+  # The container's own tools come from the channel's Omarchy mirror too; the
+  # image's mirrors stay after it as the fallback the online configuration
+  # reaches through its Include.
+  core_server=$(channel_core_server "$online_pacman_conf") || exit 1
+  sed -i "1i $core_server" /etc/pacman.d/mirrorlist
   pacman --noconfirm -Sy archlinux-keyring
   # Full upgrade, not just -Sy: docker never re-pulls :latest once it's cached,
   # so this container can be months behind the mirror it installs from. A plain
@@ -187,8 +195,12 @@ else
   : > "$build_cache_dir/airootfs/root/omarchy_kernel"
 fi
 
+# The live kernel's archiso initramfs. x86_64 also keeps linux-t2's, which
+# GRUB boots on a Mac (configs/grub/grub.cfg).
+cp "/builder/${OMARCHY_KERNEL}.preset" "$build_cache_dir/airootfs/etc/mkinitcpio.d/${OMARCHY_KERNEL}.preset"
+
 # Architecture overlay on the shared profile: live kernel, initramfs hooks,
-# GRUB entries. x86_64 keeps its exact previous behaviour.
+# GRUB entries.
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # releng's live package list is x86-flavoured; drop what arm64 cannot use.
   arm_live_excludes=(amd-ucode broadcom-wl edk2-shell hyperv intel-ucode linux memtest86+ memtest86+-efi open-vm-tools refind reflector syslinux virtualbox-guest-utils-nox)
@@ -202,8 +214,11 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # Drops the x86-only microcode/memdisk hooks and adds the Tegra/MediaTek
   # I2C-HID keyboard modules.
   configure_archiso_aarch64_mkinitcpio "$build_cache_dir/airootfs/etc/mkinitcpio.conf.d/archiso.conf"
+  # The initramfs waits for the live medium only on x86_64 (configs/airootfs/
+  # etc/initcpio/hooks/udev); the aarch64 boards keep the full settle, which
+  # the Qualcomm firmware staging before media discovery was proven with.
+  rm -f "$build_cache_dir/airootfs/etc/initcpio/hooks/udev"
   boot_splash_kernel_options="quiet splash "
-  cp "/builder/${OMARCHY_KERNEL}.preset" "$build_cache_dir/airootfs/etc/mkinitcpio.d/${OMARCHY_KERNEL}.preset"
   # The N1x firmware's SPCR serial console would take the console from the
   # panel, hence console=tty0 acpi=nospcr.
   kernel_options="console=tty0 acpi=nospcr initramfs_async=0"
@@ -231,10 +246,10 @@ CUSTOMIZE
   rm -rf "$build_cache_dir/syslinux" "$build_cache_dir/efiboot"
 else
   boot_splash_kernel_options="quiet splash "
-  kernel_options="xe.enable_panel_replay=0 initramfs_async=0"
+  kernel_options="xe.enable_panel_replay=0 initramfs_async=0 intel_idle.states_off=0x3fc"
 fi
 for grub_config in "$build_cache_dir/grub/grub.cfg" "$build_cache_dir/grub/loopback.cfg"; do
-  configure_grub_kernel "$grub_config" "$OMARCHY_KERNEL"
+  configure_grub_platform "$grub_config" "$OMARCHY_ARCH"
   sed -i \
     -e "s|%KERNEL%|$OMARCHY_KERNEL|g" \
     -e "s|%BOOT_SPLASH_KERNEL_OPTIONS%|$boot_splash_kernel_options|g" \
@@ -312,20 +327,6 @@ if [[ -d /omarchy-source && -d /omarchy-pkgs ]]; then
   fi
 fi
 
-# Node.js binary for offline mise install, matched to the target architecture.
-NODE_DIST_URL="https://nodejs.org/dist/latest"
-NODE_SHASUMS=$(curl -fsSL "$NODE_DIST_URL/SHASUMS256.txt")
-node_platform=linux-x64
-[[ $OMARCHY_ARCH == aarch64 ]] && node_platform=linux-arm64
-if ! IFS=$'\t' read -r NODE_FILENAME NODE_SHA < <(select_node_release "$node_platform" <<<"$NODE_SHASUMS"); then
-  echo "ERROR: could not find Node.js $node_platform release metadata" >&2
-  exit 1
-fi
-curl -fsSL "$NODE_DIST_URL/$NODE_FILENAME" -o "/tmp/$NODE_FILENAME"
-echo "$NODE_SHA /tmp/$NODE_FILENAME" | sha256sum -c -
-mkdir -p "$build_cache_dir/airootfs/opt/packages/"
-cp "/tmp/$NODE_FILENAME" "$build_cache_dir/airootfs/opt/packages/"
-
 # Packages installed into the live ISO environment itself (NOT the target system).
 # The selected omarchy-settings package is needed here so its post_install hook
 # drops Omarchy's plymouthd.conf into /etc/plymouth before mkarchiso builds the
@@ -337,14 +338,14 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # saves a laptop's signed firmware from Windows with qcom-firmware-extract.
   arch_packages=("$OMARCHY_KERNEL" archlinuxarm-keyring git gum jq openssl openssh pciutils plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted systemd-ukify linux-firmware-qcom qcom-firmware-extract python)
 else
-  arch_packages=(linux-t2 git gum jq openssl plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
+  # linux-t2 is the live kernel on a Mac (configs/grub/grub.cfg).
+  arch_packages=("$OMARCHY_KERNEL" linux-t2 git gum jq openssl plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
 fi
 live_packages_file="$build_cache_dir/packages.$OMARCHY_ARCH"
 printf '%s\n' "${arch_packages[@]}" >> "$live_packages_file"
 
-# The live ISO boots linux-t2 (see airootfs/etc/mkinitcpio.d/linux-t2.preset), so
-# stock linux is a second kernel nobody boots: ~147MB of ISO, plus its own archiso
-# initramfs, copied into both the ISO tree and the size-constrained FAT EFI image.
+# The live ISO boots linux-omarchy, or linux-t2 on a Mac, so stock linux is a
+# kernel nobody boots: ~147MB of ISO, plus its own archiso initramfs.
 #
 # It cannot just be deleted — releng's broadcom-wl hard-depends on it, and it is
 # the only releng package that does, so pacman would drag the kernel straight back
@@ -352,7 +353,7 @@ printf '%s\n' "${arch_packages[@]}" >> "$live_packages_file"
 # kernel we boot, so it has done nothing since we started booting T2 anyway. The
 # install is entirely offline and the live environment needs no Wi-Fi driver.
 #
-# Anchored so linux-t2 and linux-firmware are untouched.
+# Anchored so linux-omarchy, linux-t2 and linux-firmware are untouched.
 sed -i -E '/^(linux|broadcom-wl)$/d' "$live_packages_file"
 
 # Build the offline mirror: everything pacstrap might want during the target
@@ -362,6 +363,7 @@ sed -i -E '/^(linux|broadcom-wl)$/d' "$live_packages_file"
 if [[ -d /omarchy-source ]]; then
   base_pkg_lists=(/omarchy-source/install/omarchy-base.packages /omarchy-source/install/omarchy-other.packages)
   setup_form=/omarchy-source/install/provisioning/setup-form.sh
+  mise_work=/omarchy-source/install/user/mise-work.sh
 else
   # Pull the same package lists out of the freshly-downloaded Omarchy runtime
   # package so we don't need a local checkout in the non-local-source path.
@@ -383,6 +385,8 @@ else
   # actionable error below.
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/setup-form.sh 2>/dev/null || true
   setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
+  bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/user/mise-work.sh 2>/dev/null || true
+  mise_work=/tmp/omarchy-pkglists/usr/share/omarchy/install/user/mise-work.sh
   # The aarch64 list, each platform's own and the x86_64-only one. Runtimes
   # from before the platform lists ship none, so each is optional.
   for platform_list in 'omarchy-aarch64*.packages' omarchy-x86_64-only.packages; do
@@ -506,6 +510,25 @@ if [[ ! -f $setup_form ]]; then
 fi
 cp "$setup_form" "$build_cache_dir/airootfs/usr/share/omarchy-iso/setup-form.sh"
 
+# Omarchy installs Node lazily through mise since omacom/omarchy#15876. A
+# runtime from before it unpacks a bundled Node tarball during setup and stops
+# the install without one, so it still gets the build for its architecture.
+# Remove this once every channel's runtime installs Node lazily.
+if grep -qF /opt/packages "$mise_work" 2>/dev/null; then
+  NODE_DIST_URL="https://nodejs.org/dist/latest"
+  NODE_SHASUMS=$(curl -fsSL "$NODE_DIST_URL/SHASUMS256.txt")
+  node_platform=linux-x64
+  [[ $OMARCHY_ARCH == aarch64 ]] && node_platform=linux-arm64
+  if ! IFS=$'\t' read -r NODE_FILENAME NODE_SHA < <(select_node_release "$node_platform" <<<"$NODE_SHASUMS"); then
+    echo "ERROR: could not find Node.js $node_platform release metadata" >&2
+    exit 1
+  fi
+  curl -fsSL "$NODE_DIST_URL/$NODE_FILENAME" -o "/tmp/$NODE_FILENAME"
+  echo "$NODE_SHA /tmp/$NODE_FILENAME" | sha256sum -c -
+  mkdir -p "$build_cache_dir/airootfs/opt/packages/"
+  cp "/tmp/$NODE_FILENAME" "$build_cache_dir/airootfs/opt/packages/"
+fi
+
 # Collect every package we want available in the offline mirror.
 declare -a all_packages
 mapfile -t all_packages < <(
@@ -536,10 +559,10 @@ mapfile -t all_packages < <(
     sort -u
 )
 
-# x86_64: Omarchy's optional list also names firmware for aarch64 boards,
-# which has no x86_64 build. Each exclusion is explicit and printed.
+# x86_64: Omarchy's optional list also names packages for aarch64 boards,
+# which have no x86_64 build. Each exclusion is explicit and printed.
 if [[ $OMARCHY_ARCH == x86_64 ]]; then
-  aarch64_only=(asus-proart-p14-speaker-firmware)
+  aarch64_only=(asus-proart-p14-speaker-firmware iptsd surface-pro-11-sensors surface-pro-11-support)
   printf 'x86_64: excluding aarch64-only package %s\n' "${aarch64_only[@]}" >&2
   mapfile -t all_packages < <(printf '%s\n' "${all_packages[@]}" | grep -Fxv -f <(printf '%s\n' "${aarch64_only[@]}"))
 fi

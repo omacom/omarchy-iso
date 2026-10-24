@@ -93,7 +93,7 @@ while [[ $# -gt 0 ]]; do
   *)
     echo "Unknown option: $1"
     echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
-    echo "       $0 --arch aarch64 --edge|--rc [--package-dir DIR] [--dev-ssh <pubkey>] [--local-source <omarchy-checkout> <pkgs-checkout>] [...]"
+    echo "       $0 --arch aarch64 [--edge|--rc] [--package-dir DIR] [--dev-ssh <pubkey>] [--local-source <omarchy-checkout> <pkgs-checkout>] [...]"
     exit 1
     ;;
   esac
@@ -106,20 +106,17 @@ if [[ -n $LOCAL_OMARCHY_PATH ]]; then
   LOCAL_PKGS_PATH=$(realpath "$LOCAL_PKGS_PATH")
 fi
 
-# Architecture selection. x86_64 is unchanged. aarch64 builds run in a pinned
-# Arch Linux ARM container against Omarchy's edge or rc aarch64 repository,
-# and make one image for every board, on the linux-omarchy that repository
-# publishes.
+# Architecture selection. Both architectures boot linux-omarchy live; x86_64
+# also carries linux-t2 for Macs. aarch64 builds run in a pinned
+# Arch Linux ARM container against Omarchy's aarch64 repository and its mirror
+# of Arch Linux ARM in the build's channel, stable unless --rc or --edge says
+# otherwise, as on x86_64, and make one image for every board, on the
+# linux-omarchy that repository publishes.
 # build-iso.sh refuses a runtime without the platform support.
 CONTAINER_IMAGE=ghcr.io/archlinux/archlinux:latest
 CONTAINER_PLATFORM_ARGS=()
-OMARCHY_KERNEL=linux-t2
+OMARCHY_KERNEL=linux-omarchy
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
-  OMARCHY_KERNEL=linux-omarchy
-  if [[ ${OMARCHY_MIRROR:-} != edge && ${OMARCHY_MIRROR:-} != rc ]]; then
-    echo "Error: --arch aarch64 builds use the edge or rc channel, the ones Omarchy publishes for aarch64; pass --edge or --rc" >&2
-    exit 1
-  fi
   if [[ -n $PACKAGE_DIR ]]; then
     [[ -d $PACKAGE_DIR ]] || { echo "Error: package directory not found at $PACKAGE_DIR" >&2; exit 1; }
     PACKAGE_DIR=$(realpath "$PACKAGE_DIR")

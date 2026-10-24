@@ -258,6 +258,9 @@ equal "an edge ISO installs the -dev packages" "$(packages_of release/omarchy-20
 equal "a dev ISO installs the -dev packages" "$(packages_of release/omarchy-2026.10.09-x86_64-dev.iso)" "omarchy-dev omarchy-settings-dev"
 equal "a released ISO installs the release packages" "$(packages_of release/omarchy-4.0.4.iso)" "omarchy omarchy-settings"
 equal "a stable build installs the release packages" "$(packages_of /x/edge/omarchy-2026.10.09-x86_64-stable.iso)" "omarchy omarchy-settings"
+equal "an aarch64 rc ISO installs the release packages" "$(packages_of release/omarchy-2026.10.20-aarch64-rc.iso)" "omarchy omarchy-settings"
+equal "an aarch64 ISO with the debug key installs its channel's packages" "$(packages_of release/omarchy-2026.10.20-aarch64-devssh-quattro.iso)" "omarchy omarchy-settings"
+equal "an edge aarch64 ISO with the debug key installs the -dev packages" "$(packages_of release/omarchy-2026.10.20-aarch64-devssh-edge.iso)" "omarchy-dev omarchy-settings-dev"
 
 printf '%s\r\n' 'BdsDxe: loading Boot0002 "UEFI QEMU DVD-ROM QM00011 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x5,0xFFFF,0x0)' \
   'BdsDxe: starting Boot0002 "UEFI QEMU DVD-ROM QM00011 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x5,0xFFFF,0x0)' >"$tmp/serial"

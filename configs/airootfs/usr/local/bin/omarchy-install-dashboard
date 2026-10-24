@@ -954,7 +954,7 @@ render_failure() {
 }
 
 failure_menu() {
-  local choice uploader
+  local choice uploader choices
 
   [[ ${OMARCHY_UI_FAILURE_ACTION:-} == "exit" ]] && return 0
   # The failure screen and log tail have already rendered; exit with the
@@ -964,28 +964,26 @@ failure_menu() {
   while true; do
     uploader=""
     uploader=$(find_log_uploader || true)
-    if [[ -n $uploader ]]; then
-      choice=$(gum choose \
-        --height 6 \
-        --header "What would you like to do?" \
-        "Upload log for support" \
-        "View full log" \
-        "Drop to shell" \
-        "Reboot" \
-        "Power off" \
-        <"$TTY_PATH" 2>"$TTY_PATH") || choice="Drop to shell"
-    else
-      choice=$(gum choose \
-        --height 5 \
-        --header "What would you like to do?" \
-        "View full log" \
-        "Drop to shell" \
-        "Reboot" \
-        "Power off" \
-        <"$TTY_PATH" 2>"$TTY_PATH") || choice="Drop to shell"
-    fi
+    choices=()
+    [[ -n ${failure_media_diagnosis:-} ]] && choices+=("Connect to the internet and retry")
+    [[ -n $uploader ]] && choices+=("Upload log for support")
+    choices+=("View full log" "Drop to shell" "Reboot" "Power off")
+    choice=$(gum choose \
+      --height $(( ${#choices[@]} + 1 )) \
+      --header "What would you like to do?" \
+      "${choices[@]}" \
+      <"$TTY_PATH" 2>"$TTY_PATH") || choice="Drop to shell"
 
     case "$choice" in
+      "Connect to the internet and retry")
+        # Only offered when the medium is to blame: pacman has deleted what it
+        # rejected, and online the retry fetches exactly those packages again.
+        if omarchy-iso-connect <"$TTY_PATH" >"$TTY_PATH" 2>&1; then
+          rm -f "$STATE_FILE"
+          exec "$0" "$LOG_FILE" "$STATE_FILE" -- "${INSTALL_CMD[@]}"
+        fi
+        render_failure "${failure_status:-1}" "${failure_summary:-}" "${failure_media_diagnosis:-}" >"$TTY_PATH" 2>/dev/null || true
+        ;;
       "Upload log for support")
         upload_failure_log
         render_failure "${failure_status:-1}" "${failure_summary:-}" "${failure_media_diagnosis:-}" >"$TTY_PATH" 2>/dev/null || true

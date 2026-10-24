@@ -103,6 +103,7 @@ if [[ -n $expected && -n $actual ]]; then
     echo "$display_package"
     echo
     echo "Try another USB port or another stick, and test this machine's memory"
+    echo "Or hold Shift at boot and pick \"copied to RAM\" to read the stick only once"
   else
     echo "The install medium is damaged"
     echo "This package no longer matches the checksum it was built with:"
@@ -122,3 +123,4 @@ echo "$display_package"
 echo
 echo "Verify your download with sha256sum, then write the USB again"
 echo "If the download verifies, the stick or this machine's memory is at fault"
+echo "Hold Shift at boot and pick \"copied to RAM\" to read the stick only once"

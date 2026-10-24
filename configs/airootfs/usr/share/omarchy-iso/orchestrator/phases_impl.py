@@ -227,6 +227,7 @@ def prepare_live(ctx: InstallContext) -> None:
         ctx.arch_config_path, ctx.creds_path
     )
     ctx.state["mirror_handler"] = arch.make_mirror_handler(offline=True)
+    arch.refetch_misread_packages()
 
 
 def _install_disk(ctx: InstallContext) -> str | None:

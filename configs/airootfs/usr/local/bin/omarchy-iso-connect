@@ -1,0 +1,105 @@
+#!/bin/bash
+#
+# Get the live ISO online after an install failed on a misread package.
+#
+# The install never needs a network, so nothing asks for one up front. Only
+# once pacman has rejected a package read off the stick is a connection worth
+# having: the retry then fetches exactly that file from the online servers
+# behind the offline mirror. Wired Ethernet and USB tethering come up on their
+# own through systemd-networkd; Wi-Fi and a Thunderbolt cable to another
+# computer need a hand, so those are the choices offered.
+#
+# Exits 0 once the machine is online, 1 when it is not.
+
+online() {
+  ip route get 1.1.1.1 &>/dev/null
+}
+
+wait_online() {
+  for _ in {1..20}; do
+    online && return 0
+    sleep 1
+  done
+  return 1
+}
+
+wifi_station() {
+  iwctl station list 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' |
+    awk 'NR > 4 && NF { print $1; exit }'
+}
+
+wifi_networks() {
+  # Columns are name, security, signal; a name may hold spaces, and the
+  # connected network is marked with a leading ">".
+  iwctl station "$1" get-networks 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' |
+    awk 'NR > 4 && NF >= 3 { sub(/^ *> */, ""); $NF = ""; $(NF - 1) = ""; sub(/ +$/, ""); print }'
+}
+
+connect_wifi() {
+  local station ssid passphrase
+
+  station=$(wifi_station)
+  if [[ -z $station ]]; then
+    gum style "No Wi-Fi device found."
+    return 1
+  fi
+
+  iwctl station "$station" scan 2>/dev/null
+  gum spin --spinner "pulse" --title "Scanning for networks..." -- sleep 3
+  ssid=$(wifi_networks "$station" | gum choose --header "Select Wi-Fi network") || return 1
+  [[ -n $ssid ]] || return 1
+  passphrase=$(gum input --password --placeholder "Passphrase (empty for an open network)") || return 1
+
+  if [[ -n $passphrase ]]; then
+    iwctl --passphrase "$passphrase" station "$station" connect "$ssid" 2>/dev/null
+  else
+    iwctl station "$station" connect "$ssid" 2>/dev/null
+  fi
+  gum spin --spinner "pulse" --title "Connecting to $ssid..." -- bash -c "$(declare -f online wait_online); wait_online"
+}
+
+# A Thunderbolt cable to another computer makes a network link of its own.
+# The other side has to share its internet over it (on a Mac: Internet
+# Sharing to Thunderbolt Bridge); this side asks it for an address.
+connect_thunderbolt() {
+  local authorized
+
+  modprobe thunderbolt_net 2>/dev/null
+  # Hosts and already-authorized devices refuse the write; that is fine.
+  for authorized in /sys/bus/thunderbolt/devices/*/authorized; do
+    echo 1 >"$authorized" 2>/dev/null
+  done
+
+  mkdir -p /run/systemd/network
+  printf '[Match]\nName=thunderbolt*\n\n[Network]\nDHCP=yes\n' \
+    >/run/systemd/network/20-thunderbolt.network
+  networkctl reload 2>/dev/null
+  ip link set thunderbolt0 up 2>/dev/null
+
+  gum spin --spinner "pulse" --title "Waiting for the other computer..." -- bash -c "$(declare -f online wait_online); wait_online"
+}
+
+main() {
+  local choice
+
+  while ! online; do
+    choice=$(gum choose --header "Connect to the internet to fetch the misread packages" \
+      "Wi-Fi" \
+      "Thunderbolt cable to another computer" \
+      "Ethernet or USB tethering is plugged in" \
+      "Cancel") || return 1
+
+    case "$choice" in
+      "Wi-Fi") connect_wifi ;;
+      "Thunderbolt cable to another computer") connect_thunderbolt ;;
+      "Ethernet or USB tethering is plugged in")
+        gum spin --spinner "pulse" --title "Waiting for a connection..." -- bash -c "$(declare -f online wait_online); wait_online"
+        ;;
+      *) return 1 ;;
+    esac
+
+    online || gum style "Still offline. Try another way, or Cancel."
+  done
+}
+
+[[ ${BASH_SOURCE[0]} == "$0" ]] && main "$@"

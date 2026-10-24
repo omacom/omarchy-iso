@@ -82,6 +82,37 @@ def make_mirror_handler(offline: bool = True) -> MirrorListHandler:
     return MirrorListHandler(offline=offline, verbose=False)
 
 
+MISREAD_RETRIES = 3
+
+
+def refetch_misread_packages() -> None:
+    """Retry a pacstrap that pacman failed on a corrupt bundled package.
+
+    A flaky stick misreads packages at random. pacman deletes each one it
+    rejects from the bind-mounted offline mirror and fails the transaction, and
+    a silent Installer never retries. On the next attempt pacman finds those
+    packages missing and fetches them from the online servers behind [offline]
+    (offline.db still pins their sha256), so each retry repairs what the last
+    one rejected. Offline, the retry fails the same way and the error stands.
+    """
+    from archinstall.lib.exceptions import RequirementError
+    from archinstall.lib.pacman.pacman import Pacman
+
+    strap = getattr(Pacman.strap, "__wrapped__", Pacman.strap)
+
+    def strap_with_refetch(self, packages):
+        for attempt in range(MISREAD_RETRIES + 1):
+            try:
+                return strap(self, packages)
+            except RequirementError as err:
+                if attempt == MISREAD_RETRIES or "is corrupted" not in str(err):
+                    raise
+                info("› a package was misread off the install medium; fetching it again")
+
+    strap_with_refetch.__wrapped__ = strap
+    Pacman.strap = strap_with_refetch
+
+
 def perform_filesystem_operations(arch_config: ArchConfig) -> None:
     """Partition, format, encrypt. archinstall's FilesystemHandler is its own
     object (separate from Installer) so we run it before opening the

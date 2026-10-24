@@ -2,6 +2,49 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+configurator="$repo_root/configs/airootfs/root/configurator"
+output_dir=""
+output_requested=false
+
+usage() {
+  cat <<USAGE
+Usage: omarchy-iso-configurator [--output-dir DIR]
+
+Options:
+  --output-dir DIR  Interactively generate cidata config for omarchy-iso-boot VM
+  -h, --help        Show this help
+
+With no options, run the configurator preview.
+USAGE
+}
+
+fail() {
+  echo "omarchy-iso-configurator: $*" >&2
+  exit 1
+}
+
+while (( $# > 0 )); do
+  case "$1" in
+    --output-dir)
+      [[ $# -ge 2 ]] || fail "--output-dir requires a directory"
+      output_dir="$2"
+      output_requested=true
+      shift 2
+      ;;
+    --output-dir=*)
+      output_dir="${1#*=}"
+      output_requested=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unexpected argument: $1"
+      ;;
+  esac
+done
 
 if [[ -z "${OMARCHY_PATH:-}" ]]; then
   for candidate in "$repo_root/../omarchy-installer" "$repo_root/../omarchy" /usr/share/omarchy; do
@@ -12,5 +55,63 @@ if [[ -z "${OMARCHY_PATH:-}" ]]; then
   done
 fi
 
-# Do a dry-run of the configurator to show the flow without having to do a real installation
-exec bash "$repo_root/configs/airootfs/root/configurator" dry "$@"
+if ! $output_requested; then
+  exec bash "$configurator" dry
+fi
+
+[[ -n $output_dir ]] || fail "--output-dir requires a non-empty directory"
+[[ ! -e $output_dir || -d $output_dir ]] || fail "output path is not a directory: $output_dir"
+
+managed_files=(
+  user_configuration.json
+  user_credentials.json
+  user_full_name.txt
+  user_email_address.txt
+  user_encrypt_installation.txt
+)
+
+existing_files=()
+for file in "${managed_files[@]}"; do
+  [[ -e $output_dir/$file ]] && existing_files+=("$file")
+done
+
+if ((${#existing_files[@]})); then
+  printf 'The following files already exist in %s:\n' "$output_dir"
+  printf '  %s\n' "${existing_files[@]}"
+  if ! gum confirm --default=false "Replace these generated config files?"; then
+    echo "Canceled; existing files were left unchanged."
+    exit 1
+  fi
+fi
+
+umask 077
+work_dir=$(mktemp -d "${TMPDIR:-/tmp}/omarchy-cidata-config.XXXXXX")
+cleanup() {
+  rm -rf "$work_dir"
+}
+trap cleanup EXIT
+
+# The configurator writes relative to its working directory. Stage everything
+# away from the destination so canceling or failing the wizard cannot leave a
+# partial cidata configuration behind.
+(
+  cd "$work_dir"
+  bash "$configurator" cidata
+)
+
+for file in "${managed_files[@]}"; do
+  [[ -f $work_dir/$file ]] || fail "configurator did not generate $file"
+done
+
+if [[ ! -d $output_dir ]]; then
+  install -d -m 0700 -- "$output_dir"
+fi
+[[ -d $output_dir ]] || fail "output path is not a directory: $output_dir"
+
+for file in "${managed_files[@]}"; do
+  install -m 0600 -- "$work_dir/$file" "$output_dir/$file"
+done
+
+echo
+echo "Generated cidata configuration in $output_dir"
+printf '  %s\n' "${managed_files[@]}"

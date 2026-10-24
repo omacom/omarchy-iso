@@ -91,6 +91,24 @@ class ContextDeferProvisioningTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "credentials file missing"):
             self.from_env()
 
+    def test_by_id_disk_path_is_resolved_for_archinstall(self):
+        real_disk = self.dir / "nvme0n1"
+        real_disk.write_text("")
+        link = self.dir / "disk-by-id-nvme-QEMU"
+        link.symlink_to(real_disk)
+
+        config = self.base_config()
+        config["disk_config"]["device_modifications"] = [{"device": str(link), "wipe": True}]
+        self.write_config(config)
+        self.write_creds({"users": [{"username": "jeff"}]})
+
+        ctx = self.from_env()
+        arch_config = json.loads(ctx.arch_config_path.read_text())
+        self.assertEqual(
+            arch_config["disk_config"]["device_modifications"][0]["device"],
+            os.path.realpath(str(link)),
+        )
+
     def test_deferred_provisioning_generates_throwaway_luks_passphrase(self):
         self.write_config(self.base_config(defer_provisioning=True, disk_encryption={
             "encryption_type": "luks", "partitions": ["x"],

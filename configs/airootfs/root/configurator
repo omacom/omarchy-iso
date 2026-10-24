@@ -273,6 +273,11 @@ user_form() {
   omarchy_prompt_timezone || return $?
 }
 
+# One CSV row for the summary table, with the value quoted and its quotes doubled.
+summary_row() {
+  printf '%s,"%s"\n' "$1" "${2//\"/\"\"}"
+}
+
 # Returns 0 on confirmed account details, or as soon as the keyboard screen
 # arms deferred provisioning.
 user_step() {
@@ -290,16 +295,19 @@ user_step() {
       continue
     fi
 
-    # Add manual padding since gum table -p doesn't respect padding
-    echo -e "Field,Value
-Username,$username
-Password,$(printf "%${#password}s" | tr ' ' '*')
-Full name,${full_name:-[Skipped]}
-Email address,${email_address:-[Skipped]}
-Hostname,$hostname
-Timezone,$timezone
-Keyboard,$keyboard" |
-      gum table -s "," -p | sed "s/^/${PADDING_LEFT_SPACES}/"
+    # Add manual padding since gum table -p doesn't respect padding. Values are
+    # CSV-quoted: a comma or double quote in the full name or email otherwise
+    # makes gum table reject the whole summary ("invalid data provided").
+    {
+      echo "Field,Value"
+      summary_row "Username" "$username"
+      summary_row "Password" "$(printf "%${#password}s" | tr ' ' '*')"
+      summary_row "Full name" "${full_name:-[Skipped]}"
+      summary_row "Email address" "${email_address:-[Skipped]}"
+      summary_row "Hostname" "$hostname"
+      summary_row "Timezone" "$timezone"
+      summary_row "Keyboard" "$keyboard"
+    } | gum table -s "," -p | sed "s/^/${PADDING_LEFT_SPACES}/"
 
     echo
     if gum confirm --negative "No, change it" "Does this look right?"; then

@@ -1196,8 +1196,6 @@ def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str 
         f"OMARCHY_INSTALL_USER={ctx.username}",
         f"OMARCHY_START_TIME={omarchy_start_time}",
         f"OMARCHY_START_EPOCH={omarchy_start_epoch}",
-        f"OMARCHY_USER_NAME={ctx.full_name}",
-        f"OMARCHY_USER_EMAIL={ctx.email}",
         f"OMARCHY_MIRROR={mirror_channel}",
         f"OMARCHY_ISO_REF={_iso_ref()}",
         f"OMARCHY_RUNTIME_PACKAGE={_omarchy_runtime_package()}",

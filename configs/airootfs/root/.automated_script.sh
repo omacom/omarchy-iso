@@ -130,8 +130,6 @@ rm -f /run/omarchy-install/state.json
   /usr/local/bin/omarchy-iso-install \
     --config /root/user_configuration.json \
     --creds /root/user_credentials.json \
-    --full-name-file /root/user_full_name.txt \
-    --email-file /root/user_email_address.txt \
     --encrypt-file /root/user_encrypt_installation.txt \
     --authorized-keys-file /root/authorized_keys \
     --tailscale-authkey-file /root/tailscale_authkey \

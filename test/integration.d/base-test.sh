@@ -492,8 +492,6 @@ EOF
 }
 EOF
 
-  echo "Omarchy Test" >"$dir/user_full_name.txt"
-  echo "test@omarchy.org" >"$dir/user_email_address.txt"
   echo "false" >"$dir/user_encrypt_installation.txt"
   cp "$SSH_KEY.pub" "$dir/authorized_keys"
 

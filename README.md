@@ -159,8 +159,6 @@ These are the configurator's own output files, so the way to get a starting set 
 |------|----------|---------|
 | `user_configuration.json` | Yes | archinstall config: disk, hostname, timezone, keyboard |
 | `user_credentials.json` | Yes | Username and password hash |
-| `user_full_name.txt` | No | Git full name |
-| `user_email_address.txt` | No | Git email |
 | `user_encrypt_installation.txt` | No | `true` when `user_configuration.json` carries a `disk_encryption` block; defaults to false |
 | `authorized_keys` | No | SSH public keys in sshd's own format, one per line |
 | `tailscale_authkey` | No | Tailscale auth key; the machine joins your tailnet on first boot |

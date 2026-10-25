@@ -59,22 +59,6 @@ export GUM_CONFIRM_UNSELECTED_BACKGROUND="${GUM_CONFIRM_UNSELECTED_BACKGROUND:-0
 child_pid=""
 child_pgid=""
 
-whimsy=(
-  "delivering delightful defaults"
-  "saving setup struggles"
-  "picking polished packages"
-  "curating cohesive colors"
-  "preparing pleasant pixels"
-  "hyping happy hyprland"
-  "integrating intuitive interfaces"
-  "bootstrapping beautiful boxes"
-  "crafting cozy commands"
-  "making machines marvelous"
-  "polishing pretty pixels"
-  "tuning tasteful terminals"
-  "weaving wonderful workflows"
-)
-
 tips=(
   progress.tip.menu
   progress.tip.keybindings
@@ -624,12 +608,6 @@ install_progress() {
   return 0
 }
 
-# Keep the original loading messages on their own clock, so progress jumps
-# cannot skip phrases and animation frame rate does not change their cadence.
-current_whimsy() {
-  printf '%s' "${whimsy[$(( (NOW - DASH_T0) / 4 % ${#whimsy[@]} ))]}"
-}
-
 # One tip per 8 seconds, in order. Use elapsed time, since rendering can stretch
 # under pacstrap I/O, when the tips may be the most visible sign of activity.
 current_tip() {
@@ -659,7 +637,7 @@ measure_progress_layout() {
     scale=$((scale - 1))
   done
   build_icon "$scale"
-  TOP_ROW="$(centered_top_row "$((ICON_HEIGHT + 6))")"
+  TOP_ROW="$(centered_top_row "$((ICON_HEIGHT + 5))")"
   ICON_LEFT=$(( (cols - ICON_WIDTH) / 2 + 1 ))
   (( ICON_LEFT < 1 )) && ICON_LEFT=1
   PROGRESS_TEXT_WIDTH=$((cols - 2))
@@ -686,7 +664,7 @@ update_progress() {
 }
 
 render_dynamic() {
-  local step message tip
+  local step tip
   # The framebuffer can settle late in VMs. Rebuild at the new size, preserving
   # progress, instead of leaving the drawing at the old screen coordinates.
   [[ "$(term_size)" == "$LAST_SIZE" ]] || render_static
@@ -696,11 +674,9 @@ render_dynamic() {
   DISPLAY_PM=$((DISPLAY_PM + step))
   render_icon "$DISPLAY_PM"
 
-  message="$(truncate_for_width "$(current_whimsy)" "$PROGRESS_TEXT_WIDTH")"
   tip="$(truncate_for_width "$(t progress.tipLine "$(current_tip)")" "$PROGRESS_TEXT_WIDTH")"
   printf '%s%d;1H' "$CSI" "$((TOP_ROW + ICON_HEIGHT + 1))"
   center "${GREEN}$((DISPLAY_PM / 10))%${RESET}" "$PROGRESS_TEXT_WIDTH"
-  center "${GREEN}${message}${RESET}" "$PROGRESS_TEXT_WIDTH"
   blank_line
   center "${DIM}${tip}${RESET}" "$PROGRESS_TEXT_WIDTH"
   printf '%s' "$CLEAR_TO_END"

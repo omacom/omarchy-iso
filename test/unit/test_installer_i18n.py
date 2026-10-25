@@ -101,7 +101,7 @@ class CatalogTest(unittest.TestCase):
         for source in SOURCES:
             text = source.read_text()
             used |= set(re.findall(r"\bt ([a-z][A-Za-z]*(?:\.[A-Za-z]+)+)", text))
-            used |= set(re.findall(r"^\s+(progress\.(?:whimsy|tip)\.[A-Za-z]+)$", text, re.MULTILINE))
+            used |= set(re.findall(r"^\s+(progress\.tip\.[A-Za-z]+)$", text, re.MULTILINE))
         self.assertEqual(used - set(self.english), set())
         self.assertEqual(set(self.english) - used, set())
 

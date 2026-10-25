@@ -206,7 +206,7 @@ class KernelSelectionTest(unittest.TestCase):
                 ctx = types.SimpleNamespace(
                     target=target, omarchy_install={"storage": storage},
                     user_configuration=configuration, encrypt=False,
-                    is_protected=False, defer_provisioning=False,
+                    is_protected=False, defer_provisioning=False, state={},
                 )
                 with mock.patch.object(phases_impl, "_assert_boot_hooks_restored"), \
                      mock.patch.object(phases_impl, "_validate_package_signing"), \

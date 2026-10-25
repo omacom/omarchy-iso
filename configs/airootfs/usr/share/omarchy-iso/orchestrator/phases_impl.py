@@ -416,6 +416,7 @@ def _install_limine_omarchy(ctx: InstallContext, installer, config) -> None:
             disk=arch.parent_device_path(efi_partition.safe_dev_path),
             part=int(efi_partition.partn),
             removable=bootloader_removable,
+            fallback=bool(_boot_intent(ctx).get("enable_fallback")),
         )
     else:
         _install_limine_bios(ctx, boot_partition)
@@ -459,6 +460,10 @@ def _default_limine_efi_binary() -> str:
     return f"limine_{_efi_arch_suffix().lower()}.efi"
 
 
+class EfiEntryRefused(RuntimeError):
+    """The firmware would not store a boot entry; the message is efibootmgr's."""
+
+
 def _install_limine_efi(
     ctx: InstallContext,
     *,
@@ -469,6 +474,7 @@ def _install_limine_efi(
     esp_path: str = "/EFI/limine",
     efi_binary: str | None = None,
     pre_state: dict | None = None,
+    fallback: bool = False,
 ) -> None:
     if efi_binary is None:
         efi_binary = _default_limine_efi_binary()
@@ -486,7 +492,27 @@ def _install_limine_efi(
     _write_limine_pacman_hook(ctx.target, hook_command)
 
     loader = "\\" + str(Path(esp_path) / efi_binary).strip("/").replace("/", "\\")
-    _register_limine_efi_entry(disk, part, loader, pre_state=pre_state)
+    try:
+        _register_limine_efi_entry(disk, part, loader, pre_state=pre_state)
+    except EfiEntryRefused as exc:
+        # Firmware with a small or full NVRAM refuses new variables while reading
+        # fine. Every UEFI boots EFI/BOOT/BOOT<arch>.EFI when no entry matches, so
+        # an ESP that is ours alone still boots without one. A shared ESP's EFI/BOOT
+        # may be Windows' own fallback, so there the install has to stop.
+        if not (fallback or removable):
+            raise RuntimeError(
+                f"{exc}. The firmware's boot entry storage is likely full; clearing old "
+                "boot entries or resetting the firmware to its defaults usually frees it"
+            ) from exc
+        fallback_path = Path(esp_mount) / "EFI" / "BOOT" / source_name
+        _copy_required(limine_path / source_name, ctx.target / fallback_path.relative_to("/"))
+        ctx.state["efi_fallback_only"] = str(fallback_path)
+        # Firmware tries the fallback path only after its own entries fail, so a
+        # machine with a working system on another disk may still start that one.
+        info(
+            f"warning: {exc}; installed the fallback loader {fallback_path} instead. "
+            "If this machine starts another system, pick this disk in its boot menu"
+        )
 
 
 def _register_limine_efi_entry(
@@ -498,7 +524,7 @@ def _register_limine_efi_entry(
 ) -> None:
     pre_state = pre_state or _read_efibootmgr()
 
-    subprocess.run(
+    created = capture(
         [
             "efibootmgr",
             "--create",
@@ -508,9 +534,12 @@ def _register_limine_efi_entry(
             "--loader", loader,
             "--unicode",
             "--verbose",
-        ],
-        check=True,
+        ]
     )
+    if created.returncode != 0:
+        output = (created.stderr or created.stdout or "").strip().splitlines()
+        reason = output[-1] if output else f"exit status {created.returncode}"
+        raise EfiEntryRefused(f"The firmware refused a boot entry for Limine: {reason}")
 
     post_state = _read_efibootmgr()
     new_entries = [num for num in post_state["entries"] if num not in pre_state["entries"]]
@@ -543,10 +572,12 @@ def _register_limine_efi_entry(
         and num != limine_num
         and num in pre_state["entries"]
     ]
-    subprocess.run(
-        ["efibootmgr", "--bootorder", ",".join([limine_num, *keep])],
-        check=True, capture_output=True,
-    )
+    # --create already put the new entry first; this only drops the retired ones
+    # from the order, so a store too full to take the rewrite costs nothing.
+    reordered = capture(["efibootmgr", "--bootorder", ",".join([limine_num, *keep])])
+    if reordered.returncode != 0:
+        output = (reordered.stderr or reordered.stdout or "").strip().splitlines()
+        info(f"warning: could not rewrite the EFI boot order: {output[-1] if output else reordered.returncode}")
 
 
 def _install_limine_bios(ctx: InstallContext, boot_partition) -> None:
@@ -1862,7 +1893,12 @@ def validate_boot(ctx: InstallContext) -> None:
                 raise RuntimeError(f"{' / '.join(str(uki) for uki in ukis)} missing or empty")
 
         post = _read_efibootmgr()
-        if not _find_label_entries(post["entries"], "Limine"):
+        fallback_only = ctx.state.get("efi_fallback_only")
+        if fallback_only:
+            fallback = ctx.target / fallback_only.lstrip("/")
+            if not fallback.exists() or fallback.stat().st_size == 0:
+                raise RuntimeError(f"no 'Limine' entry in efibootmgr and {fallback} missing or empty")
+        elif not _find_label_entries(post["entries"], "Limine"):
             raise RuntimeError("no 'Limine' entry registered in efibootmgr")
 
     if ctx.is_protected:

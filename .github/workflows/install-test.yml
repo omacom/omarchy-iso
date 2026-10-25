@@ -155,7 +155,7 @@ jobs:
               printf "#!/bin/sh\nexit 0\n" >/usr/local/bin/omarchy-pkg-add
               chmod 0755 /usr/local/bin/omarchy-pkg-add
               qemu-system-x86_64 --version | head -1
-              ./test/integration release/*.iso boot used-disk --no-preview --memory 8192 --timeout 1800
+              ./test/integration release/*.iso boot used-disk full-nvram --no-preview --memory 8192 --timeout 1800
             '
 
       # The same on aarch64, by its own tests, in the image the ISO is built

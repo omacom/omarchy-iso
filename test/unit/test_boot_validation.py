@@ -41,6 +41,7 @@ class BootValidationTest(unittest.TestCase):
         self.ctx = types.SimpleNamespace(
             target=self.root, omarchy_install={"storage": {"kernel": "linux-aarch64"}},
             user_configuration={}, encrypt=False, is_protected=False, defer_provisioning=False,
+            state={},
         )
         self.write("boot/limine.conf", LINUX_ENTRY)
         self.write("etc/kernel/cmdline", "root=UUID=test rw\n")
@@ -73,6 +74,22 @@ class BootValidationTest(unittest.TestCase):
     def test_disabled_uki_accepts_kernel_and_initramfs_without_uki(self):
         self.disable_uki()
         phases.validate_boot(self.ctx)
+
+    def test_a_refused_boot_entry_is_accepted_only_with_the_fallback_loader(self):
+        self.disable_uki()
+        self.ctx.state["efi_fallback_only"] = "/boot/EFI/BOOT/BOOTX64.EFI"
+        with mock.patch.object(phases, "_read_efibootmgr", return_value={"entries": {}}):
+            with self.assertRaisesRegex(RuntimeError, "BOOTX64.EFI missing or empty"):
+                phases.validate_boot(self.ctx)
+            self.write("boot/EFI/BOOT/BOOTX64.EFI", "bootloader")
+            phases.validate_boot(self.ctx)
+
+    def test_a_missing_boot_entry_still_fails_when_none_was_refused(self):
+        self.disable_uki()
+        self.write("boot/EFI/BOOT/BOOTX64.EFI", "bootloader")
+        with mock.patch.object(phases, "_read_efibootmgr", return_value={"entries": {}}):
+            with self.assertRaisesRegex(RuntimeError, "no 'Limine' entry registered"):
+                phases.validate_boot(self.ctx)
 
     def test_default_uki_requires_nonempty_uki(self):
         uki = self.write("boot/EFI/Linux/omarchy_linux-aarch64.efi", "UKI")

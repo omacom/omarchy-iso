@@ -524,6 +524,8 @@ installed_system_started() {
 
 # Boot the ISO with the cidata drive onto <disk> and wait until the installed
 # system answers SSH. Returns non-zero when the installer stops or times out.
+# A scenario can name a function in INSTALL_ALONGSIDE to drive the live session
+# while the installer runs on tty1.
 install_unattended() {
   local disk="$1" serial="$2"
 
@@ -532,6 +534,7 @@ install_unattended() {
     -device ide-cd,drive=cdrom0,bootindex=2 \
     -drive "file=$CIDATA_IMG,format=raw,if=none,id=cidata" \
     -device usb-storage,drive=cidata
+  [[ -z ${INSTALL_ALONGSIDE:-} ]] || "$INSTALL_ALONGSIDE"
 
   log "Waiting for the unattended install to finish (timeout ${INSTALL_TIMEOUT}s)"
   local waited=0 text progress_name first_boot_at=""

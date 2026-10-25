@@ -1,7 +1,7 @@
 """EFI registration must preserve other installations with the same label."""
 from pathlib import Path
-import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -28,6 +28,7 @@ class LimineEFIEntriesTest(unittest.TestCase):
         self.after = {"entries": {**self.before["entries"], "0006": entry()}, "order": []}
 
     def run_registration(self, run=None):
+        run = run or (lambda command, **kwargs: types.SimpleNamespace(returncode=0, stdout="", stderr=""))
         with mock.patch.object(phases, "_read_efibootmgr", return_value=self.after), \
              mock.patch.object(phases, "info"), \
              mock.patch.object(phases.subprocess, "run", side_effect=run) as calls:
@@ -48,11 +49,13 @@ class LimineEFIEntriesTest(unittest.TestCase):
         calls = []
         def fail(command, **kwargs):
             calls.append(command)
-            raise subprocess.CalledProcessError(1, command)
-        with self.assertRaises(subprocess.CalledProcessError):
+            return types.SimpleNamespace(returncode=5, stdout="", stderr="Could not prepare Boot variable: No space left on device\n")
+        with self.assertRaises(phases.EfiEntryRefused) as refused:
             self.run_registration(fail)
         self.assertEqual(len(calls), 1)
         self.assertIn("--create", calls[0])
+        # The firmware's own reason is the diagnosis; CalledProcessError used to drop it.
+        self.assertIn("No space left on device", str(refused.exception))
 
     def test_failed_cleanup_does_not_abort_installation(self):
         def run(command, **kwargs):
@@ -60,6 +63,13 @@ class LimineEFIEntriesTest(unittest.TestCase):
         calls = self.run_registration(run)
         self.assertEqual(self.deleted(calls), ["0002"])
         self.assertEqual(calls[-1][-1], "0006,0003,0001,0004,0005")
+
+    def test_a_refused_boot_order_rewrite_keeps_the_new_entry(self):
+        def run(command, **kwargs):
+            refused = "--bootorder" in command
+            return types.SimpleNamespace(returncode=5 if refused else 0, stdout="", stderr="No space left on device" if refused else "")
+        calls = self.run_registration(run)
+        self.assertEqual(calls[-1][:2], ["efibootmgr", "--bootorder"])
 
     def test_label_only_listing_deletes_nothing(self):
         self.before["entries"] = {"0002": "Limine", "0003": "Limine"}
@@ -72,6 +82,47 @@ class LimineEFIEntriesTest(unittest.TestCase):
         calls = self.run_registration()
         self.assertEqual(len(calls), 1)
         self.assertIn("--create", calls[0])
+
+class RefusedEntryTest(unittest.TestCase):
+    """Firmware that will not store a boot entry, on an ESP the install owns and on a shared one."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.target = Path(tmp.name)
+        limine = self.target / "usr/share/limine"
+        limine.mkdir(parents=True)
+        (limine / "BOOTX64.EFI").write_bytes(b"limine")
+        self.ctx = types.SimpleNamespace(target=self.target, state={})
+        refused = phases.EfiEntryRefused("The firmware refused a boot entry for Limine: No space left on device")
+        for patch in (
+            mock.patch.object(phases, "_efi_arch_suffix", return_value="X64"),
+            mock.patch.object(phases, "_write_limine_pacman_hook"),
+            mock.patch.object(phases, "_register_limine_efi_entry", side_effect=refused),
+            mock.patch.object(phases, "info"),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def install(self, **kwargs):
+        phases._install_limine_efi(self.ctx, esp_mount="/boot", disk=Path("/dev/vda"), part=1, **kwargs)
+
+    def test_an_esp_the_install_owns_boots_from_the_fallback_loader(self):
+        self.install(fallback=True)
+
+        self.assertEqual((self.target / "boot/EFI/BOOT/BOOTX64.EFI").read_bytes(), b"limine")
+        self.assertEqual((self.target / "boot/EFI/limine/limine_x64.efi").read_bytes(), b"limine")
+        self.assertEqual(self.ctx.state["efi_fallback_only"], "/boot/EFI/BOOT/BOOTX64.EFI")
+
+    def test_a_shared_esp_stops_with_the_firmwares_reason(self):
+        with self.assertRaises(RuntimeError) as stopped:
+            self.install(fallback=False)
+
+        self.assertIn("No space left on device", str(stopped.exception))
+        self.assertIn("boot entry storage is likely full", str(stopped.exception))
+        self.assertFalse((self.target / "boot/EFI/BOOT").exists(), "a shared ESP's EFI/BOOT is never claimed")
+        self.assertNotIn("efi_fallback_only", self.ctx.state)
+
 
 if __name__ == "__main__":
     unittest.main()

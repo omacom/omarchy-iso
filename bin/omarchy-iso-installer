@@ -163,6 +163,19 @@ export OMARCHY_OMI_DIR="${OMARCHY_OMI_DIR:-$omi_dir}"
 
 # The live system's console palette (Tokyo Night, from .automated_script.sh),
 # so the preview looks like the console; the terminal's own comes back after.
+# A Linux console can't be asked with an escape, so its sixteen colors are read
+# with the kernel's GIO_CMAP before they change (as \e]P sequences to put them
+# back); without that, \e]R puts back the console's default palette.
+saved_palette=""
+if [[ ${TERM:-linux} == linux ]]; then
+  saved_palette="$(python3 -I -c '
+import fcntl, sys
+cmap = bytearray(48)
+with open("/dev/tty", "rb", buffering=0) as tty:
+    fcntl.ioctl(tty, 0x4B70, cmap)  # GIO_CMAP
+sys.stdout.write("".join("\033]P%X%02x%02x%02x" % (i, *cmap[3 * i:3 * i + 3]) for i in range(16)))
+' 2>/dev/null)" || saved_palette=""
+fi
 console_palette() {
   local i colors=(1a1b26 f7768e 9ece6a e0af68 7aa2f7 bb9af7 7dcfff a9b1d6
     414868 f7768e 9ece6a e0af68 7aa2f7 bb9af7 7dcfff c0caf5)
@@ -174,7 +187,11 @@ console_palette() {
   fi
 }
 terminal_palette() {
-  [[ ${TERM:-linux} == linux ]] || printf '\e]104\a\e]110\a\e]111\a'
+  if [[ ${TERM:-linux} == linux ]]; then
+    printf '%s' "${saved_palette:-$'\e]R'}"
+  else
+    printf '\e]104\a\e]110\a\e]111\a'
+  fi
 }
 console_palette
 trap 'terminal_palette; cleanup' EXIT

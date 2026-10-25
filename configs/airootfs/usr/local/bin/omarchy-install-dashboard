@@ -391,14 +391,19 @@ omi_stop() {
 # A line to the player; if it has gone, Omi just stops.
 omi_say() {
   (( OMI_UP )) || return 1
-  if ! printf '%s\n' "$1" >&"${OMI_PLAYER[1]}" 2>/dev/null; then
+  # Bash unsets the coproc's array once the player has gone, and under set -u
+  # reading it would end the dashboard: take the descriptor only if it's there.
+  local fd=${OMI_PLAYER[1]-}
+  if [[ -z $fd ]] || ! printf '%s\n' "$1" 2>/dev/null >&"$fd"; then
     OMI_UP=0
+    dashboard_log "Omi stopped (its player has gone)"
     return 1
   fi
 }
 
 omi_hear() {
-  if ! IFS= read -r -t 2 "$1" <&"${OMI_PLAYER[0]}" 2>/dev/null; then
+  local fd=${OMI_PLAYER[0]-}
+  if [[ -z $fd ]] || ! IFS= read -r -t 2 "$1" 2>/dev/null <&"$fd"; then
     OMI_UP=0
     dashboard_log "Omi stopped (its player didn't answer)"
     return 1

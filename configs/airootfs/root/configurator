@@ -1100,6 +1100,15 @@ install_mode_form() {
   install_mode=$(gum choose --label-delimiter $'\t' --header "$(t mode.header "$disk")" "${choices[@]}") || abort
 }
 
+verify_install_medium_before_disk_write() {
+  local verify_error
+
+  step "Verifying the install medium"
+  if ! verify_error=$(OMARCHY_VERIFY_PROGRESS=/dev/tty omarchy-wait-root-image-verify 2>&1 1>/dev/null); then
+    abort "$(head -1 <<<"$verify_error")"
+  fi
+}
+
 confirm_disk_overwrite() {
   local mode="encrypted"
   local affirmative confirm_status
@@ -1123,6 +1132,15 @@ confirm_disk_overwrite() {
     case $confirm_status in
       0)
         [[ $mode == "encrypted" ]] && encrypt_installation=true || encrypt_installation=false
+        # This is the first point where erasing the selected disk is allowed.
+        # Verify the source first, then clear an unreadable GPT/MBR before
+        # archinstall is imported: otherwise its import-time disk probe drops
+        # the device before its own wipe can run. A dry configurator
+        # demonstration must remain read-only.
+        if [[ ${CONFIGURATOR_DRY_RUN:-false} != true ]]; then
+          verify_install_medium_before_disk_write || return 1
+          omarchy-iso-cleanup-disk --full-disk-overwrite-confirmed "$disk" || abort
+        fi
         return 0
         ;;
       1)
@@ -1138,11 +1156,12 @@ confirm_disk_overwrite() {
   done
 }
 
-# Decide what and how to install: sets install_target (full_disk|free_space),
-# install_target and encrypt_installation. Nothing is written to disk yet —
-# the user step runs between this and the execution below. (deferred provisioning never
-# reaches here; it's armed by Ctrl+C on the keyboard screen and goes straight to
-# disk selection.)
+# Decide what and how to install: sets install_target (full_disk|free_space)
+# and encrypt_installation. A confirmed full-disk choice clears the old table
+# here, before archinstall can reject it; the free-space path still makes no
+# changes until run_partition_execute below. (deferred provisioning never
+# reaches here; it's armed by Ctrl+C on the keyboard screen and goes straight
+# to disk selection.)
 select_installation() {
   local full_disk_only
 
@@ -1188,6 +1207,8 @@ select_installation() {
 
 defer_provisioning=false
 install_target="full_disk"
+CONFIGURATOR_DRY_RUN=false
+[[ ${1:-} == "dry" ]] && CONFIGURATOR_DRY_RUN=true
 
 # Let the live VT reach its settled width before the first screen so the logo
 # isn't measured against the transient 80-column boot console.
@@ -1243,20 +1264,13 @@ write_user_files
 
 if [[ $install_target == "free_space" ]]; then
   # Refuse a corrupt or missing install medium before we partition or format
-  # anything. The full-disk path clears this in the orchestrator before
-  # archinstall formats; the free-space path formats here, in the configurator,
-  # so it runs the same gate first. omarchy-wait-root-image-verify collects the
-  # boot-time hasher's verdict, waiting for it if it is still running. (2>&1
-  # 1>/dev/null captures stderr, where the failure message is, and drops the
-  # boot-medium/scheduler line on stdout — the orchestrator logs that later.
-  # OMARCHY_VERIFY_PROGRESS routes a live percent line straight to the
-  # terminal while the hash is still running, so a wait on a slow medium
-  # shows movement instead of a frozen step header.)
+  # anything. The full-disk confirmation and this protected path share the
+  # same gate; the orchestrator repeats it before writing the root image.
+  # omarchy-wait-root-image-verify collects the boot-time hasher's verdict,
+  # waiting for it if it is still running. OMARCHY_VERIFY_PROGRESS routes a
+  # live percent line to the terminal so a slow medium shows movement.
   if [[ ${1:-} != "dry" ]]; then
-    step "Verifying the install medium"
-    if ! verify_error=$(OMARCHY_VERIFY_PROGRESS=/dev/tty omarchy-wait-root-image-verify 2>&1 1>/dev/null); then
-      abort "$(head -1 <<<"$verify_error")"
-    fi
+    verify_install_medium_before_disk_write || exit 1
   fi
 
   run_partition_execute "$@"

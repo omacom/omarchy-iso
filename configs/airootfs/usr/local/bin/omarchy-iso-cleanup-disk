@@ -1,8 +1,10 @@
 #!/bin/bash
 #
 # Release the install disk before archinstall wipes it, and refuse to go on
-# while anything still holds it. Idempotent — called once per install attempt
-# from the orchestrator's prepare_live phase.
+# while anything still holds it. Idempotent — normally called from the
+# orchestrator's prepare_live phase. The configurator also calls the explicit
+# --full-disk-overwrite-confirmed mode after the user accepts a whole-disk
+# overwrite and before archinstall is imported.
 #
 # A disk that has had a life before Omarchy arrives with that life switched on:
 # the live ISO's udev assembles an old RAID member and activates an old LVM
@@ -13,19 +15,29 @@
 #
 # So everything stacked on the disk is taken down from the top, and every
 # partition's signatures are wiped so udev has nothing left to put back. The
-# partition table itself stays: archinstall listed the partitions when it was
+# partition table normally stays: archinstall listed the partitions when it was
 # imported and wipes each by path, and a path that has vanished becomes a
-# regular file in /dev. Then the kernel must agree to re-read the table, which
-# it refuses while anything holds a partition. If it will not, this exits
-# non-zero with the reason on its last line, for the failure screen.
+# regular file in /dev. In --full-disk-overwrite-confirmed mode archinstall has
+# not been imported yet, so the table goes too; that is the mode that repairs a
+# malformed table archinstall cannot read. Then the kernel must agree to
+# re-read the table, which it refuses while anything holds a partition. If it
+# will not, this exits non-zero with the reason on its last line, for the
+# failure screen.
 
 set -uo pipefail
+
+wipe_partition_table=false
 
 if [[ ${1:-} == --protected ]]; then
   target="${2:-}"
   [[ -n $target ]] || { echo "Usage: $0 --protected <target>" >&2; exit 1; }
   findmnt -R "$target" >/dev/null 2>&1 && umount -R "$target" || true
   exit 0
+fi
+
+if [[ ${1:-} == --full-disk-overwrite-confirmed ]]; then
+  wipe_partition_table=true
+  shift
 fi
 
 disk="${1:-}"
@@ -87,6 +99,33 @@ release_holders() {
   done
 }
 
+# Kept as one small primitive so the destructive write can be regression-tested
+# against disposable image files without ever naming a machine's block device.
+wipe_full_disk_metadata() {
+  local target=$1 size edge=$((1024 * 1024))
+
+  # libblkid can decline to recognize the same malformed table libparted
+  # rejects, in which case wipefs has no signature to erase. The primary table
+  # is in the first MiB and every backup GPT/old end-of-disk superblock is in
+  # the last; zero both directly, then let wipefs remove anything else it can
+  # still identify. Regular files are accepted here only for the unit test;
+  # the command's argument guard above requires a block device in production.
+  if [[ -b $target ]]; then
+    size=$(blockdev --getsize64 "$target") || return 1
+  else
+    size=$(stat -c %s "$target") || return 1
+  fi
+  [[ $size =~ ^[0-9]+$ ]] && ((size > 0)) || return 1
+  ((edge > size)) && edge=$size
+
+  dd if=/dev/zero of="$target" bs="$edge" count=1 conv=notrunc,fsync status=none || return 1
+  if ((size > edge)); then
+    dd if=/dev/zero of="$target" bs="$edge" count=1 seek=$((size - edge)) \
+      oflag=seek_bytes conv=notrunc,fsync status=none || return 1
+  fi
+  wipefs --all --force "$target" >/dev/null || true
+}
+
 release_and_wipe() {
   local part
   unuse "$disk"
@@ -94,11 +133,17 @@ release_and_wipe() {
 
   # An md superblock or an LVM label is all udev needs to put a holder straight
   # back when the table is re-read. The disk's own signatures go too (an md 0.90
-  # member keeps its superblock near the end), all but the partition table.
+  # member keeps its superblock near the end). Preserve the table after
+  # archinstall has imported it; erase it before import only when the
+  # configurator has recorded an explicit whole-disk confirmation.
   for part in $(partitions); do
     wipefs --all --force "/dev/$part" >/dev/null || true
   done
-  wipefs --all --force --types nogpt,PMBR,dos "$disk" >/dev/null || true
+  if $wipe_partition_table; then
+    wipe_full_disk_metadata "$disk" || return 1
+  else
+    wipefs --all --force --types nogpt,PMBR,dos "$disk" >/dev/null || true
+  fi
   blockdev --flushbufs "$disk" 2>/dev/null || true
   blockdev --rereadpt "$disk" 2>/dev/null
 }

@@ -319,6 +319,7 @@ OMI_KIT_TSV=""         # the kit as the player reads it (omi.jq's lines)
 OMI_W=0                # Omi's size in cells, and where it's drawn
 OMI_H=0
 OMI_LEFT=1
+OMI_MID=0              # the middle of Omi's view across its columns, in half columns
 OMI_NOW=0              # the clock, in hundredths of a second (/proc/uptime)
 OMI_T0=-1              # when Omi started
 OMI_MODE="logo"        # the mode the player says is on screen
@@ -409,13 +410,13 @@ omi_hear() {
 # half a character, so every cell is drawn alike and Omi is drawn as designed:
 # 44 is the size on most consoles (21 rows), 88 only on very tall ones.
 omi_resize() {
-  local rows="$1" cols="$2" px reply w h
+  local rows="$1" cols="$2" px reply w h mid
   for px in 88 44 22; do
     omi_say "size $px" && omi_hear reply || return 0
-    read -r _ w h <<<"$reply"
+    read -r _ w h mid <<<"$reply"
     (( h * 2 <= rows && h + 6 <= rows && w <= cols - 4 )) && break
   done
-  OMI_W=$w OMI_H=$h
+  OMI_W=$w OMI_H=$h OMI_MID=${mid:-$w}
   OMI_SHOWN=()
 }
 
@@ -644,8 +645,12 @@ measure_progress_layout() {
   read -r rows cols <<<"$LAST_SIZE"
   (( OMI_UP )) && omi_resize "$rows" "$cols"
   TOP_ROW="$(centered_top_row "$((OMI_H + 6))")"
-  OMI_LEFT=$(( (cols - OMI_W) / 2 + 1 ))
+  # Omi's middle (the logo's, not its drawing's, which leaves room for what
+  # flies off it) on the screen's, rounded as a line of text is, so the logo
+  # and the text under it share one axis.
+  OMI_LEFT=$(( (cols - OMI_MID) / 2 + 1 ))
   (( OMI_LEFT < 1 )) && OMI_LEFT=1
+  PROGRESS_COLS=$cols
   PROGRESS_TEXT_WIDTH=$((cols - 2))
   (( PROGRESS_TEXT_WIDTH > CONTENT_WIDTH )) && PROGRESS_TEXT_WIDTH=$CONTENT_WIDTH
   return 0
@@ -684,10 +689,12 @@ render_dynamic() {
   message="$(truncate_for_width "$(current_whimsy)" "$PROGRESS_TEXT_WIDTH")"
   tip="$(truncate_for_width "$(t progress.tipLine "$(current_tip)")" "$PROGRESS_TEXT_WIDTH")"
   printf '%s%d;1H' "$CSI" "$((TOP_ROW + OMI_H + 1))"
-  center "${GREEN}$((DISPLAY_PM / 10))%${RESET}" "$PROGRESS_TEXT_WIDTH"
-  center "${GREEN}${message}${RESET}" "$PROGRESS_TEXT_WIDTH"
+  # Centered on the whole screen in one step, as Omi is: centering in the
+  # content width and that on the screen rounds twice, a column off Omi.
+  center "${GREEN}$((DISPLAY_PM / 10))%${RESET}" "$PROGRESS_COLS"
+  center "${GREEN}${message}${RESET}" "$PROGRESS_COLS"
   blank_line
-  center "${DIM}${tip}${RESET}" "$PROGRESS_TEXT_WIDTH"
+  center "${DIM}${tip}${RESET}" "$PROGRESS_COLS"
   printf '%s' "$CLEAR_TO_END"
 }
 

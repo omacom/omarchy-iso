@@ -17,7 +17,8 @@
 # what it answers itself (the Omarchy installer's dashboard does):
 #
 #   size <px>        Omi's view this many pixels across (made crisp); answers
-#                    "dims <cols> <rows>"
+#                    "dims <cols> <rows> <center>", center: where the view's
+#                    middle falls across those columns, in half columns
 #   now <mode>       morph there now
 #   next <mode>      morph there when the loop playing ends
 #   tick <seconds>   the clock now (any that only goes up); answers
@@ -603,7 +604,7 @@ function driven(    line, E, n, at, dt, prev, L, y, out) {
   while ((getline line) > 0) {
     split(line, E, " ")
     if (E[1] == "size") {
-      area(crisp(E[2] + 0)); printf "dims %d %d\n", AW, AH / 2; fflush()
+      area(crisp(E[2] + 0)); printf "dims %d %d %d\n", AW, AH / 2, rnd(2 * ACX); fflush()
     } else if (E[1] == "now") { PENDING = ""; setMode(E[2]) }
     else if (E[1] == "next") {
       PENDING = (E[2] == curMode && !morphing) ? "" : E[2]

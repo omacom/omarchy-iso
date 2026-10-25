@@ -77,6 +77,15 @@ for cfg in grub.cfg loopback.cfg; do
   grep -Fq '%BOOT_SPLASH_KERNEL_OPTIONS%%KERNEL_OPTIONS%' "$src" || fail "$cfg does not template boot options"
   grep -Fq -- "--id 'n1x-recovery'" "$src" || fail "$cfg lacks the N1x recovery entry"
   grep -Fq 'omarchy.n1x_recovery=1 acpi=nospcr' "$src" || fail "$cfg recovery entry lacks acpi=nospcr"
+  grep -Fq "if [ \"\${product_name}\" == '83SS' ]; then" "$src" || fail "$cfg does not limit acpi_osi=! to the Lenovo Pro 9"
+  grep -Fqx 'set lenovo_osi=' "$src" || fail "$cfg does not leave lenovo_osi empty when SMBIOS does not match"
+  grep -Fq "set lenovo_osi='acpi_osi=!'" "$src" || fail "$cfg never assigns acpi_osi=!"
+  awk '/83SS/{p=1} p{print} p && /^[[:space:]]*fi$/{exit}' "$src" | grep -Fq "set lenovo_osi='acpi_osi=!'" \
+    || fail "$cfg assigns acpi_osi=! outside the 83SS match"
+  linux_lines=$(grep -E '^[[:space:]]*linux /%INSTALL_DIR%/boot/%ARCH%/vmlinuz-' "$src")
+  linux_count=$(printf '%s\n' "$linux_lines" | grep -c .)
+  osi_count=$(printf '%s\n' "$linux_lines" | grep -c ' ${lenovo_osi}$')
+  (( linux_count >= 3 && linux_count == osi_count )) || fail "$cfg does not pass lenovo_osi on every live linux line ($osi_count/$linux_count)"
   source "$ROOT/builder/grub-platform.sh"
   for platform in x86_64 aarch64; do
     cp "$src" "$fixture/$platform-$cfg"

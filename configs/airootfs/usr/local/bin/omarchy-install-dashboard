@@ -311,8 +311,8 @@ DISPLAY_PM=0           # the percentage shown, easing toward LAST_PM
 # so a blink, a sweep or a morph fades as it does anywhere else. Tokyo Night's
 # colors go back in before the finish and failure screens, which use them.
 OMI_DIR="${OMARCHY_OMI_DIR:-/usr/share/omarchy-iso/omi}"
-OMI_MODES="logo,idle,thinking,download,working,peek,success"
-OMI_TURNS=(thinking download working peek)
+OMI_MODES="logo,idle,thinking,download-falling,working,peek,success"
+OMI_TURNS=(thinking download-falling working peek)
 OMI_TURN="${OMARCHY_OMI_TURN:-15}"  # seconds a turn lasts, at least
 OMI_UP=0               # whether the player is running
 OMI_KIT_TSV=""         # the kit as the player reads it (omi.jq's lines)

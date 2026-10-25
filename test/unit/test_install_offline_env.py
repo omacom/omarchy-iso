@@ -33,11 +33,13 @@ class MiseOfflineTest(unittest.TestCase):
         with mock.patch.object(phases_impl, "_prepare_target_setup"), \
                 mock.patch.object(phases_impl, "_ensure_finalizer_log_started",
                                   return_value=("0", "0")), \
-                mock.patch.object(phases_impl.subprocess, "run") as run:
+                mock.patch.object(phases_impl.subprocess, "run"), \
+                mock.patch.object(phases_impl, "_run_timing_scripts") as timing:
             phases_impl.run_chroot_finalizer(ctx)
 
-        command = next(c for c in (call.args[0] for call in run.call_args_list)
-                       if "arch-chroot" in c)
+        # The finalizer's arch-chroot goes through the step-timing runner.
+        command = timing.call_args.args[0]
+        self.assertIn("arch-chroot", command)
         self.assertIn("MISE_OFFLINE=1", command)
 
 

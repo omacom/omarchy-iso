@@ -123,14 +123,15 @@ if [[ $HOST_ARCH == aarch64 ]]; then
   # Arch Linux ARM carries QEMU but no aarch64 UEFI firmware; Arch's own
   # edk2-aarch64 is architecture-independent and provides it.
   omarchy-pkg-add qemu-desktop
-  UEFI_CODE=/usr/share/edk2/aarch64/QEMU_EFI.fd
-  UEFI_VARS_TEMPLATE=/usr/share/edk2/aarch64/QEMU_VARS.fd
-  if [[ ! -f $UEFI_CODE || ! -f $UEFI_VARS_TEMPLATE ]]; then
-    echo "Missing aarch64 UEFI firmware ($UEFI_CODE)." >&2
+  source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/aarch64-firmware.sh"
+  if ! aarch64_uefi_firmware; then
+    echo "Missing aarch64 UEFI firmware." >&2
     echo "Install Arch's edk2-aarch64 (arch=any) from https://archlinux.org/packages/extra/any/edk2-aarch64/" >&2
     echo "after checking its signature with pacman-key --verify, then: sudo pacman -U edk2-aarch64-*.pkg.tar.zst" >&2
     exit 1
   fi
+  UEFI_CODE=$AARCH64_UEFI_CODE
+  UEFI_VARS_TEMPLATE=$AARCH64_UEFI_VARS
 else
   omarchy-pkg-add qemu-full edk2-ovmf
   UEFI_CODE=/usr/share/edk2/x64/OVMF_CODE.4m.fd

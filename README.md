@@ -2,7 +2,7 @@
 
 [![Nightly ISO Build](https://github.com/omacom/omarchy-iso/actions/workflows/nightly-build.yml/badge.svg?branch=quattro&event=schedule)](https://github.com/omacom/omarchy-iso/actions/workflows/nightly-build.yml?query=branch%3Aquattro+event%3Aschedule)
 
-The Omarchy ISO is the only supported way to install Omarchy. It includes the Omarchy Configurator and installs Arch Linux and the Omarchy packages from the bundled mirror. It then runs target system setup in the chroot, creates the user, and runs `omarchy-provision-user` for that user.
+The Omarchy ISO is the only supported way to install Omarchy. It ships the Omarchy Configurator, writes a pre-built Arch Linux + Omarchy root image (a zstd-compressed btrfs partition image) onto the target with `zstdcat | dd`, gives it a fresh filesystem id and grows it to the partition, installs the per-machine packages (kernel, microcode, audio firmware) from the bundled mirror, runs target system setup in the chroot, creates the user, and runs `omarchy-provision-user` for that user.
 
 ## Get Omarchy
 
@@ -293,6 +293,8 @@ Scenarios under `test/integration.d/` boot a real ISO install in QEMU and assert
 
 The first scenario is `factory-reset`: it proves `omarchy-system-factory-reset` hands a machine on without destroying a shared ESP. The installed ESP gets a Windows entry with payload plus a second Linux cloned under a foreign machine-id with its own boot directory and UKIs; a real factory reset is then driven through a guest pty, and the harness asserts the foreign entries survive both the staged reset and first-boot provisioning, that the old Omarchy identity is fully retired, and that the machine reaches first-boot setup unattended.
 
+`corrupt-image` proves a bad install medium is refused before the disk is touched. It copies the ISO and flips one byte a megabyte into the root image stream itself — addressed from the extent xorriso reports out of the ISO9660 directory records, so the damage lands in the shipped bytes and nowhere else — then autoinstalls from that copy: `omarchy-root-image-verify.service` (which hashes the image at boot, while a user would be in the configurator) must fail, the install must halt in its pre-flight phase with the "re-flash" advice on screen, and the target disk must still have no partition table. It boots the ISO itself rather than the base image, so it also works standalone with `OMARCHY_INTEGRATION_ISO` set.
+
 Artifacts — screenshots, the fixtured/staged/final `limine.conf`, the reset typescript, and the factory-reset log — land under `test-runs/<iso>-integration/runs/<timestamp>-<scenario>/`, and `--no-preview` skips the `imv` review just like the acceptance harness.
 
 ## Upgrade testing
@@ -325,3 +327,39 @@ Run `./bin/omarchy-iso-upload [release/omarchy.iso]`. This requires rclone confi
 ## Full release of the ISO
 
 Run `./bin/omarchy-iso-release VERSION` to create, test, sign, and upload the ISO in one flow. Add `--rc` to release an RC build instead.
+
+## LUKS calibration during live boot
+
+`omarchy-luks-calibrate.service` runs cryptsetup's 2000 ms Argon2id benchmark
+after the medium verifiers, while the wizard is open. It publishes only the
+iteration, memory and parallel costs in a root-only file under
+`/run/omarchy-luks-calibration/`; no password, volume key or header is cached.
+Both the free-space wizard and archinstall's full-disk format consume it.
+Each format still creates a fresh header, salt and volume key.
+
+An unfinished benchmark is cancelled before formatting. Missing, malformed or
+incompatible results leave cryptsetup's normal calibration in
+place; custom iteration times and key sizes are preserved. Background work is
+skipped below 4 GiB usable RAM or 1.5 GiB available RAM. Only a benchmark
+that retains the full default 1 GiB memory cost is reusable, and it is rejected
+if memory has since become tight. Below 4 GiB without swap, cryptsetup caps
+Argon2 at half of free RAM; the medium's page cache makes that cap change
+between boot and format, so those machines keep normal calibration. The benchmark runs at normal priority after the hash
+jobs, without changing CPU governors. Timing depends on machine load and
+power policy; moving calibration does not guarantee identical unlock times.
+
+`test/unit/test_luks_calibration.py` checks parsing, validation and command
+fallbacks. The QEMU calibration scenario waits for a successful service exit,
+not for a cache file: a slow CPU can legitimately skip caching even with 8 GiB
+of RAM. With a cache it compares actual Argon2 keyslot costs and unlock times;
+without one it checks normal formatting and passphrase unlocks through both
+installer callers. The 4 GiB guest exercises that fallback too. Missing,
+failed, killed or unfinished services still fail the scenario, with service
+state and journal evidence retained. `test/unit/test_luks_calibration_scenario.py`
+covers those distinctions and ensures a failed fallback unlock is not hidden.
+
+Review validation (2026-10-25): the shell suite and 327 Python tests passed
+on the MSI desktop. The revised QEMU scenario passed with an 8 GiB cached
+result and a successful 4 GiB skip; the latter formatted and unlocked through
+both callers, including the malformed-cache fallback. This test-only update
+reused the previously built RC ISO; installer code was unchanged.

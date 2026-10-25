@@ -41,7 +41,6 @@ class BootValidationTest(unittest.TestCase):
         self.ctx = types.SimpleNamespace(
             target=self.root, omarchy_install={"storage": {"kernel": "linux-aarch64"}},
             user_configuration={}, encrypt=False, is_protected=False, defer_provisioning=False,
-            state={},
         )
         self.write("boot/limine.conf", LINUX_ENTRY)
         self.write("etc/kernel/cmdline", "root=UUID=test rw\n")
@@ -75,22 +74,6 @@ class BootValidationTest(unittest.TestCase):
         self.disable_uki()
         phases.validate_boot(self.ctx)
 
-    def test_a_refused_boot_entry_is_accepted_only_with_the_fallback_loader(self):
-        self.disable_uki()
-        self.ctx.state["efi_fallback_only"] = "/boot/EFI/BOOT/BOOTX64.EFI"
-        with mock.patch.object(phases, "_read_efibootmgr", return_value={"entries": {}}):
-            with self.assertRaisesRegex(RuntimeError, "BOOTX64.EFI missing or empty"):
-                phases.validate_boot(self.ctx)
-            self.write("boot/EFI/BOOT/BOOTX64.EFI", "bootloader")
-            phases.validate_boot(self.ctx)
-
-    def test_a_missing_boot_entry_still_fails_when_none_was_refused(self):
-        self.disable_uki()
-        self.write("boot/EFI/BOOT/BOOTX64.EFI", "bootloader")
-        with mock.patch.object(phases, "_read_efibootmgr", return_value={"entries": {}}):
-            with self.assertRaisesRegex(RuntimeError, "no 'Limine' entry registered"):
-                phases.validate_boot(self.ctx)
-
     def test_default_uki_requires_nonempty_uki(self):
         uki = self.write("boot/EFI/Linux/omarchy_linux-aarch64.efi", "UKI")
         phases.validate_boot(self.ctx)
@@ -100,7 +83,7 @@ class BootValidationTest(unittest.TestCase):
 
     def test_default_limine_overrides_hardware_dropin(self):
         self.disable_uki()
-        self.write("etc/default/limine", 'ENABLE_UKI="yes"\n')
+        self.write("etc/default/limine", 'CUSTOM_UKI_NAME=omarchy\nENABLE_UKI="yes"\n')
         with self.assertRaisesRegex(RuntimeError, "missing or empty"):
             phases.validate_boot(self.ctx)
         self.write("boot/EFI/Linux/omarchy_linux-aarch64.efi", "UKI")
@@ -165,6 +148,23 @@ class BootValidationTest(unittest.TestCase):
                 phases.validate_boot(self.ctx)
         (self.root / "boot/EFI/limine/limine_x64.efi").unlink()
         with self.assertRaisesRegex(RuntimeError, "missing or empty"):
+            phases.validate_boot(self.ctx)
+
+    def test_removable_loader_counts_only_where_this_install_wrote_it(self):
+        # The firmware dropped the "Limine" entry; EFI/BOOT/BOOTX64.EFI is
+        # there. A full-disk install formatted this ESP, so the loader is its
+        # own. A protected target's ESP may be shared, and with the fallback
+        # off that file is another OS's loader, not a route to this install.
+        self.disable_uki()
+        self.write("boot/EFI/BOOT/BOOTX64.EFI", "another loader")
+        with mock.patch.object(phases, "_read_efibootmgr", return_value={"entries": {}}), \
+             mock.patch.object(phases, "_validate_pre_mounted_filesystems"), \
+             mock.patch.object(phases, "error"):
+            phases.validate_boot(self.ctx)
+            self.ctx.is_protected = True
+            with self.assertRaisesRegex(RuntimeError, "no bootable route"):
+                phases.validate_boot(self.ctx)
+            self.ctx.omarchy_install["boot"] = {"enable_fallback": True}
             phases.validate_boot(self.ctx)
 
 

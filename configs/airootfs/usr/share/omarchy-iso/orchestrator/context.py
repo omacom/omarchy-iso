@@ -253,6 +253,8 @@ def _default_omarchy_install(user_configuration: dict) -> dict[str, Any]:
             "esp_mount": "/boot",
             "esp_path": "/EFI/limine",
             "efi_binary": "limine_aa64.efi" if platform.machine() == "aarch64" else "limine_x64.efi",
+            # Only a full-disk install is known to own its ESP; a
+            # pre-mounted target's may be shared. See _boot_intent.
             "enable_fallback": mode == "full_disk",
         },
         "storage": {},

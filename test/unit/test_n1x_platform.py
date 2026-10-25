@@ -22,6 +22,7 @@ ROOT_CMDLINE = (
     "cryptdevice=PARTUUID=f073914b-b386-4b56-b181-61ea375509ee:root root=/dev/mapper/root "
     "zswap.enabled=0 rootflags=subvol=@ rw rootfstype=btrfs"
 )
+PLAIN_ROOT_CMDLINE = "root=PARTUUID=f073914b-b386-4b56-b181-61ea375509ee zswap.enabled=0 rootflags=subvol=@ rw rootfstype=btrfs"
 KERNEL = "linux-omarchy"
 RESCUE_CMDLINE = (
     f"{ROOT_CMDLINE} console=tty0 acpi=nospcr plymouth.enable=0 nomodeset "
@@ -176,9 +177,15 @@ class Aarch64ConsoleTest(unittest.TestCase):
         (templates / "default.conf").write_text('KERNEL_CMDLINE[default]="@@CMDLINE@@"\nESP_PATH="/boot"\n')
         (templates / "limine.conf").write_text("timeout: 3\n")
         ctx = types.SimpleNamespace(target=target, omarchy_path=target / "omarchy")
+        # luks_tuning needs archinstall, which only the live ISO has. A plain
+        # root, which it passes through unchanged: the console drop-in does not
+        # depend on encryption, and an encrypted cmdline needs the rd.luks.name=
+        # luks_tuning adds (test_encrypted_cmdline.py).
+        luks_tuning = types.SimpleNamespace(with_cmdline_options=lambda cmdline: cmdline)
         with mock.patch.object(phases_impl.platform, "machine", return_value=machine), \
-                mock.patch.object(phases_impl.arch, "has_uefi", return_value=True, create=True):
-            phases_impl._write_limine_defaults(ctx, ROOT_CMDLINE, esp_mount="/boot")
+                mock.patch.object(phases_impl.arch, "has_uefi", return_value=True, create=True), \
+                mock.patch.dict(sys.modules, {"orchestrator.luks_tuning": luks_tuning}):
+            phases_impl._write_limine_defaults(ctx, PLAIN_ROOT_CMDLINE, esp_mount="/boot")
         return target / "etc/limine-entry-tool.d" / phases_impl.AARCH64_CONSOLE_CONF
 
     def test_aarch64_keeps_the_console_on_the_screen(self):
@@ -224,6 +231,46 @@ class PlatformPackageListTest(unittest.TestCase):
         self.assertEqual(self.expected("aarch64-n1x"), 960)
         self.assertEqual(self.expected("aarch64-qualcomm"), 900)
         self.assertEqual(self.expected(""), 900)
+
+    # The image holds the plain set; a platform's set adds what it lacks.
+    def delta(self, detected, platform_set, in_image):
+        with tempfile.TemporaryDirectory() as tmp:
+            share = Path(tmp)
+            (share / "omarchy-base.packages").write_text("hyprland\n")
+            (share / "omarchy-base.aarch64-n1x.packages").write_text(platform_set)
+            with mock.patch.object(phases_impl, "hw_platform", return_value=detected), \
+                    mock.patch.object(phases_impl.arch, "target_has_package",
+                                      side_effect=lambda _target, name: name in in_image, create=True):
+                return phases_impl._platform_delta_packages(Path("/mnt"), share)
+
+    def test_a_platform_gets_what_its_set_adds_to_the_image(self):
+        self.assertEqual(
+            self.delta("aarch64-n1x", "# the N1x set\nhyprland\nnvidia-open\n\nnvidia-utils\nnvidia-open\n", {"hyprland"}),
+            ["nvidia-open", "nvidia-utils"],
+        )
+
+    def test_a_machine_without_a_set_of_its_own_gets_nothing(self):
+        self.assertEqual(self.delta("aarch64", "nvidia-open\n", {"hyprland"}), [])
+        self.assertEqual(self.delta("", "nvidia-open\n", {"hyprland"}), [])
+
+
+class PlatformBootTest(unittest.TestCase):
+    # A board with a platform of its own keeps limine-mkinitcpio, which applies
+    # its hardware scripts' boot rules; every other machine takes the image's
+    # pre-built UKI.
+    def platform_boot(self, machine, detected):
+        with mock.patch.object(phases_impl.platform, "machine", return_value=machine), \
+                mock.patch.object(phases_impl, "hw_platform", return_value=detected):
+            return phases_impl._arm_platform_boot()
+
+    def test_a_platform_board_builds_its_own_entries(self):
+        self.assertTrue(self.platform_boot("aarch64", "aarch64-n1x"))
+        self.assertTrue(self.platform_boot("aarch64", "aarch64-qualcomm"))
+
+    def test_generic_aarch64_and_x86_64_take_the_image_uki(self):
+        self.assertFalse(self.platform_boot("aarch64", "aarch64"))
+        self.assertFalse(self.platform_boot("aarch64", ""))
+        self.assertFalse(self.platform_boot("x86_64", ""))
 
 
 class N1xHardwareGateTest(unittest.TestCase):

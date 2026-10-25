@@ -223,7 +223,9 @@ language="en"
 
 # The setup form takes its language and defaults from the language picked here:
 # the layout that goes with it, and its country's capital for when the network
-# cannot guess a timezone.
+# cannot guess a timezone. A language with no single country (English, Arabic,
+# Swahili, Tamil) falls back to UTC: with no fallback the form opens a search,
+# where Enter takes the first zone, Africa/Abidjan.
 LANGUAGE_DEFAULTS="${LANGUAGE_DEFAULTS:-$OMARCHY_ISO_SHARE/language-defaults.json}"
 
 language_default() {
@@ -235,6 +237,7 @@ set_form_language() {
   OMARCHY_FORM_KEYBOARD_DEFAULT=$(language_default keyboard)
   OMARCHY_FORM_KEYBOARD_DEFAULT=${OMARCHY_FORM_KEYBOARD_DEFAULT:-English (US)}
   OMARCHY_FORM_TIMEZONE_FALLBACK=$(language_default timezone)
+  OMARCHY_FORM_TIMEZONE_FALLBACK=${OMARCHY_FORM_TIMEZONE_FALLBACK:-UTC}
   export OMARCHY_FORM_LANGUAGE OMARCHY_FORM_KEYBOARD_DEFAULT OMARCHY_FORM_TIMEZONE_FALLBACK
 }
 
@@ -865,12 +868,16 @@ run_partition_execute() {
       # Kept as pipes rather than routed through disk_step: the passphrase must
       # not become an argv the process table can show. Folding stderr into
       # stdout still lands any error in the install log.
+      # The same persistent open flags as orchestrator/luks_tuning.py: the
+      # free-space path formats and opens here, before the orchestrator runs,
+      # so that tuning does not reach it.
       if ! printf "%s" "$password" |
-        cryptsetup luksFormat --type luks2 --batch-mode "$root_partition_device" - 2>&1; then
+        omarchy-luks-calibrate format "$root_partition_device" 2>&1; then
         disk_abort_hook "Formatting LUKS2 on $root_partition_device failed"
       fi
       if ! printf "%s" "$password" |
-        cryptsetup open "$root_partition_device" omarchy_root - 2>&1; then
+        cryptsetup open --persistent --allow-discards --perf-no_read_workqueue \
+          "$root_partition_device" omarchy_root - 2>&1; then
         disk_abort_hook "Opening the encrypted root on $root_partition_device failed"
       fi
       root_mapper="/dev/mapper/omarchy_root"
@@ -879,8 +886,14 @@ run_partition_execute() {
     fi
 
     step "$(t partitions.btrfs)"
+    # -K: no whole-device TRIM first. mkfs.btrfs discards the entire
+    # partition by default, which through dm-crypt takes seconds on a 1 TB
+    # SSD (and much longer on a DRAM-less one), before the install timer even
+    # starts. The root image is written over this filesystem anyway, and the
+    # installed system's fstrim.timer discards free space on its own; the
+    # full-disk path does the same through archinstall (archinstall_adapter).
     disk_step "creating the Btrfs filesystem on $root_mapper" \
-      mkfs.btrfs -f -L OMARCHY "$root_mapper"
+      mkfs.btrfs -K -f -L OMARCHY "$root_mapper"
     wait_for_device "$root_mapper" || disk_abort_hook "Root device $root_mapper never appeared"
 
     mkdir -p /mnt/btrfs-root
@@ -925,6 +938,13 @@ run_partition_execute() {
     luks_uuid_json="\"$luks_uuid\""
   fi
 
+  # enable_fallback writes the loader to EFI/BOOT/BOOTX64.EFI as well as
+  # EFI/limine. That path is only ever claimed on the Omarchy ESP, which
+  # run_partition_execute just created, wipefs'd and mkfs.fat'd in free
+  # space; the Windows ESP is never mounted here. Firmware that drops or
+  # ignores the "Limine" NVRAM entry (some AMI/MSI boards) still finds the
+  # install through the removable-media path, which is the only route left
+  # when a boot variable does not survive.
   cat <<-_EOF_ >user_configuration.json
 {
     "app_config": null,
@@ -943,7 +963,7 @@ run_partition_execute() {
             "esp_mount": "$esp_mount_in_target",
             "esp_path": "/EFI/limine",
             "efi_binary": "$limine_efi_binary",
-            "enable_fallback": false
+            "enable_fallback": true
         },
         "storage": {
             "esp_device": "$efi_dev",
@@ -1222,6 +1242,23 @@ clear
 write_user_files
 
 if [[ $install_target == "free_space" ]]; then
+  # Refuse a corrupt or missing install medium before we partition or format
+  # anything. The full-disk path clears this in the orchestrator before
+  # archinstall formats; the free-space path formats here, in the configurator,
+  # so it runs the same gate first. omarchy-wait-root-image-verify collects the
+  # boot-time hasher's verdict, waiting for it if it is still running. (2>&1
+  # 1>/dev/null captures stderr, where the failure message is, and drops the
+  # boot-medium/scheduler line on stdout — the orchestrator logs that later.
+  # OMARCHY_VERIFY_PROGRESS routes a live percent line straight to the
+  # terminal while the hash is still running, so a wait on a slow medium
+  # shows movement instead of a frozen step header.)
+  if [[ ${1:-} != "dry" ]]; then
+    step "Verifying the install medium"
+    if ! verify_error=$(OMARCHY_VERIFY_PROGRESS=/dev/tty omarchy-wait-root-image-verify 2>&1 1>/dev/null); then
+      abort "$(head -1 <<<"$verify_error")"
+    fi
+  fi
+
   run_partition_execute "$@"
 
   if [[ ${1:-} == "dry" ]]; then

@@ -5,7 +5,8 @@
 # its store full of that install's entries. The firmware reads fine and refuses
 # the write, so the install reaches Limine's efibootmgr --create and nothing
 # before it notices. Every UEFI boots EFI/BOOT/BOOT<arch>.EFI when no entry
-# matches, so a whole-disk install still has a way to boot.
+# matches, so a whole-disk install carries on and boots from that (#127). The
+# unit tests fake efibootmgr; this is the firmware actually refusing.
 #
 # Fills the NVRAM from a root shell on tty2 while the unattended install runs on
 # tty1, in the same boot: firmware compacts its store at the next boot, so a
@@ -15,9 +16,13 @@
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
 base_image_ready || { echo "No base image; run this through ./test/integration" >&2; exit 1; }
+if [[ $FIRMWARE != uefi ]]; then
+  log "full-nvram skipped: legacy BIOS has no NVRAM boot entries"
+  exit 0
+fi
 
 DISK="$RUN_DIR/disk.qcow2"
-qemu-img create -f qcow2 "$DISK" 40G >/dev/null
+qemu-img create -f qcow2 "$DISK" "${DISK_GB}G" >/dev/null
 cp "$OVMF_VARS_TEMPLATE" "$RUN_DIR/OVMF_VARS.4m.fd"
 ACTIVE_OVMF="$RUN_DIR/OVMF_VARS.4m.fd"
 
@@ -89,7 +94,7 @@ fi
 ssh_sudo "cat /var/log/omarchy-install.log" >"$RUN_DIR/omarchy-install.log" 2>/dev/null || true
 ssh_sudo "efibootmgr" >"$RUN_DIR/efibootmgr.txt" 2>/dev/null || true
 
-check "the installer was refused a boot entry" grep -q "refused a boot entry for Limine" "$RUN_DIR/omarchy-install.log"
+check "the installer was refused a boot entry" grep -q "would not register a 'Limine' UEFI boot entry" "$RUN_DIR/omarchy-install.log"
 check "efibootmgr answered" grep -q "^BootOrder" "$RUN_DIR/efibootmgr.txt"
 check "no Limine entry is in NVRAM" bash -c '! grep -q "Limine" "$1"' _ "$RUN_DIR/efibootmgr.txt"
 check "the fallback loader is installed" ssh_sudo "test -s /boot/EFI/BOOT/BOOTX64.EFI"

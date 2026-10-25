@@ -124,13 +124,17 @@ class LanguageDefaultsTest(unittest.TestCase):
         return [dict(line.split("=", 1) for line in block.strip().splitlines()) for block in output.split("--\n")[:-1]]
 
     def test_the_setup_form_gets_the_language_and_its_defaults(self):
-        polish, arabic, unknown = self.form_environment("pl", "ar", "xx")
+        polish, arabic, english, unknown = self.form_environment("pl", "ar", "en", "xx")
         self.assertEqual(polish, {"OMARCHY_FORM_LANGUAGE": "pl", "OMARCHY_FORM_KEYBOARD_DEFAULT": "Polish",
                                   "OMARCHY_FORM_TIMEZONE_FALLBACK": "Europe/Warsaw"})
-        # Picking again replaces the fallback, and a language with no home country has none.
+        # Picking again replaces the fallback. A language with no home country
+        # falls back to UTC: with no fallback at all, an offline form opens
+        # its timezone search, where Enter takes the first zone, Africa/Abidjan.
         self.assertEqual(arabic, {"OMARCHY_FORM_LANGUAGE": "ar", "OMARCHY_FORM_KEYBOARD_DEFAULT": "English (US)",
-                                  "OMARCHY_FORM_TIMEZONE_FALLBACK": ""})
+                                  "OMARCHY_FORM_TIMEZONE_FALLBACK": "UTC"})
+        self.assertEqual(english["OMARCHY_FORM_TIMEZONE_FALLBACK"], "UTC")
         self.assertEqual(unknown["OMARCHY_FORM_KEYBOARD_DEFAULT"], "English (US)")
+        self.assertEqual(unknown["OMARCHY_FORM_TIMEZONE_FALLBACK"], "UTC")
 
     def test_every_language_in_the_picker_has_defaults(self):
         self.assertLessEqual(set(catalogs()), set(self.defaults))

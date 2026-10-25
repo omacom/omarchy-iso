@@ -62,12 +62,18 @@ unuse() {
 
 # Take down everything stacked on a device, holders first, so LVM on LUKS on
 # RAID comes apart in the only order it can: device-mapper (crypt, LVM or
-# anything else) through dmsetup, md through mdadm. A holder shared with
-# another disk, a RAID1 with its other half on sdb, is stopped too: the target
-# cannot be partitioned while it runs, and stopping writes nothing to the other
-# disk's data.
+# anything else) through dmsetup, md through mdadm. A device's own partitions
+# come first, the disk's or an array's (md127p1), since what uses them holds
+# the device too. A holder shared with another disk, a RAID1 with its other
+# half on sdb, is stopped too: the target cannot be partitioned while it runs,
+# and stopping writes nothing to the other disk's data.
 release_holders() {
-  local holder name dev
+  local part holder name dev
+  for part in /sys/class/block/"$1"/"$1"*; do
+    [[ -e $part/partition ]] || continue
+    unuse "/dev/$(basename "$part")"
+    release_holders "$(basename "$part")"
+  done
   for holder in /sys/class/block/"$1"/holders/*; do
     [[ -e $holder ]] || continue
     name=$(basename "$holder")
@@ -84,10 +90,6 @@ release_holders() {
 release_and_wipe() {
   local part
   unuse "$disk"
-  for part in $(partitions); do
-    unuse "/dev/$part"
-    release_holders "$part"
-  done
   release_holders "$disk_name"
 
   # An md superblock or an LVM label is all udev needs to put a holder straight

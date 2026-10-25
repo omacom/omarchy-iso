@@ -23,7 +23,7 @@ source = ROOT / "configs/airootfs/usr/share/omarchy-iso/orchestrator/archinstall
 tree = ast.parse(source.read_text())
 functions = [
     node for node in tree.body
-    if isinstance(node, ast.FunctionDef) and node.name in {"_log_disk_state", "_log_one_disk_state"}
+    if isinstance(node, ast.FunctionDef) and node.name in {"_log_disk_state", "_log_one_disk_state", "_bounded"}
 ]
 
 TOOLS = {
@@ -75,6 +75,14 @@ class DiskFailureEvidenceTest(unittest.TestCase):
         self.assertIn("vda1 0x1000 linux_raid_member", log)
         self.assertIn("$ ls /sys/class/block/vda1/holders", log)
         self.assertIn("BTRFS error (device vda2)", log)
+
+    def test_a_stalled_read_gives_up_and_the_rest_is_still_recorded(self):
+        (Path(os.environ["PATH"].split(":")[0]) / "wipefs").write_text("#!/bin/sh\nexec sleep 60\n")
+
+        with mock.patch.dict(self.namespace, {"_bounded": lambda cmd: capture(["timeout", "1", *cmd])}):
+            self.namespace["_log_disk_state"](self.arch_config(self.dev / "vda"))
+
+        self.assertIn("BTRFS error (device vda2)", self.logged[0])
 
     def test_a_failure_to_record_never_replaces_the_install_failure(self):
         broken = types.SimpleNamespace(disk_config=types.SimpleNamespace(device_modifications=[object()]))

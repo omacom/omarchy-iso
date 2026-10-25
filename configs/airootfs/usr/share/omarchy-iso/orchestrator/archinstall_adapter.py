@@ -136,10 +136,16 @@ def _log_disk_state(arch_config: ArchConfig) -> None:
         info(f"› could not record the disk state: {exc}")
 
 
+# A failing disk can stall a read; the install error waits on these, so none
+# gets more than a few seconds.
+def _bounded(cmd: list[str]):
+    return capture(["timeout", "--kill-after=5", "10", *cmd])
+
+
 def _log_one_disk_state(disk: str) -> None:
     commands = [["lsblk", "-o", "NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS", disk]]
     partitions = []
-    for line in capture(["lsblk", "-rnpo", "PATH,TYPE", disk]).stdout.splitlines():
+    for line in _bounded(["lsblk", "-rnpo", "PATH,TYPE", disk]).stdout.splitlines():
         path, _, kind = line.partition(" ")
         if kind == "part":
             partitions.append(path)
@@ -155,7 +161,7 @@ def _log_one_disk_state(disk: str) -> None:
     commands.append(["sh", "-c", "dmesg | tail -n 40"])
     lines = [f"› disk state after the failure on {disk}"]
     for cmd in commands:
-        result = capture(cmd)
+        result = _bounded(cmd)
         lines.append(f"$ {' '.join(cmd)}")
         lines += [f"  {out}" for out in (result.stdout + result.stderr).splitlines()]
     info("\n    ".join(lines))

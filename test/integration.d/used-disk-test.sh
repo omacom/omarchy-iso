@@ -7,10 +7,10 @@
 # partition keeps the kernel on the old partition table, so archinstall cannot
 # partition the disk it was given.
 #
-# Boots the live ISO once to leave an Ubuntu-server-style disk behind (an ESP,
-# then a RAID1 member carrying LVM with swap and an ext4 root), installs
-# unattended over it, and checks the installed system boots with nothing of
-# the old stack left.
+# Boots the live ISO once to leave an old disk behind (an ESP, then a RAID1
+# member whose array has its own partition carrying LVM with swap and an ext4
+# root), installs unattended over it, and checks the installed system boots
+# with nothing of the old stack left.
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
@@ -32,8 +32,11 @@ partprobe $disk
 udevadm settle
 mkfs.fat -F32 ${disk}1
 mdadm --create /dev/md0 --level=1 --raid-devices=2 --metadata=1.2 --run ${disk}2 missing
-pvcreate -ff -y /dev/md0
-vgcreate oldvg /dev/md0
+sgdisk -n1:0:0 -t1:8e00 /dev/md0
+partprobe /dev/md0
+udevadm settle
+pvcreate -ff -y /dev/md0p1
+vgcreate oldvg /dev/md0p1
 lvcreate -y -L 1G -n swap oldvg
 lvcreate -y -l 100%FREE -n root oldvg
 mkswap /dev/oldvg/swap
@@ -82,7 +85,7 @@ HTTP_PID=""
 
 old_layout=$(grep -a -A10 '^old-install:' "$RUN_DIR/old-install-serial.log" || true)
 printf '%s\n' "$old_layout"
-if ! grep -q ' raid1' <<<"$old_layout" || ! grep -q ' lvm' <<<"$old_layout"; then
+if ! grep -q ' raid1' <<<"$old_layout" || ! grep -q '^md0p1 part' <<<"$old_layout" || ! grep -q ' lvm' <<<"$old_layout"; then
   echo "The old install was not laid down; nothing here would test the installer" >&2
   exit 1
 fi

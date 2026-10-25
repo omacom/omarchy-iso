@@ -522,21 +522,12 @@ installed_system_started() {
   grep -aq 'starting Boot.*"Limine"' "$1" 2>/dev/null
 }
 
-install_phase() {
-  log "Installing $(basename "$ISO") unattended via cidata (headless)"
+# Boot the ISO with the cidata drive onto <disk> and wait until the installed
+# system answers SSH. Returns non-zero when the installer stops or times out.
+install_unattended() {
+  local disk="$1" serial="$2"
 
-  [[ -f $SSH_KEY ]] || ssh-keygen -t ed25519 -N "" -q -C "omarchy-integration" -f "$SSH_KEY"
-  detect_packages
-  build_cidata
-
-  # Build under a staging name: the finished base is promoted only after a
-  # clean shutdown, so a failed install can never pass for a reusable base.
-  rm -f "$BASE_DISK" "$BASE_DISK.building"
-  qemu-img create -f qcow2 "$BASE_DISK.building" 40G >/dev/null
-  cp "$OVMF_VARS_TEMPLATE" "$BASE_OVMF"
-  ACTIVE_OVMF="$BASE_OVMF"
-
-  start_vm "$BASE_DISK.building" "$RUN_DIR/install-serial.log" \
+  start_vm "$disk" "$serial" \
     -drive "file=$ISO,media=cdrom,if=none,format=raw,id=cdrom0" \
     -device ide-cd,drive=cdrom0,bootindex=2 \
     -drive "file=$CIDATA_IMG,format=raw,if=none,id=cidata" \
@@ -587,7 +578,7 @@ install_phase() {
     # Once the installed system has started, the install is over and what is
     # being waited for is the first boot: say so, or a hung first boot reads
     # as a slow install.
-    if [[ -z $first_boot_at ]] && installed_system_started "$RUN_DIR/install-serial.log"; then
+    if [[ -z $first_boot_at ]] && installed_system_started "$serial"; then
       first_boot_at=$waited
       log "Install finished after about ${waited}s. Waiting for the installed system's first boot."
     fi
@@ -602,6 +593,23 @@ install_phase() {
     sleep 10
     ((waited += 10))
   done
+}
+
+install_phase() {
+  log "Installing $(basename "$ISO") unattended via cidata (headless)"
+
+  [[ -f $SSH_KEY ]] || ssh-keygen -t ed25519 -N "" -q -C "omarchy-integration" -f "$SSH_KEY"
+  detect_packages
+  build_cidata
+
+  # Build under a staging name: the finished base is promoted only after a
+  # clean shutdown, so a failed install can never pass for a reusable base.
+  rm -f "$BASE_DISK" "$BASE_DISK.building"
+  qemu-img create -f qcow2 "$BASE_DISK.building" 40G >/dev/null
+  cp "$OVMF_VARS_TEMPLATE" "$BASE_OVMF"
+  ACTIVE_OVMF="$BASE_OVMF"
+
+  install_unattended "$BASE_DISK.building" "$RUN_DIR/install-serial.log" || return 1
 
   # Keep the installer's own clock, its log and the first boot's numbers next
   # to the base image while the system is reachable, so CI can report them

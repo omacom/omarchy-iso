@@ -220,7 +220,13 @@ def prepare_live(ctx: InstallContext) -> None:
         disk = _install_disk(ctx)
         if disk:
             info(f"› cleaning up holders on install disk: {disk}")
-            subprocess.run(["omarchy-iso-cleanup-disk", disk], check=True)
+            result = capture(["omarchy-iso-cleanup-disk", disk])
+            for line in (result.stdout + result.stderr).splitlines():
+                info(f"  {line}")
+            if result.returncode != 0:
+                # Its last line says what still holds the disk, for the failure screen.
+                lines = result.stdout.strip().splitlines()
+                raise RuntimeError(lines[-1] if lines else f"Could not release {disk}")
 
     info("› loading configurator output")
     ctx.state["arch_config_handler"] = arch.load_arch_config(

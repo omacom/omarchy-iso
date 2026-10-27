@@ -710,7 +710,7 @@ shortcut_smoke_phase() {
   local status=0
   local name chord namespace plugin
   local shortcuts='menu|meta_l-spc|omarchy-menu|omarchy.menu
-apps-menu|meta_l-alt-spc|omarchy-menu|omarchy.menu
+apps-menu|meta_l-alt-spc|omarchy-dock-apps|omarchy.dock
 emojis|meta_l-ctrl-e|omarchy-emojis|omarchy.emojis
 clipboard|meta_l-ctrl-v|omarchy-clipboard|omarchy.clipboard
 audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel|omarchy.audio'

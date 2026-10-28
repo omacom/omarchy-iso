@@ -1524,10 +1524,17 @@ acceptance_phase() {
   fi
 
   # The product under test is always the installed tree — VM runs verify the
-  # finished product, never a dev-linked checkout.
+  # finished product, never a dev-linked checkout. The run names the profile
+  # it installed, so the child checks fail instead of skipping when a child
+  # run lands anywhere else or arrives without its passwords.
+  local profile=default
+  if $CHILD; then
+    profile=child
+  fi
   log "Running acceptance suite"
   ssh_guest "OMARCHY_PATH=/usr/share/omarchy OMARCHY_ACCEPTANCE_DIR=/tmp/omarchy-acceptance \
     OMARCHY_ACCEPTANCE_SUDO_PASSWORD=$GUEST_SUDO_PASSWORD OMARCHY_ACCEPTANCE_USER_PASSWORD=$GUEST_PASSWORD \
+    OMARCHY_ACCEPTANCE_PROFILE=$profile \
     bash .local/share/omarchy/test/acceptance" || status=$?
 
   log "Collecting artifacts into $RUN_DIR"

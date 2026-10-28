@@ -1,0 +1,52 @@
+# Omarchy's boot menu, in Tokyo Night: Plymouth's background (#1a1b26) and
+# its logo where Plymouth centres it, so after a pick only the menu goes
+# away. builder/boot-menu-theme.sh makes the fonts, the pixmaps and logo.png;
+# configs/grub/theme.cfg loads them.
+#
+# GRUB paints components in the reverse of the order listed here, so what is
+# on top comes first.
+title-text: ""
+desktop-color: "#1a1b26"
+terminal-font: "JetBrains Mono Regular 16"
+terminal-box: "terminal_box_*.png"
+terminal-left: "10%"
+terminal-top: "10%"
+terminal-width: "80%"
+terminal-height: "80%"
+terminal-border: "0"
+
+# The entries in Tokyo Night's foreground and bright foreground: both read at
+# better than 7:1 on the background, and test/integration.d's OCR finds them.
+# Exactly as tall as its two entries: 2 x item_height + item_spacing, plus
+# the selection box's 1 px top and bottom edges, which gui_list.c takes off
+# before it counts rows. Both show on every screen the logo fits.
++ boot_menu {
+    left = 50%-150
+    top = 50%+134
+    width = 300
+    height = 84
+    item_font = "JetBrains Mono Regular 26"
+    selected_item_font = "JetBrains Mono Bold 26"
+    item_color = "#a9b1d6"
+    selected_item_color = "#c0caf5"
+    item_height = 40
+    item_padding = 0
+    item_spacing = 2
+    item_icon_space = 16
+    icon_width = 0
+    icon_height = 0
+    selected_item_pixmap_style = "select_*.png"
+    scrollbar = true
+    scrollbar_width = 4
+    scrollbar_frame = "scroll_frame_*.png"
+    scrollbar_thumb = "scroll_thumb_*.png"
+}
+
+# Plymouth's layout(): the logo centred on the screen.
++ image {
+    left = 50%-400
+    top = 50%-94
+    width = 800
+    height = 188
+    file = "logo.png"
+}

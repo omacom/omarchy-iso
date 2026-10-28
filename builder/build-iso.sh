@@ -13,6 +13,7 @@ source /builder/node-release.sh
 source /builder/arm64-kernel-image.sh
 source /builder/archiso-aarch64-mkinitcpio.sh
 source /builder/grub-platform.sh
+source /builder/boot-menu-theme.sh
 
 # The online pacman configuration drives every package download below: one per
 # architecture and channel. On aarch64 it points at Omarchy's aarch64
@@ -144,7 +145,7 @@ else
   # so this container can be months behind the mirror it installs from. A plain
   # -Sy install is then a partial upgrade — new packages linked against a glibc
   # the container doesn't have yet.
-  pacman --noconfirm -Syu archiso git sudo base-devel jq grub imagemagick neovim nodejs npm tree-sitter-cli btrfs-progs
+  pacman --noconfirm -Syu archiso git sudo base-devel jq grub imagemagick neovim nodejs npm tree-sitter-cli btrfs-progs ttf-jetbrains-mono
   mkarchiso_command=mkarchiso
 fi
 
@@ -264,6 +265,12 @@ else
   # until its 8 s DeviceTimeout: the logo showed 7.8 s after the menu pick on
   # an MSI Z690 from USB.
   boot_splash_kernel_options="quiet splash plymouth.use-simpledrm "
+  # The boot menu offers Install and Try only, so nothing starts releng's
+  # memory test or UEFI shell, which mkarchiso copies onto the medium
+  # whenever their packages are in the live system.
+  for excluded_package in memtest86+ memtest86+-efi edk2-shell; do
+    sed -i "\\|^${excluded_package//+/[+]}$|d" "$build_cache_dir/packages.x86_64"
+  done
   kernel_options="xe.enable_panel_replay=0 initramfs_async=0 intel_idle.states_off=0x3fc"
 fi
 for grub_config in "$build_cache_dir/grub/grub.cfg" "$build_cache_dir/grub/loopback.cfg"; do
@@ -1086,6 +1093,20 @@ for platform_list in "$build_cache_dir"/airootfs/usr/share/omarchy-iso/omarchy-b
     >"$build_cache_dir/airootfs/usr/share/omarchy-iso/expected-packages.$platform"
   echo "Target install on $platform resolves to $expected_packages packages."
 done
+
+# The boot menus' theme (builder/boot-menu-theme.sh). Only x86_64 shows a
+# menu; aarch64 boots its default at once, so it carries no theme.
+if [[ $OMARCHY_ARCH == aarch64 ]]; then
+  rm -rf "$build_cache_dir/grub/themes"
+else
+  settings_archive=$(find "$offline_mirror_dir" -maxdepth 1 -name "$OMARCHY_SETTINGS_PACKAGE-[0-9]*.pkg.tar.*" ! -name '*.sig' | head -1)
+  if [[ -z $settings_archive ]]; then
+    echo "ERROR: $OMARCHY_SETTINGS_PACKAGE is not in the offline mirror, so the boot menu has no logo" >&2
+    exit 1
+  fi
+  build_grub_theme "$build_cache_dir/grub/themes/omarchy" "$settings_archive" || exit 1
+  build_syslinux_splash "$build_cache_dir/syslinux/splash.png" "$settings_archive" || exit 1
+fi
 
 # Live ISO uses the same offline pacman.conf.
 cp "$build_cache_dir/pacman-offline.conf" "$build_cache_dir/airootfs/etc/pacman.conf"

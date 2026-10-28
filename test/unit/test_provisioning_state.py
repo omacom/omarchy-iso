@@ -168,6 +168,7 @@ def make_ctx(target, **overrides):
         user_credentials={"users": []},
         state_dir=target / "state",
         authorized_keys_path=None,
+        state={},
     )
     defaults.update(overrides)
     return types.SimpleNamespace(**defaults)
@@ -184,13 +185,15 @@ class StageProvisioningStateTest(unittest.TestCase):
         info_patch.start()
         self.addCleanup(info_patch.stop)
 
-        # A fake bundled Node tarball on the "live ISO".
+        # The live ISO's /opt/packages: empty unless a test bundles Node.
         self.packages = Path(self.tmp.name) / "opt-packages"
         self.packages.mkdir()
-        (self.packages / "node-v24.0.0-linux-x64.tar.gz").write_bytes(b"node")
         node_patch = mock.patch.object(phases_impl, "NODE_PACKAGES_DIR", self.packages)
         node_patch.start()
         self.addCleanup(node_patch.stop)
+
+    def bundle_node(self):
+        (self.packages / "node-v24.0.0-linux-x64.tar.gz").write_bytes(b"node")
 
     def install_runtime_provisioning_support(self):
         service = self.target / "usr/share/omarchy/install/provisioning/omarchy-provision-owner.service"
@@ -203,33 +206,36 @@ class StageProvisioningStateTest(unittest.TestCase):
     def provisioning_dir(self):
         return self.target / "var/lib/omarchy/provisioning"
 
-    def test_normal_install_stages_only_the_node_tarball(self):
+    def test_normal_install_arms_nothing(self):
         ctx = make_ctx(self.target, defer_provisioning=False)
         phases_impl.stage_provisioning_state(ctx)
 
-        self.assertTrue((self.provisioning_dir() / "packages/node-v24.0.0-linux-x64.tar.gz").exists())
+        self.assertEqual(list(self.provisioning_dir().iterdir()), [])
         self.assertFalse((self.provisioning_dir() / "pending").exists())
         self.assertFalse((self.target / "etc/systemd/system/omarchy-provision-owner.service").exists())
+
+    def test_bundled_node_stays_on_the_target_for_a_later_factory_reset(self):
+        # A runtime that unpacks the bundled Node reads it from provisioning
+        # state once /opt/packages is gone, and factory reset carries it on.
+        self.bundle_node()
+        ctx = make_ctx(self.target, defer_provisioning=False)
+        phases_impl.stage_provisioning_state(ctx)
+
+        self.assertEqual((self.provisioning_dir() / "packages/node-v24.0.0-linux-x64.tar.gz").read_bytes(), b"node")
+        self.assertFalse((self.provisioning_dir() / "pending").exists())
+
+    def test_bundled_node_stays_on_the_target_for_first_boot_setup(self):
+        self.bundle_node()
+        self.install_runtime_provisioning_support()
+        ctx = make_ctx(self.target)
+        phases_impl.stage_provisioning_state(ctx)
+
+        self.assertEqual((self.provisioning_dir() / "packages/node-v24.0.0-linux-x64.tar.gz").read_bytes(), b"node")
+        self.assertTrue((self.provisioning_dir() / "pending").exists())
 
     def test_deferred_provisioning_against_runtime_without_support_fails_clearly(self):
         ctx = make_ctx(self.target)
         with self.assertRaisesRegex(RuntimeError, "does not ship"):
-            phases_impl.stage_provisioning_state(ctx)
-
-    def test_deferred_provisioning_without_node_tarball_fails(self):
-        for tarball in self.packages.glob("*.tar.gz"):
-            tarball.unlink()
-        self.install_runtime_provisioning_support()
-        ctx = make_ctx(self.target)
-        with self.assertRaisesRegex(RuntimeError, "Node tarball"):
-            phases_impl.stage_provisioning_state(ctx)
-
-    def test_missing_node_tarball_fails_normal_installs_too(self):
-        # The stash is what makes a later factory reset work offline.
-        for tarball in self.packages.glob("*.tar.gz"):
-            tarball.unlink()
-        ctx = make_ctx(self.target, defer_provisioning=False)
-        with self.assertRaisesRegex(RuntimeError, "Node tarball"):
             phases_impl.stage_provisioning_state(ctx)
 
     def test_deferred_provisioning_arms_first_boot_setup(self):

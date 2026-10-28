@@ -85,6 +85,16 @@ root '
   sshd -T | grep -qix "passwordauthentication no"
   sshd -T | grep -qix "authenticationmethods publickey"
 
+  # The Limine boot entry names the machine it belongs to, and limine-entry-tool
+  # and limine-snapper-sync skip an entry that names another machine. A clone
+  # has a machine ID of its own, so its first initramfs rebuild would add a
+  # second entry and delete or replace the UKI of the default entry, this one:
+  # a panic or a hash prompt at the next firmware boot. An entry that names no
+  # machine is found by its name, TARGET_OS_NAME, and updated in place.
+  mid=$(cat /etc/machine-id)
+  [[ $mid =~ ^[0-9a-f]{32}$ ]]
+  sed -i "s/machine-id=$mid *//" /boot/limine.conf
+
   # Empty, not "uninitialized": that string marks a first boot, and a first boot
   # applies unit presets, which on Arch disable everything not listed. Empty lets
   # systemd take the VM SMBIOS UUID (qemu -uuid) as this boot machine ID.
@@ -120,6 +130,7 @@ root '
   rm -rf /var/log/journal/*
 
   test ! -s /etc/machine-id
+  test -z "$(grep "machine-id=$mid" /boot/limine.conf)"
   test -z "$(ls /etc/ssh/ssh_host_* /var/lib/NetworkManager/*.lease /var/log/journal/* 2>/dev/null)"
   test ! -e /home/omarchy/.ssh/authorized_keys
   test ! -e /var/lib/systemd/random-seed

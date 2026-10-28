@@ -97,29 +97,31 @@ class ChildProfileContextTest(unittest.TestCase):
         self.assertEqual(ctx.user_configuration["kernels"], ["linux-t2"])
 
 class ChildPackageListTest(unittest.TestCase):
+    """A child install adds the runtime's child list on top of the image's
+    default set, skipping what the image already holds; every other profile
+    adds nothing, and so does a runtime that ships no child list."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        share = Path(self.tmp.name)
-        (share / "omarchy-base.packages").write_text("# base\nfoo\nbar\n")
-        (share / "omarchy-child.packages").write_text("# child\nfoo\ngcompris\n")
-        self.share = share
+        self.share = Path(self.tmp.name)
+        (self.share / "omarchy-child.packages").write_text("# child\nfoo\ngcompris\n\ngcompris\n")
 
-    def list_for(self, profile):
+    def list_for(self, profile, installed=("foo",)):
         ctx = types.SimpleNamespace(profile=profile)
-        with mock.patch.object(phases_impl, "ISO_SHARE", self.share), \
-                mock.patch.object(phases_impl, "_early_packages", return_value=[]), \
-                mock.patch.object(phases_impl, "_omarchy_runtime_package", return_value="omarchy"), \
-                mock.patch.object(phases_impl, "_omarchy_settings_package", return_value="omarchy-settings"), \
-                mock.patch.object(phases_impl, "_omarchy_nvim_package", return_value="omarchy-nvim"):
-            return phases_impl._runtime_package_list(ctx)
+        with mock.patch.object(phases_impl.arch, "target_has_package", create=True,
+                               side_effect=lambda target, name: name in installed):
+            return phases_impl._child_delta_packages(ctx, Path("/mnt"), self.share)
 
-    def test_default_profile_installs_the_base_list_only(self):
-        self.assertEqual(self.list_for("default"), ["omarchy", "foo", "bar"])
+    def test_default_profile_adds_nothing(self):
+        self.assertEqual(self.list_for("default"), [])
 
-    def test_child_profile_adds_the_child_list_without_duplicates(self):
-        self.assertEqual(self.list_for("child"), ["omarchy", "foo", "bar", "gcompris"])
+    def test_child_profile_adds_what_the_image_lacks_once(self):
+        self.assertEqual(self.list_for("child"), ["gcompris"])
 
+    def test_a_runtime_without_a_child_list_adds_nothing(self):
+        (self.share / "omarchy-child.packages").unlink()
+        self.assertEqual(self.list_for("child"), [])
 
 class ProfileHandoffTest(unittest.TestCase):
     def test_system_finalizer_passes_the_profile(self):

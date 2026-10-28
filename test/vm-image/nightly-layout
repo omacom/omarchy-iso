@@ -6,9 +6,11 @@
 #
 #   release      the path under the site, from nightly-plan
 #   iso          the ISO that was installed
-#   sealed_dir   what vm-seal made
-#   vm_packages  what the sealed image answered to: pacman -Q of its Omarchy
-#                package, pacman -Qo of its kernel's pkgbase, uname -r
+#   sealed_dir   what vm-seal made, or - for edge-aarch64, which publishes no
+#                VM image yet
+#   vm_packages  what the installed system answered to: pacman -Q of its
+#                Omarchy package (and, from a sealed image, pacman -Qo of its
+#                kernel's pkgbase), then uname -r last
 #
 # Env: SITE (https://nightly.omarchy.org), ISO_SITE (https://iso.omarchy.org),
 #      ISO_COMMIT (the omarchy-iso commit, default: HEAD of this checkout).
@@ -21,6 +23,9 @@
 #                                           arguments for booting it directly,
 #                                           vm-boot, and their SHA256SUMS
 #   omarchy-edge-<version>.iso and .sha256  edge only
+#
+# edge-aarch64 gets omarchy-edge-<version>-aarch64.iso and its .sha256 only,
+# and a latest.json without the vm part.
 #
 # and <channel>/latest.json. The released ISO already has its place:
 # latest.json points there and the ISO stays where it is.
@@ -35,12 +40,16 @@ iso_site=${ISO_SITE:-https://iso.omarchy.org}
 iso_commit=${ISO_COMMIT:-$(git -C "$here" rev-parse HEAD)}
 fail() { echo "nightly-layout: $*" >&2; exit 1; }
 
-[[ $channel == edge || $channel == stable ]] || fail "'$channel' is not a channel"
+[[ $channel == edge || $channel == stable || $channel == edge-aarch64 ]] || fail "'$channel' is not a channel"
 [[ -f $iso_file ]] || fail "no ISO at $iso_file"
 unpacked=(vmlinuz initrd cmdline)
-for file in base.qcow2 "${unpacked[@]}"; do
-  [[ -s $sealed/$file ]] || fail "the sealed image has no $file"
-done
+if [[ $channel == edge-aarch64 ]]; then
+  [[ $sealed == - ]] || fail "edge-aarch64 publishes no image; its sealed_dir is -"
+else
+  for file in base.qcow2 "${unpacked[@]}"; do
+    [[ -s $sealed/$file ]] || fail "the sealed image has no $file"
+  done
+fi
 
 omarchy=$(awk '$1 == "omarchy" || $1 == "omarchy-dev" { print $2; exit }' "$packages")
 kernel=$(tail -n 1 "$packages")
@@ -50,7 +59,35 @@ kernel=$(tail -n 1 "$packages")
 omarchy_commit=$(sed -nE 's/.*\.g([0-9a-f]+)-.*/\1/p' <<<"$omarchy")
 
 dir=$out/$release
-mkdir -p "$dir/unpacked" "$out/$channel"
+mkdir -p "$dir" "$out/$channel"
+latest=$out/$channel/latest.json
+if [[ $channel == edge-aarch64 ]]; then
+  iso=omarchy-edge-$version-aarch64.iso
+  mv "$iso_file" "$dir/$iso"
+  (cd "$dir" && sha256sum "$iso" >"$iso.sha256")
+  jq -n \
+    --arg version "$version" --arg channel "$channel" --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg url "$site/$release/$iso" --arg sha256 "$(cut -d' ' -f1 "$dir/$iso.sha256")" \
+    --argjson size "$(stat -c %s "$dir/$iso")" \
+    --arg iso_commit "$iso_commit" --arg omarchy_version "$omarchy" --arg omarchy_commit "$omarchy_commit" \
+    --arg kernel "$kernel" '{
+      version: $version, channel: $channel, arch: "aarch64", built_at: $built_at,
+      url: $url, sha256: $sha256, size: $size,
+      iso_commit: $iso_commit, omarchy_version: $omarchy_version, omarchy_commit: $omarchy_commit,
+      kernel: $kernel
+    }' >"$latest"
+  jq -e '
+    def one_line: type == "string" and test("^[^\n]+$");
+    (.version | one_line) and .channel == "edge-aarch64" and .arch == "aarch64"
+    and (.url | test("^https://[^\n ]+-aarch64\\.iso$")) and (.sha256 | test("^[0-9a-f]{64}$")) and .size > 0
+    and (.iso_commit | test("^[0-9a-f]{40}$"))
+    and (.omarchy_version | one_line) and (.omarchy_commit | test("^[0-9a-f]*$")) and (.kernel | one_line)
+    and (has("vm") | not)
+  ' "$latest" >/dev/null || { cat "$latest" >&2; fail "latest.json does not say what it should"; }
+  cat "$latest"
+  exit 0
+fi
+mkdir -p "$dir/unpacked"
 if [[ $channel == edge ]]; then
   name=omarchy-$channel-$version
   iso=$name.iso
@@ -76,7 +113,6 @@ cp "$here/vm-boot" "$dir/unpacked/vm-boot"
 unpacked+=(vm-boot)
 (cd "$dir/unpacked" && sha256sum "${unpacked[@]}" >SHA256SUMS)
 
-latest=$out/$channel/latest.json
 jq -n \
   --arg version "$version" --arg channel "$channel" --arg release "$site/$release" --arg image "$image" \
   --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \

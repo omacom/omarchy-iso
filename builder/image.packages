@@ -1,0 +1,34 @@
+# Packages the installer used to add on top of the package lists at install
+# time, now baked into the root image by build-root-image.sh. What only some
+# machines get (audio firmware, Tailscale, a kernel the image lacks) stays out
+# of the image and is installed per machine; see per_machine_packages in
+# build-iso.sh.
+
+# archinstall's base set (Installer.__packages__) and what it adds for a btrfs
+# root with zram swap.
+base
+sudo
+linux-firmware
+mkinitcpio
+btrfs-progs
+dosfstools
+zram-generator
+
+# archinstall's PipeWire selection (AudioApp.pipewire_packages).
+pipewire
+pipewire-alsa
+pipewire-jack
+pipewire-pulse
+gst-plugin-pipewire
+libpulse
+wireplumber
+
+# The orchestrator's early bootstrap set: Limine, the keyring, and what seeds
+# /etc/skel before useradd.
+base-devel
+git
+limine
+efibootmgr
+omarchy-keyring
+lua51
+luarocks

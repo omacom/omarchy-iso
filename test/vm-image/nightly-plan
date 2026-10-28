@@ -10,10 +10,12 @@
 #   release_tag       omacom/omarchy's latest release, such as v4.0.4
 #   published_stable  the version stable/latest.json names now, if any
 #
-# Prints a JSON list of {channel, version, release}; release is the path
+# Prints a JSON list of {channel, arch, version, release}; release is the path
 # under the site.
 #
-# An edge version is the date and the run number. A stable version is the
+# edge-aarch64 is the edge ISO for aarch64, under the edge version: built and
+# tested on its own runner and published beside the others, never holding them
+# back. An edge version is the date and the run number. A stable version is the
 # release's own, and on a scheduled run a release already published is left
 # out: it is done once. Two builds are never the same bytes and a published
 # file is never replaced, so no path is used twice: a stable image has the run
@@ -32,11 +34,14 @@ stable=${tag#v}
 build=$run
 [[ $attempt == 1 ]] || build+=.$attempt
 
-channels=$(jq -cn --arg v "$date.$build" '[{channel: "edge", version: $v, release: "edge/\($v)"}]')
+channels=$(jq -cn --arg v "$date.$build" '[
+  {channel: "edge", arch: "x86_64", version: $v, release: "edge/\($v)"},
+  {channel: "edge-aarch64", arch: "aarch64", version: $v, release: "edge-aarch64/\($v)"}
+]')
 if [[ $event == schedule && $published == "$stable" ]]; then
   echo "nightly-plan: stable $stable is already published" >&2
 else
   channels=$(jq -c --arg v "$stable" --arg build "$build" \
-    '. + [{channel: "stable", version: $v, release: "stable/\($v)/\($build)"}]' <<<"$channels")
+    '. + [{channel: "stable", arch: "x86_64", version: $v, release: "stable/\($v)/\($build)"}]' <<<"$channels")
 fi
 echo "$channels"

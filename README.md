@@ -2,7 +2,7 @@
 
 [![Nightly ISO Build](https://github.com/omacom/omarchy-iso/actions/workflows/nightly-build.yml/badge.svg?branch=quattro&event=schedule)](https://github.com/omacom/omarchy-iso/actions/workflows/nightly-build.yml?query=branch%3Aquattro+event%3Aschedule)
 
-The Omarchy ISO is the only supported way to install Omarchy. It includes the Omarchy Configurator and installs Arch Linux and the Omarchy packages from the bundled mirror. It then runs target system setup in the chroot, creates the user, and runs `omarchy-provision-user` for that user.
+The Omarchy ISO is the only supported way to install Omarchy. It ships the Omarchy Configurator, writes a pre-built Arch Linux + Omarchy root image (a zstd-compressed btrfs partition image) onto the target with `zstdcat | dd`, gives it a fresh filesystem id and grows it to the partition, installs the per-machine packages (audio firmware, and a kernel the image lacks) from the bundled mirror, runs target system setup in the chroot, creates the user, and runs `omarchy-provision-user` for that user.
 
 ## Get Omarchy
 
@@ -28,7 +28,15 @@ curl -fsSLO "https://iso.omarchy.org/omarchy-$version.iso.sha256"
 sha256sum -c "omarchy-$version.iso.sha256"
 ```
 
-Use the `.sig` file to verify the ISO against the Omarchy signing key.
+The checksum only catches a corrupted download. The `.sig` file proves that Omarchy built the ISO. Fetch the Omarchy signing key by its full fingerprint, then verify the ISO with GnuPG:
+
+```bash
+gpg --keyserver hkps://keys.openpgp.org --recv-keys 40DFB630FF42BCFFB047046CF0134EE680CAC571
+curl -fsSLO "https://iso.omarchy.org/omarchy-$version.iso.sig"
+gpg --verify "omarchy-$version.iso.sig" "omarchy-$version.iso"
+```
+
+The output must say `Good signature from "Omarchy <pkgs@omarchy.org>"` and show the key `40DFB630FF42BCFFB047046CF0134EE680CAC571`. A warning that the key is not certified with a trusted signature is expected. It means only that you have not signed the key yourself.
 
 ### More in the manual
 
@@ -159,8 +167,6 @@ These are the configurator's own output files, so the way to get a starting set 
 |------|----------|---------|
 | `user_configuration.json` | Yes | archinstall config: disk, hostname, timezone, keyboard |
 | `user_credentials.json` | Yes | Username and password hash; on a child install also the parent hash as `root_enc_password`, `sudo: false`, and `parent_encryption_password` when encrypted |
-| `user_full_name.txt` | No | Git full name |
-| `user_email_address.txt` | No | Git email |
 | `user_encrypt_installation.txt` | No | `true` when `user_configuration.json` carries a `disk_encryption` block; defaults to false |
 | `authorized_keys` | No | SSH public keys in sshd's own format, one per line |
 | `tailscale_authkey` | No | Tailscale auth key; the machine joins your tailnet on first boot |
@@ -209,6 +215,16 @@ Boot order is disk first: the empty disk falls through to the ISO on the first b
 
 Encrypted autoinstalls are not fully unattended — the LUKS passphrase prompt still needs someone at the first boot.
 
+`omarchy_install.language` in `user_configuration.json` takes a code from Omarchy's language registry, like `da` or `ja`, and becomes the installed system's language. Leave it out, or set `en`, for English.
+
+## Translations
+
+The configurator asks for a language first, on the screen that carries the intro and the hidden Ctrl+C entry into preparing the machine for another owner. It offers every language in Omarchy's registry (`default/i18n/locales.json` in the settings package). A language with a catalog in `configs/airootfs/usr/share/omarchy-iso/i18n/` also translates the installer. The others are listed by their English name, the installer stays in English, and the language still goes to the installed system as `/etc/omarchy/language`. The keyboard list then preselects the language's layout from `language-defaults.json`. The timezone list preselects the network's guess, and when that fails, the capital of the language's country from the same file. English, Arabic, Swahili and Tamil have no single home country, so they fall back to the plain timezone search.
+
+Catalogs exist only for languages the live console can draw. The kernel's own console fonts carry just the IBM PC character set, so the installer loads Terminus, patched by `console-font.py` with the half blocks the logo is drawn with. That covers Latin, Greek and Cyrillic. CJK, Arabic, Hebrew, the Indic scripts, Thai and Vietnamese are beyond any 512-glyph console font.
+
+To add a string, put it in `en.json` and print it with `t <key> [args]`, where `%1`, `%2` take the arguments. A catalog that lacks the key shows it in English until a translation lands. `test/unit/test_installer_i18n.py` fails on a key English does not have, on placeholders that differ from English, and on a character the patched font cannot draw. The setup form vendored from Omarchy translates its own strings from Omarchy's catalogs, in the language the configurator names in `OMARCHY_FORM_LANGUAGE`, and takes the keyboard default and the offline timezone through `OMARCHY_FORM_KEYBOARD_DEFAULT` and `OMARCHY_FORM_TIMEZONE_FALLBACK`.
+
 ## Creating the ISO
 
 Run `./bin/omarchy-iso-make`; output goes into `./release`. By default the ISO uses the Omarchy packages and tracks the `quattro` branch, from the stable mirror. Pass `--edge` to use `omarchy-dev` and `omarchy-settings-dev` from the edge mirror.
@@ -222,6 +238,22 @@ For local development, build the ISO from sibling checkouts:
 Despite the local folder name, the first argument is the Omarchy source checkout (runtime commands, configs, setup scripts, themes, shell, migrations). The installer itself lives in this ISO repo.
 
 Use `--dev` or `--rc` to build against those package channels. Both `--dev` and `--edge` select the dev packages from the edge mirror.
+
+### aarch64
+
+```bash
+./bin/omarchy-iso-make --arch aarch64 --edge --local-source ../omarchy-installer ../omarchy-pkgs
+```
+
+One aarch64 image serves every board that installs from a USB stick. Apple Silicon Macs are not among them, since they are installed from macOS. The build chooses nothing. The installer asks the machine which platform it is on, with the runtime's own `omarchy-hw-platform`, and installs that platform's packages from the offline mirror, which carries them for every platform.
+
+An aarch64 image is built from the stable channel unless `--rc` or `--edge` names another, as on x86_64: Omarchy's aarch64 repository for that channel and its mirror of Arch Linux ARM (`arm-stable-mirror.omarchy.org`, `arm-rc-mirror.omarchy.org`, `arm-mirror.omarchy.org`), from `configs/pacman-online-aarch64-<channel>.conf`.
+
+The kernel is `linux-omarchy`, as on x86_64, and it is the only one an aarch64 image is built on. It comes from the channel's aarch64 repository. A package bundle (`--package-dir`) can put a kernel under test or pinned packages ahead of it, as [N1X.md](N1X.md) describes.
+
+Snapdragon laptops get no device tree from their firmware, so the live system also carries a UKI with one for every supported laptop, built from the device trees the kernel package ships. GRUB boots it by default where the processor is a Snapdragon, and systemd-stub picks the device tree by the machine's SMBIOS data. Every other machine boots the kernel directly.
+
+The runtime the image installs must have the platform detector and the Snapdragon hardware setup (`install/hardware/qualcomm/`), which lists those device trees for the installed system's own UKI. The build refuses a runtime without them. On a laptop that still has Windows, the installer copies the vendor-signed firmware off the Windows partition before the disk is written.
 
 ## Testing the ISO
 
@@ -263,6 +295,8 @@ Scenarios under `test/integration.d/` boot a real ISO install in QEMU and assert
 
 The first scenario is `factory-reset`: it proves `omarchy-system-factory-reset` hands a machine on without destroying a shared ESP. The installed ESP gets a Windows entry with payload plus a second Linux cloned under a foreign machine-id with its own boot directory and UKIs; a real factory reset is then driven through a guest pty, and the harness asserts the foreign entries survive both the staged reset and first-boot provisioning, that the old Omarchy identity is fully retired, and that the machine reaches first-boot setup unattended.
 
+`corrupt-image` proves a bad install medium is refused before the disk is touched. It copies the ISO and flips one byte a megabyte into the root image stream itself — addressed from the extent xorriso reports out of the ISO9660 directory records, so the damage lands in the shipped bytes and nowhere else — then autoinstalls from that copy: `omarchy-root-image-verify.service` (which hashes the image at boot, while a user would be in the configurator) must fail, the install must halt in its pre-flight phase with the "re-flash" advice on screen, and the target disk must still have no partition table. It boots the ISO itself rather than the base image, so it also works standalone with `OMARCHY_INTEGRATION_ISO` set.
+
 Artifacts — screenshots, the fixtured/staged/final `limine.conf`, the reset typescript, and the factory-reset log — land under `test-runs/<iso>-integration/runs/<timestamp>-<scenario>/`, and `--no-preview` skips the `imv` review just like the acceptance harness.
 
 ## Upgrade testing
@@ -275,6 +309,8 @@ Artifacts — screenshots, the fixtured/staged/final `limine.conf`, the reset ty
 ```
 
 The evidence folder gets `report.md`, the update's output, and a picture of the desktop before and after.
+
+Pass `--release-iso` to `test/integration` when the ISO is a shipped release rather than a build of this tree. The install is then not held to what only this tree's installer does: a first boot that runs the `ConditionNeedsUpdate=` units, as the 4.0.6 ISO does, is noted instead of failing the install. The "Upgrade test" workflow and the nightly `stable` image pass it.
 
 The "Upgrade test" workflow does both steps from a release's ISO. Start it by hand, from the latest release to edge by default:
 
@@ -295,3 +331,39 @@ Run `./bin/omarchy-iso-upload [release/omarchy.iso]`. This requires rclone confi
 ## Full release of the ISO
 
 Run `./bin/omarchy-iso-release VERSION` to create, test, sign, and upload the ISO in one flow. Add `--rc` to release an RC build instead.
+
+## LUKS calibration during live boot
+
+`omarchy-luks-calibrate.service` runs cryptsetup's 2000 ms Argon2id benchmark
+after the medium verifiers, while the wizard is open. It publishes only the
+iteration, memory and parallel costs in a root-only file under
+`/run/omarchy-luks-calibration/`; no password, volume key or header is cached.
+Both the free-space wizard and archinstall's full-disk format consume it.
+Each format still creates a fresh header, salt and volume key.
+
+An unfinished benchmark is cancelled before formatting. Missing, malformed or
+incompatible results leave cryptsetup's normal calibration in
+place; custom iteration times and key sizes are preserved. Background work is
+skipped below 4 GiB usable RAM or 1.5 GiB available RAM. Only a benchmark
+that retains the full default 1 GiB memory cost is reusable, and it is rejected
+if memory has since become tight. Below 4 GiB without swap, cryptsetup caps
+Argon2 at half of free RAM; the medium's page cache makes that cap change
+between boot and format, so those machines keep normal calibration. The benchmark runs at normal priority after the hash
+jobs, without changing CPU governors. Timing depends on machine load and
+power policy; moving calibration does not guarantee identical unlock times.
+
+`test/unit/test_luks_calibration.py` checks parsing, validation and command
+fallbacks. The QEMU calibration scenario waits for a successful service exit,
+not for a cache file: a slow CPU can legitimately skip caching even with 8 GiB
+of RAM. With a cache it compares actual Argon2 keyslot costs and unlock times;
+without one it checks normal formatting and passphrase unlocks through both
+installer callers. The 4 GiB guest exercises that fallback too. Missing,
+failed, killed or unfinished services still fail the scenario, with service
+state and journal evidence retained. `test/unit/test_luks_calibration_scenario.py`
+covers those distinctions and ensures a failed fallback unlock is not hidden.
+
+Review validation (2026-10-25): the shell suite and 327 Python tests passed
+on the MSI desktop. The revised QEMU scenario passed with an 8 GiB cached
+result and a successful 4 GiB skip; the latter formatted and unlocked through
+both callers, including the malformed-cache fallback. This test-only update
+reused the previously built RC ISO; installer code was unchanged.

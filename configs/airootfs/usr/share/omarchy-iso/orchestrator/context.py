@@ -3,15 +3,29 @@ mutable `state` dict for objects that live across phases (e.g., the
 archinstall config handler and mirror list handler)."""
 
 from __future__ import annotations
+import platform
 
 import json
 import os
 import secrets
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .keyboard import validate_input_selection
+
+LANGUAGES = Path("/usr/share/omarchy/default/i18n/locales.json")
+
+
+def validate_language(language: Any, registry: Path | None = None) -> None:
+    """The installer's language is a registry code, checked before any disk is
+    touched; the target only ever reads it back as data."""
+    registry = registry or LANGUAGES
+    if language is None or language in ("", "en"):
+        return
+    if not isinstance(language, str) or not registry.is_file() or language not in json.loads(registry.read_text()):
+        raise RuntimeError(f"Unsupported language: {language!r}")
 
 
 PROFILES = frozenset({"default", "child"})
@@ -21,8 +35,6 @@ PROFILES = frozenset({"default", "child"})
 class InstallContext:
     config_path: Path
     creds_path: Path
-    full_name: str
-    email: str
     encrypt: bool
     authorized_keys_path: Path | None
     tailscale_authkey_path: Path | None
@@ -67,6 +79,7 @@ class InstallContext:
             user_configuration["kernels"] = [kernel]
 
         validate_input_selection(omarchy_install.get("input_method"), omarchy_install.get("input_xkb_layout", ""))
+        validate_language(omarchy_install.get("language"))
 
         # Deferred provisioning: the whole system installs but user creation is deferred to
         # first boot. Selected by the configurator (omarchy_install.defer_provisioning) or by
@@ -127,8 +140,6 @@ class InstallContext:
         ctx = cls(
             config_path=config_path,
             creds_path=creds_path,
-            full_name=_read_text(os.environ.get("OMARCHY_INSTALL_FULL_NAME_FILE")),
-            email=_read_text(os.environ.get("OMARCHY_INSTALL_EMAIL_FILE")),
             encrypt=_read_text(os.environ.get("OMARCHY_INSTALL_ENCRYPT_FILE")).lower() in ("true", "yes", "1"),
             authorized_keys_path=_optional_path(os.environ.get("OMARCHY_INSTALL_AUTHORIZED_KEYS_FILE")),
             tailscale_authkey_path=_optional_path(os.environ.get("OMARCHY_INSTALL_TAILSCALE_AUTHKEY_FILE")),
@@ -199,7 +210,41 @@ def _inject_provisioning_encryption_password(arch_configuration: dict, user_cred
     user_credentials["encryption_password"] = password
 
 
-def _default_kernel(pci_devices: Path = Path("/sys/bus/pci/devices")) -> str:
+# One aarch64 image serves every board, so the installer asks the machine which
+# one it is. build-iso.sh ships the runtime's own detector beside the package
+# lists; it names aarch64, aarch64-qualcomm, aarch64-n1x or aarch64-gb10.
+# x86_64 images carry none.
+HW_PLATFORM_DETECTOR = Path("/usr/share/omarchy-iso/omarchy-hw-platform")
+
+
+def hw_platform(detector: Path = HW_PLATFORM_DETECTOR) -> str:
+    if not detector.is_file():
+        return ""
+    # The detector refuses a Bash that was not started in privileged mode.
+    result = subprocess.run(["/bin/bash", "-p", str(detector)], capture_output=True, text=True)
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+# build-iso.sh records the kernel an aarch64 image installs; x86_64 images
+# carry an empty file and pick per machine.
+ISO_KERNEL_FILE = Path("/root/omarchy_kernel")
+
+
+def iso_kernel(path: Path = ISO_KERNEL_FILE) -> str:
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return ""
+
+
+def _default_kernel(pci_devices: Path = Path("/sys/bus/pci/devices"), platform_kernel: str | None = None) -> str:
+    # An aarch64 image boots and installs one kernel and nothing else boots;
+    # the configurator's detect_kernel makes the same choice.
+    platform_kernel = iso_kernel() if platform_kernel is None else platform_kernel
+    if platform_kernel:
+        return platform_kernel
     for device in pci_devices.glob("*"):
         try:
             vendor = (device / "vendor").read_text().strip().lower()
@@ -220,7 +265,9 @@ def _default_omarchy_install(user_configuration: dict) -> dict[str, Any]:
         "boot": {
             "esp_mount": "/boot",
             "esp_path": "/EFI/limine",
-            "efi_binary": "limine_x64.efi",
+            "efi_binary": "limine_aa64.efi" if platform.machine() == "aarch64" else "limine_x64.efi",
+            # Only a full-disk install is known to own its ESP; a
+            # pre-mounted target's may be shared. See _boot_intent.
             "enable_fallback": mode == "full_disk",
         },
         "storage": {},

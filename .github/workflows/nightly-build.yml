@@ -1,11 +1,15 @@
 name: Nightly ISO Build
 
-# Every night, for two channels: installs an ISO unattended and boots what it
+# Every night, for each lane: installs an ISO unattended and boots what it
 # installed (the install test), turns that installed disk into a VM image, and
 # publishes it with a latest.json saying what is in it.
 #
 #   edge    the ISO is built here, from the edge channel: its packages, its
 #           mirrors and the edge builds of Omarchy (omarchy-dev)
+#   edge-aarch64
+#           the same for aarch64, on the ARM runner with KVM: the ISO is built
+#           from the edge channel, booted, installed, and installed again as an
+#           N1x. Only the ISO is published, no VM image yet.
 #   stable  the ISO is the last release: omacom/omarchy's latest release names
 #           the version, iso.omarchy.org has the ISO, its signature is checked.
 #           Done once for each release, skipped on the nights after.
@@ -16,6 +20,7 @@ name: Nightly ISO Build
 #   https://nightly.omarchy.org/edge/<version>/unpacked/    kernel, initramfs, vm-boot
 #   https://nightly.omarchy.org/stable/<version>/<run>/omarchy-<version>.qcow2
 #   https://nightly.omarchy.org/stable/<version>/<run>/unpacked/
+#   https://nightly.omarchy.org/edge-aarch64/<version>/omarchy-edge-<version>-aarch64.iso
 #
 # Nothing is published unless the ISO installed and the image passed its
 # checks. A version's files are written once and never replaced: the CDN keeps
@@ -75,7 +80,8 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.channels) }}
-    runs-on: namespace-profile-linux-amd64-16x32
+    # aarch64 runs on Linux on Apple Silicon: the ARM runners that have KVM.
+    runs-on: ${{ matrix.arch == 'aarch64' && 'namespace-profile-arm64-linux-apple-12x32' || 'namespace-profile-linux-amd64-16x32' }}
     timeout-minutes: 90
     env:
       CHANNEL: ${{ matrix.channel }}
@@ -108,6 +114,10 @@ jobs:
         if: matrix.channel == 'edge'
         run: NO_BOOT_OFFER=1 ./bin/omarchy-iso-make --edge
 
+      - name: Build the edge ISO (aarch64)
+        if: matrix.channel == 'edge-aarch64'
+        run: ./bin/omarchy-iso-make --arch aarch64 --edge --no-boot-offer
+
       # Good only if the signature is the release key's, the one in this repo.
       - name: Download the released ISO and check its signature
         if: matrix.channel == 'stable'
@@ -128,6 +138,7 @@ jobs:
       # The same install test a pull request gets (install-test.yml), then the
       # image: the installed disk that test leaves behind, sealed and checked.
       - name: Install unattended, boot the installed system, seal it
+        if: matrix.arch != 'aarch64'
         run: |
           sudo chmod 0666 /dev/kvm
           docker run --rm --device /dev/kvm -v "$PWD:/w" -w /w \
@@ -153,7 +164,7 @@ jobs:
               printf "#!/bin/sh\nexit 0\n" >/usr/local/bin/omarchy-pkg-add
               chmod 0755 /usr/local/bin/omarchy-pkg-add
               qemu-system-x86_64 --version | head -1
-              ./test/integration release/*.iso boot --no-preview --memory 8192 --timeout 1800
+              ./test/integration release/*.iso boot ${{ matrix.channel == 'stable' && '--release-iso' || '' }} --no-preview --memory 8192 --timeout 1800
 
               base=$(ls -d test-runs/*-integration)
               ./test/vm-image/vm-seal "$base" sealed
@@ -161,6 +172,18 @@ jobs:
               ./test/vm-image/vm-boot sealed "pacman -Qq omarchy omarchy-dev 2>/dev/null | xargs pacman -Q; pacman -Qo /usr/lib/modules/\$(uname -r)/pkgbase; uname -r" >vm-packages.txt
               cat vm-packages.txt
             '
+
+      # The install test of install-test.yml's aarch64 job, in the image the ISO
+      # is built in: the live ISO to its installer, the install and two boots
+      # of the result, then the same ISO installed as an N1x. No image is
+      # sealed for aarch64 yet.
+      - name: Boot, install unattended and boot the installed system (aarch64)
+        if: matrix.arch == 'aarch64'
+        run: |
+          sudo chmod 0666 /dev/kvm
+          ./test/arm64-container ./test/arm64-live-boot release/*.iso test-runs/aarch64-live
+          ./test/arm64-container ./test/arm64-install release/*.iso test-runs/aarch64-integration
+          PLATFORM=aarch64-n1x ./test/arm64-container ./test/arm64-install release/*.iso test-runs/aarch64-n1x
 
       # The container ran as root; what it wrote belongs to root until here.
       - name: Hand the results to the runner's user
@@ -174,7 +197,11 @@ jobs:
           ISO_COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
-          ./test/vm-image/nightly-layout "$CHANNEL" "$VERSION" "$RELEASE" release/*.iso sealed vm-packages.txt out
+          if [[ $CHANNEL == edge-aarch64 ]]; then
+            ./test/vm-image/nightly-layout "$CHANNEL" "$VERSION" "$RELEASE" release/*.iso - test-runs/aarch64-integration/packages.txt out
+          else
+            ./test/vm-image/nightly-layout "$CHANNEL" "$VERSION" "$RELEASE" release/*.iso sealed vm-packages.txt out
+          fi
           dir=out/$RELEASE
 
           {
@@ -184,9 +211,18 @@ jobs:
             echo "| --- | ---: |"
             (cd "$dir" && find . -type f -printf '| `%P` | %s |\n' | sort) | awk -F'|' '{ printf "|%s| %.0f MiB |\n", $2, $3 / 1048576 }'
             echo
-            echo '```'
-            cat vm-verify.txt
-            echo '```'
+            if [[ -f vm-verify.txt ]]; then
+              echo '```'
+              cat vm-verify.txt
+              echo '```'
+            fi
+            for checks in test-runs/*/checks; do
+              [[ -f $checks ]] || continue
+              echo "**${checks%/checks}**"
+              echo '```'
+              cat "$checks"
+              echo '```'
+            done
           } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Keep the release for the publish job
@@ -211,6 +247,12 @@ jobs:
             test-runs/*/runs/**/*.txt
             test-runs/*/runs/**/*.json
             test-runs/*/runs/**/*.log
+            test-runs/*/checks
+            test-runs/*/facts
+            test-runs/*/packages.txt
+            test-runs/*/serial.log
+            test-runs/*/shots/*.png
+            test-runs/*/*.png
             vm-verify.txt
             vm-packages.txt
           if-no-files-found: ignore
@@ -271,15 +313,17 @@ jobs:
       # it had stored the file, and the publish only passed on rclone's retry.
       # 1.60 sends "x-amz-acl: private" with each upload; current rclone does
       # not send it to Cloudflare.
+      # Not RCLONE_VERSION: rclone reads every RCLONE_<FLAG> variable as that
+      # flag, and "--version=v1.75.2" stops it before it does anything.
       - name: rclone
         env:
-          RCLONE_VERSION: v1.75.2
-          RCLONE_SHA256: efbfe852181f7191eb3c9043ed1ab49c9b2d0ba045c61c926a5da111c939ec5c
+          PINNED_RCLONE: v1.75.2
+          PINNED_RCLONE_SHA256: efbfe852181f7191eb3c9043ed1ab49c9b2d0ba045c61c926a5da111c939ec5c
         run: |
           set -euo pipefail
           [ -n "$RCLONE_CONFIG_R2_ACCESS_KEY_ID" ] || { echo "::error::the nightly environment has no bucket key"; exit 1; }
-          curl -fsSL --retry 3 -o rclone.deb "https://github.com/rclone/rclone/releases/download/$RCLONE_VERSION/rclone-$RCLONE_VERSION-linux-amd64.deb"
-          echo "$RCLONE_SHA256  rclone.deb" | sha256sum -c -
+          curl -fsSL --retry 3 -o rclone.deb "https://github.com/rclone/rclone/releases/download/$PINNED_RCLONE/rclone-$PINNED_RCLONE-linux-amd64.deb"
+          echo "$PINNED_RCLONE_SHA256  rclone.deb" | sha256sum -c -
           sudo dpkg -i rclone.deb >/dev/null
           rclone version | head -1
 

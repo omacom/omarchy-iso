@@ -1,9 +1,13 @@
+# Integration with archinstall (https://github.com/archlinux/archinstall,
+# GPL-3.0-only, by the archinstall contributors): this module subclasses its
+# Installer, patches private methods of it, and follows its guided installer
+# (archinstall/scripts/guided.py). Attribution as omacom/omarchy-iso#202 asks.
 """Thin compatibility wall around the archinstall Python library.
 
 ONLY this module imports from archinstall. Everything else uses these helpers.
 If archinstall's API churns, the blast radius is contained here.
 
-Tested against archinstall 4.4 (Python 3.14).
+Tested against archinstall 4.4 and 4.5 (Python 3.14).
 
 The canonical call sequence (mirrored from archinstall.scripts.guided.py) is:
 
@@ -17,6 +21,9 @@ The canonical call sequence (mirrored from archinstall.scripts.guided.py) is:
         inst.generate_key_files()                     # encrypted only
         inst.set_mirrors(handler, mirror_config, on_target=False)
         inst.minimal_installation(...)                # base + linux pacstrap
+                                                      # (we unpack the root image
+                                                      # and run install_base_delta
+                                                      # instead; see below)
         inst.set_mirrors(handler, mirror_config, on_target=True)
         inst.setup_swap(algo=...)
         inst.create_users(users)
@@ -35,6 +42,8 @@ from the start.
 from __future__ import annotations
 
 import importlib
+import os
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -50,9 +59,49 @@ from archinstall.lib.installer import Installer
 from archinstall.lib.mirror.mirror_handler import MirrorListHandler
 from archinstall.lib.models import Bootloader
 from archinstall.lib.models.device import DiskLayoutType, EncryptionType
+from archinstall.lib.pacman.config import PacmanConfig
 from archinstall.lib.models.users import User
 
+from .command import capture
 from .ui import info
+
+# The archinstall this adapter is written and tested against. luks_tuning and
+# _filesystem_step_tweaks replace archinstall internals (Luks2's methods, the
+# device handler's, and parted's Disk.commit, which archinstall calls), and
+# install_base_delta calls private Installer methods;
+# none of that is a stable API. The ISO pins archinstall in its offline
+# mirror, so another version means the ISO build picked up a new release:
+# stop at startup and say so, before a replaced internal misbehaves in the
+# middle of an install. OMARCHY_ARCHINSTALL_UNTESTED=1 runs anyway, which is
+# how a new release gets tried.
+# Releases whose internals this module was checked against (major.minor).
+TESTED_ARCHINSTALL = ("4.4", "4.5")
+
+
+def check_archinstall_version(version: str | None = None) -> None:
+    if version is None:
+        from importlib.metadata import PackageNotFoundError, version as package_version
+        try:
+            version = package_version("archinstall")
+        except PackageNotFoundError:
+            version = "unknown"
+    if ".".join(version.split(".")[:2]) in TESTED_ARCHINSTALL:
+        return
+    message = (
+        f"archinstall {version} is installed, but this installer is tested against "
+        f"archinstall {' and '.join(TESTED_ARCHINSTALL)}: it replaces archinstall internals that "
+        f"change between releases (orchestrator/archinstall_adapter.py)"
+    )
+    if os.environ.get("OMARCHY_ARCHINSTALL_UNTESTED") == "1":
+        info(f"› {message}; running anyway (OMARCHY_ARCHINSTALL_UNTESTED=1)")
+        return
+    raise RuntimeError(f"{message}. Set OMARCHY_ARCHINSTALL_UNTESTED=1 to try it anyway.")
+
+
+check_archinstall_version()
+
+from . import luks_tuning  # noqa: E402 - patches archinstall only after the check
+luks_tuning.apply()
 
 
 def load_arch_config(config_path: Path, creds_path: Path) -> ArchConfigHandler:
@@ -82,7 +131,186 @@ def make_mirror_handler(offline: bool = True) -> MirrorListHandler:
     return MirrorListHandler(offline=offline, verbose=False)
 
 
-def perform_filesystem_operations(arch_config: ArchConfig) -> None:
+# How long a committed partition table may take to show up as device nodes.
+PARTITION_NODES_TIMEOUT = 10.0
+
+
+@contextmanager
+def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
+    """Time the pieces of archinstall's filesystem step, and keep mkfs.btrfs
+    from discarding the whole device when the filesystem it makes is thrown
+    away.
+
+    The step is one number in the log (2.0 s in a VM, 4.4 s on an XPS 16,
+    22.2 s on a ThinkPad E14), which cannot say which piece cost what, so
+    every piece logs its own [step] line.
+
+    mkfs.btrfs TRIMs the entire device before it formats (mkfs.btrfs(8), -K
+    to skip). On a virtual disk that is instant; on a 1 TB laptop SSD behind
+    dm-crypt it takes seconds, and much longer on a DRAM-less drive. When a
+    root image is about to be written over that filesystem the TRIM only
+    delays the install: the image lands two seconds later, the installed
+    system keeps fstrim.timer enabled, and btrfs discards freed space on its
+    own. Nothing else about the step changes.
+
+    archinstall's partition() runs wipefs on each new partition the moment
+    parted's commit returns. parted closing the disk after writing the table
+    makes udevd re-read it (BLKRRPART, from its inotify watch on the disk),
+    which drops every partition and adds them back. When the re-read gets
+    there before wipefs opens the partition, wipefs finds no /dev/vda1
+    ("probing initialization failed: No such file or directory"); that
+    failed about half of CI's BIOS installs. So the commit is followed by
+    udevadm settle, which waits for the re-read, and then by a wait for every
+    partition node of the disk.
+
+    Everything here is best effort. If archinstall moves one of these names
+    the step runs exactly as before, untimed and with the TRIM."""
+    try:
+        import archinstall.lib.disk.device_handler as dh_module
+        import archinstall.lib.disk.filesystem as fs_module
+        import parted
+        from archinstall.lib.disk.luks import Luks2
+        from archinstall.lib.models.device import FilesystemType
+        from .phases_impl import _time_step
+        device_handler = dh_module.device_handler
+    except Exception as exc:  # pragma: no cover - depends on the archinstall release
+        info(f"› filesystem step runs untimed ({exc})")
+        yield
+        return
+
+    instance_patches: list[str] = []
+    luks_originals: dict[str, object] = {}
+    commit_original = None
+    settle = {"calls": 0, "seconds": 0.0}
+    settle_originals: dict[object, object] = {}
+
+    def timed(original, label):
+        def wrapper(*args, **kwargs):
+            with _time_step(label):
+                return original(*args, **kwargs)
+        return wrapper
+
+    def format_wrapper(original):
+        takes_options = _method_accepts(original, "additional_parted_options")
+
+        def wrapper(fs_type, path, additional_parted_options=None, *args, **kwargs):
+            options = list(additional_parted_options or [])
+            if throwaway_root_fs and takes_options and fs_type == FilesystemType.BTRFS and "-K" not in options:
+                options.append("-K")
+            label = f"FS.mkfs.{getattr(fs_type, 'value', fs_type)}" + (" -K (no whole-device TRIM)" if "-K" in options else "")
+            with _time_step(label):
+                if takes_options:
+                    return original(fs_type, path, options, *args, **kwargs)
+                return original(fs_type, path, *args, **kwargs)
+        return wrapper
+
+    def luks_wrapper(function, label):
+        def wrapper(self, *args, **kwargs):
+            with _time_step(label):
+                return function(self, *args, **kwargs)
+        return wrapper
+
+    def settle_wrapper(original):
+        def wrapper(*args, **kwargs):
+            started = time.monotonic()
+            try:
+                return original(*args, **kwargs)
+            finally:
+                settle["calls"] += 1
+                settle["seconds"] += time.monotonic() - started
+        return wrapper
+
+    def commit_wrapper(original):
+        def wrapper(disk, *args, **kwargs):
+            result = original(disk, *args, **kwargs)
+            dh_module.udev_sync()
+            nodes = [Path(partition.path) for partition in disk.partitions]
+            deadline = time.monotonic() + PARTITION_NODES_TIMEOUT
+            while missing := [str(node) for node in nodes if not node.exists()]:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"partition table on {disk.device.path} written, but {', '.join(missing)} "
+                        f"did not appear within {PARTITION_NODES_TIMEOUT:g}s"
+                    )
+                time.sleep(0.05)
+            return result
+        return wrapper
+
+    try:
+        for name, label in (("partition", "FS.partition"), ("create_btrfs_volumes", "FS.create_btrfs_subvolumes")):
+            original = getattr(device_handler, name, None)
+            if callable(original):
+                setattr(device_handler, name, timed(original, label))  # instance attribute shadows the method
+                instance_patches.append(name)
+        original_format = getattr(device_handler, "format", None)
+        if callable(original_format):
+            device_handler.format = format_wrapper(original_format)
+            instance_patches.append("format")
+        for name, label in (("encrypt", "FS.luksFormat"), ("unlock", "FS.luks_open")):
+            function = Luks2.__dict__.get(name)
+            if callable(function):
+                luks_originals[name] = function
+                setattr(Luks2, name, luks_wrapper(function, label))
+        for module in (dh_module, fs_module):
+            if callable(getattr(module, "udev_sync", None)):
+                settle_originals[module] = module.udev_sync
+                module.udev_sync = settle_wrapper(module.udev_sync)
+        if callable(parted.Disk.__dict__.get("commit")) and callable(getattr(dh_module, "udev_sync", None)):
+            commit_original = parted.Disk.__dict__["commit"]
+            parted.Disk.commit = commit_wrapper(commit_original)
+        yield
+    finally:
+        for name in instance_patches:
+            try:
+                delattr(device_handler, name)
+            except AttributeError:
+                pass
+        for name, function in luks_originals.items():
+            setattr(Luks2, name, function)
+        if commit_original is not None:
+            parted.Disk.commit = commit_original
+        for module, function in settle_originals.items():
+            module.udev_sync = function
+        if settle["seconds"] >= 0.05:
+            info(f"[step] FS.udevadm settle ({settle['calls']} calls): {settle['seconds']:.6f}s")
+
+
+def _write_locale_conf_for_prebuilt(installer, locale_config) -> None:
+    """Write /etc/locale.conf when archinstall's set_locale declined to.
+
+    set_locale finds the chosen locale by matching a *commented* line in
+    /etc/locale.gen (`re.compile(rf'#{lang}(\\.{encoding})?{modifier} {encoding}')`),
+    uncomments it, runs locale-gen, and only then writes locale.conf. The
+    root image ships en_US.UTF-8 already uncommented and already compiled
+    (build-root-image.sh does that to save 0.77 s of locale-gen at install), so
+    the match fails, set_locale logs "Invalid locale" and returns False, and
+    locale.conf is never written. The installed system then falls back to
+    systemd's LANG=C.UTF-8 instead of the locale it just generated.
+
+    So: if the locale is present and *enabled* in locale.gen, the image already
+    did set_locale's work and only the last line is missing. Anything else is a
+    genuine failure and is left alone for the caller's error to stand.
+    """
+    target = Path(installer.target)
+    locale_gen = target / "etc" / "locale.gen"
+    if not locale_gen.is_file():
+        return
+    lang, encoding = locale_config.sys_lang, locale_config.sys_enc
+    # sys_lang may or may not already carry the encoding ("en_US" vs
+    # "en_US.UTF-8"); accept the entry either way, as set_locale's regex does.
+    wanted = {f"{lang} {encoding}", f"{lang}.{encoding} {encoding}"}
+    enabled = next(
+        (line.split()[0] for line in locale_gen.read_text().splitlines()
+         if not line.startswith("#") and line.strip() in wanted),
+        None,
+    )
+    if not enabled:
+        return
+    (target / "etc" / "locale.conf").write_text(f"LANG={enabled}\n")
+    info(f"› locale {enabled} is already compiled into the image; wrote locale.conf directly")
+
+
+def perform_filesystem_operations(arch_config: ArchConfig, throwaway_root_fs: bool = False) -> None:
     """Partition, format, encrypt. archinstall's FilesystemHandler is its own
     object (separate from Installer) so we run it before opening the
     Installer context manager.
@@ -112,15 +340,80 @@ def perform_filesystem_operations(arch_config: ArchConfig) -> None:
     )
 
     attempts = 3
-    for attempt in range(1, attempts + 1):
-        udev_sync()
-        try:
-            handler.perform_filesystem_operations(**fs_kwargs)
-            return
-        except Exception as exc:
-            if attempt == attempts or "unable to inform the kernel" not in str(exc):
-                raise
-            info(f"› partition commit lost a udev race (attempt {attempt}/{attempts}); retrying")
+    with _filesystem_step_tweaks(throwaway_root_fs):
+        for attempt in range(1, attempts + 1):
+            udev_sync()
+            try:
+                handler.perform_filesystem_operations(**fs_kwargs)
+                return
+            except Exception as exc:
+                if attempt == attempts or "unable to inform the kernel" not in str(exc):
+                    _log_disk_state(arch_config)
+                    raise
+                info(f"› partition commit lost a udev race (attempt {attempt}/{attempts}); retrying")
+
+
+class OmarchyInstaller(Installer):
+    """archinstall's Installer, without its request to report our failures.
+
+    Installer.__exit__ answers any exception inside `with Installer(...)` with
+    "Please submit this issue (and file) to
+    https://github.com/archlinux/archinstall/issues". Most of what runs in that
+    block here is Omarchy's own install (the root image, Limine, efibootmgr),
+    so Omarchy's failures would be filed with archinstall
+    (archlinux/archinstall#4773: an efibootmgr refusal in phases_impl). The
+    phase runner reports a failure itself, with its own log; on the way out
+    this keeps only archinstall's copy of its log to the install medium."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if exc_type is None:
+            return super().__exit__(exc_type, exc_value, traceback)
+        sync_log = getattr(self, "sync_log_to_install_medium", None)
+        if sync_log is not None:
+            sync_log()
+        return None
+
+
+def _log_disk_state(arch_config: ArchConfig) -> None:
+    """Write what the disk looked like when archinstall gave up on it into the
+    install log: the support log is all a report arrives with, and by then the
+    machine has been rebooted out of the state that explains it."""
+    try:
+        for mod in arch_config.disk_config.device_modifications:
+            _log_one_disk_state(str(mod.device.device_info.path))
+    except Exception as exc:  # noqa: BLE001 -- the failure being explained wins
+        info(f"› could not record the disk state: {exc}")
+
+
+# A failing disk can stall a read; the install error waits on these, so none
+# gets more than a few seconds.
+def _bounded(cmd: list[str]):
+    return capture(["timeout", "--kill-after=5", "10", *cmd])
+
+
+def _log_one_disk_state(disk: str) -> None:
+    commands = [["lsblk", "-o", "NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS", disk]]
+    partitions = []
+    for line in _bounded(["lsblk", "-rnpo", "PATH,TYPE", disk]).stdout.splitlines():
+        path, _, kind = line.partition(" ")
+        if kind == "part":
+            partitions.append(path)
+    # A partition path archinstall wrote after the kernel dropped it is a regular
+    # file, which lsblk never lists, so look at what is in /dev as well.
+    nodes = sorted(set(partitions) | {str(p) for p in Path(disk).parent.glob(f"{Path(disk).name}?*")})
+    commands += [["stat", "-c", "%n: %F", node] for node in nodes]
+    for path in partitions:
+        commands += [
+            ["ls", f"/sys/class/block/{Path(path).name}/holders"],
+            ["wipefs", "--no-act", path],
+        ]
+    commands.append(["sh", "-c", "dmesg | tail -n 40"])
+    lines = [f"› disk state after the failure on {disk}"]
+    for cmd in commands:
+        result = _bounded(cmd)
+        lines.append(f"$ {' '.join(cmd)}")
+        lines += [f"  {out}" for out in (result.stdout + result.stderr).splitlines()]
+    info("\n    ".join(lines))
 
 
 @contextmanager
@@ -133,13 +426,129 @@ def open_installer(
     /mnt is left clean for a retry."""
     if not arch_config.disk_config:
         raise RuntimeError("disk_config missing from arch config")
-    with Installer(
+    with OmarchyInstaller(
         mountpoint,
         arch_config.disk_config,
         kernels=arch_config.kernels,
         silent=silent,
     ) as installer:
         yield installer
+
+
+def target_has_package(target: Path, name: str) -> bool:
+    """Whether pacman's local db in the target records `name` as installed."""
+    local_db = target / "var" / "lib" / "pacman" / "local"
+    for entry in local_db.glob(f"{name}-*"):
+        desc = entry / "desc"
+        if not desc.is_file():
+            continue
+        lines = desc.read_text(errors="ignore").splitlines()
+        try:
+            if lines[lines.index("%NAME%") + 1] == name:
+                return True
+        except (ValueError, IndexError):
+            continue
+    return False
+
+
+def install_base_delta(
+    installer: Installer,
+    arch_config: ArchConfig,
+    *,
+    hostname: str | None,
+    locale_config,
+) -> None:
+    """Installer.minimal_installation for a target that already holds the root
+    image: everything it does around its base pacstrap, with the pacstrap
+    reduced to the base packages the image does not carry (the kernel and the
+    CPU microcode).
+
+    Mirrors archinstall 4.4's and 4.5's minimal_installation step for step so the target
+    ends up as that call would leave it: filesystem/encryption preparation
+    (which also decides the mkinitcpio hooks), microcode detection, pacman.conf
+    handling, vconsole, hostname, locale, and the helper flags later Installer
+    methods look at. LVM layouts are not supported by the image path."""
+    disk_config = installer._disk_config
+    if disk_config.lvm_config:
+        raise RuntimeError("root image install does not support LVM layouts")
+
+    # Each framework call below has its own [step] timer: the function takes
+    # 0.8 s with no package to install, and the timers show where.
+    from .phases_impl import _time_step
+
+    with _time_step("DELTA.prepare_fs_and_encrypt"):
+        for mod in disk_config.device_modifications:
+            for part in mod.partitions:
+                if part.fs_type is None:
+                    continue
+                # 4.5 dropped the mountpoint, which 4.4 took and never used.
+                if _method_accepts(installer._prepare_fs_type, "mountpoint"):
+                    installer._prepare_fs_type(part.fs_type, part.mountpoint)
+                else:
+                    installer._prepare_fs_type(part.fs_type)
+                if part in installer._disk_encryption.partitions:
+                    installer._prepare_encrypt()
+
+    with _time_step("DELTA.microcode"):
+        if ucode := installer._get_microcode():
+            (installer.target / "boot" / ucode).unlink(missing_ok=True)
+            installer._base_packages.append(ucode.stem)
+
+    with _time_step("DELTA.pacman_conf"):
+        mirror_config = arch_config.mirror_config
+        pacman_conf = PacmanConfig(installer.target)
+        pacman_conf.enable(mirror_config.optional_repositories if mirror_config else [])
+        pacman_conf.apply()
+
+    with _time_step("DELTA.vconsole"):
+        if locale_config:
+            installer.set_vconsole(locale_config)
+
+    with _time_step("DELTA.package_delta"):
+        delta = [pkg for pkg in installer._base_packages if not target_has_package(installer.target, pkg)]
+        if delta:
+            installer.pacman.strap(delta)
+        installer._helper_flags["base-strapped"] = True
+
+    with _time_step("DELTA.pacman_conf_persist"):
+        pacman_conf.persist()
+        if arch_config.pacman_config:
+            pacman_conf.configure(arch_config.pacman_config)
+
+    with _time_step("DELTA.fstrim"):
+        if not installer._disable_fstrim:
+            installer.enable_periodic_trim()
+
+    with _time_step("DELTA.hostname"):
+        if hostname:
+            installer.set_hostname(hostname)
+
+    with _time_step("DELTA.locale_and_keyboard"):
+        if locale_config:
+            if not installer.set_locale(locale_config):
+                _write_locale_conf_for_prebuilt(installer, locale_config)
+            installer.set_keyboard_language(locale_config.kb_layout)
+
+    installer._helper_flags["base"] = True
+
+    with _time_step("DELTA.post_base_install"):
+        for function in installer.post_base_install:
+            function(installer)
+        # 4.5: services queued before the base existed (copy_iso_network_config).
+        if services := getattr(installer, "_post_base_install_services", None):
+            installer.enable_service(services)
+
+
+def setup_zram_swap(installer: Installer) -> None:
+    """Installer.setup_swap without its pacman.strap('zram-generator'): the
+    root image carries the package. Enables the zram unit and records that
+    zram is on, as archinstall 4.4 does. Its /etc zram-generator.conf is not
+    reproduced: omarchy-settings ships the tuning as a vendor drop-in and the
+    orchestrator removed archinstall's copy anyway."""
+    if not target_has_package(installer.target, "zram-generator"):
+        installer.pacman.strap("zram-generator")
+    installer.enable_service("systemd-zram-setup@zram0.service")
+    installer._zram_enabled = True
 
 
 def is_encrypted(arch_config: ArchConfig) -> bool:
@@ -241,10 +650,30 @@ def install_applications(installer: Installer, arch_config: ArchConfig) -> None:
     users = arch_config.auth_config.users if arch_config.auth_config else None
     handler = _application_handler()
     install_applications_method = handler.install_applications
-    if _method_accepts_users(install_applications_method):
-        install_applications_method(installer, app_config, users)
-    else:
-        install_applications_method(installer, app_config)
+
+    # The application installers strap their package sets unconditionally.
+    # The root image already carries those (PipeWire and friends) and the
+    # offline mirror no longer does, and pacstrap --needed still has to
+    # resolve every target before it can skip it. Strap only what the target
+    # lacks (the hardware-detected firmware), through the installer instance
+    # the handlers call into.
+    original_strap = installer.add_additional_packages
+
+    def strap_missing(packages: str | list[str]) -> None:
+        if isinstance(packages, str):
+            packages = [packages]
+        missing = [pkg for pkg in packages if not target_has_package(installer.target, pkg)]
+        if missing:
+            original_strap(missing)
+
+    installer.add_additional_packages = strap_missing  # type: ignore[method-assign]
+    try:
+        if _method_accepts_users(install_applications_method):
+            install_applications_method(installer, app_config, users)
+        else:
+            install_applications_method(installer, app_config)
+    finally:
+        del installer.add_additional_packages
 
 
 def root_user(arch_config: ArchConfig) -> User | None:

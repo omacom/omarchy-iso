@@ -14,7 +14,7 @@
 # Usage: omarchy-iso-test [release/omarchy.iso] [options]
 #
 #   --keyboard LABEL   English (US/UK), Japanese, Japanese (US keyboard), Korean,
-#                      or Chinese (Simplified, Pinyin)/(Traditional, Zhuyin).
+#                      or Chinese (Simplified, Pinyin), Taiwan (Zhuyin) or Hong Kong (Cangjie).
 #                      OMARCHY_PATH must be the source tree used to build the ISO.
 #   --encrypt          Drive the encrypted install flow (default: unencrypted)
 #   --child            Answer "Child" at the first question: a kid password and
@@ -25,6 +25,9 @@
 #                      text consoles.
 #   --provision              Drive the deferred-provisioning install flow: no user during install, the
 #                      first boot runs omarchy-provision-owner and creates it there
+#   --free-space       Install into the free space of a synthetic Windows-style
+#                      disk (existing ESP + data partition kept) and verify the
+#                      existing partitions survive
 #   --reuse-base       Skip the install phase if a base image already exists
 #   --install-only     Stop after producing the installed base image
 #   --sync-omarchy DIR Push DIR's test suite into the guest before running
@@ -49,6 +52,7 @@ INSTALL_TIMEOUT=2400
 BOOT_TIMEOUT=600
 ENCRYPT=false
 PROVISION=false
+FREE_SPACE=false
 REUSE_BASE=false
 INSTALL_ONLY=false
 KEEP_RUNNING=false
@@ -57,6 +61,36 @@ SYNC_DIR=""
 SYNC_ALL=false
 
 KEYBOARD_LABEL="English (US)"
+# --fake-pci VENDOR:DEVICE:CLASS (hex, repeatable): hardware the VM should claim
+# to have, e.g. 10de:2684:030000 (an RTX 4090) or 106b:1802:088000 (an Apple
+# T2). Each is a vfio-user device whose IDs QEMU overrides: a real PCI function
+# in the guest (lspci, sysfs, udev, modalias) that no driver can drive. What it
+# exercises is everything that keys off the hardware being there: detection,
+# the packages and kernel the install picks, DKMS builds, boot configuration.
+# Needs QEMU 10.1 and a vfio-user server ($VFIO_USER_SERVER, by default
+# libvfio-user's gpio-pci-idio-16 sample); see test/fake-pci.md.
+FAKE_PCI=()
+FAKE_PCI_PIDS=()
+# --smbios TYPE-1-FIELDS (repeatable, QEMU syntax, a literal comma is ",,"):
+# the DMI identity omarchy's hardware scripts match on, e.g.
+#   --smbios "manufacturer=Framework,product=Laptop 16 (AMD Ryzen 7040 Series)"
+#   --smbios "manufacturer=ASUSTeK COMPUTER INC.,family=ROG Flow Z13"
+SMBIOS=()
+# --cpu-id vendor=GenuineIntel,model=170: what /proc/cpuinfo reports (CPUID
+# leaf values; KVM lets a guest claim any vendor and model). omarchy picks
+# microcode by vendor and thermald/intel-lpmd by model number.
+# --battery: an ACPI battery (BAT0, present, discharging) and a lid switch, as
+# an SSDT compiled at run time (iasl). omarchy-battery-present and
+# omarchy-hw-laptop read exactly these.
+# --acpi-hid HID: an ACPI device with that _HID, e.g. OVTI08F4 (the IPU7
+# camera sensor omarchy keys the camera package on).
+# --no-network: no NIC at all. The harness then cannot reach the guest over
+# SSH, so it stops once the installed system booted to its console login.
+CPU_ID=""
+BATTERY=false
+ACPI_HIDS=()
+NO_NETWORK=false
+
 GUEST_USER="omarchy"
 GUEST_PASSWORD="omarchy"
 # A child run types this at the parent prompts; it is then what sudo asks for.
@@ -70,6 +104,7 @@ while (($#)); do
     --encrypt) ENCRYPT=true ;;
     --child) CHILD=true ;;
     --provision) PROVISION=true ;;
+    --free-space) FREE_SPACE=true ;;
     --reuse-base) REUSE_BASE=true ;;
     --install-only) INSTALL_ONLY=true ;;
     --keep-running) KEEP_RUNNING=true ;;
@@ -79,6 +114,12 @@ while (($#)); do
     --port) SSH_PORT="$2"; shift ;;
     --memory) MEMORY="$2"; shift ;;
     --timeout) INSTALL_TIMEOUT="$2"; shift ;;
+    --fake-pci) FAKE_PCI+=("$2"); shift ;;
+    --smbios) SMBIOS+=("$2"); shift ;;
+    --cpu-id) CPU_ID="$2"; shift ;;
+    --battery) BATTERY=true ;;
+    --acpi-hid) ACPI_HIDS+=("$2"); shift ;;
+    --no-network) NO_NETWORK=true ;;
     -*) echo "Unknown option: $1" >&2; exit 1 ;;
     *) ISO="$1" ;;
   esac
@@ -125,11 +166,15 @@ if [[ ! -f ${ISO:-} ]]; then
 fi
 
 case "$KEYBOARD_LABEL" in
-  "English (US)" | "English (UK)" | "Japanese" | "Japanese (US keyboard)" | "Korean" | "Chinese (Simplified, Pinyin)" | "Chinese (Traditional, Zhuyin)") ;;
+  "English (US)" | "English (UK)" | "Japanese" | "Japanese (US keyboard)" | "Korean" | "Chinese (Simplified, Pinyin)" | "Taiwan (Zhuyin)" | "Hong Kong (Cangjie)") ;;
   *) echo "The VM harness cannot type credentials with keyboard: $KEYBOARD_LABEL" >&2; exit 1 ;;
 esac
 
 omarchy-pkg-add qemu-full edk2-ovmf socat imagemagick tesseract tesseract-data-eng
+# --battery and --acpi-hid compile their SSDT with iasl.
+if $BATTERY || ((${#ACPI_HIDS[@]})); then
+  omarchy-pkg-add acpica
+fi
 
 OVMF_CODE="/usr/share/edk2/x64/OVMF_CODE.4m.fd"
 OVMF_VARS_TEMPLATE="/usr/share/edk2/x64/OVMF_VARS.4m.fd"
@@ -140,6 +185,14 @@ if [[ $KEYBOARD_LABEL != "English (US)" ]]; then
 fi
 $ENCRYPT && BASE_NAME+="-encrypted"
 $PROVISION && BASE_NAME+="-provision"
+$FREE_SPACE && BASE_NAME+="-free-space"
+$NO_NETWORK && BASE_NAME+="-no-network"
+# The fake hardware changes what the install does (packages, kernel, boot
+# configuration), so --reuse-base must not boot an image installed with other
+# hardware, or none. A hash of the settings, since --smbios is free text.
+if ((${#FAKE_PCI[@]} + ${#SMBIOS[@]} + ${#ACPI_HIDS[@]})) || [[ -n $CPU_ID ]] || $BATTERY; then
+  BASE_NAME+="-hw-$(declare -p FAKE_PCI SMBIOS CPU_ID BATTERY ACPI_HIDS | sha256sum | cut -c1-12)"
+fi
 BASE_DIR="$REPO_DIR/test-runs/$BASE_NAME"
 RUN_DIR="$BASE_DIR/runs/$(date +%Y%m%d-%H%M%S)"
 BASE_DISK="$BASE_DIR/base.qcow2"
@@ -234,9 +287,11 @@ cleanup() {
 
   [[ -n $HTTP_PID ]] && kill "$HTTP_PID" 2>/dev/null || true
 
+  # The fake PCI devices are the VM's: they go when it does, after it.
   if ! $KEEP_RUNNING; then
     vm_running && log "Stopping test VM"
     stop_vm
+    for pid in "${FAKE_PCI_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
   fi
 
   rm -f "$RUN_DIR/.screen.ppm" "$RUN_DIR/.screen.png"
@@ -255,10 +310,66 @@ start_vm() {
   # virtio-gpu before the system comes up.
   log "Watch (do not resize): vncviewer -RemoteResize=0 127.0.0.1:5905"
 
+  # vfio-user maps guest memory into the device process, so it has to be a
+  # shareable memfd; only when a fake device is asked for.
+  local fake_args=() spec sock vendor device class index=0
+  for pid in "${FAKE_PCI_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
+  FAKE_PCI_PIDS=()
+  for spec in "${FAKE_PCI[@]}"; do
+    IFS=: read -r vendor device class <<<"$spec"
+    sock="${QMP_SOCK%.sock}.fakepci$index.sock"
+    rm -f "$sock"
+    "${VFIO_USER_SERVER:-gpio-pci-idio-16}" "$sock" 2>>"$RUN_DIR/fakepci.log" &
+    FAKE_PCI_PIDS+=($!)
+    for _ in $(seq 1 50); do [[ -S $sock ]] && break; sleep 0.1; done
+    [[ -S $sock ]] || { echo "the vfio-user server did not come up for $spec (see test/fake-pci.md)" >&2; return 1; }
+    fake_args+=(-device "{\"driver\":\"vfio-user-pci\",\"socket\":{\"path\":\"$sock\",\"type\":\"unix\"},\"x-pci-vendor-id\":$((16#$vendor)),\"x-pci-device-id\":$((16#$device)),\"x-pci-class-code\":$((16#$class))}")
+    index=$((index + 1))
+  done
+  for spec in "${SMBIOS[@]}"; do
+    fake_args+=(-smbios "type=1,$spec")
+  done
+  if $BATTERY || ((${#ACPI_HIDS[@]})); then
+    local dsl="$RUN_DIR/fake-acpi.dsl" i=0
+    {
+      echo 'DefinitionBlock ("", "SSDT", 2, "OMARCH", "FAKEHW", 1) { Scope (\_SB) {'
+      if $BATTERY; then cat <<'DSL'
+  Device (BAT0) { Name (_HID, EisaId ("PNP0C0A")) Name (_UID, One)
+    Method (_STA, 0) { Return (0x1F) }
+    Method (_BIF, 0) { Return (Package () { 1, 60000, 60000, 1, 12000, 3000, 300, 100, 100, "FAKE-BAT", "0001", "LION", "Omarchy" }) }
+    Method (_BST, 0) { Return (Package () { 0, 10000, 48000, 12000 }) }
+    Method (_PCL, 0) { Return (Package () { \_SB }) } }
+  Device (LID0) { Name (_HID, EisaId ("PNP0C0D")) Method (_LID, 0) { Return (One) } Method (_STA, 0) { Return (0x0F) } }
+DSL
+      fi
+      for hid in "${ACPI_HIDS[@]}"; do
+        printf '  Device (FHD%d) { Name (_HID, "%s") Name (_UID, Zero) Method (_STA, 0) { Return (0x0F) } }\n' "$i" "$hid"; i=$((i + 1))
+      done
+      echo "} }"
+    } >"$dsl"
+    if ! iasl -p "${dsl%.dsl}" "$dsl" >"$RUN_DIR/fake-acpi.log" 2>&1; then
+      cat "$RUN_DIR/fake-acpi.log" >&2
+      echo "iasl could not compile $dsl" >&2
+      return 1
+    fi
+    fake_args+=(-acpitable "file=${dsl%.dsl}.aml")
+    log "Fake ACPI: battery=$BATTERY hids=${ACPI_HIDS[*]:-none}"
+  fi
+  [[ -n $CPU_ID ]] && log "Fake CPU identity: $CPU_ID"
+  ((${#SMBIOS[@]})) && log "Fake DMI identity: ${SMBIOS[*]}"
+  if ((${#FAKE_PCI[@]})); then
+    fake_args+=(-object "memory-backend-memfd,id=fakepcimem,size=${MEMORY}M,share=on" -numa node,memdev=fakepcimem)
+    log "Fake PCI hardware: ${FAKE_PCI[*]}"
+  fi
+
+  local net_args=(-netdev "user,id=net0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22" -device virtio-net-pci,netdev=net0)
+  $NO_NETWORK && net_args=(-nic none)
+
   qemu-system-x86_64 \
-    -cpu host -enable-kvm -machine q35,accel=kvm \
+    -cpu "host${CPU_ID:+,$CPU_ID}" -enable-kvm -machine q35,accel=kvm \
     -smp "$(nproc)" \
     -m "$MEMORY" \
+    "${fake_args[@]}" \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -drive if=pflash,format=raw,file="$BASE_OVMF" \
     -drive file="$disk",format=qcow2,if=none,id=drive0 \
@@ -267,8 +378,7 @@ start_vm() {
     -display none \
     -vnc 127.0.0.1:5 \
     -usb -device usb-tablet \
-    -netdev user,id=net0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22 \
-    -device virtio-net-pci,netdev=net0 \
+    "${net_args[@]}" \
     -qmp "unix:$QMP_SOCK,server,nowait" \
     -serial "file:$serial" \
     -pidfile "$PIDFILE" \
@@ -287,7 +397,9 @@ ocr_screen() {
 
   screendump "$shot"
   [[ -s $shot ]] || return 0
-  magick "$shot" -colorspace gray -negate -resize 150% "$prepped" 2>/dev/null || return 0
+  # Black on white: the negated grays alone read the focused button on the
+  # finished install, dark text on a light bar, as "Reboot Nou".
+  magick "$shot" -colorspace gray -negate -resize 150% -threshold 50% "$prepped" 2>/dev/null || return 0
   tesseract "$prepped" - --psm 6 2>/dev/null || true
 }
 
@@ -695,9 +807,14 @@ drive_configurator() {
   capture_console "success-installer-00-greeter"
   press ret
 
-  # "Who is this computer for?" is the first screen: Me is preselected, Child
-  # one row down, Another owner two.
-  wait_for_screen "computer for" 300
+  # Language is the first screen, with English preselected; Return takes it.
+  wait_for_screen "Language" 300
+  capture_console "success-installer-00-language"
+  press ret
+
+  # "Who is this computer for?" follows: Myself is preselected, My child one
+  # row down, Another owner two.
+  wait_for_screen "computer for" 120
   capture_console "success-installer-01-computer-for"
 
   if $PROVISION; then
@@ -742,15 +859,19 @@ drive_configurator() {
   capture_console "success-installer-02-keyboard-layout"
   press ret
 
-  # Normal flow: user step comes before disk selection.
-  wait_for_screen "Username" 120
+  # Normal flow: timezone and user step come before disk selection.
+  wait_for_screen "Timezone" 180 # the geo guess can take a moment
+  capture_console "success-installer-02-timezone"
+  press ret
+
+  wait_for_screen "Username" 60
   type_text "$GUEST_USER"
-  capture_console "success-installer-02-username"
+  capture_console "success-installer-03-username"
   press ret
 
   wait_for_screen "Password" 60
   type_text "$GUEST_PASSWORD"
-  capture_console "success-installer-03-password"
+  capture_console "success-installer-04-password"
   press ret
 
   wait_for_screen "Must match" 60
@@ -772,34 +893,9 @@ drive_configurator() {
     press ret
   fi
 
-  # A child install asks for neither name nor email.
-  if ! $CHILD; then
-    wait_for_screen "Full name" 60
-    type_text "Omarchy Test"
-    capture_console "success-installer-05-full-name"
-    press ret
-
-    wait_for_screen "Email address" 60
-    type_text "test"
-    if [[ $KEYBOARD_LABEL == "Japanese" ]]; then
-      press bracket_left
-    elif [[ $KEYBOARD_LABEL == "English (UK)" ]]; then
-      press shift-apostrophe
-    else
-      press shift-2
-    fi
-    type_text "omarchy.org"
-    capture_console "success-installer-06-email"
-    press ret
-  fi
-
   wait_for_screen "Hostname" 60
   type_text "$GUEST_HOSTNAME"
   capture_console "success-installer-07-hostname"
-  press ret
-
-  wait_for_screen "Timezone" 180 # tzupdate geo-guess can take a moment
-  capture_console "success-installer-08-timezone"
   press ret
 
   wait_for_screen "look right" 60
@@ -810,10 +906,37 @@ drive_configurator() {
   capture_console "success-installer-10-install-disk"
   press ret # the single virtio disk
 
+  if $FREE_SPACE; then
+    # The picker only appears when the disk has usable free space on UEFI.
+    wait_for_screen "installation mode" 60
+    capture_console "success-installer-11-install-mode"
+    # Esc goes back to the disk list rather than ending the install.
+    press esc
+    wait_for_screen "install disk" 60
+    press ret
+    wait_for_screen "installation mode" 60
+    # "Full disk install" comes first; free space is the next entry.
+    press home
+    press down
+    press ret
+    # BitLocker/ESP checks and the free-space analysis run, then the confirm.
+    wait_for_screen "of free space" 120
+    capture_console "success-installer-12-free-space-confirm-encrypted"
+    if ! $ENCRYPT; then
+      press ctrl-c # toggles the confirm to the unencrypted flow
+      # Same highlighted button OCR cannot read as the full-disk confirm below.
+      sleep 2
+      capture_console "success-installer-13-free-space-confirm-unencrypted"
+    fi
+    press ret
+    sleep 2
+    capture_console "success-installer-14-install-started"
+    return 0
+  fi
   wait_for_screen "installation mode\|recovery possible" 60
   if ocr_screen | grep -qi "installation mode"; then
     capture_console "success-installer-11-install-mode"
-    press ret # "Full disk install" is preselected
+    press ret # a blank disk: "Full disk install" comes first
   fi
 
   wait_for_screen "recovery possible" 60
@@ -883,30 +1006,6 @@ drive_provision_owner() {
     press ret
   fi
 
-  # A child install asks for neither name nor email, so a child run goes
-  # without the '@' keymap proof below.
-  if ! $CHILD; then
-    wait_for_screen "Full name" 60
-    type_text "Omarchy Test"
-    press ret
-
-    wait_for_screen "Email address" 60
-    # The keyboard step above applied English (UK), where '@' is Shift+' (not
-    # Shift+2 as on US); send that keycode so the typed email is correct under
-    # the new layout — itself further proof the deferred keymap took effect.
-    type_text "test"
-    if [[ $KEYBOARD_LABEL == "English (US)" || $KEYBOARD_LABEL == "English (UK)" ]]; then
-      press shift-apostrophe
-    elif [[ $KEYBOARD_LABEL == "Japanese" ]]; then
-      press bracket_left
-    else
-      press shift-2
-    fi
-    type_text "omarchy.org"
-    capture_console "success-provision-04-email"
-    press ret
-  fi
-
   # Hostname is deferred to first boot too.
   wait_for_screen "Hostname" 60
   type_text "$GUEST_HOSTNAME"
@@ -923,7 +1022,7 @@ drive_provision_owner() {
   capture_console "success-provision-07-review"
   press ret
 
-  # Finalization (offline Node unpack, LUKS re-key on encrypted installs)
+  # Finalization (user setup, LUKS re-key on encrypted installs)
   # runs before SDDM appears.
   capture_console "success-provision-08-finalizing"
 }
@@ -1020,6 +1119,32 @@ unlock_luks() {
       echo "Timed out waiting for LUKS unlock" >&2
       return 1
     fi
+  done
+}
+
+# With no NIC there is no SSH to wait for, so the first boot has to show on
+# screen that it came up: a console login under the installed hostname. The
+# live ISO's own getty has another name, so its prompt while the reboot is
+# still going does not count.
+wait_for_first_boot_login() {
+  log "Waiting for the installed system's console login"
+
+  local waited=0
+  until ocr_screen | grep -qi "$GUEST_HOSTNAME login:"; do
+    if ! vm_running; then
+      echo "VM exited before the installed system reached a login" >&2
+      return 1
+    fi
+
+    if ((waited >= BOOT_TIMEOUT)); then
+      capture_console "failure-first-boot-no-login"
+      echo "Timed out after ${BOOT_TIMEOUT}s waiting for the $GUEST_HOSTNAME login" >&2
+      return 1
+    fi
+
+    press ctrl-alt-f3
+    sleep 10
+    ((waited += 10))
   done
 }
 
@@ -1193,13 +1318,87 @@ establish_session() {
 
 # -------------------------------------------------------------------- phases
 
+# A synthetic Windows-style disk for the free-space install: a FAT32 ESP and
+# an ext4 data partition carrying a marker file, followed by ~76GiB of
+# unallocated space. Built without root: parted partitions the raw file, the
+# filesystems are made straight into it at their offsets. Unlike
+# omarchy-iso-test-windows-disk it has no EFI/Microsoft directory (that needs
+# mtools or a mount), so the configurator reports no Windows ESP; the
+# free-space mechanics it exercises are the same either way.
+create_free_space_disk() {
+  local disk="$1" raw="$1.raw" populate="$RUN_DIR/.preserve"
+  local esp_start_mib=1 esp_size_mib=512 data_end_mib=$((20 * 1024))
+
+  rm -f "$disk" "$raw"
+  truncate -s 96G "$raw"
+  parted --script "$raw" \
+    mklabel gpt \
+    mkpart WINDOWS_ESP fat32 "${esp_start_mib}MiB" "$((esp_start_mib + esp_size_mib))MiB" \
+    set 1 esp on \
+    mkpart WINDOWS_DATA ext4 "$((esp_start_mib + esp_size_mib))MiB" "${data_end_mib}MiB"
+
+  mkfs.fat -F32 -n WINDOWS_ESP -C "$RUN_DIR/.esp.img" $((esp_size_mib * 1024)) >/dev/null
+  dd if="$RUN_DIR/.esp.img" of="$raw" bs=1M seek="$esp_start_mib" conv=notrunc,sparse status=none
+  rm -f "$RUN_DIR/.esp.img"
+
+  rm -rf "$populate"
+  mkdir -p "$populate"
+  echo "This file must survive the Omarchy install." >"$populate/OMARCHY-MUST-NOT-TOUCH.txt"
+  mkfs.ext4 -q -F -L WINDOWS_DATA -d "$populate" \
+    -E offset=$(( (esp_start_mib + esp_size_mib) * 1024 * 1024 )) \
+    "$raw" "$(( (data_end_mib - esp_start_mib - esp_size_mib) * 1024 ))k"
+  rm -rf "$populate"
+
+  qemu-img convert -f raw -O qcow2 "$raw" "$disk"
+  rm -f "$raw"
+}
+
+# The partitions the free-space install had to leave alone, checked from
+# inside the installed system.
+verify_preserved_partitions() {
+  log "Verifying the pre-existing partitions survived"
+  local report="$RUN_DIR/preserved-partitions.txt"
+
+  ssh_guest "lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINTS" >"$report" 2>&1 || true
+  if ! ssh_guest "echo $GUEST_PASSWORD | sudo -S -p '' sh -c '
+      blkid -L WINDOWS_ESP >/dev/null &&
+      mkdir -p /run/preserve && mount -o ro LABEL=WINDOWS_DATA /run/preserve &&
+      test -f /run/preserve/OMARCHY-MUST-NOT-TOUCH.txt; rc=\$?; umount /run/preserve 2>/dev/null; exit \$rc'"; then
+    capture_console "failure-free-space-partitions-lost"
+    echo "Pre-existing partitions were not preserved; see $report" >&2
+    return 1
+  fi
+  log "WINDOWS_ESP and WINDOWS_DATA (with its marker file) are intact"
+}
+
+# The installer encrypts in 4096-byte sectors, which cryptsetup refuses on a
+# partition whose size 4096 does not divide; both paths make one that it does.
+verify_luks_sector_size() {
+  local report="$RUN_DIR/luks-sector-size.txt" sector size
+  ssh_guest "echo $GUEST_PASSWORD | sudo -S -p '' sh -c '
+      dev=\$(blkid -t TYPE=crypto_LUKS -o device | head -n 1)
+      echo size \$(blockdev --getsize64 \$dev); cryptsetup luksDump \$dev'" >"$report" 2>&1 || true
+  sector=$(awk '$1 == "sector:" { print $2; exit }' "$report")
+  size=$(awk '$1 == "size" { print $2; exit }' "$report")
+  if [[ $sector != 4096 ]] || ((size % 4096)); then
+    echo "The root's LUKS sectors are ${sector:-unknown} bytes on a ${size:-unknown}-byte partition; see $report" >&2
+    return 1
+  fi
+  log "The root's LUKS sectors are 4096 bytes on a $size-byte partition"
+}
+
 install_phase() {
   log "Installing $(basename "$ISO") into a fresh VM (headless, driven via console)"
 
   [[ -f $SSH_KEY ]] || ssh-keygen -t ed25519 -N "" -q -C "omarchy-iso-test" -f "$SSH_KEY"
 
-  rm -f "$BASE_DISK"
-  qemu-img create -f qcow2 "$BASE_DISK" 40G >/dev/null
+  if $FREE_SPACE; then
+    log "Building the synthetic Windows-style disk"
+    create_free_space_disk "$BASE_DISK"
+  else
+    rm -f "$BASE_DISK"
+    qemu-img create -f qcow2 "$BASE_DISK" 40G >/dev/null
+  fi
   cp "$OVMF_VARS_TEMPLATE" "$BASE_OVMF"
 
   start_vm "$BASE_DISK" "$RUN_DIR/install-serial.log" \
@@ -1214,7 +1413,18 @@ install_phase() {
   elif $ENCRYPT; then
     unlock_luks
   fi
+  if $NO_NETWORK; then
+    # Nothing to SSH through. The install finished and the installed system
+    # booted to its console login; that is what a machine with no NIC has to
+    # show.
+    wait_for_first_boot_login
+    log "No network: the installed system booted to its login; stopping here."
+    capture_console "success-first-boot-no-network"
+    return 0
+  fi
   bootstrap_ssh
+  $FREE_SPACE && verify_preserved_partitions
+  $ENCRYPT && verify_luks_sector_size
 
   # SSH can come up (console bootstrap logs in on a spare TTY) while
   # omarchy-provision-owner is still finalizing the user and re-keying LUKS. Saving
@@ -1270,6 +1480,10 @@ install_phase() {
     >"$RUN_DIR/omarchy-install-timing.json" 2>/dev/null || true
   ssh_guest "echo $GUEST_SUDO_PASSWORD | sudo -S cat /var/log/pacman.log 2>/dev/null" \
     >"$RUN_DIR/pacman.log" 2>/dev/null || true
+
+  # Keep format decisions and step timings for --install-only runs too.
+  ssh_guest "echo $GUEST_PASSWORD | sudo -S cat /var/log/omarchy-install.log 2>/dev/null" \
+    >"$RUN_DIR/omarchy-install.log" 2>/dev/null || true
 
   log "Installed system is up. Saving base image."
   stop_vm
@@ -1336,6 +1550,10 @@ else
   install_phase
 fi
 
+if $NO_NETWORK && ! $INSTALL_ONLY; then
+  log "No network: the acceptance suite needs SSH; stopping after the install"
+  INSTALL_ONLY=true
+fi
 if $INSTALL_ONLY; then
   log "Base image ready: $BASE_DISK"
   exit 0

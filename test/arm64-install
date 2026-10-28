@@ -1,0 +1,226 @@
+#!/bin/bash
+#
+# Installs an aarch64 Omarchy ISO unattended in a VM, reboots into what it
+# installed and checks the result over SSH: the whole path a machine takes,
+# with nobody at the keyboard.
+#
+#   test/arm64-install <omarchy.iso> <evidence_dir>
+#
+# The answers are the ones the x86_64 integration harness gives its installs
+# (build_cidata in test/integration.d/base-test.sh), changed where the
+# architecture shows: Limine's binary, the kernel, the mirror.
+#
+# Needs an arm64 host with a usable /dev/kvm, qemu-system-aarch64, the AAVMF
+# firmware, mtools, dosfstools, jq, openssl and tesseract, and for PLATFORM
+# what test/arm64-n1x/make-rom needs. evidence_dir gets the serial log,
+# screenshots, the installer's log and the checks' output.
+#
+# Env: TIMEOUT (seconds for install and first boot, default 1500), SMP (8),
+#      MEM (12G), MACHINE (virt with ACPI; test/arm64-live-boot says why the GIC
+#      is set as it is), KERNEL (linux-omarchy),
+#      PLATFORM (aarch64-n1x: the VM's firmware carries what Omarchy reads
+#      from an NVIDIA N1x's, test/arm64-n1x, so Omarchy's own detector names
+#      the machine one and installs and sets it up as one),
+#      MIRROR (where the installed system gets Arch Linux ARM's packages:
+#      Omarchy's own mirror of them).
+set -euo pipefail
+[[ $# -eq 2 ]] || { sed -n '2,22p' "$0" >&2; exit 2; }
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+iso=$(realpath "$1")
+out=$(realpath -m "$2")
+mkdir -p "$out/shots"
+
+[[ $(uname -m) == aarch64 ]] || { echo "arm64-install: this needs an arm64 host" >&2; exit 1; }
+[[ -r /dev/kvm && -w /dev/kvm ]] || { echo "arm64-install: /dev/kvm is not usable" >&2; exit 1; }
+[[ ${PLATFORM:-aarch64-n1x} == aarch64-n1x ]] || { echo "arm64-install: PLATFORM can only be aarch64-n1x" >&2; exit 2; }
+source "$ROOT/bin/lib/aarch64-firmware.sh"
+aarch64_uefi_firmware || { echo "arm64-install: no aarch64 UEFI firmware found" >&2; exit 1; }
+code=$AARCH64_UEFI_CODE vars=$AARCH64_UEFI_VARS
+
+state=$(mktemp -d /var/tmp/arm64-install.XXXXXX)
+cleanup() {
+  local status=$? pid
+  if [[ -f $state/qemu.pid ]]; then
+    pid=$(cat "$state/qemu.pid")
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+  fi
+  rm -rf "$state"
+  exit "$status"
+}
+trap cleanup EXIT
+
+# --- answers ---------------------------------------------------------------
+GUEST_USER=omarchy GUEST_PASSWORD=omarchy GUEST_HOSTNAME=omarchy-arm64
+BASE_DIR=$state SSH_KEY=$state/id_ed25519 CIDATA_IMG=$state/cidata.img
+ssh-keygen -q -t ed25519 -N '' -C arm64-install -f "$SSH_KEY"
+# The harness's own functions, so the two cannot drift apart: detect_packages
+# names the runtime the ISO's channel installs (omarchy-dev on edge, omarchy on
+# rc and stable), and build_cidata ends by writing the image; the
+# architecture's answers are changed and it is redone.
+eval "$(sed -n '/^detect_packages() {$/,/^}$/p' "$ROOT/test/integration.d/base-test.sh")"
+eval "$(sed -n '/^build_cidata() {$/,/^  mcopy -i "\$CIDATA_IMG"/p' "$ROOT/test/integration.d/base-test.sh"; echo '}')"
+eval "$(sed -n '/^cidata_cloud_init() {$/,/^}$/p' "$ROOT/test/integration.d/base-test.sh")"
+# ... and the harness's settings, with its defaults, which build_cidata reads:
+# the disk it lays the partitions out for, the UKI, encryption and keyboard
+# choices. All of them, so a setting the harness adds later comes along too.
+eval "$(grep -E '^[A-Z_]+="\$\{OMARCHY_INTEGRATION_[A-Z_]+:-[^}]*\}"$' "$ROOT/test/integration.d/base-test.sh")"
+ISO=$iso detect_packages
+build_cidata
+answers=$state/cidata/user_configuration.json
+jq --arg kernel "${KERNEL:-linux-omarchy}" --arg mirror "${MIRROR:-https://arm-mirror.omarchy.org/\$arch/\$repo}" '
+  .omarchy_install.boot.efi_binary = "limine_aa64.efi"
+  | .omarchy_install.storage.kernel = $kernel
+  | .kernels = [$kernel]
+  | .mirror_config.custom_servers = [{url: $mirror}]' "$answers" >"$answers.new"
+mv "$answers.new" "$answers"
+rm -f "$CIDATA_IMG"
+truncate -s 4M "$CIDATA_IMG"
+mkfs.vfat -n CIDATA "$CIDATA_IMG" >/dev/null
+mcopy -i "$CIDATA_IMG" "$state"/cidata/* ::/
+cp "$answers" "$out/user_configuration.json"
+
+# --- machine ---------------------------------------------------------------
+# An N1x's firmware describes its NVDA0200 I2C controllers in ACPI and has the
+# GPU memory variable; this VM's gets both from an option ROM on its RNG.
+rng=virtio-rng-pci
+if [[ -n ${PLATFORM:-} ]]; then
+  "$ROOT/test/arm64-n1x/make-rom" "$state/n1x.rom"
+  rng+=",romfile=$state/n1x.rom"
+fi
+port=$(( 20000 + RANDOM % 10000 ))
+qemu-img create -q -f qcow2 "$state/target.qcow2" "${DISK_GB}G"
+cp "$vars" "$state/vars.fd"
+: >"$out/serial.log"
+# The empty disk is first in the boot order: the firmware falls through to the
+# ISO now and finds Limine there after the install. The machine is described to
+# what it boots by ACPI, as an N1x laptop or an Arm server is, so no device tree
+# is passed and MSIs reach the GICv2m through the MADT's MSI frame.
+# test/arm64-live-boot boots the ISO with the device tree.
+qemu-system-aarch64 -machine "${MACHINE:-virt,gic-version=3,msi=gicv2m,acpi=on}" -accel kvm -cpu host \
+  -smp "${SMP:-8}" -m "${MEM:-12G}" \
+  -drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$state/vars.fd" \
+  -drive "file=$state/target.qcow2,format=qcow2,if=none,id=target" -device virtio-blk-pci,drive=target,bootindex=0 \
+  -device virtio-scsi-pci -drive "file=$iso,format=raw,if=none,id=iso,media=cdrom,readonly=on" \
+  -device scsi-cd,drive=iso,bootindex=1 \
+  -device qemu-xhci -device usb-kbd -device usb-tablet \
+  -drive "file=$CIDATA_IMG,format=raw,if=none,id=cidata" -device usb-storage,drive=cidata \
+  -device virtio-gpu-pci -device "$rng" \
+  -netdev "user,id=net,hostfwd=tcp:127.0.0.1:$port-:22" -device virtio-net-pci,netdev=net \
+  -serial "file:$out/serial.log" -display none \
+  -qmp "unix:$state/qmp.sock,server,nowait" -pidfile "$state/qemu.pid" -daemonize
+
+qmp() { # one QMP command, as JSON
+  python3 - "$state/qmp.sock" "$1" <<'PY'
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(20); s.connect(sys.argv[1]); f = s.makefile("rw")
+f.readline()
+for command in ({"execute": "qmp_capabilities"}, json.loads(sys.argv[2])):
+    f.write(json.dumps(command) + "\n"); f.flush()
+    while "return" not in (reply := json.loads(f.readline())):
+        if "error" in reply: sys.exit(reply["error"]["desc"])
+PY
+}
+screen() { # file -> the text on the screen
+  qmp "{\"execute\":\"screendump\",\"arguments\":{\"filename\":\"$1\",\"format\":\"png\"}}" 2>/dev/null || return 0
+  tesseract "$1" - 2>/dev/null | grep -v '^\s*$' || true
+}
+guest() { # a command, run on the installed system as its user
+  ssh -n -i "$SSH_KEY" -p "$port" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 -o LogLevel=ERROR "$GUEST_USER@127.0.0.1" "$@"
+}
+
+# --- install and first boot ------------------------------------------------
+# The live ISO runs sshd too, but only the installed system has this user.
+start=$(date +%s) timeout=${TIMEOUT:-1500} tick=0
+until guest true 2>/dev/null; do
+  elapsed=$(( $(date +%s) - start ))
+  if ! kill -0 "$(cat "$state/qemu.pid")" 2>/dev/null; then
+    echo "arm64-install: qemu exited after $elapsed s" >&2; exit 1
+  fi
+  if (( elapsed > timeout )); then
+    screen "$out/shots/timeout.png" | tail -n 12 >&2
+    echo "arm64-install: no installed system on SSH after $timeout s" >&2; exit 1
+  fi
+  if (( ++tick % 2 == 0 )); then
+    shot=$out/shots/$(printf '%04d' "$elapsed").png
+    text=$(screen "$shot")
+    echo "  $elapsed s: $(tail -n 2 <<<"$text" | tr '\n' ' ' | cut -c1-120)"
+    # When the installer stops it says so on its screen, above the last lines
+    # of its log, and leaves the live system up: the x86_64 test reads the same
+    # screen. Without this the wait runs to its timeout on a dead install. A
+    # long error scrolls that heading off the top, but the live shell's prompt
+    # then starts with the installer's non-zero exit status.
+    if grep -qiE 'installation stopped|exited with status|^[1-9][0-9]* root@' <<<"$text"; then
+      cp "$shot" "$out/shots/halted.png"
+      echo "$text" >&2
+      echo "arm64-install: the installer stopped after $elapsed s (shots/halted.png)" >&2; exit 1
+    fi
+    if grep -qi 'Reboot Now' <<<"$text"; then
+      echo "  $elapsed s: the installer is done; rebooting"
+      qmp '{"execute":"send-key","arguments":{"keys":[{"type":"qcode","data":"ret"}]}}'
+    fi
+  fi
+  sleep 10
+done
+echo "installed_system_seconds=$(( $(date +%s) - start ))" | tee "$out/timing"
+
+# --- checks ----------------------------------------------------------------
+failures=0
+check() { # description, then a command run in the guest that must succeed
+  local what=$1; shift
+  if guest "$@" >/dev/null 2>&1; then echo "ok - $what"; else echo "not ok - $what"; failures=$((failures + 1)); fi
+}
+{
+  check "the system reaches running or degraded" \
+    's=$(timeout 180 systemctl is-system-running --wait); [ "$s" = running ] || [ "$s" = degraded ]'
+  check "no unit failed" '[ -z "$(systemctl --failed --no-legend)" ]'
+  check "the desktop is up: Hyprland is running" 'for i in $(seq 1 60); do pgrep -x Hyprland && exit 0; sleep 1; done; exit 1'
+  check "it runs the kernel it was told to install" \
+    "pacman -Qo /usr/lib/modules/\$(uname -r) | grep -q ' ${KERNEL:-linux-omarchy} '"
+  check "the user can use sudo" "echo $GUEST_PASSWORD | sudo -S -p '' true"
+  check "it booted through Limine's unified kernel image" \
+    "echo $GUEST_PASSWORD | sudo -S -p '' sh -c 'ls /boot/EFI/Linux/omarchy_*.efi'"
+  check "the Omarchy runtime is installed" "pacman -Q $RUNTIME_PACKAGE"
+  # A runtime from before lazy Node unpacked the one the ISO bundled for it.
+  check "Node waits for its first use, or came from the ISO for this architecture" \
+    'node=$(ls ~/.local/share/mise/installs/node/*/bin/node 2>/dev/null | head -n 1); if [ -n "$node" ]; then file -bL "$node" | grep -q aarch64; else [ -x ~/.local/share/mise/shims/node ]; fi'
+  check "packages come from Omarchy's mirror and nowhere else" \
+    "grep -q '^Server.*omarchy\.org' /etc/pacman.d/mirrorlist && ! grep '^Server' /etc/pacman.d/mirrorlist | grep -vq 'omarchy\.org'"
+  if [[ -n ${PLATFORM:-} ]]; then
+    # The machine's own word for what it is, which every platform-specific
+    # step of the install and of the system after it goes by.
+    said=$(guest omarchy-hw-platform 2>&1) || true
+    check "Omarchy's detector names it $PLATFORM (it says ${said:-nothing})" \
+      "[ \"\$(omarchy-hw-platform)\" = $PLATFORM ]"
+    check "the installer took the $PLATFORM default set" \
+      "echo $GUEST_PASSWORD | sudo -S -p '' grep -aq 'omarchy-base.$PLATFORM.packages' /var/log/omarchy-install.log"
+  fi
+  if [[ ${PLATFORM:-} == aarch64-n1x ]]; then
+    check "the NVIDIA module is built for the running kernel" 'modinfo -k "$(uname -r)" nvidia'
+  fi
+} | tee "$out/checks"
+failures=$(grep -c '^not ok' "$out/checks" || true)
+guest 'uname -r; cat /proc/cmdline; systemctl --failed --no-legend; grep -E "^Server" /etc/pacman.d/mirrorlist' >"$out/facts" 2>&1 || true
+# What a nightly says it published: the Omarchy package, then the kernel.
+guest 'pacman -Q omarchy-dev omarchy 2>/dev/null; uname -r' >"$out/packages.txt" 2>/dev/null || true
+# The timings the x86_64 test reports: the installer's own, and this boot's.
+guest "echo $GUEST_PASSWORD | sudo -S -p '' cat /var/log/omarchy-install-timing.json" >"$out/omarchy-install-timing.json" 2>/dev/null || true
+guest 'systemd-analyze' >"$out/first-boot-systemd-analyze.txt" 2>/dev/null || true
+ssh -i "$SSH_KEY" -p "$port" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$GUEST_USER@127.0.0.1" "sudo -S -p '' cat /var/log/omarchy-install.log" \
+  <<<"$GUEST_PASSWORD" >"$out/omarchy-install.log" 2>/dev/null || true
+screen "$out/shots/installed.png" >/dev/null
+# The boot of every day after the first, as the x86_64 test measures it.
+mkdir -p "$out/runs/everyday-boot"
+booted=$(guest 'cat /proc/sys/kernel/random/boot_id')
+guest "echo $GUEST_PASSWORD | sudo -S -p '' systemctl reboot" >/dev/null 2>&1 || true
+for _ in $(seq 1 60); do
+  sleep 5
+  now=$(guest 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null) && [[ $now != "$booted" ]] && break
+done
+guest 'timeout 180 systemctl is-system-running --wait; systemd-analyze' 2>/dev/null |
+  grep -a '^Startup finished' >"$out/runs/everyday-boot/systemd-analyze.txt" ||
+  { echo "arm64-install: the installed system did not come back from a reboot" >&2; failures=$((failures + 1)); }
+(( failures == 0 )) || { echo "arm64-install: $failures checks failed" >&2; exit 1; }
+echo "arm64-install: installed, rebooted and checked in $(cut -d= -f2 "$out/timing") s"

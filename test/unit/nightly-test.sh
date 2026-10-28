@@ -29,24 +29,28 @@ refused() { # description, command...: it has to fail and say why
 planned() { "$plan" "$@" 2>/dev/null; }
 
 first=$(planned 2026.10.09 431 1 schedule v4.0.4 "")
-equal "a first run makes both channels" "$(jq -r 'map(.channel) | join(",")' <<<"$first")" "edge,stable"
+equal "a first run makes every lane" "$(jq -r 'map(.channel) | join(",")' <<<"$first")" "edge,edge-aarch64,stable"
+lane() { jq -r --arg c "$1" ".[] | select(.channel == \$c) | $2" <<<"$3"; }
+equal "each lane says its architecture" "$(jq -r 'map(.arch) | join(",")' <<<"$first")" "x86_64,aarch64,x86_64"
+equal "the aarch64 lane has the edge version" "$(lane edge-aarch64 .version "$first")" "2026.10.09.431"
+equal "the aarch64 path" "$(lane edge-aarch64 .release "$first")" "edge-aarch64/2026.10.09.431"
 equal "the edge version" "$(jq -r '.[0].version' <<<"$first")" "2026.10.09.431"
 equal "the edge path" "$(jq -r '.[0].release' <<<"$first")" "edge/2026.10.09.431"
-equal "the stable version is the release's" "$(jq -r '.[1].version' <<<"$first")" "4.0.4"
-equal "the stable path has the run number" "$(jq -r '.[1].release' <<<"$first")" "stable/4.0.4/431"
+equal "the stable version is the release's" "$(lane stable .version "$first")" "4.0.4"
+equal "the stable path has the run number" "$(lane stable .release "$first")" "stable/4.0.4/431"
 
 again=$(planned 2026.10.09 431 2 schedule v4.0.4 "")
 equal "a run started again has its own edge version" "$(jq -r '.[0].version' <<<"$again")" "2026.10.09.431.2"
-equal "a run started again has its own stable path" "$(jq -r '.[1].release' <<<"$again")" "stable/4.0.4/431.2"
+equal "a run started again has its own stable path" "$(lane stable .release "$again")" "stable/4.0.4/431.2"
 [[ $(jq -r '.[].release' <<<"$first" | sort) != "$(jq -r '.[].release' <<<"$again" | sort)" ]] ||
   fail "two attempts of one run share a path"
 
 equal "a published release is left out of a scheduled run" \
-  "$(planned 2026.10.09 432 1 schedule v4.0.4 4.0.4 | jq -r 'map(.channel) | join(",")')" "edge"
+  "$(planned 2026.10.09 432 1 schedule v4.0.4 4.0.4 | jq -r 'map(.channel) | join(",")')" "edge,edge-aarch64"
 equal "a new release is made on the next scheduled run" \
-  "$(planned 2026.10.09 432 1 schedule v4.0.5 4.0.4 | jq -r '.[1].version')" "4.0.5"
+  "$(lane stable .version "$(planned 2026.10.09 432 1 schedule v4.0.5 4.0.4)")" "4.0.5"
 equal "a manual run makes a published release again" \
-  "$(planned 2026.10.09 432 1 workflow_dispatch v4.0.4 4.0.4 | jq -r 'map(.channel) | join(",")')" "edge,stable"
+  "$(planned 2026.10.09 432 1 workflow_dispatch v4.0.4 4.0.4 | jq -r 'map(.channel) | join(",")')" "edge,edge-aarch64,stable"
 
 refused "a release tag that is not a version" "$plan" 2026.10.09 431 1 schedule nightly ""
 refused "an empty release tag" "$plan" 2026.10.09 431 1 schedule "" ""
@@ -124,6 +128,29 @@ equal "stable: image address has the run number" "$(field .vm.url)" "https://nig
 equal "stable: unpacked folder" "$(field .vm.unpacked)" "https://nightly.example/stable/4.0.4/431/unpacked/"
 (cd "$tmp/out/stable/4.0.4/431" && sha256sum -c --quiet omarchy-4.0.4.qcow2.sha256) || fail "stable: the image's checksum file does not match it"
 (cd "$tmp/out/stable/4.0.4/431/unpacked" && sha256sum -c --quiet SHA256SUMS) || fail "stable: SHA256SUMS does not match the unpacked files"
+
+# edge-aarch64: the ISO and latest.json, no image yet. The ARM install test
+# answers with the Omarchy package (twice, as pacman does) and the kernel.
+rm -rf "$tmp/out"
+echo "an aarch64 iso" >"$tmp/release/omarchy-2026.10.09-aarch64-edge.iso"
+printf '%s\n' "omarchy-dev 4.0.0.r7026.g51bfd1d-1" "omarchy-dev 4.0.0.r7026.g51bfd1d-1" "7.2.8-11-omarchy" >"$tmp/arm-packages"
+"$layout" edge-aarch64 2026.10.09.431 edge-aarch64/2026.10.09.431 "$tmp/release/omarchy-2026.10.09-aarch64-edge.iso" \
+  - "$tmp/arm-packages" "$tmp/out" >/dev/null
+json=$tmp/out/edge-aarch64/latest.json
+dir=$tmp/out/edge-aarch64/2026.10.09.431
+equal "edge-aarch64: files published" "$(cd "$tmp/out" && find . -type f | sort | paste -sd' ')" \
+  "./edge-aarch64/2026.10.09.431/omarchy-edge-2026.10.09.431-aarch64.iso ./edge-aarch64/2026.10.09.431/omarchy-edge-2026.10.09.431-aarch64.iso.sha256 ./edge-aarch64/latest.json"
+(cd "$dir" && sha256sum -c --quiet ./*.sha256) || fail "edge-aarch64: the checksum file does not match the ISO"
+equal "edge-aarch64: url" "$(field .url)" "https://nightly.example/edge-aarch64/2026.10.09.431/omarchy-edge-2026.10.09.431-aarch64.iso"
+equal "edge-aarch64: arch" "$(field .arch)" "aarch64"
+equal "edge-aarch64: omarchy_commit" "$(field .omarchy_commit)" "51bfd1d"
+equal "edge-aarch64: kernel" "$(field .kernel)" "7.2.8-11-omarchy"
+equal "edge-aarch64: no image is described" "$(field 'has("vm")')" "false"
+[[ $(basename "$(field .url)") =~ [0-9]+(\.[0-9]+){2,} ]] || fail "edge-aarch64: the ISO's name carries no version"
+equal "edge-aarch64: the version read from the ISO's name" "${BASH_REMATCH[0]}" "2026.10.09.431"
+echo "another aarch64 iso" >"$tmp/release/omarchy-2026.10.09-aarch64-edge.iso"
+refused "an aarch64 lane given a sealed image" "$layout" edge-aarch64 2026.10.09.432 edge-aarch64/2026.10.09.432 \
+  "$tmp/release/omarchy-2026.10.09-aarch64-edge.iso" "$tmp/sealed-edge" "$tmp/arm-packages" "$tmp/out6"
 
 # Nothing half-made is described.
 sealed "$tmp/sealed-short"; rm "$tmp/sealed-short/initrd"
@@ -214,6 +241,12 @@ if PATH="$tmp/rc:$PATH" "$wrapped" copy a b >"$tmp/rc/out" 2>&1; then fail "rclo
 equal "rclone: its exit status is kept" "$(PATH="$tmp/rc:$PATH" "$wrapped" copy a b >/dev/null 2>&1; echo $?)" "3"
 if grep -q '::warning::' "$tmp/rc/out"; then fail "rclone: a failed upload was reported as a retry"; fi
 
+# rclone reads every RCLONE_<FLAG> variable as that flag: RCLONE_VERSION=v1.75.2
+# was "--version=v1.75.2" and stopped the publish before it uploaded anything.
+# Only its remote's settings, RCLONE_CONFIG_*, belong in a workflow's environment.
+flags=$(sed -nE 's/^[[:space:]]+(RCLONE_[A-Z0-9_]+):.*/\1/p' "$ROOT"/.github/workflows/*.yml | grep -v '^RCLONE_CONFIG_' | sort -u | paste -sd' ' || true)
+[[ -z $flags ]] || fail "rclone: a workflow sets $flags, which rclone would read as flags"
+
 # ------------------------------------------------------------ the install test
 # The harness is a script that starts a VM when it is read; take the two
 # functions out of it.
@@ -225,6 +258,9 @@ equal "an edge ISO installs the -dev packages" "$(packages_of release/omarchy-20
 equal "a dev ISO installs the -dev packages" "$(packages_of release/omarchy-2026.10.09-x86_64-dev.iso)" "omarchy-dev omarchy-settings-dev"
 equal "a released ISO installs the release packages" "$(packages_of release/omarchy-4.0.4.iso)" "omarchy omarchy-settings"
 equal "a stable build installs the release packages" "$(packages_of /x/edge/omarchy-2026.10.09-x86_64-stable.iso)" "omarchy omarchy-settings"
+equal "an aarch64 rc ISO installs the release packages" "$(packages_of release/omarchy-2026.10.20-aarch64-rc.iso)" "omarchy omarchy-settings"
+equal "an aarch64 ISO with the debug key installs its channel's packages" "$(packages_of release/omarchy-2026.10.20-aarch64-devssh-quattro.iso)" "omarchy omarchy-settings"
+equal "an edge aarch64 ISO with the debug key installs the -dev packages" "$(packages_of release/omarchy-2026.10.20-aarch64-devssh-edge.iso)" "omarchy-dev omarchy-settings-dev"
 
 printf '%s\r\n' 'BdsDxe: loading Boot0002 "UEFI QEMU DVD-ROM QM00011 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x5,0xFFFF,0x0)' \
   'BdsDxe: starting Boot0002 "UEFI QEMU DVD-ROM QM00011 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x5,0xFFFF,0x0)' >"$tmp/serial"

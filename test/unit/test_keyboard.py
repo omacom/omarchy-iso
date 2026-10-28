@@ -40,6 +40,25 @@ def supported_keymaps():
 SUPPORTED_KEYMAPS = supported_keymaps()
 
 
+def localectl_lists_keymaps() -> bool:
+    """Whether this host can answer "which keymaps exist".
+
+    The cases below compare the configurator's list against the system's, so
+    they need a systemd-booted Arch: localectl reads /usr/share/kbd/keymaps
+    and refuses to run at all when PID 1 is not systemd. That is true on the
+    live ISO and on a developer's Arch box, and false on a container and on
+    the Ubuntu runners the CI lint/unit jobs use. Skip there rather than
+    error, so this file can be part of a run on any host."""
+    try:
+        return KEYBOARD.capture(["localectl", "--no-pager", "list-keymaps"]).returncode == 0
+    except Exception:
+        return False
+
+
+LOCALECTL_AVAILABLE = localectl_lists_keymaps()
+
+
+@unittest.skipUnless(LOCALECTL_AVAILABLE, "localectl cannot list keymaps on this host")
 class KeyboardConfigurationTest(unittest.TestCase):
     def target(self, directory: str) -> Path:
         target = Path(directory)
@@ -82,7 +101,7 @@ class KeyboardConfigurationTest(unittest.TestCase):
                 )
 
     def test_input_choice_survives_while_console_keymap_stays_real(self):
-        for method, keymap, layout in (("mozc", "jp106", ""), ("mozc", "us", ""), ("hangul", "us", "kr"), ("pinyin", "us", ""), ("chewing", "us", "")):
+        for method, keymap, layout in (("mozc", "jp106", ""), ("mozc", "us", ""), ("hangul", "us", "kr"), ("hangul", "us", "kr:kr104"), ("none", "us", "la"), ("pinyin", "us", ""), ("chewing", "us", ""), ("cangjie5", "us", "")):
             with self.subTest(method=method), tempfile.TemporaryDirectory() as directory:
                 target = self.target(directory)
                 self.assertTrue(KEYBOARD.configure_keyboard(target, keymap, method, layout))
@@ -104,7 +123,7 @@ class KeyboardConfigurationTest(unittest.TestCase):
                 KEYBOARD.configure_keyboard(target, "unknown", "pinyin")
 
     def test_invalid_input_preferences_are_rejected_without_writes(self):
-        for method, layout in (("unknown", ""), ("hangul", "kr\nKEYMAP=ru")):
+        for method, layout in (("unknown", ""), ("hangul", "kr\nKEYMAP=ru"), ("hangul", "kr:dvorak"), ("none", "az")):
             with tempfile.TemporaryDirectory() as directory:
                 target = self.target(directory)
                 with self.assertRaises(ValueError):

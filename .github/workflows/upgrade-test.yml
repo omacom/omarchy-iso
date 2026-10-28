@@ -21,7 +21,7 @@ on:
         options: [edge, rc]
         default: edge
       from:
-        description: "Release to start from, like 4.0.4 (default: the latest)"
+        description: "Release or release candidate to start from, like 4.0.4 or 4.0.5rc1 (default: the latest)"
         type: string
         default: ""
 
@@ -53,7 +53,8 @@ jobs:
           set -euo pipefail
           version=${FROM:-$(gh api repos/omacom/omarchy/releases/latest --jq .tag_name)}
           version=${version#v}
-          [[ $version =~ ^[0-9]+(\.[0-9]+)+$ ]] || { echo "::error::'$version' is not a release version"; exit 1; }
+          # A release candidate's ISO is published as omarchy-<version>rc<N>.iso.
+          [[ $version =~ ^[0-9]+(\.[0-9]+)+(rc[0-9]+)?$ ]] || { echo "::error::'$version' is not a release version"; exit 1; }
           echo "version=$version" | tee -a "$GITHUB_OUTPUT"
 
       # Good only if the signature is the release key's, the one in this repo.
@@ -75,8 +76,10 @@ jobs:
           rm -rf "$home" "release/$iso.sig"
 
       # The install test's own install, which leaves the installed disk behind;
-      # the upgrade then starts from that disk. A failed upgrade does not stop
-      # here: the evidence is kept first, and the last step fails the job.
+      # the upgrade then starts from that disk. The ISO is a shipped release,
+      # so the install is not held to what only this tree's installer does
+      # (--release-iso). A failed install or upgrade does not stop here: the
+      # evidence is kept first, and the last step fails the job.
       - name: Install the release, then upgrade it
         run: |
           sudo chmod 0666 /dev/kvm
@@ -96,10 +99,19 @@ jobs:
               done
               printf "#!/bin/sh\nexit 0\n" >/usr/local/bin/omarchy-pkg-add
               chmod 0755 /usr/local/bin/omarchy-pkg-add
-              ./test/integration release/*.iso boot --no-preview --memory 8192 --timeout 1800
-
+              mkdir -p upgrade-evidence
               status=0
-              VM_STATE_DIR=/w ./test/upgrade-test "$(ls -d test-runs/*-integration)" "$TO" upgrade-evidence || status=$?
+              ./test/integration release/*.iso boot --release-iso --no-preview --memory 8192 --timeout 1800 || status=$?
+              if [ "$status" = 0 ]; then
+                VM_STATE_DIR=/w ./test/upgrade-test "$(ls -d test-runs/*-integration)" "$TO" upgrade-evidence || status=$?
+              else
+                # No installed system to upgrade: keep what the install left,
+                # its logs and screenshots, not its disks or keys.
+                mkdir -p upgrade-evidence/install
+                (cd test-runs && find . -type f \( -name "*.txt" -o -name "*.log" -o -name "*.json" -o -name "*.png" \) \
+                  -exec cp --parents {} ../upgrade-evidence/install/ \;) || true
+                echo "**The release did not install and boot** (test/integration exited $status), so nothing was upgraded." >upgrade-evidence/report.md
+              fi
               echo "$status" >upgrade-evidence/status
             '
 

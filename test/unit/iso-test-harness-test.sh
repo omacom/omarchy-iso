@@ -41,7 +41,7 @@ OVMF_VARS_TEMPLATE="$work/OVMF_VARS.template"
 RUN_DIR="$work"
 ISO="$work/omarchy.iso"
 BOOT_TIMEOUT=60
-FREE_SPACE=false PROVISION=false ENCRYPT=false NO_NETWORK=true
+FREE_SPACE=false PROVISION=false ENCRYPT=false NO_NETWORK=true CHILD=false
 touch "$SSH_KEY" "$OVMF_VARS_TEMPLATE"
 
 log() { :; }
@@ -133,7 +133,7 @@ naming=$(sed -n '/^BASE_NAME="/,/^BASE_DIR=/p' "$harness")
 [[ -n $naming ]] || fail "the harness no longer names its base image with BASE_NAME"
 base_name() { # [VAR=value | VAR+=(value)]...
   ISO="$work/omarchy.iso" KEYBOARD_LABEL="English (US)" REPO_DIR="$work"
-  ENCRYPT=false PROVISION=false FREE_SPACE=false
+  ENCRYPT=false PROVISION=false FREE_SPACE=false CHILD=false
   FAKE_PCI=() SMBIOS=() CPU_ID="" BATTERY=false ACPI_HIDS=() NO_NETWORK=false
   local setting
   for setting; do eval "$setting"; done
@@ -201,7 +201,7 @@ echo "ok - fake PCI devices stay up as long as their VM, and stop after it"
   take drive_configurator
   source "$ROOT/configs/airootfs/usr/share/omarchy-iso/disk-partitioning.sh"
   mapfile -t modes < <(install_mode_choices true 2)
-  FREE_SPACE=true PROVISION=false ENCRYPT=true
+  FREE_SPACE=true PROVISION=false ENCRYPT=true CHILD=false
   KEYBOARD_LABEL="English (US)" GUEST_USER=omarchy GUEST_PASSWORD=omarchy
   picking=false selected=0 choice=""
   type_text() { :; }

@@ -681,6 +681,13 @@ def arch_install_system(ctx: InstallContext) -> None:
                 with _time_step(f"STEP.platform_packages ({_base_package_file().name})"):
                     installer.add_additional_packages(platform_packages)
 
+            # A child install (kids mode) adds the runtime's child list on top
+            # of the default set, in the same masked-hooks transaction.
+            child_packages = _child_delta_packages(ctx, installer.target)
+            if child_packages:
+                with _time_step("STEP.child_packages"):
+                    installer.add_additional_packages(child_packages)
+
             with _time_step("STEP.configure_keyboard"):
                 if not configure_keyboard(
                     installer.target, kb_layout,
@@ -1879,6 +1886,75 @@ def _write_language_marker(ctx: InstallContext) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# add_parent_disk_key: on an encrypted child install, key the LUKS volume to the
+# parent password as well as the kid's. That second slot is what lets a parent
+# boot a machine whose kid has forgotten their password and reset it from
+# inside. The kid's passphrase (the one the disk was formatted with) unlocks
+# the volume for the add; both travel as root-only key files, never argv.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _luks_partition(ctx: InstallContext) -> str:
+    storage = _storage_intent(ctx)
+    if storage.get("luks_uuid"):
+        return f"/dev/disk/by-uuid/{storage['luks_uuid']}"
+
+    # Full-disk installs let archinstall pick the partition; find the one it
+    # formatted on the install disk.
+    modifications = (ctx.user_configuration.get("disk_config") or {}).get("device_modifications") or []
+    disks = [m.get("device") for m in modifications if m.get("device")]
+    res = capture(["blkid", "-t", "TYPE=crypto_LUKS", "-o", "device"])
+    candidates = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+    if disks:
+        candidates = [c for c in candidates if any(c.startswith(d) for d in disks)]
+    if len(candidates) != 1:
+        raise RuntimeError(f"expected one LUKS partition on {disks or 'the install disk'}, found {candidates}")
+    return candidates[0]
+
+
+def _write_key_file(ctx: InstallContext, name: str, passphrase: str) -> Path:
+    path = ctx.state_dir / name
+    path.touch(mode=0o600, exist_ok=True)
+    path.chmod(0o600)
+    # Byte-for-byte the slot passphrase: no trailing newline.
+    path.write_text(passphrase)
+    return path
+
+
+def add_parent_disk_key(ctx: InstallContext) -> None:
+    if ctx.profile != "child" or ctx.defer_provisioning or not _provision_install_encrypted(ctx):
+        return
+
+    kid = _provision_encryption_password(ctx)
+    parent = ctx.user_credentials.get("parent_encryption_password")
+    if not kid or not parent:
+        raise RuntimeError(
+            "child install on an encrypted disk needs both encryption_password and "
+            "parent_encryption_password in user_credentials.json to key the disk to the parent"
+        )
+
+    device = _luks_partition(ctx)
+    kid_file = _write_key_file(ctx, "luks-kid-key", kid)
+    parent_file = _write_key_file(ctx, "luks-parent-key", parent)
+    try:
+        already = subprocess.run(
+            ["cryptsetup", "open", "--test-passphrase", "--key-file", str(parent_file), device],
+            capture_output=True,
+        )
+        if already.returncode == 0:
+            info("› the parent password already unlocks the disk")
+            return
+
+        info("› adding the parent password as a second disk key")
+        subprocess.run(
+            ["cryptsetup", "luksAddKey", "--key-file", str(kid_file), device, str(parent_file)],
+            check=True,
+        )
+    finally:
+        kid_file.unlink(missing_ok=True)
+        parent_file.unlink(missing_ok=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Install intent helpers: normalize the Omarchy-specific part of the
 # configurator JSON so full-disk and pre-mounted installs feed the same boot
 # and target setup code.
@@ -2348,6 +2424,7 @@ def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str 
         "OMARCHY_PATH=/usr/share/omarchy",
         "OMARCHY_INSTALL=/usr/share/omarchy/install",
         f"OMARCHY_INSTALL_USER={ctx.username}",
+        f"OMARCHY_INSTALL_PROFILE={ctx.profile}",
         f"OMARCHY_START_TIME={omarchy_start_time}",
         f"OMARCHY_START_EPOCH={omarchy_start_epoch}",
         f"OMARCHY_MIRROR={mirror_channel}",
@@ -2409,6 +2486,7 @@ def run_system_finalizer(ctx: InstallContext) -> None:
         cmd = ["/usr/bin/omarchy-apply-system", "--defer-provisioning", "--first-install"]
     else:
         cmd = ["/usr/bin/omarchy-apply-system", "--install-user", ctx.username, "--first-install"]
+    cmd += ["--profile", ctx.profile]
 
     # On aarch64 the runtime runs pacman-key --init and --populate on the
     # target (omarchy's install/post-install/pacman.sh). Two pacman-keys on
@@ -3400,6 +3478,26 @@ def _platform_delta_packages(target: Path, share: Path = Path("/usr/share/omarch
         return []
     pkgs: list[str] = []
     for raw in base_pkgs_file.read_text().splitlines():
+        s = raw.strip()
+        if not s or s.startswith("#") or s in pkgs:
+            continue
+        if not arch.target_has_package(target, s):
+            pkgs.append(s)
+    return pkgs
+
+
+def _child_delta_packages(ctx: InstallContext, target: Path, share: Path = Path("/usr/share/omarchy-iso")) -> list[str]:
+    """What a child install (kids mode) adds on top of the image's default
+    set: the runtime's child list, which build-iso.sh vendors beside the base
+    list and carries in the offline mirror, minus what the image already
+    holds. Nothing on any other profile."""
+    if getattr(ctx, "profile", "default") != "child":
+        return []
+    child_list = share / "omarchy-child.packages"
+    if not child_list.is_file():
+        return []
+    pkgs: list[str] = []
+    for raw in child_list.read_text().splitlines():
         s = raw.strip()
         if not s or s.startswith("#") or s in pkgs:
             continue

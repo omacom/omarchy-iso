@@ -1039,7 +1039,13 @@ disk_form() {
     fi
   done <<<"$available_disks"
 
-  selected_display=$(echo "$disk_options" | gum choose --header "$(t disk.header)") || abort
+  # Esc asks again: the account screens before this one are confirmed and
+  # left behind. Ctrl+C still ends the install.
+  local status
+  while true; do
+    selected_display=$(echo "$disk_options" | gum choose --header "$(t disk.header)") && break || status=$?
+    ((status == OMARCHY_FORM_BACK)) || abort
+  done
   disk=$(echo "$selected_display" | awk '{print $1}')
 }
 
@@ -1083,22 +1089,23 @@ requires_full_disk_install() {
   [[ -z "$free_space_b" || "$free_space_b" -eq 0 ]]
 }
 
+# Returns gum's status: OMARCHY_FORM_BACK for Esc, OMARCHY_FORM_SIGNAL for
+# Ctrl+C.
 install_mode_form() {
-  local free_space_offered=false partitions choice choices=()
+  local free_space_offered=false choice choices=()
 
   # The free-space/protected path registers an EFI boot entry and is UEFI-only.
   # Full-disk installs still support BIOS through the orchestrator's BIOS branch.
   if [[ -d /sys/firmware/efi ]] && ! $full_disk_only; then
     free_space_offered=true
   fi
-  partitions=$(partition_numbers "$disk" | grep -c .)
   local -A labels=([full_disk]="$(t mode.fullDisk)" [free_space]="$(t mode.freeSpace)" [other_disk]="$(t mode.otherDisk)")
   while read -r choice; do
     choices+=("${labels[$choice]}"$'\t'"$choice")
-  done < <(install_mode_choices "$free_space_offered" "$partitions")
+  done < <(install_mode_choices "$free_space_offered")
 
   step "$(t mode.intro)"
-  install_mode=$(gum choose --label-delimiter $'\t' --header "$(t mode.header "$disk")" "${choices[@]}") || abort
+  install_mode=$(gum choose --label-delimiter $'\t' --header "$(t mode.header "$disk")" "${choices[@]}")
 }
 
 confirm_disk_overwrite() {
@@ -1145,7 +1152,7 @@ confirm_disk_overwrite() {
 # reaches here; it's armed by Ctrl+C on the keyboard screen and goes straight to
 # disk selection.)
 select_installation() {
-  local full_disk_only
+  local full_disk_only status
 
   while true; do
     if requires_full_disk_install; then
@@ -1159,7 +1166,13 @@ select_installation() {
     if $full_disk_only; then
       install_mode="full_disk"
     else
-      install_mode_form
+      # Esc goes back to the disk list, as "Choose a different disk" does. Ctrl+C
+      # still ends the install.
+      install_mode_form && status=0 || status=$?
+      if ((status != 0)); then
+        ((status == OMARCHY_FORM_BACK)) || abort
+        install_mode="other_disk"
+      fi
     fi
 
     case "$install_mode" in

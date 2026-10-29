@@ -665,10 +665,8 @@ def arch_install_system(ctx: InstallContext) -> None:
             # use the target kernel instead of the live ISO's kernel.
             # The root image carries the default kernel's headers, so this
             # is a pacman run only for a kernel the image does not hold (linux-t2).
-            missing_headers = [
-                f"{kernel}-headers" for kernel in config.kernels
-                if not arch.target_has_package(installer.target, f"{kernel}-headers")
-            ]
+            missing_headers = arch.target_missing_packages(
+                installer.target, [f"{kernel}-headers" for kernel in config.kernels])
             if missing_headers:
                 with _time_step(f"STEP.kernel_headers ({' '.join(missing_headers)})"):
                     installer.add_additional_packages(missing_headers)
@@ -1184,7 +1182,8 @@ def _finish_root_image(ctx: InstallContext) -> None:
     image deliberately ships an empty one) before limine-entry-tool and the
     factory snapshot read it."""
     target = ctx.target
-    missing = [pkg for pkg in _root_image_required_packages() if not arch.target_has_package(target, pkg)]
+    installed = arch.target_package_names(target)
+    missing = [pkg for pkg in _root_image_required_packages() if pkg not in installed]
     if missing:
         raise RuntimeError(f"root image lacks required packages: {', '.join(missing)}")
     subprocess.run(["systemd-machine-id-setup", f"--root={target}"], check=True, capture_output=True)
@@ -3401,11 +3400,9 @@ def _platform_delta_packages(target: Path, share: Path = Path("/usr/share/omarch
     pkgs: list[str] = []
     for raw in base_pkgs_file.read_text().splitlines():
         s = raw.strip()
-        if not s or s.startswith("#") or s in pkgs:
-            continue
-        if not arch.target_has_package(target, s):
+        if s and not s.startswith("#") and s not in pkgs:
             pkgs.append(s)
-    return pkgs
+    return arch.target_missing_packages(target, pkgs)
 
 
 def _arm_platform_boot() -> bool:

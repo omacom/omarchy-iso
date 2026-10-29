@@ -3,7 +3,7 @@
 configure_archiso_aarch64_mkinitcpio() {
   local config=$1
   local hook hook_body hook_line modules_line replacement
-  local -a filtered_hooks=() hook_lines=() hooks=() module_lines=()
+  local -a filtered_hooks=() hook_lines=() hooks=() module_lines=() modules=()
   local -a early_input_modules=(
     i2c_mt65xx
     i2c_tegra
@@ -35,10 +35,16 @@ configure_archiso_aarch64_mkinitcpio() {
     return 1
   fi
 
+  # The live configuration's own modules (loop) stay, ahead of these.
   mapfile -t module_lines < <(grep -E '^MODULES=' "$config")
-  if (( ${#module_lines[@]} != 0 )); then
+  if (( ${#module_lines[@]} > 1 )) || [[ ${#module_lines[@]} == 1 && ! ${module_lines[0]} =~ ^MODULES=\([^\)]*\)$ ]]; then
     echo "ERROR: unexpected Archiso mkinitcpio module layout: $config" >&2
     return 1
+  fi
+  if (( ${#module_lines[@]} == 1 )); then
+    modules_line=${module_lines[0]#MODULES=\(}
+    read -r -a modules <<<"${modules_line%\)}"
+    sed -i '/^MODULES=/d' "$config"
   fi
 
   hook_line=${hook_lines[0]}
@@ -71,7 +77,8 @@ configure_archiso_aarch64_mkinitcpio() {
   # other NVIDIA boards) and the I2C-HID transport before the live root is
   # mounted. The generic keyboard hook does not include drivers under
   # hid/i2c-hid.
-  printf -v modules_line 'MODULES=(%s %s)' "${early_input_modules[*]}" "${snapdragon_platform_modules[*]}"
+  modules+=("${early_input_modules[@]}" "${snapdragon_platform_modules[@]}")
+  printf -v modules_line 'MODULES=(%s)' "${modules[*]}"
   printf '%s\n' "$modules_line" >>"$config"
 
   mapfile -t hook_lines < <(grep -E '^HOOKS=\([^)]*\)$' "$config")

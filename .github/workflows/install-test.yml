@@ -1,13 +1,16 @@
 name: Install test
 
-# Builds the ISO a pull request produces once per architecture, then installs
-# it unattended in KVM guests. On x86_64, one job per variant: the default
-# install and the encrypted one run every scenario in test/integration.d/, the
-# others install a machine the default does not cover (another keyboard, a
-# small disk, little memory, BIOS firmware, a slow medium) and run the
-# scenarios that concern it. On aarch64, the live ISO, the install, and the
-# install as an N1x. The default variant's build, install and boot times are
-# what every later change is measured against in its own PR.
+# Builds the ISO a pull request produces once per architecture, then tests it
+# in KVM guests, in parallel jobs that each fetch that ISO. On x86_64, the
+# default install and the encrypted one run the scenarios in
+# test/integration.d/ that boot the installed system; the scenarios that
+# reinstall, and the ones that only boot the live ISO, run in jobs of their
+# own; the other variants install a machine the default does not cover
+# (another keyboard, a small disk, little memory, BIOS firmware, a slow
+# medium) and run the scenarios that concern it. On aarch64, the live ISO,
+# the install, and the install as an N1x, each in its own job. The default
+# variant's build, install and boot times are what every later change is
+# measured against in its own PR.
 
 on:
   pull_request:
@@ -182,12 +185,47 @@ jobs:
       fail-fast: false
       matrix:
         # scenarios: the test/integration.d/ scenarios to run after the
-        # install; empty runs all of them. options go to test/integration,
-        # env to the harness (OMARCHY_INTEGRATION_*, base-test.sh).
+        # install; empty runs all of them but those in except. live: run the
+        # scenarios without the shared install, for the ones that boot the
+        # ISO themselves. options go to test/integration, env to the harness
+        # (OMARCHY_INTEGRATION_*, base-test.sh).
+        #
+        # default and encrypted run every scenario no other job runs, so a
+        # new scenario runs there until it is given a job; except lists the
+        # ones that have one. A scenario that boots only the live ISO runs
+        # once, as the variant changes nothing it does before it stops.
         include:
           - variant: default
+            except: &elsewhere used-disk full-nvram live-lowmem pxe slow-medium corrupt-image luks-calibration
           - variant: encrypted
+            except: *elsewhere
             env: OMARCHY_INTEGRATION_ENCRYPT=true
+          # Reinstalls over a disk the base install has used, and over
+          # firmware with a full NVRAM. live-lowmem boots the live ISO with
+          # the UEFI variables the shared install leaves, so it runs after
+          # one. used-disk and full-nvram also install with LUKS, as the
+          # encrypted job did.
+          - variant: default-reinstall
+            scenarios: used-disk full-nvram live-lowmem
+          - variant: encrypted-reinstall
+            scenarios: used-disk full-nvram
+            env: OMARCHY_INTEGRATION_ENCRYPT=true
+          # The live ISO, without the shared install: pxe installs over the
+          # network itself, the others stop before any disk is formatted.
+          - variant: live-pxe
+            scenarios: pxe
+            live: true
+          # pxe installs, so it runs encrypted too, as the encrypted job did.
+          - variant: live-pxe-encrypted
+            scenarios: pxe
+            live: true
+            env: OMARCHY_INTEGRATION_ENCRYPT=true
+          - variant: live-media
+            scenarios: slow-medium corrupt-image
+            live: true
+          - variant: live-misc
+            scenarios: luks-calibration
+            live: true
           - variant: kb-uk
             scenarios: boot keymap-locale
             env: OMARCHY_INTEGRATION_KB_LAYOUT=uk
@@ -242,15 +280,31 @@ jobs:
           VARIANT: ${{ matrix.variant }}
           VARIANT_ENV: ${{ matrix.env }}
           SCENARIOS: ${{ matrix.scenarios }}
+          EXCEPT: ${{ matrix.except }}
+          LIVE: ${{ matrix.live && 'true' || '' }}
           OPTIONS: ${{ matrix.options }}
           MEMORY: ${{ matrix.memory || 8192 }}
         run: |
           sudo chmod 0666 /dev/kvm
+          if [[ -n $EXCEPT ]]; then
+            # Each scenario left to another job must have one, or it would
+            # run nowhere.
+            for name in $EXCEPT; do
+              grep -Eq "^ +scenarios: (.* )?$name( |$)" .github/workflows/install-test.yml ||
+                { echo "::error::$name is left out of the $VARIANT job, and no other job runs it"; exit 1; }
+            done
+            SCENARIOS=
+            for scenario in test/integration.d/*-test.sh; do
+              name=$(basename "$scenario" -test.sh)
+              [[ $name == base || " $EXCEPT " == *" $name "* ]] || SCENARIOS+="$name "
+            done
+            echo "Scenarios: $SCENARIOS"
+          fi
           variant_env=()
           for setting in $VARIANT_ENV; do variant_env+=(-e "$setting"); done
           docker run --rm --device /dev/kvm -v "$PWD:/w" -w /w \
             -e OMARCHY_INTEGRATION_DISK_CACHE=none -e OMARCHY_INTEGRATION_DISCARD_DISKS=1 \
-            -e OMARCHY_INTEGRATION_VARIANT="$VARIANT" -e SCENARIOS -e OPTIONS -e MEMORY \
+            -e OMARCHY_INTEGRATION_VARIANT="$VARIANT" -e SCENARIOS -e LIVE -e OPTIONS -e MEMORY \
             "${variant_env[@]}" \
             ghcr.io/archlinux/archlinux:latest bash -euo pipefail -c '
               # pacman 7 fails every sync on a kernel without Landlock, which
@@ -273,6 +327,19 @@ jobs:
               printf "#!/bin/sh\nexit 0\n" >/usr/local/bin/omarchy-pkg-add
               chmod 0755 /usr/local/bin/omarchy-pkg-add
               qemu-system-x86_64 --version | head -1
+              if [ -n "$LIVE" ]; then
+                # What test/integration does around a scenario, without its
+                # install: these boot the ISO themselves.
+                export OMARCHY_INTEGRATION_ISO OMARCHY_INTEGRATION_MEMORY="$MEMORY" \
+                  OMARCHY_INTEGRATION_INSTALL_TIMEOUT=1800 OMARCHY_INTEGRATION_NO_PREVIEW=true
+                OMARCHY_INTEGRATION_ISO=$(realpath release/*.iso)
+                status=0
+                for name in $SCENARIOS; do
+                  printf "\033[1;35m==> %s\033[0m\n" "test/integration.d/$name-test.sh"
+                  env -u SCENARIO bash "test/integration.d/$name-test.sh" || status=1
+                done
+                exit "$status"
+              fi
               # shellcheck disable=SC2086 # scenario names and options are separate words
               ./test/integration release/*.iso $SCENARIOS $OPTIONS --no-preview --memory "$MEMORY" --timeout 1800
             '
@@ -286,8 +353,9 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" test-runs
           echo "${{ job.status }}" >test-runs/status
 
+      # A live job installs nothing, so it has no times to report.
       - name: Report times
-        if: always()
+        if: always() && !matrix.live
         env:
           VARIANT: ${{ matrix.variant }}
           VARIANT_ENV: ${{ matrix.env }}
@@ -374,11 +442,32 @@ jobs:
           retention-days: 14
 
   install-aarch64:
-    name: "aarch64: install it unattended, boot the result"
+    name: "aarch64: ${{ matrix.name }}"
     # Skipped with its build, which runs for a trusted author only.
     needs: build-aarch64
     runs-on: namespace-profile-arm64-linux-apple-12x32
     timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        # The same on aarch64, by its own tests, in the image the ISO is
+        # built in: the live ISO to its installer, the install, and the
+        # install as an N1x (the default set and the NVIDIA module that the
+        # installer gives that laptop). artifact: the prefix of the job's
+        # artifact; the install's has none, as the comment workflow reads it.
+        include:
+          - name: install it unattended, boot the result
+            test: arm64-install
+            results: aarch64-integration
+          - name: boot the live ISO to its installer
+            test: arm64-live-boot
+            results: aarch64-live
+            artifact: live-
+          - name: install it as an N1x, boot the result
+            test: arm64-install
+            results: aarch64-n1x
+            platform: aarch64-n1x
+            artifact: n1x-
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -390,16 +479,14 @@ jobs:
         with:
           name: iso-${{ github.run_id }}-aarch64
 
-      # The same on aarch64, by its own tests, in the image the ISO is built
-      # in: first the live ISO to its installer, then the install.
-      - name: Install unattended, then boot the installed system (aarch64)
+      - name: Run the test (aarch64)
+        env:
+          TEST: ${{ matrix.test }}
+          RESULTS: ${{ matrix.results }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
           sudo chmod 0666 /dev/kvm
-          ./test/arm64-container ./test/arm64-live-boot release/*.iso test-runs/aarch64-live
-          ./test/arm64-container ./test/arm64-install release/*.iso test-runs/aarch64-integration
-          # The same ISO once more, as an N1x: the default set and the NVIDIA
-          # module that the installer gives that laptop.
-          PLATFORM=aarch64-n1x ./test/arm64-container ./test/arm64-install release/*.iso test-runs/aarch64-n1x
+          ./test/arm64-container "./test/$TEST" release/*.iso "test-runs/$RESULTS"
 
       # The harness ran as root in its container: test-runs and what QEMU
       # wrote there (the serial logs) belong to root until this step.
@@ -411,7 +498,7 @@ jobs:
           echo "${{ job.status }}" >test-runs/status
 
       - name: Report times
-        if: always()
+        if: always() && matrix.results == 'aarch64-integration'
         run: |
           base=$(ls -d test-runs/*-integration 2>/dev/null | head -1)
           # Without the firmware's share and the total it is part of: in the
@@ -446,14 +533,14 @@ jobs:
       # The comment workflow runs from quattro and reads only this artifact;
       # it needs the PR number, which a workflow_run event omits for forks.
       - name: Record the pull request
-        if: always() && github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request' && !matrix.artifact
         run: echo "${{ github.event.pull_request.number }}" > test-runs/pr-number
 
       - name: Upload test artifacts
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: install-test-${{ github.run_id }}-${{ github.run_attempt }}-aarch64
+          name: install-test-${{ matrix.artifact }}${{ github.run_id }}-${{ github.run_attempt }}-aarch64
           path: |
             test-runs/pr-number
             test-runs/status

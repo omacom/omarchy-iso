@@ -18,6 +18,21 @@ run_earlyhook() {
     udevd_running=1
 }
 
+# Wait up to 30 s for a filesystem with this UUID, asking blkid the way the
+# archiso hook resolves the medium (resolve_device), by-uuid link first. Not udev's by-uuid link:
+# Ventoy boots the ISO as a file on its stick and maps it to
+# /dev/mapper/ventoy with dmsetup, from a udev rule that runs once the
+# stick is scanned, and that device never gets the link.
+wait_for_medium() {
+    local tenths=300
+    while [ "$tenths" -gt 0 ]; do
+        blkid -lt "UUID=$1" -o device >/dev/null 2>&1 && return 0
+        sleep 0.1
+        tenths=$((tenths - 1))
+    done
+    return 1
+}
+
 run_hook() {
     msg ":: Triggering uevents..."
     udevadm trigger --action=add --type=subsystems
@@ -31,7 +46,7 @@ run_hook() {
     # shellcheck disable=SC2154
     if [ -n "${archisosearchuuid}" ] &&
         [ -z "${archiso_nbd_srv}${archiso_nfs_srv}${archiso_http_srv}" ] &&
-        udevadm wait --timeout=30 "/dev/disk/by-uuid/${archisosearchuuid}" 2>/dev/null; then
+        wait_for_medium "${archisosearchuuid}"; then
         return 0
     fi
     udevadm settle

@@ -852,8 +852,14 @@ drive_configurator() {
     # The picker only appears when the disk has usable free space on UEFI.
     wait_for_screen "installation mode" 60
     capture_console "success-installer-11-install-mode"
-    # The fixture has existing partitions: the safe free-space choice is first.
+    # Esc goes back to the disk list rather than ending the install.
+    press esc
+    wait_for_screen "install disk" 60
+    press ret
+    wait_for_screen "installation mode" 60
+    # "Full disk install" comes first; free space is the next entry.
     press home
+    press down
     press ret
     # BitLocker/ESP checks and the free-space analysis run, then the confirm.
     wait_for_screen "of free space" 120

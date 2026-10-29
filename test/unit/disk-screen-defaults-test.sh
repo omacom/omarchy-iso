@@ -3,12 +3,14 @@
 # The disk and mode screens are gum lists, and gum highlights the first entry,
 # so the first entry is the default a user confirms with Enter. Seen on an MSI
 # desktop with a GL.iNet Comet KVM attached: the disk list opened on the
-# Comet's 5.7 GB USB storage and offered its 0-byte optical drive, and on the
-# disk that held the owner's daily install the mode list opened on "Full disk
-# install".
+# Comet's 5.7 GB USB storage and offered its 0-byte optical drive. The mode
+# list opens on "Full disk install" on every disk, the common case; the
+# overwrite confirmation after it names the disk.
 #
 # install_disk_candidates() and install_mode_choices() decide those lists, and
 # the configurator calls them (checked by text below; it cannot be sourced).
+# Esc on either list goes back instead of ending the install, as on the
+# screens before them: 4.5.0rc2 quit the installer there.
 
 set -uo pipefail
 
@@ -84,24 +86,25 @@ check "an SD card goes after the internal disks; an eMMC's boot areas are not of
   "/dev/mmcblk1 /dev/nvme0n1 /dev/mmcblk0" "$(install_disk_candidates "" | list)"
 
 echo "==> the mode list"
-check "a disk with partitions and room: free space first" \
-  "free_space|full_disk|other_disk" \
-  "$(install_mode_choices true 3 | paste -sd'|' -)"
-check "an empty disk with room: full disk first" \
+check "free space on offer: full disk still first" \
   "full_disk|free_space|other_disk" \
-  "$(install_mode_choices true 0 | paste -sd'|' -)"
+  "$(install_mode_choices true | paste -sd'|' -)"
 check "no free-space mode on offer (BIOS, or no room)" \
   "full_disk|other_disk" \
-  "$(install_mode_choices false 3 | paste -sd'|' -)"
+  "$(install_mode_choices false | paste -sd'|' -)"
 
 echo "==> the configurator calls them"
 check "disk list from install_disk_candidates" "1" \
   "$(grep -v '^\s*#' "$CONFIGURATOR" | grep -c 'install_disk_candidates "\$exclude_disk"')"
 check "mode list from install_mode_choices" "1" \
   "$(grep -v '^\s*#' "$CONFIGURATOR" | grep -c 'install_mode_choices "\$free_space_offered"')"
+check "Esc on the disk or mode list does not end the install" "0" \
+  "$(grep -E 't (disk|mode)\.header' "$CONFIGURATOR" | grep -c '|| abort')"
+check "Esc on the mode list goes back to the disk list" "1" \
+  "$(grep -v '^\s*#' "$CONFIGURATOR" | grep -c 'install_mode="other_disk"')"
 
 if ((failures > 0)); then
   echo "FAIL: $failures check(s) failed"
   exit 1
 fi
-echo "ok: the disk and mode screens open on a safe default"
+echo "ok: the disk and mode screens open on full disk and go back on Esc"

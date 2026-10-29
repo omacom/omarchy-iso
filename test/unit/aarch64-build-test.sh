@@ -401,7 +401,7 @@ configure_archiso_aarch64_mkinitcpio "$fixture/archiso.conf"
 grep -Eq '^HOOKS=\(' "$fixture/archiso.conf" || fail "live HOOKS line lost"
 grep -Eq 'microcode|memdisk' "$fixture/archiso.conf" && fail "x86-only hooks remain in the aarch64 live initramfs"
 grep -Eq '^HOOKS=\(.*\bplymouth\b' "$fixture/archiso.conf" || fail "Plymouth is missing from the aarch64 live initramfs"
-grep -q '^MODULES=(i2c_mt65xx i2c_tegra i2c_hid i2c_hid_acpi hid_generic hid_multitouch ' "$fixture/archiso.conf" || fail "early keyboard modules missing"
+grep -q '^MODULES=(loop i2c_mt65xx i2c_tegra i2c_hid i2c_hid_acpi hid_generic hid_multitouch ' "$fixture/archiso.conf" || fail "loop and the early keyboard modules missing"
 # A Snapdragon laptop's platform drivers, for a kernel that builds them as
 # modules. Each is optional, so a kernel without one still gets its image.
 live_modules=$(sed -n 's/^MODULES=(\(.*\))$/\1/p' "$fixture/archiso.conf")

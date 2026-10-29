@@ -49,6 +49,8 @@ jobs:
           fi
 
       - name: Comment on the pull request
+        env:
+          ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
         run: |
           set -euo pipefail
           # The number comes from the pull request's own run, so trust it only
@@ -57,6 +59,23 @@ jobs:
           [ -n "$pr" ] || { echo "No pull request number in the artifact"; exit 0; }
           [ "$(gh api "repos/$REPO/pulls/$pr" -q .head.sha)" = "$HEAD_SHA" ] ||
             { echo "PR #$pr has moved past $HEAD_SHA; not commenting"; exit 0; }
+
+          # An architecture's checks run in several jobs, and the status in its
+          # artifact is one job's. Give each architecture's folder the first
+          # result of its jobs that is not a pass, from the run's own record.
+          # Without that record, each artifact's own status stands: a lookup
+          # that fails must not cost the comment.
+          if ! jobs=$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs?per_page=100" \
+            -q '.jobs[] | [.name, (.conclusion // "")] | @tsv'); then
+            echo "::warning::Could not read the run's jobs; each architecture shows one job's status"
+            jobs=
+          fi
+          for dir in "$RUNNER_TEMP/pr"/*/; do
+            case $(basename "$dir") in *-aarch64) arch=aarch64 ;; *) arch=x86_64 ;; esac
+            worst=$(awk -F'\t' -v prefix="$arch: " \
+              'index($1, prefix) == 1 && $2 != "success" && $2 != "skipped" && $2 != "" { print $2; exit }' <<<"$jobs")
+            [ -z "$worst" ] || echo "$worst" 2>/dev/null >"$dir/status" || true
+          done
 
           ./test/install-test-comment "$RUNNER_TEMP/pr" "$RUNNER_TEMP/base" "$CONCLUSION" "$RUN_URL" "$HEAD_SHA" >"$RUNNER_TEMP/comment.md"
 

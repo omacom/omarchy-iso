@@ -23,7 +23,7 @@ configure_archiso_aarch64_mkinitcpio() {
     qcom_hwspinlock? smem? smp2p? socinfo? llcc-qcom? qcom_aoss? icc-bwmon?
     qcom-cpucp-mbox? nvmem_qfprom? nvmem_qcom-spmi-sdam? qcom-pon? rtc-pm8xxx?
     qcom_tsens? qcom-spmi-temp-alarm? i2c-qcom-geni? i2c-hid-of?
-    phy-qcom-qmp-pcie? phy-qcom-qmp-combo? phy-qcom-eusb2-repeater?
+    phy-qcom-qmp-pcie? phy-qcom-qmp-combo? phy-qcom-eusb2-repeater? phy-nxp-ptn3222?
     phy-snps-eusb2? phy-qcom-edp? dwc3-qcom? xhci-plat-hcd? ps883x? pmic_glink?
     pmic_glink_altmode? pci-pwrctrl-pwrseq? pwrseq-qcom-wcn?
   )

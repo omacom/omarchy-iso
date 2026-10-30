@@ -97,6 +97,24 @@ verify_keymap_and_locale() {
   check "/etc/vconsole.conf records the chosen keymap ($KB_LAYOUT)" \
     ssh_guest ". /etc/vconsole.conf && [ \"\$KEYMAP\" = $(printf %q "$KB_LAYOUT") ]"
 
+  # The desktop reads XKBLAYOUT from the same file (omarchy's hypr/input.lua)
+  # and falls back to us without it. systemd derives it from kbd-model-map,
+  # which has no row for several keymaps the setup form offers (no-latin1,
+  # pl, cz, ...); the installer's alias table covers those. With us the
+  # check would pass on a broken build, so it is made only for another
+  # layout. OMARCHY_INTEGRATION_XKB_LAYOUT pins the exact value (uk -> gb,
+  # no-latin1 -> no); unset, any layout at all is accepted.
+  if [[ $KB_LAYOUT != us ]]; then
+    local expect_xkb="${OMARCHY_INTEGRATION_XKB_LAYOUT:-}"
+    if [[ -n $expect_xkb ]]; then
+      check "/etc/vconsole.conf names XKBLAYOUT=$expect_xkb, what Hyprland types with" \
+        ssh_guest ". /etc/vconsole.conf && [ \"\$XKBLAYOUT\" = $(printf %q "$expect_xkb") ]"
+    else
+      check "/etc/vconsole.conf names an XKBLAYOUT, so Hyprland does not fall back to us" \
+        ssh_guest ". /etc/vconsole.conf && [ -n \"\$XKBLAYOUT\" ]"
+    fi
+  fi
+
   # An exact value, not "non-empty": C.UTF-8 is the bug this scenario exists
   # for and would pass a laxer check.
   #
@@ -127,7 +145,8 @@ verify_keymap_and_locale() {
     # Not a pass: with the default layout this scenario cannot tell a kept
     # choice from a dropped one.
     log "NOTE: KB_LAYOUT is us — the keymap assertion is a tautology here."
-    log "      Run with OMARCHY_INTEGRATION_KB_LAYOUT=uk for the real check."
+    log "      Run with OMARCHY_INTEGRATION_KB_LAYOUT=uk for the real check,"
+    log "      or =no-latin1 to cover the XKB alias table as well."
   else
     # Both halves, because either alone passes on a broken build: a keymap with
     # no vconsole.conf is the image's us default (us.map.gz and nothing else),

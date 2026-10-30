@@ -39,6 +39,11 @@ def supported_keymaps():
 
 SUPPORTED_KEYMAPS = supported_keymaps()
 
+# What systemd-firstboot derives XKBLAYOUT from, and what the layouts it
+# names must exist in.
+KBD_MODEL_MAP = Path("/usr/share/systemd/kbd-model-map")
+XKB_SYMBOLS = Path("/usr/share/X11/xkb/symbols")
+
 
 def localectl_lists_keymaps() -> bool:
     """Whether this host can answer "which keymaps exist".
@@ -79,7 +84,7 @@ class KeyboardConfigurationTest(unittest.TestCase):
             self.assertIn("XKBLAYOUT=us", lines)
             self.assertEqual(lines.count("FONT=default8x16"), 1)
 
-    def test_all_configurator_keymaps_are_known_to_localectl(self):
+    def test_all_setup_form_keymaps_reach_the_console_and_the_desktop(self):
         if SUPPORTED_KEYMAPS is None:
             self.skipTest("no Omarchy runtime checkout to read the layout list from")
         for keymap in SUPPORTED_KEYMAPS:
@@ -88,7 +93,39 @@ class KeyboardConfigurationTest(unittest.TestCase):
                 self.assertTrue(KEYBOARD.configure_keyboard(target, keymap))
                 lines = (target / "etc/vconsole.conf").read_text().splitlines()
                 self.assertIn(f"KEYMAP={keymap}", lines)
+                # Without XKBLAYOUT Hyprland falls back to us: the keymap is
+                # in kbd-model-map or in KEYBOARD.XKB_ALIASES, or this fails.
+                self.assertEqual(
+                    sum(line.startswith("XKBLAYOUT=") for line in lines), 1,
+                    f"{keymap}: no XKBLAYOUT in vconsole.conf, the desktop would type us",
+                )
                 self.assertEqual(lines.count("FONT=default8x16"), 1)
+
+    def test_aliases_fill_in_the_xkb_settings_the_model_map_lacks(self):
+        # systemd-firstboot writes XKBLAYOUT only for keymaps in kbd-model-map.
+        # no-latin1 has no row there, so a Norwegian install typed US in
+        # Hyprland while its console and LUKS prompt were Norwegian.
+        for keymap, layout, variant in (("no-latin1", "no", ""), ("de_CH-latin1", "ch", "de"), ("colemak", "us", "colemak")):
+            with self.subTest(keymap=keymap), tempfile.TemporaryDirectory() as directory:
+                target = self.target(directory)
+                self.assertTrue(KEYBOARD.configure_keyboard(target, keymap))
+                lines = (target / "etc/vconsole.conf").read_text().splitlines()
+                self.assertIn(f"KEYMAP={keymap}", lines)
+                self.assertEqual([line for line in lines if line.startswith("XKBLAYOUT=")], [f"XKBLAYOUT={layout}"])
+                self.assertEqual(
+                    [line for line in lines if line.startswith("XKBVARIANT=")],
+                    [f"XKBVARIANT={variant}"] if variant else [],
+                )
+                self.assertIn("XKBMODEL=pc105", lines)
+                self.assertEqual(lines.count("FONT=default8x16"), 1)
+
+    def test_aliases_leave_a_keymap_the_model_map_knows_alone(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self.target(directory)
+            self.assertTrue(KEYBOARD.configure_keyboard(target, "de-latin1"))
+            lines = (target / "etc/vconsole.conf").read_text().splitlines()
+            self.assertEqual([line for line in lines if line.startswith("XKBLAYOUT=")], ["XKBLAYOUT=de"])
+            self.assertEqual([line for line in lines if line.startswith("XKBVARIANT=")], [])
 
     def test_unknown_and_empty_keymaps_match_archinstall_behavior(self):
         for keymap, expected in (("definitely-not-a-keymap", False), ("", True)):
@@ -129,6 +166,43 @@ class KeyboardConfigurationTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     KEYBOARD.configure_keyboard(target, "us", method, layout)
                 self.assertFalse((target / "etc/omarchy/input-method").exists())
+
+
+class XkbAliasTableTest(unittest.TestCase):
+    """The alias table against the two files it bridges: kbd-model-map (what
+    systemd-firstboot knows) and xkeyboard-config (what Hyprland can load)."""
+
+    def test_aliases_name_only_keymaps_the_model_map_lacks(self):
+        # When systemd adds a row for one of these, firstboot writes the real
+        # thing and the alias is dead weight: drop it.
+        if not KBD_MODEL_MAP.is_file():
+            self.skipTest("no kbd-model-map on this host")
+        mapped = {
+            line.split()[0]
+            for line in KBD_MODEL_MAP.read_text().splitlines()
+            if line.strip() and not line.startswith("#")
+        }
+        for keymap in KEYBOARD.XKB_ALIASES:
+            with self.subTest(keymap=keymap):
+                self.assertNotIn(keymap, mapped, f"kbd-model-map now knows {keymap}; drop the alias")
+
+    def test_aliases_name_layouts_and_variants_xkeyboard_config_has(self):
+        if not XKB_SYMBOLS.is_dir():
+            self.skipTest("no xkeyboard-config on this host")
+        for keymap, (layout, variant) in KEYBOARD.XKB_ALIASES.items():
+            with self.subTest(keymap=keymap):
+                symbols = XKB_SYMBOLS / layout
+                self.assertTrue(symbols.is_file(), f"no XKB layout {layout}")
+                if variant:
+                    self.assertIn(f'xkb_symbols "{variant}"', symbols.read_text(), f"no variant {variant} in {layout}")
+
+    def test_aliases_are_not_empty_or_multiline(self):
+        # vconsole.conf is sourced as shell by Omarchy's migrations; a value
+        # with a newline or a space would break that.
+        for keymap, (layout, variant) in KEYBOARD.XKB_ALIASES.items():
+            with self.subTest(keymap=keymap):
+                self.assertRegex(layout, r"^[a-z]+$")
+                self.assertRegex(variant, r"^[a-z_]*$")
 
 
 if __name__ == "__main__":

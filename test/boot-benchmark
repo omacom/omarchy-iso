@@ -1,0 +1,660 @@
+#!/bin/bash
+#
+# Boot benchmark: how long the ISO and installer keep a user waiting for the
+# "Press Return to Start Install" screen when the ISO is on a USB stick, and
+# how much of that wait the screen is black. The firmware's time is measured
+# too, but kept out of both: the ISO cannot shorten it.
+#
+# The ISO is attached as a throttled usb-storage device, the way a stick boots
+# on real hardware, rather than the IDE CD-ROM the integration suite uses. Two
+# profiles:
+#
+#   usb2  EHCI controller, 40 MB/s. USB 2.0 signals at 480 Mbit/s; bulk
+#         transfers carry at most 13 x 512 bytes per 125 us microframe
+#         (53 MB/s), and mass storage's per-command wrappers leave ~40 MB/s
+#         for the fastest sticks a USB 2.0 port can run.
+#   usb3  xHCI controller, 150 MB/s: a mainstream USB 3 stick, well under the
+#         5 Gbit/s bus, so the stick and not the bus sets the pace.
+#
+# Both read the ISO with O_DIRECT, so the host's page cache never serves the
+# guest faster than the throttle, and each run measures the rate the guest
+# really gets from the stick (after the timing, with the verify units that
+# hash the medium at boot and the configurator's prefetch stopped, and the
+# stick seen idle first) and records the USB link speed it negotiated.
+#
+# Each run boots a fresh VM and
+#
+#   - samples the screen at --fps on its own monitor socket, classifying
+#     every frame black or not: black is under 0.5% of the subpixels
+#     brighter than 25%, which counts QEMU's "Display output
+#     is not active" placeholder, a lone kernel warning line and the
+#     configurator's empty Tokyo Night console with its cursor as black, and
+#     a firmware logo, the splash or any real screen as not,
+#     and with every frame records how many bytes the stick has delivered,
+#   - watches the screen (OCR) until the greeter shows,
+#   - then SSHes in (root's key comes in as a systemd credential over SMBIOS,
+#     so the ISO is booted unmodified and with no cidata drive) and reads
+#     the guest's own clock: the greeter's ttfx animation starts right after
+#     the hint prints, and the guest's uptime pins kernel start on the host
+#     clock. Nothing else is passed in: even switching on IO accounting
+#     for a unit changes how the medium's I/O is scheduled, and with it the
+#     boot being measured.
+#
+# Every run's wait is then split between who can shorten it:
+#
+#   ISO and installer: the time to the greeter, and its black seconds
+#     the boot menu countdown (spans before kernel start where the stick sits
+#     idle for 2 s or more), the boot files at the stick's rate (their size
+#     is the ISO's), kernel + initramfs, and userspace to greeter, with how
+#     much the stick read from kernel start to greeter: when that alone
+#     takes most of the time at the stick's rate, the boot is waiting on the
+#     stick, much of it for the verify hashes competing with it.
+#   Firmware: reported on its own line, in no total and no black count
+#     power-on until the firmware first reads the stick, and the time it
+#     spends reading the boot files beyond what the stick's rate needs (a
+#     slow firmware USB driver; under QEMU, OVMF's EHCI driver reads at
+#     ~8 MB/s whatever the stick does). Its time is cut out of the timeline
+#     before the black seconds are counted (split_wait).
+#
+# Usage: test/boot-benchmark [release/omarchy.iso] [options]
+#
+#   --usb2          The USB 2.0 profile (default)
+#   --usb3          The USB 3 profile
+#   --speed MB      Override the profile's read rate, in MB/s (10^6 bytes)
+#   --runs N        Boots to measure (default 3)
+#   --bios          Boot on SeaBIOS instead of OVMF; ISOLINUX then counts
+#                   down its 15 s menu
+#   --memory MB     VM memory (default 8192)
+#   --smp N         VM CPUs (default 4)
+#   --port PORT     Host port forwarded to guest SSH (default 2330)
+#   --timeout SECS  Give up on a boot after this long (default 600)
+#   --fps N         Screen samples per second (default 50). Every sample is a
+#                   screendump in QEMU's main loop, the loop that also runs
+#                   the throttled medium, so it is capped rather than free.
+#   --out DIR       Results directory (default test-runs/<iso>-boot-benchmark/<stamp>)
+
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+
+ISO=""
+PROFILE=usb2
+SPEED_MB=""
+RUNS=3
+FIRMWARE=uefi
+MEMORY=8192
+SMP=4
+SSH_PORT=2330
+TIMEOUT=600
+FPS=50
+OUT=""
+
+while (($#)); do
+  case "$1" in
+    --usb2) PROFILE=usb2 ;;
+    --usb3) PROFILE=usb3 ;;
+    --speed) SPEED_MB="$2"; shift ;;
+    --runs) RUNS="$2"; shift ;;
+    --bios) FIRMWARE=bios ;;
+    --uefi) FIRMWARE=uefi ;;
+    --memory) MEMORY="$2"; shift ;;
+    --smp) SMP="$2"; shift ;;
+    --port) SSH_PORT="$2"; shift ;;
+    --timeout) TIMEOUT="$2"; shift ;;
+    --fps) FPS="$2"; shift ;;
+    --out) OUT="$2"; shift ;;
+    -h|--help) sed -n '1d; /^#/!q; p' "$0"; exit 0 ;;
+    -*) echo "Unknown option: $1" >&2; exit 1 ;;
+    *) ISO="$1" ;;
+  esac
+  shift
+done
+
+case $PROFILE in
+  usb2) CONTROLLER=usb-ehci; SPEED_MB=${SPEED_MB:-40} ;;
+  usb3) CONTROLLER=qemu-xhci; SPEED_MB=${SPEED_MB:-150} ;;
+esac
+if ! [[ $SPEED_MB =~ ^[0-9]+$ ]] || ((SPEED_MB == 0)); then
+  echo "--speed takes a whole number of MB/s above 0" >&2
+  exit 1
+fi
+BPS=$((SPEED_MB * 1000 * 1000))
+if ! [[ $FPS =~ ^[0-9]+$ ]] || ((FPS == 0)); then
+  echo "--fps takes a whole number above 0" >&2
+  exit 1
+fi
+
+if [[ -z $ISO && -t 0 ]]; then
+  ISO=$(ls -t "$ROOT"/release/*.iso 2>/dev/null | gum choose --header "Select ISO to benchmark")
+fi
+if [[ ! -f ${ISO:-} ]]; then
+  echo "No ISO to benchmark. Pass one explicitly or put it in release/." >&2
+  exit 1
+fi
+ISO=$(realpath "$ISO")
+
+omarchy-pkg-add qemu-full edk2-ovmf socat bc python imagemagick tesseract tesseract-data-eng
+
+OVMF_CODE="/usr/share/edk2/x64/OVMF_CODE.4m.fd"
+OVMF_VARS_TEMPLATE="/usr/share/edk2/x64/OVMF_VARS.4m.fd"
+
+# Black: under this share of the subpixels brighter than 25%.
+BLACK_LIT_FRACTION=0.005
+
+OUT=${OUT:-$ROOT/test-runs/$(basename "$ISO" .iso)-boot-benchmark/$(date +%Y%m%d-%H%M%S)-$FIRMWARE-$PROFILE-${SPEED_MB}mbs}
+mkdir -p "$OUT"
+OUT=$(realpath "$OUT")
+SSH_KEY="$OUT/id_ed25519"
+ssh-keygen -t ed25519 -N "" -q -C "omarchy-boot-benchmark" -f "$SSH_KEY"
+
+QMP_SOCK=$(mktemp -u "${TMPDIR:-/tmp}/omarchy-boot-benchmark-qmp.XXXXXX.sock")
+# The screen sampler's own monitor: QMP serves one client at a time, and the
+# sampler must not wait on the OCR loop's screendumps or the other way round.
+QMP_SCREEN_SOCK="$QMP_SOCK.screen"
+FRAME_DIR=$(mktemp -d "${XDG_RUNTIME_DIR:-/dev/shm}/omarchy-boot-benchmark.XXXXXX")
+RUN_DIR=""
+PIDFILE=""
+SAMPLER_PID=""
+SAMPLER_STATUS=0
+
+log() {
+  printf '\033[1;34m[%s]\033[0m %s\n' "$(date +%H:%M:%S)" "$*"
+}
+
+# ------------------------------------------------------------------ vm
+
+vm_running() {
+  [[ -n $PIDFILE && -f $PIDFILE ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+}
+
+qmp() {
+  printf '{"execute":"qmp_capabilities"}\n{"execute":%s}\n' "$1" |
+    timeout 5 socat -t 2 - "UNIX-CONNECT:$QMP_SOCK" 2>/dev/null || true
+}
+
+# Keeps the sampler's exit status: 143 is the kill below, anything else a
+# sampler that had already died on its own.
+stop_sampler() {
+  [[ -n $SAMPLER_PID ]] || return 0
+  kill "$SAMPLER_PID" 2>/dev/null || true
+  SAMPLER_STATUS=0
+  wait "$SAMPLER_PID" 2>/dev/null || SAMPLER_STATUS=$?
+  SAMPLER_PID=""
+}
+
+stop_vm() {
+  stop_sampler
+  vm_running || return 0
+  qmp '"quit"' >/dev/null
+  for _ in {1..20}; do vm_running || break; sleep 0.25; done
+  vm_running && kill "$(cat "$PIDFILE")" 2>/dev/null || true
+}
+
+cleanup() {
+  stop_vm
+  rm -f "$QMP_SOCK" "$QMP_SCREEN_SOCK"
+  rm -rf "$FRAME_DIR"
+}
+trap cleanup EXIT
+
+start_vm() {
+  local firmware_args=()
+  if [[ $FIRMWARE == uefi ]]; then
+    cp "$OVMF_VARS_TEMPLATE" "$RUN_DIR/OVMF_VARS.4m.fd"
+    firmware_args=(
+      -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE"
+      -drive if=pflash,format=raw,file="$RUN_DIR/OVMF_VARS.4m.fd"
+    )
+  fi
+  # An empty target disk, as the machine being installed would have.
+  qemu-img create -f qcow2 "$RUN_DIR/disk.qcow2" 40G >/dev/null
+
+  qemu-system-x86_64 \
+    -cpu host -enable-kvm -machine q35,accel=kvm \
+    -smp "$SMP" \
+    -m "$MEMORY" \
+    "${firmware_args[@]}" \
+    -drive "file=$RUN_DIR/disk.qcow2,format=qcow2,if=none,id=drive0" \
+    -device virtio-blk-pci,drive=drive0 \
+    -device "$CONTROLLER,id=usb" \
+    -drive "file=$ISO,format=raw,if=none,id=stick,readonly=on,cache.direct=on,throttling.bps-total=$BPS" \
+    -device usb-storage,bus=usb.0,drive=stick,removable=on,bootindex=1 \
+    -device virtio-vga \
+    -display none \
+    -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22" \
+    -device virtio-net-pci,netdev=net0 \
+    -smbios "type=11,value=io.systemd.credential.binary:ssh.authorized_keys.root=$(base64 -w0 "$SSH_KEY.pub")" \
+    -qmp "unix:$QMP_SOCK,server,nowait" \
+    -qmp "unix:$QMP_SCREEN_SOCK,server,nowait" \
+    -serial "file:$RUN_DIR/serial.log" \
+    -pidfile "$PIDFILE" \
+    -daemonize
+}
+
+# One line per frame, "<seconds since $1> <lit fraction> <bytes the stick
+# has delivered>", at $FPS, and a
+# copy of every frame that flips the screen between black and not, for
+# checking the classification by eye. One long-lived process on its own QMP
+# connection: spawning socat and magick per frame tops out near 15 Hz. The
+# frame lands on tmpfs and the bright subpixels are counted in memory, which
+# is a byte delete in C: ~2 ms for a 1280x800 frame. A subpixel counts as
+# bright above 25% (64/255), the same cut as a 25% gray threshold to within
+# the odd saturated color.
+sample_screen() {
+  # exec: stop_sampler kills this PID, which must be the sampler itself.
+  exec python3 -I - "$QMP_SCREEN_SOCK" "$RUN_DIR" "$1" "$FPS" "$BLACK_LIT_FRACTION" "$FRAME_DIR" <<'PY'
+import json, os, shutil, socket, sys, time
+
+sock_path, run_dir, t0, fps, cut, frame_dir = sys.argv[1:]
+t0, period, cut = float(t0), 1 / float(fps), float(cut)
+dark = bytes(range(65))
+shot = os.path.join(frame_dir, "frame.ppm")
+screens = os.path.join(run_dir, "screens")
+os.makedirs(screens, exist_ok=True)
+
+conn = socket.socket(socket.AF_UNIX)
+while True:
+    try:
+        conn.connect(sock_path)
+        break
+    except OSError:
+        time.sleep(0.01)
+qmp = conn.makefile("rwb")
+
+def call(command, **arguments):
+    qmp.write(json.dumps({"execute": command, "arguments": arguments}).encode() + b"\n")
+    qmp.flush()
+    while True:  # skip asynchronous events
+        reply = json.loads(qmp.readline())
+        if "return" in reply or "error" in reply:
+            return reply
+
+def pixels(data):
+    # P6, width, height, maxval, each ended by one whitespace byte; the
+    # raster can itself start with a whitespace-valued byte.
+    pos = 0
+    for _ in range(4):
+        while data[pos] in b" \t\r\n":
+            pos += 1
+        while data[pos] not in b" \t\r\n":
+            pos += 1
+    return data[pos + 1:]
+
+qmp.readline()  # greeting
+call("qmp_capabilities")
+timeline = open(os.path.join(run_dir, "screen-timeline.txt"), "a", buffering=1)
+last, due = None, time.time()
+while True:
+    now = time.time()
+    stats = call("query-blockstats").get("return", [])
+    read = next((d["stats"]["rd_bytes"] for d in stats if d.get("device") == "stick"), -1)
+    if "error" not in call("screendump", filename=shot):
+        with open(shot, "rb") as f:
+            pix = pixels(f.read())
+        lit = len(pix.translate(None, dark)) / len(pix)
+        t = now - t0
+        timeline.write(f"{t:.3f} {lit:.6f} {read}\n")
+        state = "black" if lit < cut else "content"
+        if state != last:
+            shutil.copy(shot, os.path.join(screens, f"{t:07.2f}-{state}.ppm"))
+            last = state
+    due += period
+    time.sleep(max(0, due - time.time()))
+    due = max(due, time.time() - period)  # a stall must not turn into a burst
+PY
+}
+
+# Splits the wait in timeline $1 between the firmware and the ISO, and counts
+# the black seconds in the ISO's part only. $2 is kernel start, $3 the
+# greeter, $4 the stick's rate in MB/s (seconds since QEMU start). Prints
+# "<power-on to first read> <menu> <boot files MB> <boot files at the
+# stick's rate> <firmware read overhead> <MB read from kernel start to
+# greeter> <black> <longest black stretch> <frames> <mean interval ms>",
+# or fails when the timeline has no byte counts.
+#
+# The firmware's time is cut out of the timeline before anything is
+# counted: power-on until its first read of the stick counts for nothing,
+# the menu countdown and kernel start to greeter count in full, and the rest
+# of the boot-file loading counts at the ISO's share of it, the files' size
+# at the stick's rate, so a second there counts as that share of a second.
+# What reading them took beyond that (a slow firmware USB driver, and the
+# loader's own few hundred ms) is the firmware's read overhead. The menu
+# countdown is every span of 2 s or more over which consecutive frames saw
+# the same byte count and that ends in another read before kernel start;
+# counted from the first to the last frame that saw it, so sparse frames
+# never book reading time as idle. Each frame stands for the time until the
+# next one, and before the first frame nothing is on screen yet.
+split_wait() {
+  awk -v kernel="$2" -v greeter="$3" -v rate="$4" -v cut="$BLACK_LIT_FRACTION" '
+    # How much of a second at time x is the ISO and installer'"'"'s.
+    function share(x,   i) {
+      if (x < first || x >= greeter) return 0
+      if (x >= kernel) return 1
+      for (i = 1; i <= spans; i++) if (x >= menu_from[i] && x < menu_to[i]) return 1
+      return scale
+    }
+    # The ISO'"'"'s seconds in [from, to), cut wherever the share can change.
+    function iso_seconds(from, to,   at, n, i, j, x, sum) {
+      if (to <= from) return 0
+      n = 0
+      at[++n] = from; at[++n] = to
+      if (first > from && first < to) at[++n] = first
+      if (kernel > from && kernel < to) at[++n] = kernel
+      if (greeter > from && greeter < to) at[++n] = greeter
+      for (i = 1; i <= spans; i++) {
+        if (menu_from[i] > from && menu_from[i] < to) at[++n] = menu_from[i]
+        if (menu_to[i] > from && menu_to[i] < to) at[++n] = menu_to[i]
+      }
+      for (i = 2; i <= n; i++) {
+        x = at[i]
+        for (j = i - 1; j >= 1 && at[j] > x; j--) at[j + 1] = at[j]
+        at[j + 1] = x
+      }
+      for (i = 1; i < n; i++) sum += (at[i + 1] - at[i]) * share((at[i] + at[i + 1]) / 2)
+      return sum
+    }
+    function frame(from, to, black,   d) {
+      d = iso_seconds(from, to)
+      if (d <= 0) return
+      if (black) { blacks += d; run += d; if (run > longest) longest = run }
+      else run = 0
+    }
+
+    # First pass: the stick reads.
+    NR == FNR {
+      if ($3 < 0) unknown = 1
+      if (first == "" && $3 > 0) { first = $1; since = $1 }
+      else if (first != "" && $1 <= kernel && $3 != last) {
+        if (prev - since >= 2) { spans++; menu_from[spans] = since; menu_to[spans] = prev; menu += prev - since }
+        since = $1
+      }
+      if ($1 <= kernel) at_kernel = $3
+      if ($1 <= greeter) at_greeter = $3
+      prev = $1; last = $3
+      next
+    }
+    FNR == 1 {
+      if (unknown || first == "") { failed = 1; exit }
+      boot = at_kernel / 1e6
+      loading = kernel - first - menu
+      boot_s = boot / rate
+      if (boot_s > loading) boot_s = loading
+      if (boot_s < 0) boot_s = 0
+      scale = loading > 0 ? boot_s / loading : 0
+    }
+    # Second pass: the screen, over the ISO'"'"'s seconds.
+    {
+      if (FNR == 1) frame(0, $1, 1)
+      else {
+        frame(shown, $1, shown_black)
+        if ($1 <= greeter) { frames++; gaps += $1 - shown }
+      }
+      shown = $1; shown_black = ($2 < cut)
+    }
+    END {
+      if (failed || unknown || first == "") exit 1
+      frame(shown, greeter, shown_black)
+      printf "%.1f %.1f %.0f %.1f %.1f %.0f %.1f %.1f %d %.0f\n", first, menu, boot, boot_s, loading - boot_s,
+        (at_greeter - at_kernel) / 1e6, blacks, longest, frames + 1, frames ? gaps / frames * 1000 : 0
+    }' "$1" "$1"
+}
+
+# The greeter's tagline is plain text; its "Press Return to Start Install"
+# hint is dim, which OCR reads less reliably, so either one counts.
+greeter_on_screen() {
+  local shot="$RUN_DIR/.screen.ppm" prepped="$RUN_DIR/.screen.png"
+  qmp "\"screendump\", \"arguments\": {\"filename\": \"$shot\"}" >/dev/null
+  [[ -s $shot ]] || return 1
+  magick "$shot" -colorspace gray -negate -resize 150% -threshold 50% "$prepped" 2>/dev/null || return 1
+  tesseract "$prepped" - --psm 6 2>/dev/null | grep -qiE "start install|agentic linux"
+}
+
+ssh_live_root() {
+  ssh -i "$SSH_KEY" -p "$SSH_PORT" \
+    -o BatchMode=yes -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=5 -o LogLevel=ERROR \
+    root@127.0.0.1 "$@"
+}
+
+# ------------------------------------------------------------------ run
+
+# Sets ROW to one TSV row (the columns of the results.tsv header below): the
+# ISO and installer's time, its black seconds and its legs, then the
+# firmware's time and its legs, then OCR-seen, link speed, measured stick
+# rate and screen sample interval. Not run in a subshell, so the EXIT trap
+# still knows PIDFILE if the benchmark is interrupted mid-boot.
+benchmark_run() {
+  local n="$1" t0 seen="" now probe
+
+  RUN_DIR="$OUT/run-$n"
+  PIDFILE="$RUN_DIR/qemu.pid"
+  mkdir -p "$RUN_DIR"
+  rm -f "$QMP_SOCK" "$QMP_SCREEN_SOCK"
+
+  t0=$EPOCHREALTIME
+  start_vm
+  sample_screen "$t0" &
+  SAMPLER_PID=$!
+
+  local polled
+  while true; do
+    polled=$EPOCHREALTIME
+    if greeter_on_screen; then
+      seen=$(bc <<<"$polled - $t0")
+      break
+    fi
+    vm_running || { echo "run $n: VM exited before the greeter showed" >&2; return 1; }
+    if (($(bc <<<"$EPOCHREALTIME - $t0 > $TIMEOUT"))); then
+      magick "$RUN_DIR/.screen.ppm" "$RUN_DIR/timeout.png" 2>/dev/null || true
+      echo "run $n: no greeter after ${TIMEOUT}s" >&2
+      return 1
+    fi
+    sleep 0.5
+  done
+  stop_sampler
+  # A sampler that died on its own before this (QEMU closed its socket, an
+  # exception) left the timeline short: black_seconds would stretch its last
+  # frame to the greeter, or print nothing and leave TSV fields empty, which
+  # the tab-separated reads collapse into shifted columns.
+  if ((SAMPLER_STATUS != 143)) || [[ ! -s $RUN_DIR/screen-timeline.txt ]]; then
+    echo "run $n: the screen sampler died before the greeter showed (exit $SAMPLER_STATUS)" >&2
+    return 1
+  fi
+  magick "$RUN_DIR/.screen.ppm" "$RUN_DIR/greeter.png" 2>/dev/null || true
+  rm -f "$RUN_DIR/.screen.ppm" "$RUN_DIR/.screen.png"
+
+  local deadline=$((SECONDS + 60))
+  until ssh_live_root true 2>/dev/null; do
+    ((SECONDS < deadline)) || { echo "run $n: no SSH on the live ISO" >&2; return 1; }
+    sleep 1
+  done
+
+  # One round trip for the clocks: the guest's uptime against the host's
+  # clock right after it returns places kernel start on the host timeline
+  # (off by the command's own latency, a few ms over loopback). The greeter
+  # starts its ttfx logo animation right after printing its hint, so that
+  # process's start time is when the screen became ready, on the guest's
+  # clock. bash -s: the live root's login shell is zsh.
+  probe=$(ssh_live_root bash -s <<'EOF'
+read -r uptime _ </proc/uptime
+echo "$uptime"
+systemctl show -p UserspaceTimestampMonotonic --value | awk '{ printf "%.3f\n", $1 / 1000000 }'
+pid=$(pgrep -xo ttfx)
+if [[ -n $pid ]]; then
+  awk -v hz="$(getconf CLK_TCK)" '{ printf "%.3f\n", $22 / hz }' "/proc/$pid/stat"
+else
+  echo "?"
+fi
+EOF
+  )
+  now=$EPOCHREALTIME
+
+  local uptime userspace greeter kernel_at loader total
+  { read -r uptime; read -r userspace; read -r greeter; } <<<"$probe"
+  kernel_at=$(bc <<<"$now - $uptime")
+  loader=$(bc <<<"$kernel_at - $t0")
+  if [[ $greeter == "?" ]]; then
+    total=$seen
+  else
+    total=$(bc <<<"$loader + $greeter")
+  fi
+
+  # systemd-analyze's summary waits for boot to finish, which the verify
+  # units hashing the medium hold off for minutes; blame works meanwhile.
+  ssh_live_root 'systemd-analyze blame --no-pager | head -30; systemctl status --no-pager omarchy-mirror-verify.service omarchy-root-image-verify.service' \
+    >"$RUN_DIR/systemd-analyze.txt" 2>&1 || true
+  ssh_live_root 'cat /var/log/omarchy-install.log; journalctl -b -o short-monotonic --no-pager' >"$RUN_DIR/journal.txt" 2>&1 || true
+
+  # What the guest really gets from the stick, timed now that the boot is:
+  # the verify units and the configurator's prefetch would share the
+  # throttle, so silence both first. The prefetch (warm_offline_mirror in
+  # .automated_script.sh, a background subshell of the configurator) polls
+  # the verify units' jobs once a second and reads the image and the mirror
+  # the moment they are gone, so stopping the units and killing its cat in
+  # the same breath misses it: freeze the configurator's processes before
+  # the jobs can disappear, so it never gets that far, then kill a cat
+  # already under way. Then watch the stick idle for two seconds, longer
+  # than the prefetch's poll, before measuring; one still read at a tenth
+  # of the throttle or more leaves the rate unknown rather than halved.
+  # O_DIRECT keeps the guest's page cache out of it, and 1 GiB in skips what
+  # the boot already read. Ten seconds' worth at the set rate, so the
+  # throttle's one-second burst allowance (bps/10 on top) moves the result
+  # by ~1%, not ~6%.
+  local medium
+  medium=$(ssh_live_root bash -s -- "$SPEED_MB" <<'EOF'
+pkill -STOP -f '[.]automated_script[.]sh'
+pkill -x cat
+systemctl stop omarchy-mirror-verify.service omarchy-root-image-verify.service 2>/dev/null
+dev=$(findmnt -no SOURCE /run/archiso/bootmnt)
+disk=$(lsblk -no PKNAME "$dev" 2>/dev/null | head -1)
+disk=/dev/${disk:-${dev#/dev/}}
+stat=/sys/class/block/${disk#/dev/}/stat
+limit=$(($1 / 10)); ((limit > 0)) || limit=1
+quiet=
+for _ in 1 2 3; do
+  read -r _ _ before _ <"$stat"; sleep 2; read -r _ _ after _ <"$stat"
+  idle_mb=$(((after - before) * 512 / 2000000))
+  ((idle_mb < limit)) && { quiet=1; break; }
+done
+if [[ -z $quiet ]]; then
+  echo "the stick is still read at $idle_mb MB/s now that the boot is done; its rate stays unknown" >&2
+  pkill -CONT -f '[.]automated_script[.]sh'
+  exit 1
+fi
+p=$(readlink -f "/sys/class/block/${disk#/dev/}/device")
+while [[ $p != / && ! -f $p/speed ]]; do p=${p%/*}; done
+link=$(cat "$p/speed" 2>/dev/null || echo "?")
+dd if="$disk" of=/dev/null bs=1M count="$(($1 * 10))" skip=1024 iflag=direct 2>&1 |
+  awk -v link="$link" '/copied/ { for (i = 1; i <= NF; i++) if ($i == "copied,") s = $(i + 1); printf "%s %.1f\n", link, $1 / s / 1e6 }'
+pkill -CONT -f '[.]automated_script[.]sh'
+EOF
+  ) || true
+  local link="?" rate="?"
+  [[ -n $medium ]] && read -r link rate <<<"$medium"
+
+  stop_vm
+
+  local frame
+  for frame in "$RUN_DIR"/screens/*.ppm; do
+    magick "$frame" -resize 320x "${frame%.ppm}.png" && rm -f "$frame"
+  done
+  magick montage -label '%t' "$RUN_DIR"/screens/*.png -tile 6x -geometry +2+2 -background '#444' \
+    -title "black/content flips (seconds since QEMU start)" "$RUN_DIR/screens.png" 2>/dev/null || true
+
+  local to_greeter
+  to_greeter=$(bc <<<"$total - $loader - $userspace")
+
+  # Without the stick's rate or its byte counts the firmware's time cannot
+  # be cut out: everything before kernel start then stays one leg, kept out
+  # of the ISO's time like the firmware's, and the ISO's time and black
+  # seconds are unknown.
+  local split first="?" menu="?" boot_mb="?" boot_s="?" overhead="?" read_mb="?" black="?" longest="?" interval="?"
+  local iso="?" firmware
+  firmware=$(printf '%.1f' "$loader")
+  if [[ $rate != "?" ]] && split=$(split_wait "$RUN_DIR/screen-timeline.txt" "$loader" "$total" "$rate"); then
+    read -r first menu boot_mb boot_s overhead read_mb black longest _ interval <<<"$split"
+    firmware=$(printf '%.1f' "$(bc <<<"$first + $overhead")")
+    iso=$(printf '%.1f' "$(bc <<<"$menu + $boot_s + $total - $loader")")
+  fi
+
+  printf -v ROW '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.1f\t%.1f\t%s\t%s\t%s\t%s\t%.1f\t%s\t%s\t%s' \
+    "$n" "$iso" "$black" "$longest" "$menu" "$boot_mb" "$boot_s" "$userspace" "$to_greeter" "$read_mb" \
+    "$firmware" "$first" "$overhead" \
+    "$seen" "${link}M" "$rate" "$interval"
+}
+
+
+log "ISO:      $ISO"
+log "Medium:   $PROFILE profile: usb-storage on $CONTROLLER, $SPEED_MB MB/s, O_DIRECT"
+log "VM:       $FIRMWARE, $SMP CPUs, $MEMORY MB"
+log "Results:  $OUT"
+
+RESULTS="$OUT/results.tsv"
+printf '%s\t' run iso_s black_s longest_black_s menu_s boot_files_mb boot_files_s \
+  kernel_initrd_s userspace_to_greeter_s read_kernel_to_greeter_mb \
+  firmware_s poweron_to_first_read_s firmware_read_overhead_s \
+  ocr_seen_s usb_link stick_mb_s screen_sample_ms | sed 's/\t$/\n/' >"$RESULTS"
+
+# The breakdown of one row (or of the medians): the ISO and installer's time
+# and its black seconds, and apart from them, counted in neither, the
+# firmware's.
+report() {
+  local iso black longest menu boot_mb boot_s initrd greeter read_mb firmware first overhead rate
+  IFS=$'\t' read -r _ iso black longest menu boot_mb boot_s initrd greeter read_mb firmware first overhead _ _ rate _ <<<"$1"
+  local busy=""
+  [[ $read_mb == "?" ]] ||
+    busy="the stick read $read_mb MB from kernel start, $(printf '%.1f' "$(bc -l <<<"$read_mb / $rate")") s at its rate"
+  if [[ $iso == "?" ]]; then
+    printf '  %-44s %6s     (no stick rate or byte counts to cut the firmware out)\n' "ISO and installer, to the greeter" "?"
+    printf '    %-42s %6s s\n' "kernel + initramfs" "$initrd"
+    printf '    %-42s %6s s\n' "userspace to greeter" "$greeter"
+    printf '  %-44s %6s s   (power-on to kernel start: boot loading not split out)\n' "Firmware (out of our control)" "$firmware"
+    return
+  fi
+  printf '  %-44s %6s s   (%s s black, longest %s s)\n' "ISO and installer, to the greeter" "$iso" "$black" "$longest"
+  printf '    %-42s %6s s\n' "boot menu countdown" "$menu"
+  printf '    %-42s %6s s\n' "boot files ($boot_mb MB) at the stick's rate" "$boot_s"
+  printf '    %-42s %6s s\n' "kernel + initramfs" "$initrd"
+  printf '    %-42s %6s s   %s\n' "userspace to greeter" "$greeter" "${busy:+($busy)}"
+  printf '  %-44s %6s s\n' "Firmware (out of our control)" "$firmware"
+  printf '    %-42s %6s s\n' "power-on to first read of the stick" "$first"
+  printf '    %-42s %6s s   (%s)\n' "boot files read slower than the stick" "$overhead" \
+    "$(printf '%s MB in %.1f s; the stick does %s MB/s' "$boot_mb" "$(bc <<<"$overhead + $boot_s")" "$rate")"
+}
+
+status=0
+for ((n = 1; n <= RUNS; n++)); do
+  log "Run $n/$RUNS"
+  if benchmark_run "$n"; then
+    printf '%s\n' "$ROW" >>"$RESULTS"
+    report "$ROW"
+    IFS=$'\t' read -r _ _ _ _ _ _ _ _ _ _ _ _ _ seen link rate interval <<<"$ROW"
+    log "  OCR saw the greeter ${seen}s after power-on; stick on a ${link}bit/s link read ${rate} MB/s; a screen frame every ${interval} ms"
+  else
+    status=1
+    stop_vm
+  fi
+done
+
+median() {
+  local values count
+  values=$(tail -n +2 "$RESULTS" | cut -f"$1" | sort -n)
+  count=$(wc -l <<<"$values")
+  sed -n "$(((count + 1) / 2))p" <<<"$values"
+}
+
+echo
+column -t -s $'\t' "$RESULTS"
+runs=$(($(wc -l <"$RESULTS") - 1))
+if ((runs > 0)); then
+  echo
+  log "ISO and installer to the greeter ($PROFILE, $SPEED_MB MB/s, $FIRMWARE), median of $runs run(s):"
+  medians=median
+  for ((col = 2; col <= 17; col++)); do
+    medians+=$'\t'$(median "$col")
+  done
+  report "$medians"
+fi
+
+exit $status

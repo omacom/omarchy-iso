@@ -1,0 +1,72 @@
+#!/bin/bash
+#
+# omarchy-discard-partition <partition>
+#
+# Tells the drive that every block of a partition the installer has just
+# created is free, before anything is written to it. Called for the new root
+# partition on both disk paths: after archinstall partitions the whole disk
+# (orchestrator/archinstall_adapter.py), and after the configurator carves the
+# free-space layout (root/configurator), each time after wipefs and before
+# LUKS, mkfs or the root image touch the partition.
+#
+# Without it the drive never learns that the space is free. mkfs.btrfs runs
+# with -K (no whole-device TRIM through dm-crypt, which was seconds on a 1 TB
+# SSD), the root image fills a few GiB, and btrfs's discard=async only trims
+# what is freed after mount. So whatever the space held before (a previous
+# install, Windows) stays live data to the drive's flash translation layer,
+# and sustained writes slow down: a Samsung 990 PRO wrote 2.07 GB/s through
+# LUKS onto such a partition and 6.57 GB/s after a discard. The raw discard of
+# that 327 GB partition took 0.33 s, cheaper than mkfs's TRIM through dm-crypt.
+#
+# Best effort, and never fails the install: a device that cannot discard is
+# skipped, a slow one is stopped after OMARCHY_DISCARD_BUDGET seconds (120),
+# and every outcome is logged. This returns only once blkdiscard has exited,
+# so nothing writes to the partition while a discard is in flight.
+
+set -uo pipefail
+
+part=${1:?usage: omarchy-discard-partition <partition>}
+budget=${OMARCHY_DISCARD_BUDGET:-120}
+esp_type=c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+
+say() { printf 'omarchy-discard-partition: %s\n' "$*"; }
+
+if [[ $(lsblk -dno TYPE "$part" 2>/dev/null) != "part" ]]; then
+  say "$part is not a partition; not discarding"
+  exit 0
+fi
+if [[ $(lsblk -dno PARTTYPE "$part" 2>/dev/null) == "$esp_type" ]]; then
+  say "$part is an EFI system partition; not discarding"
+  exit 0
+fi
+# Mounted, or held by dm-crypt, LVM or md: something is using it. blkdiscard
+# also opens the device exclusively and refuses then (no -f, ever).
+if [[ -n $(lsblk -no MOUNTPOINTS "$part" 2>/dev/null | tr -d '[:space:]') ]] ||
+  compgen -G "/sys/class/block/${part##*/}/holders/*" >/dev/null; then
+  say "$part is in use; not discarding"
+  exit 0
+fi
+max=$(lsblk -bdno DISC-MAX "$part" 2>/dev/null | tr -d '[:space:]')
+if [[ -z $max || $max == 0 ]]; then
+  say "$part does not accept discards; skipping"
+  exit 0
+fi
+
+size=$(lsblk -bdno SIZE "$part" 2>/dev/null | tr -d '[:space:]')
+started=$EPOCHREALTIME
+# A stopped discard still waits for the requests it has already sent to the
+# drive (the kernel stops sending more on a fatal signal, since 6.12 also in
+# the middle of one ioctl), so --step 4G bounds what is in flight when the
+# budget runs out. On a 990 PRO it cost 0.34-0.40 s for 327 GB against 0.33 s
+# in one ioctl (3 runs each). timeout waits for blkdiscard to exit.
+timeout --signal=TERM "$budget" blkdiscard --step 4G "$part" </dev/null
+status=$?
+elapsed=$(awk -v a="$started" -v b="$EPOCHREALTIME" 'BEGIN { printf "%.2f", b - a }')
+
+case $status in
+  0) say "discarded $part ($((size / 1024 / 1024)) MiB) in ${elapsed}s" ;;
+  2) say "$part does not support discards; skipping" ;;
+  124) say "WARNING: discarding $part was still running after ${budget}s; stopped it after ${elapsed}s, the rest of the partition is left as it was" ;;
+  *) say "WARNING: blkdiscard $part failed (exit $status) after ${elapsed}s; continuing without the discard" ;;
+esac
+exit 0

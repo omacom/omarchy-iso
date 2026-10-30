@@ -10,10 +10,12 @@
 # (build_cidata in test/integration.d/base-test.sh), changed where the
 # architecture shows: Limine's binary, the kernel, the mirror.
 #
-# Needs an arm64 host with a usable /dev/kvm, qemu-system-aarch64, the AAVMF
-# firmware, mtools, dosfstools, jq, openssl and tesseract, and for PLATFORM
-# what test/arm64-n1x/make-rom needs. evidence_dir gets the serial log,
-# screenshots, the installer's log and the checks' output.
+# Needs an arm64 host with a usable /dev/kvm, or a Mac with QEMU's hypervisor
+# framework, qemu-system-aarch64, the AAVMF firmware, mtools, dosfstools, jq,
+# openssl and tesseract, and for PLATFORM what test/arm64-n1x/make-rom needs.
+# evidence_dir gets the serial log, screenshots, the installer's log and the
+# checks' output. On macOS, dosfstools and mtools come from Homebrew, whose
+# sbin directory holds mkfs.vfat and is not on PATH by default.
 #
 # Env: TIMEOUT (seconds for install and first boot, default 1500), SMP (8),
 #      MEM (12G), MACHINE (virt with ACPI; test/arm64-live-boot says why the GIC
@@ -24,14 +26,18 @@
 #      MIRROR (where the installed system gets Arch Linux ARM's packages:
 #      Omarchy's own mirror of them).
 set -euo pipefail
-[[ $# -eq 2 ]] || { sed -n '2,22p' "$0" >&2; exit 2; }
+[[ $# -eq 2 ]] || { sed -n '2,27p' "$0" >&2; exit 2; }
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 iso=$(realpath "$1")
-out=$(realpath -m "$2")
+mkdir -p "$2"
+out=$(cd -- "$2" && pwd -P)
 mkdir -p "$out/shots"
 
-[[ $(uname -m) == aarch64 ]] || { echo "arm64-install: this needs an arm64 host" >&2; exit 1; }
-[[ -r /dev/kvm && -w /dev/kvm ]] || { echo "arm64-install: /dev/kvm is not usable" >&2; exit 1; }
+[[ $(uname -m) =~ ^(aarch64|arm64)$ ]] || { echo "arm64-install: this needs an arm64 host" >&2; exit 1; }
+source "$ROOT/bin/lib/qemu-accel.sh"
+qemu_accel || exit 1
+command -v mkfs.vfat >/dev/null ||
+  { echo "arm64-install: mkfs.vfat is missing: install dosfstools, and on macOS add \$(brew --prefix)/sbin to PATH" >&2; exit 1; }
 [[ ${PLATFORM:-aarch64-n1x} == aarch64-n1x ]] || { echo "arm64-install: PLATFORM can only be aarch64-n1x" >&2; exit 2; }
 source "$ROOT/bin/lib/aarch64-firmware.sh"
 aarch64_uefi_firmware || { echo "arm64-install: no aarch64 UEFI firmware found" >&2; exit 1; }
@@ -97,7 +103,7 @@ cp "$vars" "$state/vars.fd"
 # what it boots by ACPI, as an N1x laptop or an Arm server is, so no device tree
 # is passed and MSIs reach the GICv2m through the MADT's MSI frame.
 # test/arm64-live-boot boots the ISO with the device tree.
-qemu-system-aarch64 -machine "${MACHINE:-virt,gic-version=3,msi=gicv2m,acpi=on}" -accel kvm -cpu host \
+qemu-system-aarch64 -machine "${MACHINE:-virt,gic-version=3,msi=gicv2m,acpi=on}" "${QEMU_ACCEL[@]}" \
   -smp "${SMP:-8}" -m "${MEM:-12G}" \
   -drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$state/vars.fd" \
   -drive "file=$state/target.qcow2,format=qcow2,if=none,id=target" -device virtio-blk-pci,drive=target,bootindex=0 \

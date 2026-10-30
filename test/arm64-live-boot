@@ -6,8 +6,9 @@
 #
 #   test/arm64-live-boot <omarchy.iso> <evidence_dir>
 #
-# Needs an arm64 host with a usable /dev/kvm, qemu-system-aarch64 and the
-# AAVMF/edk2 firmware. evidence_dir gets serial.log, screen.png and timing.
+# Needs an arm64 host with a usable /dev/kvm or a Mac with QEMU's hypervisor
+# framework, qemu-system-aarch64 and the AAVMF/edk2 firmware. evidence_dir gets
+# serial.log, screen.png and timing.
 #
 # Env: TIMEOUT (seconds to wait for the login prompt, default 600), SMP (4),
 #      MEM (8G), MACHINE. The default machine is the one that works under
@@ -16,11 +17,12 @@
 set -euo pipefail
 [[ $# -eq 2 ]] || { sed -n '2,16p' "$0" >&2; exit 2; }
 iso=$(realpath "$1")
-out=$(realpath -m "$2")
-mkdir -p "$out"
+mkdir -p "$2"
+out=$(cd -- "$2" && pwd -P)
 
-[[ $(uname -m) == aarch64 ]] || { echo "arm64-live-boot: this needs an arm64 host" >&2; exit 1; }
-[[ -r /dev/kvm && -w /dev/kvm ]] || { echo "arm64-live-boot: /dev/kvm is not usable" >&2; exit 1; }
+[[ $(uname -m) =~ ^(aarch64|arm64)$ ]] || { echo "arm64-live-boot: this needs an arm64 host" >&2; exit 1; }
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/bin/lib/qemu-accel.sh"
+qemu_accel || exit 1
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/bin/lib/aarch64-firmware.sh"
 aarch64_uefi_firmware || { echo "arm64-live-boot: no aarch64 UEFI firmware found" >&2; exit 1; }
 code=$AARCH64_UEFI_CODE vars=$AARCH64_UEFI_VARS
@@ -54,7 +56,7 @@ PY
 }
 
 start=$(date +%s)
-qemu-system-aarch64 -machine "${MACHINE:-virt,gic-version=3,msi=gicv2m,acpi=off}" -accel kvm -cpu host \
+qemu-system-aarch64 -machine "${MACHINE:-virt,gic-version=3,msi=gicv2m,acpi=off}" "${QEMU_ACCEL[@]}" \
   -smp "${SMP:-4}" -m "${MEM:-8G}" \
   -drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$state/vars.fd" \
   -device virtio-scsi-pci -drive "file=$iso,format=raw,if=none,id=iso,media=cdrom,readonly=on" \

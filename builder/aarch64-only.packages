@@ -2,7 +2,8 @@
 # machine has, so no x86_64 build carries them: the x86_64 build leaves each one
 # out of its offline mirror and out of its install set. Every one of these is
 # installed by the hardware setup of the model that needs it, not by a default
-# install set.
+# install set. test/edge-packages reads this list too, to ask the repositories
+# the same question without building an ISO.
 asus-proart-p14-speaker-firmware
 asus-zenbook-a16-audio
 iptsd

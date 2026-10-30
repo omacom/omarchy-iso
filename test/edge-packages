@@ -1,0 +1,165 @@
+#!/bin/bash
+#
+# Asks the edge repositories whether they serve every name the edge runtime's
+# package lists carry, for each architecture the nightly builds.
+#
+# The ISO build resolves those lists while it runs, and it knows only the
+# architecture it built: a name the runtime gained that no repository serves
+# stops the nightly, hours after the runtime published, one architecture at a
+# time. A pull request builds from stable and never reads the edge runtime's
+# lists at all. This asks the same repositories the same question in under a
+# minute, and says which package and which list.
+#
+# That is the class of #17039: asus-zenbook-a16-audio reached the runtime's
+# install/omarchy-other.packages, no x86_64 repository served it, and the
+# x86_64 nightly failed in the builder's guard.
+#
+# It checks names, not dependency resolution: a package that exists but whose
+# dependencies cannot be met still fails only in a build.
+#
+# Usage: test/edge-packages [channel]   (edge by default; rc and stable work too)
+#
+# Needs pacman, bsdtar and curl, and root for pacman's own sync. The pacman
+# configurations are this tree's, so the repositories and their order are the
+# build's own.
+
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+channel=${1:-edge}
+case $channel in
+edge) runtime=omarchy-dev ;;
+rc | stable) runtime=omarchy ;;
+*)
+  echo "edge-packages: '$channel' is not a channel: use edge, rc or stable" >&2
+  exit 2
+  ;;
+esac
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+failed=0
+report=()
+
+# The architecture's own pacman configuration, with signatures off: the
+# question here is whether a name exists, and the build'keyring is not built
+# yet.
+config_for() {
+  local arch=$1 out=$2 src
+  src=$ROOT/configs/pacman-online-$channel.conf
+  [[ $arch == aarch64 ]] && src=$ROOT/configs/pacman-online-aarch64-$channel.conf
+  # [platform] is the bundle an aarch64 build mounts at /packages, not a
+  # repository: there is nothing to ask for a name there.
+  awk '/^\[/ { skip = ($0 == "[platform]") } !skip' "$src" |
+    sed -e 's/^SigLevel *=.*/SigLevel = Never/' -e "s/^Architecture *=.*/Architecture = $arch/" >"$out"
+}
+
+# The names the build reads from the runtime for this architecture, as
+# omarchy-pkg-defaults reads them: the base list, the architecture's and each
+# platform's additions, and what the offline mirror carries.
+names_for() {
+  local arch=$1 dir=$2
+  {
+    sed -e 's/[[:space:]]*#.*$//' -e '/^[[:space:]]*$/d' \
+      "$dir/usr/share/omarchy/install/omarchy-base.packages" \
+      "$dir/usr/share/omarchy/install/omarchy-other.packages"
+    if [[ $arch == aarch64 ]]; then
+      # Every ARM platform's list, except Apple's: an Apple Silicon machine is
+      # installed from macOS with Asahi ALARM, and no ISO here builds for it.
+      local list
+      for list in "$dir"/usr/share/omarchy/install/omarchy-aarch64*.packages; do
+        [[ ${list##*/} == omarchy-aarch64-apple.packages ]] && continue
+        sed -e 's/[[:space:]]*#.*$//' -e '/^[[:space:]]*$/d' "$list"
+      done
+    fi
+  } | awk '!seen[$0]++'
+}
+
+check_arch() {
+  local arch=$1 dir=$work/$1 conf=$work/$1/pacman.conf
+  local pkg served name
+  mkdir -p "$dir"/{db,cache,root}
+  config_for "$arch" "$conf"
+
+  local attempt
+  for attempt in 1 2 3; do
+    if pacman --config "$conf" --dbpath "$dir/db" --noconfirm -Sy >/dev/null; then
+      break
+    elif ((attempt < 3)); then
+      echo "edge-packages: syncing the $arch databases failed, attempt $attempt of 3; trying again in 15 s" >&2
+      sleep 15
+    else
+      echo "edge-packages: could not sync the $arch databases" >&2
+      exit 1
+    fi
+  done
+  # Written to a file rather than piped: a reader that stops early leaves pacman
+  # with SIGPIPE, and pipefail would call that a failed sync.
+  pacman --config "$conf" --dbpath "$dir/db" -Slq | sort -u >"$dir/served"
+  if ! grep -qx "$runtime" "$dir/served"; then
+    echo "edge-packages: the $channel channel has no $runtime for $arch" >&2
+    exit 1
+  fi
+
+  if ! pacman --config "$conf" --dbpath "$dir/db" --cachedir "$dir/cache" --noconfirm -Syw "$runtime" >/dev/null; then
+    echo "edge-packages: could not download $runtime for $arch" >&2
+    exit 1
+  fi
+  pkg=$(find "$dir/cache" -maxdepth 1 -name "$runtime-*.pkg.tar.*" ! -name '*.sig' -print -quit)
+  if [[ -z $pkg ]]; then
+    echo "edge-packages: $runtime for $arch was not downloaded" >&2
+    exit 1
+  fi
+  bsdtar -xf "$pkg" -C "$dir/root" --include='usr/share/omarchy/install/*.packages'
+
+  local -a names
+  mapfile -t names < <(names_for "$arch" "$dir/root")
+  # A silent zero would read as a pass: the runtime ships these lists, so a
+  # handful of names means the extraction, not the repositories, went wrong.
+  if (( ${#names[@]} < 100 )); then
+    echo "edge-packages: read ${#names[@]} names for $arch from $runtime; its package lists are missing" >&2
+    exit 1
+  fi
+  if [[ $arch == aarch64 ]]; then
+    # The build drops x86-only names before it resolves them.
+    source "$ROOT/builder/aarch64-package-filter.sh"
+    mapfile -t names < <(filter_aarch64_packages linux-omarchy "${names[@]}" 2>/dev/null)
+  else
+    # The x86_64 build drops the names only an aarch64 machine has.
+    grep -hv '^#\|^$' "$ROOT/builder/aarch64-only.packages" >"$dir/excluded"
+  fi
+
+  for name in "${names[@]}"; do
+    [[ -n $name ]] || continue
+    if [[ -f $dir/excluded ]] && grep -Fxq -- "$name" "$dir/excluded"; then
+      continue
+    fi
+    grep -Fxq -- "$name" "$dir/served" && continue
+    # A group or a virtual name is not in -Slq; keep anything -Sp resolves.
+    pacman --config "$conf" --dbpath "$dir/db" -Sp --print-format '%n' --noconfirm "$name" >/dev/null 2>&1 && continue
+    echo "::error::no $arch repository serves '$name', which the $channel $runtime asks for" >&2
+    report+=("$name ($arch)")
+    failed=1
+  done
+  echo "edge-packages: checked ${#names[@]} names for $arch"
+}
+
+check_arch x86_64
+check_arch aarch64
+
+if ((failed)); then
+  printf '\nThe nightly build would stop on these, one architecture at a time:\n' >&2
+  printf '  %s\n' "${report[@]}" >&2
+  cat >&2 <<'MSG'
+
+Either a repository must serve the name for that architecture, or the build
+has to be told to leave it out: builder/aarch64-only.packages when only an
+aarch64 machine has it, builder/aarch64-package-filter.sh when only x86_64
+does. A model-specific package that only one machine installs belongs in
+install/omarchy-other.packages with one of those, never in a platform list.
+MSG
+  exit 1
+fi
+
+echo "every name the $channel runtime asks for is served on both architectures"

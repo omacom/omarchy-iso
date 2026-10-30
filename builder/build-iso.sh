@@ -604,7 +604,8 @@ mapfile -t target_packages < <(
 
 # x86_64: Omarchy's optional list also names packages for aarch64 boards,
 # which have no x86_64 build. Each exclusion is explicit and printed, and the
-# list is a file of its own so it can be read without parsing this script.
+# list is a file of its own so it can be read without parsing this script, which
+# is what test/edge-packages does.
 if [[ $OMARCHY_ARCH == x86_64 ]]; then
   mapfile -t aarch64_only < <(grep -hv '^#\|^$' /builder/aarch64-only.packages)
   printf 'x86_64: excluding aarch64-only package %s\n' "${aarch64_only[@]}" >&2

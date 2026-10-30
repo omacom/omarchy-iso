@@ -1,0 +1,45 @@
+name: Edge package names
+
+# Asks the edge repositories whether they serve every name the edge runtime's
+# package lists carry, for both architectures the nightly builds. A name the
+# runtime gained that no repository serves stops the nightly, hours after the
+# runtime published, one architecture at a time; a pull request builds from
+# stable and never reads those lists. test/edge-packages asks the same question
+# in about two minutes and names the package.
+#
+# Not on pull requests: it measures the published channel, not the change, so a
+# run there would say the same thing whatever the pull request did. Dispatch it
+# by hand when a change touches builder/aarch64-only.packages or
+# builder/aarch64-package-filter.sh.
+
+on:
+  schedule:
+    - cron: "17 */4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edge-packages
+  cancel-in-progress: true
+
+jobs:
+  names:
+    name: Every name the edge runtime asks for is served
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Ask the edge repositories
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w ghcr.io/archlinux/archlinux:latest bash -euo pipefail -c '
+            # pacman 7 fails every sync on a kernel without Landlock, which
+            # these runners have; omarchy-iso does the same.
+            if ! grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then
+              printf "#!/bin/sh\nexec /usr/bin/pacman --disable-sandbox \"\$@\"\n" >/usr/local/bin/pacman
+              chmod 0755 /usr/local/bin/pacman
+            fi
+            ./test/edge-packages
+          '

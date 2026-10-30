@@ -605,7 +605,7 @@ mapfile -t target_packages < <(
 # x86_64: Omarchy's optional list also names packages for aarch64 boards,
 # which have no x86_64 build. Each exclusion is explicit and printed.
 if [[ $OMARCHY_ARCH == x86_64 ]]; then
-  aarch64_only=(asus-proart-p14-speaker-firmware iptsd surface-pro-11-sensors surface-pro-11-support)
+  aarch64_only=(asus-proart-p14-speaker-firmware asus-proart-p16-speaker-firmware iptsd surface-pro-11-sensors surface-pro-11-support)
   printf 'x86_64: excluding aarch64-only package %s\n' "${aarch64_only[@]}" >&2
   mapfile -t all_packages < <(printf '%s\n' "${all_packages[@]}" | grep -Fxv -f <(printf '%s\n' "${aarch64_only[@]}"))
   mapfile -t target_packages < <(printf '%s\n' "${target_packages[@]}" | grep -Fxv -f <(printf '%s\n' "${aarch64_only[@]}"))

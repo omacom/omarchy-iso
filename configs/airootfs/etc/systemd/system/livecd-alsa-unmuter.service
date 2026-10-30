@@ -1,0 +1,21 @@
+[Unit]
+Description=Unmute All Sound Card Controls For Use With The Live Arch Environment
+# Only the accessibility entry needs sound. releng orders this after
+# systemd-udev-settle.service and wants it, which pulled settle into every
+# boot with a sound card although the condition then skips this unit, and
+# settle holds sysinit.target until every device has been probed. Settle
+# here instead: the condition gates ExecStartPre=, so only accessibility
+# boots wait, and they still see every card, not just the first one that
+# started sound.target. A settle that times out on some unrelated device
+# must not keep the cards it did find muted, as releng's soft Wants= never
+# did, so its failure is ignored.
+After=sound.target
+ConditionKernelCommandLine=accessibility=on
+
+[Service]
+Type=oneshot
+ExecStartPre=-/usr/bin/udevadm settle
+ExecStart=/usr/local/bin/livecd-sound -u
+
+[Install]
+WantedBy=sound.target

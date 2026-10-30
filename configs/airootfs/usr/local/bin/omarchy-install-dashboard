@@ -122,19 +122,14 @@ term_size() { stty size 2>/dev/null <"$TTY_PATH" || printf '24 80\n'; }
 term_cols() { local size; size="$(term_size)"; printf '%s\n' "${size#* }"; }
 
 # Read the actual character dimensions instead of assuming an 8 x 16 font.
-# Linux VTs expose the font through KDFONTOP; desktop terminals may expose
-# pixels in their window size or answer the standard cell-size query.
+# Desktop terminals expose pixels in their window size. A Linux VT leaves those
+# at zero but reports its font through KDFONTOP.
 term_cell_size() {
   python3 - "$TTY_PATH" <<'PY'
 import fcntl
-import os
-import re
-import select
 import struct
 import sys
 import termios
-import time
-import tty
 
 with open(sys.argv[1], "r+b", buffering=0) as terminal:
     fd = terminal.fileno()
@@ -144,7 +139,11 @@ with open(sys.argv[1], "r+b", buffering=0) as terminal:
         print(round(width / cols), round(height / rows))
         sys.exit()
     try:
-        font = bytearray(struct.pack("@5IP", 1, 0, 0, 0, 0, 0))
+        # KD_FONT_OP_GET with no data pointer fills in only the size, but the
+        # kernel refuses with ENOSPC a font larger than the width and height
+        # passed in. A plain GET returns fonts up to 32 rows, and none here is
+        # wider than 16, so 32 x 32 lets it answer.
+        font = bytearray(struct.pack("@5IP", 1, 0, 32, 32, 0, 0))
         fcntl.ioctl(fd, 0x4B72, font)  # KDFONTOP / KD_FONT_OP_GET, no glyph data
         _, _, width, height, _ = struct.unpack_from("@5I", font)
         if width and height:
@@ -152,25 +151,6 @@ with open(sys.argv[1], "r+b", buffering=0) as terminal:
             sys.exit()
     except OSError:
         pass
-
-    settings = termios.tcgetattr(fd)
-    try:
-        tty.setcbreak(fd, termios.TCSANOW)
-        os.write(fd, b"\x1b[16t")
-        response = b""
-        deadline = time.monotonic() + 0.15
-        while select.select([fd], [], [], max(0, deadline - time.monotonic()))[0]:
-            response += os.read(fd, 64)
-            match = re.search(rb"\x1b\[6;(\d+);(\d+)t", response)
-            if match:
-                height, width = map(int, match.groups())
-                if width and height:
-                    print(width, height)
-                    sys.exit()
-            if time.monotonic() >= deadline:
-                break
-    finally:
-        termios.tcsetattr(fd, termios.TCSANOW, settings)
     print(8, 16)  # Conventional console font when dimensions aren't available.
 PY
 }
@@ -455,8 +435,13 @@ icon_cell() {
     ICON_FRAME+="${CSI}${upper};49m▀"
   elif (( upper == 0 )); then
     ICON_FRAME+="${CSI}${lower};49m▄"
-  else
+  elif (( upper >= 90 )); then
     ICON_FRAME+="${CSI}${upper};$((lower + 10))m▀"
+  else
+    # The VT reads bright backgrounds (100-107) as normal ones (40-47), so the
+    # grey half under a green tip would vanish. The bright half is always the
+    # foreground: green over grey is grey ▄ on green.
+    ICON_FRAME+="${CSI}${lower};$((upper + 10))m▄"
   fi
 }
 

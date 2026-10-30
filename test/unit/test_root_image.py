@@ -139,7 +139,7 @@ class VerifyRootImageTest(unittest.TestCase):
     def test_corrupt_medium_raises_with_the_helpers_message(self):
         stderr = ("install medium is corrupt: re-flash it\n"
                   "sha256 mismatch on the root image\n"
-                  "omarchy-root.img.zst: FAILED")
+                  "omarchy-root.sfs: FAILED")
         with self.helper_returns(1, stdout="boot medium: /dev/sda1 ...\n", stderr=stderr):
             with self.assertRaises(RuntimeError) as raised:
                 phases_impl.verify_install_medium(self.ctx)
@@ -158,7 +158,7 @@ class VerifyRootImageTest(unittest.TestCase):
         # size-based timeout (here 3 s). The helper's stall check must get to
         # run during that wait, not after the progress mirroring has sat it out.
         with tempfile.TemporaryDirectory() as tmp:
-            stream = Path(tmp) / "omarchy-root.img.zst"
+            stream = Path(tmp) / "omarchy-root.sfs"
             stream.write_bytes(b"\0" * 4096)
             began = time.monotonic()
 
@@ -199,7 +199,7 @@ class PublishVerifyProgressTest(unittest.TestCase):
 
     def test_mirrors_hasher_read_position(self):
         with tempfile.TemporaryDirectory() as tmp:
-            stream = (Path(tmp) / "omarchy-root.img.zst").resolve()
+            stream = (Path(tmp) / "omarchy-root.sfs").resolve()
             stream.write_bytes(b"\0" * 4096)
             states = iter(["activating", "active"])
 
@@ -227,7 +227,7 @@ class PublishVerifyProgressTest(unittest.TestCase):
         # 2000 + 1024 of 6096 bytes.
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp).resolve()
-            stream = tmp / "omarchy-root.img.zst"
+            stream = tmp / "omarchy-root.sfs"
             stream.write_bytes(b"\0" * 4096)
             mirror = tmp / "mirror"
             mirror.mkdir()
@@ -267,7 +267,7 @@ class PublishVerifyProgressTest(unittest.TestCase):
 
     def test_missing_image_is_a_no_op(self):
         with mock.patch.object(phases_impl, "ROOT_IMAGE",
-                               Path("/nonexistent/omarchy-root.img.zst")), \
+                               Path("/nonexistent/omarchy-root.sfs")), \
              mock.patch.object(phases_impl, "_verify_unit_property") as show:
             phases_impl._publish_verify_progress(ctx=None)
         show.assert_not_called()

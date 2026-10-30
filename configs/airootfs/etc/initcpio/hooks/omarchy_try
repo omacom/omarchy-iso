@@ -1,0 +1,129 @@
+#!/usr/bin/ash
+# The root image under the new root, after archiso has found the medium and
+# mounted its live environment there:
+#
+#   omarchy-root.sfs  the squashfs on the medium holding the root image
+#   omarchy-root.img  the image, attached read-only to a loop device
+#   its btrfs         mounted read-only, subvolume omarchy-root
+#
+# The live system is built as a layer over that image
+# (builder/dedup-airootfs.sh), so a live boot stacks it on the image, over
+# archiso's own writable space.
+#
+# With omarchy.try=1, Try Omarchy boots the installed system instead:
+#
+#   omarchy-try.sfs   the Try layer (builder/build-try-layer.sh): the user, the
+#                     session, nothing that touches a disk
+#   omarchy-try-*.sfs a driver layer on top, for the machine's NVIDIA card or
+#                     T2 chip
+#   tmpfs             where everything the session writes goes
+#
+# A kernel the image has no modules for (linux-t2, which a Mac boots) gets the
+# live system's own module tree, which archiso has mounted already.
+#
+# The backing mounts stay under /run, which switch_root carries into the new
+# root, so the loop device keeps its file for as long as the system runs.
+
+# Never fall through to the live installer: someone picked Try, and the live
+# system would start an install (an unattended one when a cidata drive is
+# attached). A shell to look around in, then a reboot.
+boot_failed() {
+    err "Omarchy: $1. Nothing has been installed; the machine restarts when you leave this shell."
+    launch_interactive_shell
+    reboot -f
+}
+
+mount_image() {
+    local loop
+    mkdir -p /run/omarchy-root/sfs /run/omarchy-root/image
+    # threads=multi: squashfs decompresses on every core instead of one.
+    mount -t squashfs -o ro,loop,threads=multi "$1" /run/omarchy-root/sfs &&
+        loop="$(losetup --find --show --read-only -- /run/omarchy-root/sfs/omarchy-root.img)" &&
+        mount -t btrfs -o ro,subvol=omarchy-root "$loop" /run/omarchy-root/image
+}
+
+# Which NVIDIA driver the machine's card takes, as Omarchy's installer decides
+# it: its own detectors, run from the image against this machine's sysfs.
+try_nvidia() {
+    local image=/run/omarchy-root/image
+    mount --bind /sys "$image/sys" 2>/dev/null || return 0
+    if chroot "$image" /usr/share/omarchy/bin/omarchy-hw-nvidia-gsp; then
+        echo nvidia-open
+    elif chroot "$image" /usr/share/omarchy/bin/omarchy-hw-nvidia-without-gsp; then
+        echo nvidia-580xx
+    fi
+    umount "$image/sys"
+}
+
+# A T2 Mac: the T2 bridge, by the IDs install/hardware/apple/fix-t2.sh checks.
+try_t2() {
+    local device
+    for device in /sys/bus/pci/devices/*; do
+        [ "$(cat "$device/vendor")" = 0x106b ] || continue
+        case "$(cat "$device/device")" in 0x1801 | 0x1802) echo t2; return ;; esac
+    done
+}
+
+run_latehook() {
+    local base sfs layer upper lower driver kver
+    # shellcheck disable=SC2154
+    # archisobasedir comes from the command line (parse_cmdline in init).
+    base="/run/archiso/bootmnt/${archisobasedir:-arch}/$(uname -m)"
+    sfs="$base/omarchy-root.sfs"
+
+    if [ "$(getarg omarchy.try)" != "1" ]; then
+        [ -e /run/archiso/airootfs/etc/omarchy-iso-live-over-image ] || return 0
+        mount_image "$sfs" || boot_failed "the live system needs $sfs, which could not be mounted"
+        # shellcheck disable=SC2154
+        # cow_directory is archiso's (its run_hook), as are the directories.
+        umount /new_root &&
+            mount -t overlay airootfs \
+                -o "lowerdir=/run/archiso/airootfs:/run/omarchy-root/image,upperdir=/run/archiso/cowspace/${cow_directory}/upperdir,workdir=/run/archiso/cowspace/${cow_directory}/workdir" \
+                /new_root || boot_failed "could not mount the live system over the root image"
+        return 0
+    fi
+
+    layer="$base/omarchy-try.sfs"
+    if [ ! -f "$sfs" ] || [ ! -f "$layer" ]; then
+        boot_failed "Try Omarchy needs $sfs and $layer"
+    fi
+    mkdir -p /run/omarchy-try/layer /run/omarchy-try/rw
+    if ! mount_image "$sfs" || ! mount -t squashfs -o ro,loop "$layer" /run/omarchy-try/layer; then
+        boot_failed "Try Omarchy could not mount the root image"
+    fi
+
+    # The driver layer, where this machine needs one and the ISO carries it.
+    # The NVIDIA layers hold modules for the image's kernel only.
+    lower=/run/omarchy-try/layer:/run/omarchy-root/image
+    kver=$(uname -r)
+    if [ -d "/run/omarchy-root/image/usr/lib/modules/$kver" ]; then
+        driver=$(try_nvidia)
+    else
+        driver=$(try_t2)
+    fi
+    if [ -n "$driver" ] && [ -f "$base/omarchy-try-$driver.sfs" ]; then
+        mkdir -p /run/omarchy-try/driver
+        if mount -t squashfs -o ro,loop "$base/omarchy-try-$driver.sfs" /run/omarchy-try/driver; then
+            lower=/run/omarchy-try/driver:$lower
+            msg ":: Try Omarchy: with the $driver layer"
+        fi
+    fi
+
+    # Half of RAM for what the session writes; tmpfs takes pages only as they
+    # are used.
+    upper=/run/omarchy-try/rw
+    mount -t tmpfs -o size=50%,mode=0755 omarchy-try "$upper"
+    mkdir -p "$upper/upper" "$upper/work"
+
+    # archiso's own root: its live environment over a tmpfs. Nothing has run
+    # from it yet.
+    umount /new_root || boot_failed "Try Omarchy could not unmount the live root"
+    mount -t overlay omarchy-try \
+        -o "lowerdir=$lower,upperdir=$upper/upper,workdir=$upper/work,index=off,metacopy=off,redirect_dir=off" \
+        /new_root || boot_failed "Try Omarchy could not mount the session root"
+    if [ ! -d "/new_root/usr/lib/modules/$kver" ] && [ -d "/run/archiso/airootfs/usr/lib/modules/$kver" ]; then
+        mkdir -p "/new_root/usr/lib/modules/$kver"
+        mount --bind "/run/archiso/airootfs/usr/lib/modules/$kver" "/new_root/usr/lib/modules/$kver"
+    fi
+    msg ":: Try Omarchy: booting the root image from the medium"
+}

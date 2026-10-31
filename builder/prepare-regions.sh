@@ -30,4 +30,3 @@ if [[ ! -d $regions ]]; then
 fi
 
 cp -a "$regions" "$iso_payload/regions"
-

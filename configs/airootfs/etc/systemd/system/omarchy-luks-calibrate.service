@@ -1,0 +1,24 @@
+[Unit]
+Description=Calibrate LUKS Argon2id while the installer wizard is open
+# Keep CPU/RAM calibration out of the boot-time hashing work. No installer
+# unit depends on this optional result; a quick install cancels it and uses
+# cryptsetup's ordinary calibration instead.
+After=omarchy-mirror-verify.service omarchy-root-image-verify.service
+ConditionPathExists=/run/archiso/bootmnt
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/omarchy-luks-calibrate calibrate
+RuntimeDirectory=omarchy-luks-calibration
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
+TimeoutStopSec=2
+# CPU/RAM only: the benchmark must not access the host's disks.
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

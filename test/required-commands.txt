@@ -1,0 +1,61 @@
+# Commands that Omarchy's own scripts (bin/, install/, migrations/ in the
+# omarchy package) invoke and that must therefore exist on every installed
+# system. Most of them arrive as dependencies of something else, which is how
+# Ubuntu lost curl and xxd from its 26.04 minimal images: a package nobody
+# had listed vanished when the package that dragged it in was dropped. This
+# list is the contract; commands-test.sh checks it on the installed system.
+# Of 403 distinct commands in command position, the ones below are those
+# whose package is not named in any Omarchy package list.
+# Not listed, on purpose: commands a script installs itself first
+# (fido2-token, after omarchy-pkg-add libfido2), guards with
+# omarchy-cmd-present (usbreset), or only names in a pattern (nano, nvme).
+awk
+blkid
+cmp
+cryptsetup
+curl
+diff
+dmesg
+efibootmgr
+find
+findmnt
+free
+gio
+git
+gsettings
+gtk-update-icon-cache
+hostnamectl
+ip
+iw
+jq
+journalctl
+localectl
+loadkeys
+lsblk
+lsmod
+lspci
+modprobe
+mount
+notify-send
+nvim
+perl
+pgrep
+ping
+pkexec
+pkill
+python3
+sed
+setfont
+sqlite3
+systemctl
+tar
+timedatectl
+udevadm
+unzip
+update-desktop-database
+upower
+v4l2-ctl
+xdg-mime
+xdg-open
+xdg-settings
+xdg-user-dirs-update

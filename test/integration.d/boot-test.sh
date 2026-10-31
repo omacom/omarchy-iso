@@ -38,6 +38,14 @@ printf '{"boot_to_ssh_ms": %d, "system_state": "%s"}\n' "$boot_ms" "$state" >"$R
 
 check "systemd reports the system running (got: ${state:-nothing})" test "$state" = running
 check "no failed units" test ! -s "$RUN_DIR/failed-units.txt"
+# The installer encrypts in 4096-byte sectors, btrfs's own block size
+# (orchestrator/luks_calibration.py); a volume formatted with 512 keeps them.
+if [[ $ENCRYPT == true ]]; then
+  ssh_sudo 'cryptsetup luksDump "$(blkid -t TYPE=crypto_LUKS -o device | head -n 1)"' \
+    >"$RUN_DIR/luks-dump.txt" 2>/dev/null || true
+  sector=$(awk '$1 == "sector:" { print $2; exit }' "$RUN_DIR/luks-dump.txt")
+  check "the root's LUKS sectors are 4096 bytes (got: ${sector:-nothing})" test "$sector" = 4096
+fi
 capture_console "success-boot"
 
 stop_vm

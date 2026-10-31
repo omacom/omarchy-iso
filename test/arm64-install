@@ -33,11 +33,9 @@ mkdir -p "$out/shots"
 [[ $(uname -m) == aarch64 ]] || { echo "arm64-install: this needs an arm64 host" >&2; exit 1; }
 [[ -r /dev/kvm && -w /dev/kvm ]] || { echo "arm64-install: /dev/kvm is not usable" >&2; exit 1; }
 [[ ${PLATFORM:-aarch64-n1x} == aarch64-n1x ]] || { echo "arm64-install: PLATFORM can only be aarch64-n1x" >&2; exit 2; }
-for firmware in /usr/share/AAVMF/AAVMF_CODE.fd:/usr/share/AAVMF/AAVMF_VARS.fd \
-  /usr/share/edk2/aarch64/QEMU_CODE.fd:/usr/share/edk2/aarch64/QEMU_VARS.fd; do
-  [[ -f ${firmware%%:*} && -f ${firmware##*:} ]] && { code=${firmware%%:*}; vars=${firmware##*:}; break; }
-done
-: "${code:?no aarch64 UEFI firmware found}"
+source "$ROOT/bin/lib/aarch64-firmware.sh"
+aarch64_uefi_firmware || { echo "arm64-install: no aarch64 UEFI firmware found" >&2; exit 1; }
+code=$AARCH64_UEFI_CODE vars=$AARCH64_UEFI_VARS
 
 state=$(mktemp -d /var/tmp/arm64-install.XXXXXX)
 cleanup() {
@@ -62,6 +60,11 @@ ssh-keygen -q -t ed25519 -N '' -C arm64-install -f "$SSH_KEY"
 # architecture's answers are changed and it is redone.
 eval "$(sed -n '/^detect_packages() {$/,/^}$/p' "$ROOT/test/integration.d/base-test.sh")"
 eval "$(sed -n '/^build_cidata() {$/,/^  mcopy -i "\$CIDATA_IMG"/p' "$ROOT/test/integration.d/base-test.sh"; echo '}')"
+eval "$(sed -n '/^cidata_cloud_init() {$/,/^}$/p' "$ROOT/test/integration.d/base-test.sh")"
+# ... and the harness's settings, with its defaults, which build_cidata reads:
+# the disk it lays the partitions out for, the UKI, encryption and keyboard
+# choices. All of them, so a setting the harness adds later comes along too.
+eval "$(grep -E '^[A-Z_]+="\$\{OMARCHY_INTEGRATION_[A-Z_]+:-[^}]*\}"$' "$ROOT/test/integration.d/base-test.sh")"
 ISO=$iso detect_packages
 build_cidata
 answers=$state/cidata/user_configuration.json
@@ -86,7 +89,7 @@ if [[ -n ${PLATFORM:-} ]]; then
   rng+=",romfile=$state/n1x.rom"
 fi
 port=$(( 20000 + RANDOM % 10000 ))
-qemu-img create -q -f qcow2 "$state/target.qcow2" 40G
+qemu-img create -q -f qcow2 "$state/target.qcow2" "${DISK_GB}G"
 cp "$vars" "$state/vars.fd"
 : >"$out/serial.log"
 # The empty disk is first in the boot order: the firmware falls through to the
@@ -145,8 +148,10 @@ until guest true 2>/dev/null; do
     echo "  $elapsed s: $(tail -n 2 <<<"$text" | tr '\n' ' ' | cut -c1-120)"
     # When the installer stops it says so on its screen, above the last lines
     # of its log, and leaves the live system up: the x86_64 test reads the same
-    # screen. Without this the wait runs to its timeout on a dead install.
-    if grep -qiE 'installation stopped|exited with status' <<<"$text"; then
+    # screen. Without this the wait runs to its timeout on a dead install. A
+    # long error scrolls that heading off the top, but the live shell's prompt
+    # then starts with the installer's non-zero exit status.
+    if grep -qiE 'installation stopped|exited with status|^[1-9][0-9]* root@' <<<"$text"; then
       cp "$shot" "$out/shots/halted.png"
       echo "$text" >&2
       echo "arm64-install: the installer stopped after $elapsed s (shots/halted.png)" >&2; exit 1

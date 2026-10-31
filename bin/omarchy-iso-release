@@ -8,6 +8,7 @@ set -e
 MAKE_ARGS=()
 ISO_REF=quattro
 RELEASE_SUFFIX=""
+ARCH=x86_64
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -21,14 +22,25 @@ while [[ $# -gt 0 ]]; do
     RELEASE_SUFFIX="-rc"
     shift
     ;;
+  --arch)
+    ARCH="${2:-}"
+    case "$ARCH" in
+    x86_64 | aarch64) ;;
+    *)
+      echo "Error: --arch must be x86_64 or aarch64" >&2
+      exit 1
+      ;;
+    esac
+    shift 2
+    ;;
   -*)
     echo "Unknown option: $1"
-    echo "Usage: omarchy-iso-release [--no-make] [--rc] [version]"
+    echo "Usage: omarchy-iso-release [--no-make] [--rc] [--arch x86_64|aarch64] [version]"
     exit 1
     ;;
   *)
     if [[ -n "${BUILD_VERSION-}" ]]; then
-      echo "Usage: omarchy-iso-release [--no-make] [--rc] [version]"
+      echo "Usage: omarchy-iso-release [--no-make] [--rc] [--arch x86_64|aarch64] [version]"
       exit 1
     fi
     BUILD_VERSION="$1"
@@ -38,7 +50,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${BUILD_VERSION-}" ]]; then
-  echo "Usage: omarchy-iso-release [--no-make] [--rc] [version]"
+  echo "Usage: omarchy-iso-release [--no-make] [--rc] [--arch x86_64|aarch64] [version]"
   exit 1
 fi
 
@@ -50,20 +62,27 @@ if [[ $BUILD_VERSION == *rc* ]]; then
   RELEASE_SUFFIX=""
 fi
 
+# The x86_64 ISO keeps the plain name every download link already uses. Any
+# other architecture says so, as the nightly's do, or it would upload over it.
+ARCH_SUFFIX=""
+if [[ $ARCH != x86_64 ]]; then
+  ARCH_SUFFIX="-$ARCH"
+fi
+
 BUILD_ROOT=$(realpath "${BASH_SOURCE[0]%/*}/..")
 BUILD_RELEASE_PATH="$BUILD_ROOT/release"
 
 # Make ISOs
 if [[ ! " ${MAKE_ARGS[*]} " =~ " --no-make " ]]; then
   echo -e "\e[32mMaking $ISO_REF ISO\e[0m"
-  omarchy-iso-make --no-cache --no-boot-offer "${MAKE_ARGS[@]}"
+  omarchy-iso-make --arch "$ARCH" --no-cache --no-boot-offer "${MAKE_ARGS[@]}"
 else
   echo -e "\e[31mSkipping remaking ISOs\e[0m"
 fi
 
 # Sign and upload ISO
-latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*x86_64-"$ISO_REF".iso | head -n1)
-release_iso="$BUILD_RELEASE_PATH/omarchy-$BUILD_VERSION$RELEASE_SUFFIX.iso"
+latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*"$ARCH-$ISO_REF".iso | head -n1)
+release_iso="$BUILD_RELEASE_PATH/omarchy-$BUILD_VERSION$RELEASE_SUFFIX$ARCH_SUFFIX.iso"
 cp "$latest_iso" "$release_iso"
 
 echo -e "\e[32mSigning $ISO_REF ISO\e[0m"

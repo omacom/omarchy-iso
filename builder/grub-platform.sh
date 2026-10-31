@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 
-# The N1x recovery entry boots the hardware probe that only linux-omarchy
-# can run, so it stays in the menu of an image on that kernel and leaves every
-# other one.
-configure_grub_kernel() {
+# The N1x recovery entry boots the hardware probe that only an aarch64 image
+# can run, so it stays in that image's menu and leaves the x86_64 one.
+configure_grub_platform() {
   local config=$1
-  local kernel=${2:-}
+  local arch=${2:-}
 
-  case "$kernel" in
-    linux-omarchy)
+  case "$arch" in
+    aarch64)
       sed -i \
         -e '/^%N1X_ONLY_BEGIN%$/d' \
         -e '/^%N1X_ONLY_END%$/d' \

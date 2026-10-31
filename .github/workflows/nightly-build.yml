@@ -164,7 +164,7 @@ jobs:
               printf "#!/bin/sh\nexit 0\n" >/usr/local/bin/omarchy-pkg-add
               chmod 0755 /usr/local/bin/omarchy-pkg-add
               qemu-system-x86_64 --version | head -1
-              ./test/integration release/*.iso boot --no-preview --memory 8192 --timeout 1800
+              ./test/integration release/*.iso boot ${{ matrix.channel == 'stable' && '--release-iso' || '' }} --no-preview --memory 8192 --timeout 1800
 
               base=$(ls -d test-runs/*-integration)
               ./test/vm-image/vm-seal "$base" sealed
@@ -340,21 +340,7 @@ jobs:
       # Fetched the way a user fetches them. It proves what is served, and it
       # is the first request the CDN sees for each file.
       - name: Check what the CDN serves
-        run: |
-          set -euo pipefail
-          dir=out/$RELEASE
-          check() { # url, expected sha256
-            got=$(curl -fsSL --retry 3 "$1" | sha256sum | cut -d" " -f1)
-            [ "$got" = "$2" ] || { echo "::error::$1 serves $got, expected $2"; exit 1; }
-            echo "ok $1"
-          }
-          # Every file of the version, the checksum files too.
-          (cd "$dir" && find . -type f -printf '%P\n' | sort) >files.txt
-          [ -s files.txt ] || { echo "::error::nothing to check under $dir"; exit 1; }
-          while read -r file; do
-            check "$SITE/$RELEASE/$file" "$(sha256sum "$dir/$file" | cut -d" " -f1)"
-          done <files.txt
-          echo "$(wc -l <files.txt) files published and checked"
+        run: ./test/vm-image/nightly-check-cdn "out/$RELEASE" "$SITE/$RELEASE"
 
       - name: Point latest.json at it
         run: |

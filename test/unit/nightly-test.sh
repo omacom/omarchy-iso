@@ -2,9 +2,10 @@
 #
 # The nightly's decisions, tried without a runner: which channels a run makes
 # and where they go (test/vm-image/nightly-plan), what it lays out and what
-# latest.json then says (test/vm-image/nightly-layout), and two things the
-# install test decides from what it is given: which Omarchy packages an ISO
-# installs, and when an install is over.
+# latest.json then says (test/vm-image/nightly-layout), how it checks what the
+# CDN serves (test/vm-image/nightly-check-cdn), and two things the install test
+# decides from what it is given: which Omarchy packages an ISO installs, and
+# when an install is over.
 
 set -euo pipefail
 
@@ -246,6 +247,55 @@ if grep -q '::warning::' "$tmp/rc/out"; then fail "rclone: a failed upload was r
 # Only its remote's settings, RCLONE_CONFIG_*, belong in a workflow's environment.
 flags=$(sed -nE 's/^[[:space:]]+(RCLONE_[A-Z0-9_]+):.*/\1/p' "$ROOT"/.github/workflows/*.yml | grep -v '^RCLONE_CONFIG_' | sort -u | paste -sd' ' || true)
 [[ -z $flags ]] || fail "rclone: a workflow sets $flags, which rclone would read as flags"
+
+# ----------------------------------------------------------- nightly-check-cdn
+# curl is played by a stand-in that serves a directory, counts each file's
+# fetches, and breaks the first CDN_BREAKS fetches of the files in CDN_BROKEN
+# after 100 bytes, as the reset HTTP/2 stream did (exit 92).
+checker="$ROOT/test/vm-image/nightly-check-cdn"
+bash -n "$checker"
+cdn=$tmp/cdn
+mkdir -p "$cdn/bin" "$cdn/built/unpacked" "$cdn/count"
+head -c 300000 /dev/urandom >"$cdn/built/a.iso"
+head -c 300000 /dev/urandom >"$cdn/built/unpacked/vmlinuz"
+cp -r "$cdn/built" "$cdn/served"
+cat >"$cdn/bin/curl" <<'STUB'
+#!/bin/bash
+file=${*: -1}
+file=${file#https://cdn.test/1/}
+count=$CDN/count/${file//\//_}
+fetches=$(( $(cat "$count" 2>/dev/null || echo 0) + 1 ))
+echo "$fetches" >"$count"
+if [[ " ${CDN_BROKEN:-} " == *" $file "* ]] && (( fetches <= ${CDN_BREAKS:-1} )); then
+  head -c 100 "$CDN/served/$file"
+  exit 92
+fi
+cat "$CDN/served/$file"
+STUB
+chmod +x "$cdn/bin/curl"
+checked() { rm -f "$cdn/count"/*; env PATH="$cdn/bin:$PATH" CDN="$cdn" NIGHTLY_CHECK_DELAY=0 "$@" "$checker" "$cdn/built" https://cdn.test/1; }
+fetches() { cat "$cdn/count/${1//\//_}"; }
+
+out=$(checked)
+[[ $out == *"2 files published and checked"* ]] || fail "cdn: a clean publish did not pass: $out"
+[[ $out != *::warning::* ]] || fail "cdn: a clean publish was reported as a retry"
+
+out=$(checked CDN_BROKEN=unpacked/vmlinuz) || fail "cdn: a transfer that broke once failed the check"
+[[ $out == *"::warning::the CDN check needed a retry for 1 file(s): unpacked/vmlinuz"* ]] ||
+  fail "cdn: a retried file was not named: $(grep warning <<<"$out")"
+equal "cdn: a broken transfer is fetched again whole" "$(fetches unpacked/vmlinuz)" "2"
+
+refused "cdn: a transfer that keeps breaking" checked CDN_BROKEN=a.iso CDN_BREAKS=9
+equal "cdn: a transfer that keeps breaking is tried three times" "$(fetches a.iso)" "3"
+grep -q 'could not be fetched in 3 attempts' "$tmp/refused.err" || fail "cdn: a file that never arrived was not named"
+
+head -c 300000 /dev/urandom >"$cdn/served/a.iso"
+refused "cdn: other bytes than were built" checked
+equal "cdn: other bytes are not fetched again" "$(fetches a.iso)" "1"
+grep -q 'a.iso serves' "$tmp/refused.err" || fail "cdn: a file with other bytes was not named"
+cp "$cdn/built/a.iso" "$cdn/served/a.iso"
+
+refused "cdn: nothing to check" env PATH="$cdn/bin:$PATH" CDN="$cdn" "$checker" "$tmp/no-such-dir" https://cdn.test/1
 
 # ------------------------------------------------------------ the install test
 # The harness is a script that starts a VM when it is read; take the two

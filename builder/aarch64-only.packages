@@ -1,0 +1,10 @@
+# Names in the runtime's install/omarchy-other.packages that only an aarch64
+# machine has, so no x86_64 build carries them: the x86_64 build leaves each one
+# out of its offline mirror and out of its install set. Every one of these is
+# installed by the hardware setup of the model that needs it, not by a default
+# install set.
+asus-proart-p14-speaker-firmware
+asus-zenbook-a16-audio
+iptsd
+surface-pro-11-sensors
+surface-pro-11-support

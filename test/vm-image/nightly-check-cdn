@@ -1,0 +1,53 @@
+#!/bin/bash
+# Fetches every file of a published version from the CDN, the way a user
+# fetches it, and compares it with what was built.
+#
+#   nightly-check-cdn <built directory> <published URL>
+#
+# curl's --retry covers a timeout and a few HTTP statuses, not a transfer that
+# breaks partway: a reset HTTP/2 stream (exit 92) failed the publish on
+# 2026-10-28 after every file had uploaded. Retrying inside curl would not do
+# either, since bytes of a failed attempt that already went down the pipe stay
+# in the checksum. So a failed fetch is fetched again whole, and a pass that
+# needed it warns on the run's page. A file that arrives with other bytes fails
+# at once: every version has paths of its own, so no cache holds older bytes
+# for them. A transfer that stalls fails too, after a minute below 1 KiB/s,
+# instead of holding the job until its timeout.
+set -euo pipefail
+dir=$1
+site=$2
+attempts=3
+delay=${NIGHTLY_CHECK_DELAY:-15}
+
+list=$(mktemp)
+trap 'rm -f "$list"' EXIT
+# Every file of the version, the checksum files too.
+[[ -d $dir ]] && (cd "$dir" && find . -type f -printf '%P\n' | sort) >"$list"
+[[ -s $list ]] || { echo "::error::nothing to check under $dir" >&2; exit 1; }
+
+retried=()
+while read -r file; do
+  want=$(sha256sum "$dir/$file" | cut -d" " -f1)
+  for (( attempt = 1; ; attempt++ )); do
+    if got=$(curl -fsSL --speed-limit 1024 --speed-time 60 "$site/$file" | sha256sum | cut -d" " -f1); then
+      break
+    fi
+    if (( attempt == attempts )); then
+      echo "::error::$site/$file could not be fetched in $attempts attempts" >&2
+      exit 1
+    fi
+    echo "fetching $site/$file failed on attempt $attempt of $attempts, fetching it again" >&2
+    sleep $(( attempt * delay ))
+  done
+  if [[ $got != "$want" ]]; then
+    echo "::error::$site/$file serves $got, expected $want" >&2
+    exit 1
+  fi
+  (( attempt == 1 )) || retried+=("$file")
+  echo "ok $site/$file"
+done <"$list"
+
+if (( ${#retried[@]} )); then
+  echo "::warning::the CDN check needed a retry for ${#retried[@]} file(s): ${retried[*]}"
+fi
+echo "$(wc -l <"$list") files published and checked"

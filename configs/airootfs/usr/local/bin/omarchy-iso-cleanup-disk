@@ -1,12 +1,23 @@
 #!/bin/bash
 #
-# Clean up any holders / mounts / LVM / crypt devices on the install disk
-# before archinstall starts wiping. Idempotent — called once per install attempt
-# from the orchestrator's cleanup_disk phase.
+# Release the install disk before archinstall wipes it, and refuse to go on
+# while anything still holds it. Idempotent — called once per install attempt
+# from the orchestrator's prepare_live phase.
 #
-# Ported verbatim from .automated_script.sh's cleanup_install_disk(). Kept in
-# bash because lsblk / findmnt / lvm / cryptsetup are all easier to drive
-# here than from Python.
+# A disk that has had a life before Omarchy arrives with that life switched on:
+# the live ISO's udev assembles an old RAID member and activates an old LVM
+# volume group the moment the disk appears. Anything left holding a partition
+# keeps the kernel on the old partition table, and archinstall's partprobe logs
+# that and carries on, so the filesystem it makes next is not where the new
+# table says it is.
+#
+# So everything stacked on the disk is taken down from the top, and every
+# partition's signatures are wiped so udev has nothing left to put back. The
+# partition table itself stays: archinstall listed the partitions when it was
+# imported and wipes each by path, and a path that has vanished becomes a
+# regular file in /dev. Then the kernel must agree to re-read the table, which
+# it refuses while anything holds a partition. If it will not, this exits
+# non-zero with the reason on its last line, for the failure screen.
 
 set -uo pipefail
 
@@ -19,29 +30,106 @@ fi
 
 disk="${1:-}"
 [[ -n $disk && -b $disk ]] || { echo "Need a block device argument; got '$disk'" >&2; exit 1; }
+disk=$(realpath "$disk")
+disk_name=$(basename "$disk")
 
 echo "Cleaning up existing holders on install disk: $disk"
 findmnt -R /mnt >/dev/null && umount -R /mnt || true
 
-while read -r dev; do
-  [[ -b $dev ]] || continue
-  swapoff "$dev" 2>/dev/null || true
+# Kernel names (sda2, nvme0n1p2) of the disk's partitions.
+partitions() {
+  local part
+  for part in /sys/block/"$disk_name"/"$disk_name"*; do
+    [[ -e $part/partition ]] && basename "$part"
+  done
+}
+
+# The /dev path for a kernel block device name (dm-0 -> /dev/mapper/<name>).
+dev_path() {
+  if [[ -e /sys/class/block/$1/dm/name ]]; then
+    echo "/dev/mapper/$(<"/sys/class/block/$1/dm/name")"
+  else
+    echo "/dev/$1"
+  fi
+}
+
+unuse() {
+  swapoff "$1" 2>/dev/null || true
   while read -r target; do
     [[ -n $target ]] && umount "$target" 2>/dev/null || true
-  done < <(findmnt -rn -S "$dev" -o TARGET 2>/dev/null || true)
-done < <(lsblk -rnpo PATH "$disk")
+  done < <(findmnt -rn -S "$1" -o TARGET 2>/dev/null || true)
+}
 
-while read -r dev type; do
-  [[ $type == disk || $type == part || $type == crypt ]] || continue
-  while read -r vg; do
-    [[ -n $vg ]] && vgchange -an "$vg" 2>/dev/null || true
-  done < <(pvs --noheadings -o vg_name "$dev" 2>/dev/null | awk '{$1=$1; print}' | sort -u)
-done < <(lsblk -rnpo PATH,TYPE "$disk")
+# Take down everything stacked on a device, holders first, so LVM on LUKS on
+# RAID comes apart in the only order it can: device-mapper (crypt, LVM or
+# anything else) through dmsetup, md through mdadm. A device's own partitions
+# come first, the disk's or an array's (md127p1), since what uses them holds
+# the device too. A holder shared with another disk, a RAID1 with its other
+# half on sdb, is stopped too: the target cannot be partitioned while it runs,
+# and stopping writes nothing to the other disk's data.
+release_holders() {
+  local part holder name dev
+  for part in /sys/class/block/"$1"/"$1"*; do
+    [[ -e $part/partition ]] || continue
+    unuse "/dev/$(basename "$part")"
+    release_holders "$(basename "$part")"
+  done
+  for holder in /sys/class/block/"$1"/holders/*; do
+    [[ -e $holder ]] || continue
+    name=$(basename "$holder")
+    release_holders "$name"
+    dev=$(dev_path "$name")
+    unuse "$dev"
+    case $name in
+      dm-*) echo "Removing $dev"; dmsetup remove --retry "$dev" || true ;;
+      md*) echo "Stopping $dev"; mdadm --stop "$dev" || true ;;
+    esac
+  done
+}
 
-while read -r dev type; do
-  [[ $type == crypt ]] && cryptsetup close "$dev" 2>/dev/null || true
-done < <(lsblk -rnpo PATH,TYPE "$disk")
+release_and_wipe() {
+  local part
+  unuse "$disk"
+  release_holders "$disk_name"
 
-blockdev --flushbufs "$disk" 2>/dev/null || true
-partprobe "$disk" 2>/dev/null || true
-udevadm settle || true
+  # An md superblock or an LVM label is all udev needs to put a holder straight
+  # back when the table is re-read. The disk's own signatures go too (an md 0.90
+  # member keeps its superblock near the end), all but the partition table.
+  for part in $(partitions); do
+    wipefs --all --force "/dev/$part" >/dev/null || true
+  done
+  wipefs --all --force --types nogpt,PMBR,dos "$disk" >/dev/null || true
+  blockdev --flushbufs "$disk" 2>/dev/null || true
+  blockdev --rereadpt "$disk" 2>/dev/null
+}
+
+# Each attempt first waits out any activation udev already began, then holds
+# the disk's lock, which udevd honours by leaving the disk alone: nothing can
+# be assembled from a signature between reading the stack and wiping it.
+released=false
+for attempt in 1 2 3 4 5; do
+  udevadm settle 2>/dev/null || true
+  exec {lock}<"$disk"
+  flock -x "$lock"
+  release_and_wipe && released=true
+  exec {lock}<&-
+  $released && break
+  sleep 1
+done
+udevadm settle 2>/dev/null || true
+
+if ! $released; then
+  lsblk -o NAME,TYPE,FSTYPE,MOUNTPOINTS "$disk" || true
+  busy=()
+  for part in $(partitions); do
+    for holder in /sys/class/block/"$part"/holders/*; do
+      [[ -e $holder ]] && busy+=("$part is held by $(basename "$(dev_path "$(basename "$holder")")")")
+    done
+    findmnt -rn -S "/dev/$part" >/dev/null 2>&1 && busy+=("$part is mounted")
+  done
+  ((${#busy[@]})) || busy=("the kernel would not re-read its partition table")
+  echo "$disk is still in use and cannot be partitioned (${busy[*]}). Reboot the installer and try again."
+  exit 1
+fi
+
+echo "Released $disk"

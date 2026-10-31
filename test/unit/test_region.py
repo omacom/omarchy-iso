@@ -2,12 +2,14 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import types
 import unittest
 from contextlib import ExitStack
+from itertools import product
 from pathlib import Path
 from unittest import mock
 
@@ -95,6 +97,12 @@ class RegionSelectionTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.from_env({"omarchy_install": {"region": "zz"}})
 
+    def test_invalid_override_is_refused_before_install_state_is_created(self):
+        for invalid in ("zz", "CN", "../cn", True, 1):
+            with self.subTest(region=invalid), self.assertRaisesRegex(RuntimeError, "Unsupported region"):
+                self.from_env({"timezone": "UTC", "omarchy_install": {"region": invalid}})
+            self.assertFalse((self.root / "state").exists())
+
     def test_marker_is_written_only_for_regional_targets(self):
         target = self.root / "target"
         phases_impl._write_region_marker(types.SimpleNamespace(target=target, region="global"))
@@ -105,40 +113,57 @@ class RegionSelectionTest(unittest.TestCase):
         self.assertEqual(marker.read_text(), "cn\n")
         self.assertEqual(marker.stat().st_mode & 0o777, 0o644)
 
-    def test_region_adds_no_packages_and_marks_only_regional_targets(self):
-        for selected in ("global", "cn"):
-            with self.subTest(region=selected), ExitStack() as stack:
-                events = []
+    def test_region_survives_root_image_install_without_changing_package_delta(self):
+        cases = (
+            ("Asia/Shanghai", None, "cn"),
+            ("Asia/Urumqi", None, "cn"),
+            ("Europe/Copenhagen", None, "global"),
+            ("Asia/Hong_Kong", None, "global"),
+            ("Asia/Shanghai", "global", "global"),
+            ("UTC", "cn", "cn"),
+        )
+        for (timezone, override, expected), pre_mounted in product(cases, (False, True)):
+            with self.subTest(timezone=timezone, override=override, pre_mounted=pre_mounted), ExitStack() as stack:
+                packages_added = []
                 installer = mock.MagicMock()
-                installer.add_additional_packages.side_effect = lambda packages: events.append(packages)
+                installer.add_additional_packages.side_effect = packages_added.extend
                 config = types.SimpleNamespace(
                     kernels=["linux-omarchy"], locale_config=None, mirror_config=None,
                     swap=None, auth_config=None, app_config=None, timezone=None,
                     ntp=False, hostname="test", pacman_config="/etc/pacman.conf",
                 )
-                ctx = types.SimpleNamespace(
-                    state={"arch_config_handler": types.SimpleNamespace(config=config), "mirror_handler": None},
-                    target=self.root / "target", tailscale_authkey_path=None, omarchy_install={},
-                    region=selected,
-                )
+                ctx = self.from_env({"timezone": timezone, "omarchy_install": {"region": override}})
+                ctx.target = self.root / "target"
+                ctx.state = {"arch_config_handler": types.SimpleNamespace(config=config), "mirror_handler": None}
+
+                # Unpacking the shared root replaces everything on the target.
+                # Writing the marker before that would silently lose it.
+                def unpack_image(_ctx):
+                    if ctx.target.exists():
+                        shutil.rmtree(ctx.target)
+                    (ctx.target / "etc").mkdir(parents=True)
+
+                stack.enter_context(mock.patch.object(phases_impl, "_install_root_image", side_effect=unpack_image))
                 for name in ("_mount_offline_package_cache", "_mask_mkinitcpio_pacman_hooks",
                              "_unmask_mkinitcpio_pacman_hooks", "_configure_limine_boot",
-                             "_write_pre_mounted_fstab", "_install_early_packages"):
+                             "_write_pre_mounted_fstab", "_unmount_offline_package_cache",
+                             "_start_target_keyring_init"):
                     stack.enter_context(mock.patch.object(phases_impl, name))
-                stack.enter_context(mock.patch.object(
-                    phases_impl, "_unmount_offline_package_cache", side_effect=lambda _: events.append("unmount")))
                 stack.enter_context(mock.patch.object(phases_impl, "configure_keyboard", return_value=True))
-                stack.enter_context(mock.patch.object(phases_impl, "_runtime_package_list", return_value=["omarchy"]))
-                for name, value in (("is_pre_mount", True), ("root_user", None)):
+                stack.enter_context(mock.patch.object(phases_impl, "_platform_delta_packages", return_value=[]))
+                stack.enter_context(mock.patch.object(phases_impl.arch, "target_missing_packages", return_value=[], create=True))
+                for name, value in (("is_pre_mount", pre_mounted), ("is_encrypted", False), ("root_user", None)):
                     stack.enter_context(mock.patch.object(phases_impl.arch, name, return_value=value, create=True))
-                stack.enter_context(mock.patch.object(phases_impl.arch, "sanity_check", create=True))
+                for name in ("sanity_check", "perform_filesystem_operations", "install_base_delta"):
+                    stack.enter_context(mock.patch.object(phases_impl.arch, name, create=True))
                 opened = stack.enter_context(mock.patch.object(phases_impl.arch, "open_installer", create=True))
                 opened.return_value.__enter__.return_value = installer
 
                 phases_impl.arch_install_system(ctx)
 
-                self.assertEqual(events, [["linux-omarchy-headers"], ["omarchy"], "unmount"])
-                self.assertEqual((ctx.target / "etc/omarchy/region").exists(), selected != "global")
+                self.assertEqual(packages_added, [])
+                marker = ctx.target / "etc/omarchy/region"
+                self.assertEqual(marker.read_text() if marker.exists() else None, "cn\n" if expected == "cn" else None)
 
     def test_finalizer_adds_no_trust_for_any_region(self):
         for selected in ("global", "cn"):

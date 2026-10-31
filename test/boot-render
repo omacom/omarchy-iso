@@ -1,0 +1,1034 @@
+#!/usr/bin/env python3
+"""Boot an ISO in QEMU and check every frame the screen shows, up to the greeter.
+
+The live ISO draws the Omarchy logo on the console as the initramfs starts,
+where the installer's greeter will draw it, and the greeter draws over it in
+place: from the first logo on, the screen should only ever show that logo,
+the greeter, and the dark of a mode switch. This boots the ISO unmodified, as
+a throttled USB stick through its firmware and boot loader like the boot
+benchmark, saves every frame that differs from the one before, and checks
+each one:
+
+- the logo, cell by cell: logo.txt drawn at the console's cell size (8x16 or
+  16x32 on a framebuffer, the half-size logo in 9x16 cells on the VGA text
+  console), every half cell either inked or empty as the logo has it, which
+  box drawing, a half-drawn or half-erased logo, or another font all fail;
+- its place: the greeter's (console-logo.sh and the configurator lay it out
+  the same way), and the same place in every frame of the same size;
+- nothing else lit: no kernel or login text, no copy of the logo, and on the
+  greeter only the tagline and hint, centred, on their rows;
+- no dark frames between the first logo and the greeter longer than
+  --max-dark, and none after the greeter;
+- no text between the boot loader's last dark frame and the first logo.
+
+Frames go to OUT/frames as PNG, named by their time since QEMU started and
+what they showed; OUT/report.txt has the timeline and the problems. Exit 0
+when there are none, 1 when there are, 2 when the run itself failed.
+
+The logo it expects is the one the ISO under test draws: the greeter's and
+the copy fitted to 80 columns, read out of its live initramfs
+(console-logo/greeter.txt, fitted.txt) and kept in OUT/logo. On a console
+narrower than both (a 600-pixel-wide framebuffer's 75 columns) the fitted one
+is drawn from its first column and cut at its last.
+
+Usage: test/boot-render ISO [options]
+       test/boot-render --analyze OUT [--logo PATH]
+
+  --firmware uefi|bios  (default uefi)
+  --device DEV          QEMU display device (default virtio-vga): VGA,
+                        virtio-vga, virtio-gpu-pci, bochs-display,
+                        cirrus-vga, qxl-vga, vmware-svga, ati-vga, ramfb
+  --resolution WxH      The display's EDID resolution (VGA, virtio-vga,
+                        virtio-gpu-pci and bochs-display; default 1280x800)
+  --usb usb2|usb3       The stick: EHCI at 40 MB/s or xHCI at 150 MB/s
+                        (default usb3)
+  --fps N               Screendumps a second (default 25)
+  --timeout SECS        Give up without a greeter after this long (default 180)
+  --after-greeter SECS  Keep watching the greeter this long (default 2)
+  --max-dark SECS       Longest dark stretch allowed after the first logo
+                        (default 0.5)
+  --out DIR             (default test-runs/<iso>-boot-render/<firmware>-<device>-<resolution>)
+  --logo PATH           The greeter's logo, in place of the ISO's (where that
+                        cannot be read: /usr/share/omarchy/logo.txt)
+  --cpu MODEL           QEMU's -cpu (default host,ucode-rev=0xffffffff: KVM
+                        loads no microcode, and a Zen 5 guest with the host's
+                        old revision prints "RDSEED32 is broken" at emergency
+                        level, where a real machine has the ISO's early
+                        microcode update first)
+  --journal             Also log in over SSH once the greeter is up (as the
+                        boot benchmark does) and save the guest's journal and
+                        kernel log to OUT/journal.txt (the guest gets a NIC)
+  --qemu-arg ARG        One more argument for QEMU, repeatable: a systemd
+                        credential through -smbios type=11, say, to try a
+                        change without a rebuild
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import bisect
+import gzip
+import hashlib
+import lzma
+import json
+import os
+import re
+import shutil
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import zlib
+from dataclasses import dataclass, field
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+OVMF_CODE = Path("/usr/share/edk2/x64/OVMF_CODE.4m.fd")
+OVMF_VARS = Path("/usr/share/edk2/x64/OVMF_VARS.4m.fd")
+EDID_DEVICES = {"VGA", "virtio-vga", "virtio-gpu-pci", "bochs-display"}
+TAGLINE = "Beautiful, Fun & Agentic Linux by DHH"
+MIN_FPS = 5  # fewer screen samples a second and a frame seen once could have lasted a quarter second
+HINT = "Press Return to Start Install"
+# A subpixel above this is lit: the console's background (1a1b26) and black
+# are below it, the dim hint's grey and the logo's green above.
+LIT_ABOVE = 0x50
+LIT = bytes(1 if value > LIT_ABOVE else 0 for value in range(256))
+INK, EMPTY = 0.9, 0.1  # lit fraction of a half cell's core: inked above, empty below
+SPECK = 600  # lit pixels in a box of SPECK_SIDE at most: a cursor or one character, no logo
+SPECK_SIDE = 40
+
+
+# --- Frames -----------------------------------------------------------------
+
+
+@dataclass
+class Frame:
+    width: int
+    height: int
+    rgb: bytes
+    _mask: bytes | None = None
+
+    @property
+    def mask(self) -> bytes:
+        """One byte per pixel, 1 where any subpixel is lit."""
+        if self._mask is None:
+            t = self.rgb.translate(LIT)
+            n = self.width * self.height
+            lit = int.from_bytes(t[0::3], "big") | int.from_bytes(t[1::3], "big") | int.from_bytes(t[2::3], "big")
+            self._mask = lit.to_bytes(n, "big")
+        return self._mask
+
+    def lit(self, x0: int, y0: int, x1: int, y1: int) -> int:
+        """Lit pixels in [x0, x1) x [y0, y1), clipped to the frame."""
+        x0, x1 = max(0, x0), min(self.width, x1)
+        y0, y1 = max(0, y0), min(self.height, y1)
+        if x0 >= x1 or y0 >= y1:
+            return 0
+        m, w = self.mask, self.width
+        return sum(m[y * w + x0:y * w + x1].count(1) for y in range(y0, y1))
+
+    def background(self) -> tuple[int, int, int]:
+        """The commonest colour of a sparse grid of pixels."""
+        counts: dict[bytes, int] = {}
+        for y in range(0, self.height, max(1, self.height // 40)):
+            for x in range(0, self.width, max(1, self.width // 40)):
+                i = (y * self.width + x) * 3
+                px = self.rgb[i:i + 3]
+                counts[px] = counts.get(px, 0) + 1
+        return tuple(max(counts, key=counts.get))  # type: ignore[return-value]
+
+
+def read_ppm(data: bytes) -> Frame:
+    fields, pos = [], 0
+    while len(fields) < 4:
+        while data[pos] in b" \t\r\n":
+            pos += 1
+        start = pos
+        while data[pos] not in b" \t\r\n":
+            pos += 1
+        fields.append(data[start:pos])
+    if fields[0] != b"P6" or fields[3] != b"255":
+        raise ValueError("not an 8-bit P6 PPM")
+    width, height = int(fields[1]), int(fields[2])
+    return Frame(width, height, data[pos + 1:pos + 1 + width * height * 3])
+
+
+def write_png(path: Path, frame: Frame) -> None:
+    stride = frame.width * 3
+    raw = b"".join(b"\x00" + frame.rgb[y * stride:(y + 1) * stride] for y in range(frame.height))
+
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+
+    header = struct.pack(">IIBBBBB", frame.width, frame.height, 8, 2, 0, 0, 0)
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(raw, 1)) + chunk(b"IEND", b""))
+
+
+def read_png(path: Path) -> Frame:
+    """The PNGs write_png writes: 8-bit RGB, no interlacing, filter 0."""
+    data = path.read_bytes()
+    pos, idat, width = 8, b"", 0
+    while pos < len(data):
+        (length,) = struct.unpack(">I", data[pos:pos + 4])
+        kind, body = data[pos + 4:pos + 8], data[pos + 8:pos + 8 + length]
+        if kind == b"IHDR":
+            width, height, depth, colour = struct.unpack(">IIBB", body[:10])
+            if (depth, colour) != (8, 2):
+                raise ValueError(f"{path}: not 8-bit RGB")
+        elif kind == b"IDAT":
+            idat += body
+        pos += 12 + length
+    raw = zlib.decompress(idat)
+    stride = width * 3
+    rows = [raw[y * (stride + 1):(y + 1) * (stride + 1)] for y in range(height)]
+    if any(row[0] != 0 for row in rows):
+        raise ValueError(f"{path}: filtered rows")
+    return Frame(width, height, b"".join(row[1:] for row in rows))
+
+
+# --- The logo ---------------------------------------------------------------
+
+TOP = {"█": 1, "▀": 1, "▄": 0, " ": 0}
+BOTTOM = {"█": 1, "▀": 0, "▄": 1, " ": 0}
+
+
+@dataclass
+class Logo:
+    """A logo of block glyphs as its pixel grid: a glyph is one column and
+    two pixels (half cells) high."""
+
+    name: str
+    pixels: list[list[int]]  # [half row][column]
+
+    @classmethod
+    def from_lines(cls, name: str, lines: list[str]) -> "Logo":
+        width = max(len(line) for line in lines)
+        pixels = []
+        for line in lines:
+            line = line.ljust(width)
+            if any(char not in TOP for char in line):
+                raise ValueError(f"{name}: only block glyphs and spaces")
+            pixels.append([TOP[c] for c in line])
+            pixels.append([BOTTOM[c] for c in line])
+        return cls(name, pixels)
+
+    @property
+    def rows(self) -> int:  # text rows
+        return len(self.pixels) // 2
+
+    @property
+    def cols(self) -> int:
+        return len(self.pixels[0])
+
+    def ink_extent(self) -> tuple[int, int, int, int]:
+        """First and last inked column and half row."""
+        cols = [c for c in range(self.cols) if any(row[c] for row in self.pixels)]
+        halves = [h for h, row in enumerate(self.pixels) if any(row)]
+        return cols[0], cols[-1], halves[0], halves[-1]
+
+    def without_column(self, column: int, name: str) -> "Logo":
+        return Logo(name, [row[:column] + row[column + 1:] for row in self.pixels])
+
+    def clipped(self, cols: int) -> "Logo":
+        """Its first COLS columns, named "name|cols": what console-logo.sh and
+        the greeter leave of it on a console that many columns wide (each
+        line's end wraps and the next row's erase takes it away)."""
+        return Logo(f"{self.name}|{cols}", [row[:cols] for row in self.pixels])
+
+
+def named(logos: list[Logo], name: str) -> Logo:
+    """The logo of that name, "fitted|75" the fitted one cut to 75 columns."""
+    base, _, cols = name.partition("|")
+    logo = next(logo for logo in logos if logo.name == base)
+    return logo.clipped(int(cols)) if cols else logo
+
+
+def logo_variants(path: Path) -> list[Logo]:
+    """The greeter's logo and a copy fitted to 80 columns, its leftmost blank
+    column dropped (as omarchy-console-logo does), from a logo.txt."""
+    lines = path.read_text(encoding="utf-8").rstrip("\n").split("\n")
+    greeter = Logo.from_lines("greeter", lines)
+    variants = [greeter]
+    if greeter.cols > 80:
+        blank = [c for c in range(greeter.cols) if not any(row[c] for row in greeter.pixels)]
+        if blank:
+            variants.append(greeter.without_column(blank[0], "fitted"))
+    return variants
+
+
+def load_logos(directory: Path) -> list[Logo] | None:
+    """The greeter's logo and the fitted copy as an ISO carries them
+    (greeter.txt, fitted.txt in DIRECTORY), or None."""
+    greeter, fitted = directory / "greeter.txt", directory / "fitted.txt"
+    if not (greeter.is_file() and fitted.is_file()):
+        return None
+    return [Logo.from_lines(name, path.read_text(encoding="utf-8").rstrip("\n").split("\n"))
+            for name, path in (("greeter", greeter), ("fitted", fitted))]
+
+
+NUL_RUN_END = re.compile(rb"[^\x00]")
+
+
+def decompress(data: bytes) -> bytes:
+    if data[:4] == b"\x28\xb5\x2f\xfd":
+        try:
+            from compression import zstd  # Python 3.14
+            return zstd.decompress(data)
+        except ImportError:
+            return subprocess.run(["zstd", "-dcq"], input=data, capture_output=True, check=True).stdout
+    if data[:6] == b"\xfd7zXZ\x00":
+        return lzma.decompress(data)
+    if data[:2] == b"\x1f\x8b":
+        return gzip.decompress(data)
+    raise ValueError(f"an initramfs part compressed some other way ({data[:4].hex()})")
+
+
+def cpio_files(data: bytes, names: set[str]) -> dict[str, bytes]:
+    """NAMES out of an initramfs: newc archives one after another, the
+    uncompressed early ones first, the last compressed."""
+    found: dict[str, bytes] = {}
+    pos = 0
+    while pos < len(data):
+        if data.startswith((b"070701", b"070702"), pos):
+            size, namesize = int(data[pos + 54:pos + 62], 16), int(data[pos + 94:pos + 102], 16)
+            name = data[pos + 110:pos + 110 + namesize - 1].decode("utf-8", "replace")
+            pos += -(-(110 + namesize) // 4) * 4
+            if name.removeprefix("./") in names:
+                found[name.removeprefix("./")] = data[pos:pos + size]
+            pos += -(-size // 4) * 4
+        elif data[pos] == 0:
+            match = NUL_RUN_END.search(data, pos)
+            pos = match.start() if match else len(data)
+        else:
+            found.update(cpio_files(decompress(data[pos:]), names))
+            break
+    return found
+
+
+def iso_logos(iso: Path, directory: Path) -> list[Logo] | None:
+    """The logos the ISO's live initramfs draws, written to DIRECTORY."""
+    listing = subprocess.run(["xorriso", "-indev", str(iso), "-find", "/arch/boot", "-name", "initramfs-*.img"],
+                             capture_output=True, text=True).stdout.split()
+    images = sorted((path.strip("'") for path in listing if "pxe" not in path and "-t2" not in path), key=len)
+    if not images:
+        return None
+    with tempfile.TemporaryDirectory() as work:
+        image = Path(work) / "initramfs.img"
+        subprocess.run(["xorriso", "-osirrox", "on", "-indev", str(iso), "-extract", images[0], str(image)],
+                       capture_output=True)
+        if not image.is_file():
+            return None
+        share = "usr/share/omarchy-iso/console-logo"
+        try:
+            files = cpio_files(image.read_bytes(), {f"{share}/greeter.txt", f"{share}/fitted.txt"})
+        except (ValueError, OSError, subprocess.CalledProcessError):
+            return None
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, body in files.items():
+        (directory / Path(name).name).write_bytes(body)
+    return load_logos(directory)
+
+
+@dataclass
+class Geometry:
+    """Where and how a logo is drawn: its cells' origin and size, and where
+    the half blocks split a cell (the kernel's 8x16 font splits 7/9, the
+    installer's Terminus 8/8). vga: the half-size logo, 2x4 logo pixels a
+    9x16 cell."""
+
+    logo: str
+    ox: int
+    oy: int
+    cw: int
+    ch: int
+    split: int
+    vga: bool = False
+
+    def key(self) -> tuple:
+        return (self.logo, self.ox, self.oy, self.cw, self.ch, self.vga)
+
+
+def half_regions(logo: Logo, g: Geometry):
+    """(expected ink, x0, y0, x1, y1) of each half cell's core: the cell
+    inset by a pixel, so a split one row off or a VGA ninth column is no
+    mismatch."""
+    if g.vga:
+        for h, row in enumerate(logo.pixels):
+            cy = g.oy + (h // 4) * 16 + (h % 4) * 4
+            for c, ink in enumerate(row):
+                cx = g.ox + (c // 2) * 9 + (c % 2) * 4
+                yield ink, cx + 1, cy + 1, cx + 3, cy + 3
+        return
+    for h, row in enumerate(logo.pixels):
+        top = h % 2 == 0
+        y0 = g.oy + (h // 2) * g.ch + (0 if top else g.split)
+        y1 = g.oy + (h // 2) * g.ch + (g.split if top else g.ch)
+        for c, ink in enumerate(row):
+            x0 = g.ox + c * g.cw
+            yield ink, x0 + 1, y0 + 1, x0 + g.cw - 1, y1 - 1
+
+
+def check_shape(frame: Frame, logo: Logo, g: Geometry) -> list[tuple[int, int, float]]:
+    """The half cells that are neither as inked nor as empty as the logo has
+    them: (half row, column, lit fraction)."""
+    bad = []
+    cols = logo.cols
+    for n, (ink, x0, y0, x1, y1) in enumerate(half_regions(logo, g)):
+        area = max(0, x1 - x0) * max(0, y1 - y0)
+        if area == 0:
+            continue
+        fraction = frame.lit(x0, y0, x1, y1) / area
+        if (ink and fraction < INK) or (not ink and fraction > EMPTY):
+            bad.append((n // cols, n % cols, round(fraction, 2)))
+    return bad
+
+
+def candidate_geometries(frame: Frame, logos: list[Logo], box: tuple[int, int, int, int]):
+    """Geometries that would draw one of the logos over exactly this box."""
+    x0, y0, x1, y1 = box
+    width, height = x1 - x0 + 1, y1 - y0 + 1
+    # A console narrower than every logo has the narrowest cut at its edge,
+    # in 8-pixel cells only: the 16x32 font goes with 115 columns and more
+    # (console-logo.sh), so a narrow console in it is the font gone wrong.
+    narrowest = min(logos, key=lambda logo: logo.cols)
+    cut = [narrowest.clipped(frame.width // 8)] if narrowest.cols > frame.width // 8 else []
+    for logo in logos + cut:
+        c0, c1, h0, h1 = logo.ink_extent()
+        ncols = c1 - c0 + 1
+        if frame.width == 720 and frame.height == 400 and logo.name == "greeter":
+            # The half-size logo: column c at (c // 2) * 9 + (c % 2) * 4, 4 wide.
+            def xpos(c):
+                return (c // 2) * 9 + (c % 2) * 4
+            if width == xpos(c1) + 4 - xpos(c0) and height == (h1 - h0 + 1) * 4:
+                yield logo, Geometry("vga", x0 - xpos(c0), y0 - (h0 // 4) * 16 - (h0 % 4) * 4, 9, 16, 8, vga=True)
+        if width % ncols:
+            continue
+        cw = width // ncols
+        if logo in cut and cw != 8:
+            continue
+        ch = 2 * cw if cw != 9 else 16
+        for split in range(1, ch):
+            top = (h0 // 2) * ch + (split if h0 % 2 else 0)
+            bottom = (h1 // 2) * ch + (ch if h1 % 2 else split)
+            if bottom - top == height:
+                yield logo, Geometry(logo.name, x0 - c0 * cw, y0 - top, cw, ch, split)
+
+
+# --- Frames classified --------------------------------------------------------
+
+
+@dataclass
+class Verdict:
+    kind: str  # black, blank, text, logo, greeter
+    box: tuple[int, int, int, int] | None = None
+    geometry: Geometry | None = None
+    bad: list = field(default_factory=list)
+    stray: tuple[int, int, int, int] | None = None
+    stray_pixels: int = 0
+    notes: list[str] = field(default_factory=list)
+
+
+def bands(frame: Frame) -> list[list[int]]:
+    """Runs of rows with lit pixels: [y0, y1, lit pixels, x0, x1]."""
+    out: list[list[int]] = []
+    m, w = frame.mask, frame.width
+    for y in range(frame.height):
+        row = m[y * w:(y + 1) * w]
+        count = row.count(1)
+        if not count:
+            continue
+        x0, x1 = row.find(1), row.rfind(1)
+        if out and out[-1][1] == y - 1:
+            band = out[-1]
+            band[1] = y
+            band[2] += count
+            band[3], band[4] = min(band[3], x0), max(band[4], x1)
+        else:
+            out.append([y, y, count, x0, x1])
+    return out
+
+
+def text_rows(g: Geometry, logo: Logo) -> tuple[int, int]:
+    """The greeter's tagline and hint rows, in pixels from the frame's top:
+    logo, blank, tagline, blank, hint."""
+    return g.oy + (logo.rows + 1) * g.ch, g.oy + (logo.rows + 3) * g.ch
+
+
+def classify(frame: Frame, logos: list[Logo]) -> Verdict:
+    found = bands(frame)
+    if not found:
+        bg = frame.background()
+        return Verdict("black" if max(bg) < 0x10 else "blank")
+    biggest = max(found, key=lambda band: band[2])
+    box = (biggest[3], biggest[0], biggest[4], biggest[1])
+    if len(found) == 1 and biggest[2] <= SPECK and box[2] - box[0] < SPECK_SIDE and box[3] - box[1] < SPECK_SIDE:
+        return Verdict("speck", box=box)
+    if len(found) == 1 and qemu_inactive(frame, box):
+        return Verdict("black", notes=["QEMU: Display output is not active."])
+    best = None
+    for logo, g in candidate_geometries(frame, logos, box):
+        bad = check_shape(frame, logo, g)
+        if best is None or len(bad) < len(best[2]):
+            best = (logo, g, bad)
+    if best is None or best[2]:
+        verdict = Verdict("text", box=box)
+        if best is not None:
+            verdict.geometry, verdict.bad = best[1], best[2]
+        return verdict
+    logo, g, _ = best
+    verdict = Verdict("logo", box=box, geometry=g)
+    allowed = [box]
+    if not g.vga:
+        tagline_y, hint_y = text_rows(g, logo)
+        tagline = frame.lit(0, tagline_y, frame.width, tagline_y + g.ch)
+        hint = frame.lit(0, hint_y, frame.width, hint_y + g.ch)
+        if tagline:
+            verdict.kind = "greeter"
+            allowed += [(0, tagline_y, frame.width - 1, tagline_y + g.ch - 1),
+                        (0, hint_y, frame.width - 1, hint_y + g.ch - 1)]
+            cols = frame.width // g.cw
+            for name, text, y, lit in (("tagline", TAGLINE, tagline_y, tagline), ("hint", HINT, hint_y, hint)):
+                if not lit:
+                    verdict.notes.append(f"no {name}")
+                    continue
+                row = [band for band in bands_in(frame, y, y + g.ch)]
+                left = min(band[0] for band in row) // g.cw
+                right = max(band[1] for band in row) // g.cw
+                expected = (cols - len(text)) // 2
+                if not (expected - 1 <= left <= expected + 1 and right <= expected + len(text)):
+                    verdict.notes.append(f"{name} at columns {left}-{right}, not {expected}-{expected + len(text) - 1}")
+    stray = frame.lit(0, 0, frame.width, frame.height)
+    for x0, y0, x1, y1 in allowed:
+        stray -= frame.lit(x0, y0, x1 + 1, y1 + 1)
+    if stray > 0:
+        verdict.stray_pixels = stray
+        verdict.stray = stray_box(frame, allowed)
+    return verdict
+
+
+def qemu_inactive(frame: Frame, box: tuple[int, int, int, int]) -> bool:
+    """QEMU's own "Display output is not active." on a screen the guest has
+    switched off: one line of 29 characters of its 8x16 font, centred."""
+    x0, y0, x1, y1 = box
+    return 200 <= x1 - x0 <= 240 and y1 - y0 < 16 and abs((x0 + x1) / 2 - frame.width / 2) <= 8 \
+        and abs((y0 + y1) / 2 - frame.height / 2) <= 16
+
+
+def bands_in(frame: Frame, y0: int, y1: int) -> list[tuple[int, int]]:
+    m, w = frame.mask, frame.width
+    out = []
+    for y in range(max(0, y0), min(frame.height, y1)):
+        row = m[y * w:(y + 1) * w]
+        if 1 in row:
+            out.append((row.find(1), row.rfind(1)))
+    return out
+
+
+def drawn_on(frame: Frame, later: Frame, box: tuple[int, int, int, int]) -> bool:
+    """Every pixel lit in box (inclusive) of frame is the same colour in later, a frame of the same size."""
+    x0, y0, x1, y1 = box
+    m, w = frame.mask, frame.width
+    for y in range(y0, y1 + 1):
+        for x in range(x0, x1 + 1):
+            i = y * w + x
+            if m[i] and frame.rgb[i * 3:i * 3 + 3] != later.rgb[i * 3:i * 3 + 3]:
+                return False
+    return True
+
+
+def lit_only(frame: Frame, other: Frame) -> tuple[int, int, int, int] | None:
+    """The box (inclusive) of the pixels lit in frame and dark in other, a frame of the same size."""
+    m, n, w = frame.mask, other.mask, frame.width
+    xs, ys = [], []
+    for y in range(frame.height):
+        a, b = m[y * w:(y + 1) * w], n[y * w:(y + 1) * w]
+        if a == b:
+            continue
+        lit = [x for x, (p, q) in enumerate(zip(a, b)) if p and not q]
+        if lit:
+            ys.append(y)
+            xs += [lit[0], lit[-1]]
+    return (min(xs), min(ys), max(xs), max(ys)) if ys else None
+
+
+def stray_box(frame: Frame, allowed) -> tuple[int, int, int, int] | None:
+    m, w = frame.mask, frame.width
+    xs, ys = [], []
+    for y in range(frame.height):
+        row = bytearray(m[y * w:(y + 1) * w])
+        for x0, y0, x1, y1 in allowed:
+            if y0 <= y <= y1:
+                row[x0:x1 + 1] = bytes(x1 + 1 - x0)
+        if 1 in row:
+            ys.append(y)
+            xs += [row.find(1), row.rfind(1)]
+    return (min(xs), min(ys), max(xs), max(ys)) if ys else None
+
+
+# --- The boot as a whole ------------------------------------------------------
+
+
+def expected_place(frame: Frame, logos: list[Logo], g: Geometry) -> tuple[int, int] | None:
+    """Where console-logo.sh and the greeter put the logo's cells on a
+    console of this frame's size: (column, row) of its top left cell."""
+    if g.vga:
+        cols, rows, logo_cols, logo_rows, frame_rows = 80, 25, (logos[0].cols + 1) // 2, (logos[0].rows + 1) // 2, 2
+    else:
+        cols, rows = frame.width // g.cw, frame.height // g.ch
+        logo = named(logos, g.logo)
+        logo_cols, logo_rows, frame_rows = logo.cols, logo.rows, 4
+    return max(0, (cols - logo_cols) // 2), max(0, (rows - logo_rows - frame_rows) // 2)
+
+
+def analyse(frames: list[tuple[float, Frame]], logos: list[Logo], max_dark: float,
+            samples: list[float] | None = None) -> tuple[list, list[str], dict]:
+    """Classify each frame and judge the boot: (rows, problems, summary).
+    samples: the time of every screen sample, changed or not (samples.txt)."""
+    rows = [(t, frame, classify(frame, logos)) for t, frame in frames]
+    problems: list[str] = []
+
+    # How many samples saw each frame. The sampler keeps a frame only when it
+    # changed, so its time on screen is the time to the next one, and on a
+    # slow machine (a loaded CI runner) one seen by a single sample can look
+    # long. A frame is transient, gone by the next sample, when it was on
+    # screen 0.1 s at most, or seen by one sample with the next within 0.25 s.
+    seen: list[int] = []
+    if samples:
+        times = sorted(samples)
+        for i, (t, _, _) in enumerate(rows):
+            end = rows[i + 1][0] if i + 1 < len(rows) else float("inf")
+            seen.append(bisect.bisect_left(times, end - 1e-6) - bisect.bisect_left(times, t - 1e-6))
+
+    def transient(i: int) -> bool:
+        span = (rows[i + 1][0] if i + 1 < len(rows) else rows[i][0]) - rows[i][0]
+        return span <= 0.1 or (bool(seen) and seen[i] == 1 and span <= 0.25)
+
+    logo_kinds = ("logo", "greeter")
+    first = next((i for i, (_, _, v) in enumerate(rows) if v.kind in logo_kinds), None)
+    greeter = next((i for i, (_, _, v) in enumerate(rows) if v.kind == "greeter"), None)
+    summary = {"first logo": rows[first][0] if first is not None else None,
+               "greeter": rows[greeter][0] if greeter is not None else None}
+    if samples and len(samples) > 1 and max(samples) > min(samples):
+        summary["samples a second"] = round((len(samples) - 1) / (max(samples) - min(samples)), 1)
+    if first is None:
+        problems.append("no logo on screen")
+        return rows, problems, summary
+    if greeter is None:
+        problems.append("no greeter on screen")
+
+    # Reference geometry per frame size: the greeter's, else the first logo's.
+    reference: dict[tuple[int, int], Geometry] = {}
+    for _, frame, v in rows:
+        if v.kind in logo_kinds and (v.kind == "greeter" or (frame.width, frame.height) not in reference):
+            reference[(frame.width, frame.height)] = v.geometry
+
+    # Text right before the first logo, in its video mode: the frames back to
+    # the last dark one or one in another mode (a boot menu's, the firmware's
+    # before it). The first logo caught half drawn just before it is a note,
+    # and so is the whole screen lit for one frame as the mode comes: QEMU's
+    # VGA BIOS clears the video memory of the boot menu's graphics mode word
+    # by word, each write a trip out of the guest, and the half switched mode
+    # shows that memory for some 30 ms; hardware takes microseconds.
+    first_frame, first_v = rows[first][1], rows[first][2]
+    start = first
+    while start > 0:
+        frame, v = rows[start - 1][1], rows[start - 1][2]
+        if v.kind in ("black", "blank", "speck") or (frame.width, frame.height) != (first_frame.width, first_frame.height):
+            break
+        start -= 1
+    for i in range(start, first):
+        t, frame, v = rows[i]
+        if v.kind != "text":
+            continue
+        before = rows[start - 1][1] if start > 0 else None
+        if i == start and before is not None and (before.width, before.height) != (frame.width, frame.height) \
+                and transient(i) and old_video_memory(frame, v.box):
+            summary.setdefault("notes", []).append(f"{t:.2f} the switch to {frame.width}x{frame.height} showed the old video memory")
+            continue
+        # The first logo drawn row by row over one frame or a few (a big
+        # console's 32 px cells under load), whole within 0.25 s. ISOLINUX's
+        # can show the VGA's cursor where it writes: lit there and dark in
+        # the logo, an underline (one BIOS boot in some 1500).
+        if (frame.width, frame.height) == (first_frame.width, first_frame.height) \
+                and overlaps(v.box, logo_box(first_v.geometry, logos)) and rows[first][0] - t <= 0.25:
+            logo = logo_of(first_v.geometry, logos)
+            bad = check_shape(frame, logo, first_v.geometry)
+            ink = {(h, c) for h, row in enumerate(logo.pixels) for c, on in enumerate(row) if on}
+            missing_only = all((h, c) in ink for h, c, _ in bad)
+            cursor = None if missing_only else lit_only(frame, first_frame)
+            if missing_only or (cursor is not None and cursor_sized(cursor, first_v.geometry)):
+                summary.setdefault("notes", []).append(f"{t:.2f} logo drawn half way ({len(bad)} half cells)"
+                                                       + (f", a cursor at {cursor}" if cursor else ""))
+                continue
+        problems.append(f"{t:7.2f} text before the logo at {v.box}")
+
+    dark = []
+    end = greeter if greeter is not None else len(rows)
+    for i in range(first, len(rows)):
+        t, frame, v = rows[i]
+        until = rows[i + 1][0] if i + 1 < len(rows) else t
+        size = (frame.width, frame.height)
+        if v.kind in ("black", "blank", "speck"):
+            if i < end:
+                dark.append((t, until))
+            following_v = rows[i + 1][2] if i + 1 < len(rows) else None
+            if v.kind == "speck" and transient(i) and following_v is not None and following_v.kind in logo_kinds \
+                    and inside(v.box, logo_box(following_v.geometry, logos)):
+                # The first sliver of the logo the next frame shows whole.
+                summary.setdefault("notes", []).append(f"{t:.2f} logo drawn half way (a speck of it)")
+            elif v.kind == "speck":
+                problems.append(f"{t:7.2f} a speck on the screen (a cursor?) at {v.box} for {until - t:.2f} s")
+            elif i >= end:
+                problems.append(f"{t:7.2f} {v.kind} frame after the greeter ({until - t:.2f} s)")
+            continue
+        if v.kind == "text":
+            before = rows[i - 1][1]
+            after = rows[i + 1][1] if i + 1 < len(rows) else None
+            sizes = {size, (before.width, before.height), (after.width, after.height) if after else None}
+            if i < end and after is not None and len(sizes) == 3 and transient(i) and old_video_memory(frame, v.box):
+                # A mode passed through within a frame, between two others
+                # before the greeter, its screen lit all over: the same old
+                # video memory as the switch to the first logo's mode above.
+                # QEMU's cirrus driver passes 640x400 on its way from the
+                # VGA's 720x400 to 800x600. No logo is up: dark.
+                summary.setdefault("notes", []).append(f"{t:.2f} the switch to {frame.width}x{frame.height} showed the old video memory")
+                dark.append((t, until))
+                continue
+            g = reference.get(size)
+            if g is not None and overlaps(v.box, logo_box(g, logos)):
+                logo = logo_of(g, logos)
+                bad = check_shape(frame, logo, g)
+                ink = {(h, c) for h, row in enumerate(logo.pixels) for c, on in enumerate(row) if on}
+                partial = bool(bad) and all((h, c) in ink for h, c, _ in bad)
+                following = rows[i + 1][2].kind if i + 1 < len(rows) else None
+                if not bad:
+                    # The logo whole, something else lit on its rows.
+                    box = stray_box(frame, [logo_box(g, logos)])
+                    problems.append(f"{t:7.2f} lit pixels besides the logo at {box}")
+                    continue
+                if partial and transient(i) and following in ("black", "blank", "logo", "greeter"):
+                    # A clear or a redraw caught half way, gone by the next frame.
+                    summary.setdefault("notes", []).append(f"{t:.2f} logo {'cleared' if following in ('black', 'blank') else 'drawn'} half way ({len(bad)} half cells)")
+                elif partial:
+                    problems.append(f"{t:7.2f} logo partly missing for {until - t:.2f} s: {len(bad)} half cells")
+                else:
+                    problems.append(f"{t:7.2f} logo garbled: {len(bad)} half cells wrong, e.g. {bad[:3]}")
+            else:
+                problems.append(f"{t:7.2f} text on screen at {v.box}")
+            continue
+        g = v.geometry
+        if v.stray and transient(i) and cursor_sized(v.stray, g):
+            # The VGA cursor for a frame as the kernel's console starts: its
+            # erase from the cursor down gives the cell under ISOLINUX's
+            # cursor a grey attribute before the console hides the cursor,
+            # some 10 ms of QEMU's writes to the VGA's memory.
+            summary.setdefault("notes", []).append(f"{t:.2f} a cursor for {until - t:.2f} s at {v.stray}")
+        elif v.stray and v.kind == "logo" and transient(i) and i + 1 < len(rows) and rows[i + 1][2].kind == "greeter" \
+                and (rows[i + 1][1].width, rows[i + 1][1].height) == size and drawn_on(frame, rows[i + 1][1], v.stray):
+            # The greeter's text caught part way, each pixel of it as the next
+            # frame has it. fbcon on a DRM driver's framebuffer, simpledrm's
+            # too, draws into a shadow that a worker copies to the screen from
+            # the top: a copy passing the tagline's rows before the greeter
+            # wrote it and the hint's after shows the hint alone for a frame
+            # (QEMU's std VGA, about one boot in a hundred).
+            summary.setdefault("notes", []).append(f"{t:.2f} greeter drawn half way ({v.stray_pixels} pixels of its text first)")
+        elif v.stray:
+            problems.append(f"{t:7.2f} {v.stray_pixels} lit pixels besides the {v.kind} at {v.stray}")
+        next_v = rows[i + 1][2] if i + 1 < len(rows) else None
+        if v.notes and v.kind == "greeter" and transient(i) and next_v is not None \
+                and next_v.kind == "greeter" and not next_v.notes:
+            # The greeter's text caught half drawn, whole in the next frame.
+            summary.setdefault("notes", []).append(f"{t:.2f} greeter drawn half way ({'; '.join(v.notes)})")
+        else:
+            for note in v.notes:
+                problems.append(f"{t:7.2f} {note}")
+        place = expected_place(frame, logos, g)
+        at = ((g.ox // g.cw) if not g.vga else g.ox // 9, (g.oy // g.ch))
+        if place and ((g.ox % g.cw, g.oy % g.ch) != (0, 0) or at != place):
+            problems.append(f"{t:7.2f} {v.kind} at cell {at} (+{g.ox % g.cw},{g.oy % g.ch} px), the greeter's place is {place}")
+        ref = reference.get(size)
+        if ref is not None and ref.key() != g.key():
+            problems.append(f"{t:7.2f} {v.kind} drawn as {g.key()}, the greeter as {ref.key()}")
+        if i > end and v.kind != "greeter":
+            problems.append(f"{t:7.2f} {v.kind} after the greeter")
+    if dark:
+        # Consecutive dark frames are one stretch: a modeset's black, then
+        # fbcon's cleared background.
+        stretches: list[list[float]] = []
+        for a, b in dark:
+            if stretches and abs(stretches[-1][1] - a) < 1e-6:
+                stretches[-1][1] = b
+            else:
+                stretches.append([a, b])
+        longest = max(stretches, key=lambda d: d[1] - d[0])
+        total = sum(b - a for a, b in dark)
+        summary["dark after the first logo"] = round(total, 2)
+        summary["longest dark"] = round(longest[1] - longest[0], 2)
+        if longest[1] - longest[0] > max_dark:
+            problems.append(f"{longest[0]:7.2f} dark for {longest[1] - longest[0]:.2f} s between the first logo and the greeter")
+        elif total > 2 * max_dark:
+            # Short stretches over and over: a redraw loop.
+            problems.append(f"dark for {total:.2f} s in {len(stretches)} stretches between the first logo and the greeter")
+    # Each transient frame is forgiven; many of them are a flicker.
+    notes = summary.get("notes", [])
+    if len(notes) > 3:
+        problems.append(f"{len(notes)} frames caught half way or flickering (more than 3), at "
+                        + ", ".join(note.split(" ", 1)[0] for note in notes))
+    return rows, problems, summary
+
+
+def old_video_memory(frame: Frame, box: tuple[int, int, int, int]) -> bool:
+    """The screen lit all over, as a video mode shows the memory another mode
+    left: nine tenths of the frame each way, a fifth of it lit at least
+    (QEMU's frames are half lit or more), not a border around a line."""
+    x0, y0, x1, y1 = box
+    return x1 - x0 >= 0.9 * frame.width and y1 - y0 >= 0.9 * frame.height \
+        and frame.lit(x0, y0, x1 + 1, y1 + 1) >= 0.2 * (x1 - x0 + 1) * (y1 - y0 + 1)
+
+
+def cursor_sized(box: tuple[int, int, int, int], g: Geometry) -> bool:
+    """Whether a lit box is no more than a cursor: one cell wide, an underline high."""
+    x0, y0, x1, y1 = box
+    return x1 - x0 < (9 if g.vga else g.cw) and y1 - y0 < max(3, g.ch // 8)
+
+
+def inside(box: tuple[int, int, int, int], outer: tuple[int, int, int, int]) -> bool:
+    return outer[0] <= box[0] and outer[1] <= box[1] and box[2] <= outer[2] and box[3] <= outer[3]
+
+
+def logo_of(g: Geometry, logos: list[Logo]) -> Logo:
+    return logos[0] if g.vga else named(logos, g.logo)
+
+
+def logo_box(g: Geometry, logos: list[Logo]) -> tuple[int, int, int, int]:
+    logo = logo_of(g, logos)
+    if g.vga:
+        return g.ox, g.oy, g.ox + (logo.cols + 1) // 2 * 9 - 1, g.oy + logo.rows // 2 * 16 - 1
+    return g.ox, g.oy, g.ox + logo.cols * g.cw - 1, g.oy + logo.rows * g.ch - 1
+
+
+def overlaps(a, b) -> bool:
+    return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
+
+
+def describe(v: Verdict) -> str:
+    out = v.kind
+    if v.geometry is not None and v.kind != "text":
+        g = v.geometry
+        out += f" {g.logo} {g.cw}x{g.ch}" + ("" if g.vga else f"/{g.split}") + f" at {g.ox},{g.oy}"
+    elif v.box:
+        out += f" at {v.box}"
+    if v.stray:
+        out += f" stray {v.stray_pixels}px {v.stray}"
+    return out
+
+
+def report(out: Path, rows, problems, summary) -> str:
+    lines = []
+    last = None
+    for t, frame, v in rows:
+        line = f"{t:7.2f} {frame.width}x{frame.height} {describe(v)}"
+        key = (frame.width, frame.height, describe(v))
+        if key != last:
+            lines.append(line)
+        last = key
+    lines.append("")
+    lines += [f"{k}: {v}" for k, v in summary.items()]
+    lines.append("PROBLEMS: " + ("none" if not problems else str(len(problems))))
+    lines += ["  " + p for p in problems]
+    text = "\n".join(lines) + "\n"
+    (out / "report.txt").write_text(text)
+    return text
+
+
+# --- QEMU ---------------------------------------------------------------------
+
+SAMPLER = r"""
+import hashlib, json, os, socket, sys, time
+sock, outdir, fps, t0 = sys.argv[1], sys.argv[2], float(sys.argv[3]), float(sys.argv[4])
+conn = socket.socket(socket.AF_UNIX)
+for _ in range(500):
+    try:
+        conn.connect(sock); break
+    except OSError:
+        time.sleep(0.01)
+f = conn.makefile("rw")
+def call(cmd, **args):
+    f.write(json.dumps({"execute": cmd, "arguments": args}) + "\n"); f.flush()
+    while True:
+        r = json.loads(f.readline())
+        if "return" in r or "error" in r:
+            return r
+f.readline(); call("qmp_capabilities")
+shot = os.path.join(outdir, "shot.ppm")
+log = open(os.path.join(outdir, "samples.txt"), "a", buffering=1)
+last, due = None, time.time()
+while True:
+    now = time.time()
+    if "error" in call("screendump", filename=shot):
+        break
+    log.write(f"{now - t0:09.3f}\n")
+    with open(shot, "rb") as s:
+        digest = hashlib.md5(s.read()).digest()
+    if digest != last:
+        os.rename(shot, os.path.join(outdir, f"{now - t0:09.3f}.ppm"))
+        last = digest
+    due += 1 / fps
+    time.sleep(max(0, due - time.time()))
+    due = max(due, time.time() - 1 / fps)
+"""
+
+
+def run_qemu(args, out: Path, logos: list[Logo]) -> list[tuple[float, Path]]:
+    raw = out / "raw"
+    raw.mkdir(parents=True)
+    tmp = Path(tempfile.mkdtemp(prefix="boot-render-"))
+    qmp, screen_qmp = tmp / "qmp.sock", tmp / "screen.sock"
+    firmware = []
+    if args.firmware == "uefi":
+        shutil.copy(OVMF_VARS, out / "OVMF_VARS.fd")
+        firmware = ["-drive", f"if=pflash,format=raw,readonly=on,file={OVMF_CODE}",
+                    "-drive", f"if=pflash,format=raw,file={out / 'OVMF_VARS.fd'}"]
+    controller, bps = ("usb-ehci", 40_000_000) if args.usb == "usb2" else ("qemu-xhci", 150_000_000)
+    if args.device in EDID_DEVICES:
+        width, height = args.resolution.split("x")
+        display = ["-device", f"{args.device},edid=on,xres={width},yres={height}"]
+    else:
+        display = ["-device", args.device]
+    if args.device != "VGA":
+        display = ["-vga", "none"] + display
+    subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", str(out / "disk.qcow2"), "40G"], check=True)
+    network, ssh_port = ["-nic", "none"], 0
+    if args.journal:
+        key = out / "id_ed25519"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            ssh_port = s.getsockname()[1]
+        network = ["-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{ssh_port}-:22", "-device", "virtio-net-pci,netdev=net0",
+                   "-smbios", "type=11,value=io.systemd.credential.binary:ssh.authorized_keys.root="
+                   + base64.b64encode((out / "id_ed25519.pub").read_bytes()).decode()]
+    qemu = subprocess.Popen([
+        "qemu-system-x86_64", "-cpu", args.cpu, "-enable-kvm", "-machine", "q35,accel=kvm",
+        "-smp", str(args.smp), "-m", str(args.memory), *firmware,
+        "-drive", f"file={out / 'disk.qcow2'},format=qcow2,if=none,id=drive0", "-device", "virtio-blk-pci,drive=drive0",
+        "-device", f"{controller},id=usb",
+        "-drive", f"file={args.iso},format=raw,if=none,id=stick,readonly=on,cache.direct=on,throttling.bps-total={bps}",
+        "-device", "usb-storage,bus=usb.0,drive=stick,removable=on,bootindex=1",
+        *display, "-display", "none", *network, *args.qemu_arg,
+        "-qmp", f"unix:{qmp},server,nowait", "-qmp", f"unix:{screen_qmp},server,nowait",
+        "-serial", f"file:{out / 'serial.log'}",
+    ], stdout=subprocess.DEVNULL, stderr=open(out / "qemu.log", "w"))
+    t0 = time.time()
+    sampler = subprocess.Popen([sys.executable, "-I", "-c", SAMPLER, str(screen_qmp), str(raw), str(args.fps), str(t0)])
+    seen: set[str] = set()
+    greeter_at = None
+    try:
+        while time.time() - t0 < args.timeout:
+            if qemu.poll() is not None:
+                raise SystemExit(f"QEMU exited: {(out / 'qemu.log').read_text()[-400:]}")
+            for path in sorted(raw.glob("0*.ppm")):
+                if path.name in seen:
+                    continue
+                seen.add(path.name)
+                if greeter_at is None and classify(read_ppm(path.read_bytes()), logos).kind == "greeter":
+                    greeter_at = time.time()
+            if greeter_at is not None and time.time() - greeter_at > args.after_greeter:
+                break
+            time.sleep(0.2)
+        if args.journal and greeter_at is not None:
+            save_journal(out, ssh_port)
+    finally:
+        sampler.send_signal(signal.SIGTERM)
+        sampler.wait()
+        qemu.terminate()
+        try:
+            qemu.wait(10)
+        except subprocess.TimeoutExpired:
+            qemu.kill()
+        shutil.rmtree(tmp, ignore_errors=True)
+        (out / "disk.qcow2").unlink(missing_ok=True)
+    return [(float(p.stem), p) for p in sorted(raw.glob("0*.ppm"))]
+
+
+def save_journal(out: Path, port: int) -> None:
+    ssh = ["ssh", "-i", str(out / "id_ed25519"), "-p", str(port), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+           "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=5",
+           "-o", "LogLevel=ERROR", "root@127.0.0.1"]
+    command = "dmesg; echo '=== journal'; journalctl -b -o short-monotonic --no-pager"
+    for _ in range(20):
+        result = subprocess.run(ssh + [command], capture_output=True, text=True)
+        if result.returncode == 0:
+            (out / "journal.txt").write_text(result.stdout)
+            return
+        time.sleep(1)
+    (out / "journal.txt").write_text(f"no SSH: {result.stderr}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("iso", nargs="?")
+    parser.add_argument("--analyze", type=Path)
+    parser.add_argument("--firmware", choices=("uefi", "bios"), default="uefi")
+    parser.add_argument("--device", default="virtio-vga")
+    parser.add_argument("--resolution", default="1280x800")
+    parser.add_argument("--usb", choices=("usb2", "usb3"), default="usb3")
+    parser.add_argument("--fps", type=float, default=25)
+    parser.add_argument("--timeout", type=float, default=180)
+    parser.add_argument("--after-greeter", type=float, default=2)
+    parser.add_argument("--max-dark", type=float, default=0.5)
+    parser.add_argument("--smp", type=int, default=4)
+    parser.add_argument("--memory", type=int, default=4096)
+    parser.add_argument("--out", type=Path)
+    parser.add_argument("--logo", type=Path)
+    parser.add_argument("--cpu", default="host,ucode-rev=0xffffffff")
+    parser.add_argument("--journal", action="store_true")
+    parser.add_argument("--qemu-arg", action="append", default=[])
+    args = parser.parse_args()
+    host_logo = Path("/usr/share/omarchy/logo.txt")
+
+    if args.analyze:
+        out = args.analyze
+        logos = logo_variants(args.logo) if args.logo else load_logos(out / "logo") or logo_variants(host_logo)
+        frames = [(float(p.name.split("-")[0]), read_png(p)) for p in sorted((out / "frames").glob("*.png"))]
+    else:
+        if not args.iso:
+            parser.error("an ISO, or --analyze DIR")
+        args.iso = Path(args.iso).resolve()
+        resolution = args.resolution if args.device in EDID_DEVICES else "native"
+        out = args.out or ROOT / "test-runs" / f"{args.iso.stem}-boot-render" / f"{args.firmware}-{args.device}-{resolution}"
+        if out.exists():
+            shutil.rmtree(out)
+        out.mkdir(parents=True)
+        logos = logo_variants(args.logo) if args.logo else iso_logos(args.iso, out / "logo") or logo_variants(host_logo)
+        frames = []
+        for t, path in run_qemu(args, out, logos):
+            frames.append((t, read_ppm(path.read_bytes())))
+        (out / "frames").mkdir()
+        for t, frame in frames:
+            write_png(out / "frames" / f"{t:08.3f}-{classify(frame, logos).kind}.png", frame)
+        if (out / "raw" / "samples.txt").exists():
+            shutil.move(out / "raw" / "samples.txt", out / "samples.txt")
+        shutil.rmtree(out / "raw")
+    if not frames:
+        print("no frames", file=sys.stderr)
+        return 2
+    samples = [float(line) for line in (out / "samples.txt").read_text().split()] if (out / "samples.txt").exists() else None
+    rows, problems, summary = analyse(frames, logos, args.max_dark, samples)
+    print(report(out, rows, problems, summary), end="")
+    print(f"frames and report: {out}")
+    if summary.get("samples a second", MIN_FPS) < MIN_FPS:
+        print(f"the screen was sampled {summary['samples a second']} times a second, fewer than {MIN_FPS}: "
+              "too few to judge this boot (a machine too busy)", file=sys.stderr)
+        return 2
+    if summary.get("greeter") is None:
+        return 2
+    return 1 if problems else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

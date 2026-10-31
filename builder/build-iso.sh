@@ -1188,8 +1188,12 @@ boot_files_sort="$build_cache_dir/airootfs/usr/share/omarchy-iso/boot-files.sort
 printf '%s\n' "airootfs_image_tool_options+=('-sort' '$boot_files_sort')" >>"$build_cache_dir/profiledef.sh"
 
 # Build the ISO. profiledef.sh reads OMARCHY_ARCH for the archiso arch/bootmodes.
+# On x86_64 its EFI images get GRUB with the modules and the menu font the boot
+# uses, not all of them (builder/grub/grub-mkstandalone, first on its PATH).
+mkarchiso_path=$PATH
+[[ $OMARCHY_ARCH == x86_64 ]] && mkarchiso_path="/builder/grub:$PATH"
 echo "[timing] mkarchiso start $(date +%s)"
-"$mkarchiso_command" -v -w "$build_cache_dir/work/" -o /out/ "$build_cache_dir/"
+PATH="$mkarchiso_path" "$mkarchiso_command" -v -w "$build_cache_dir/work/" -o /out/ "$build_cache_dir/"
 echo "[timing] mkarchiso end $(date +%s)"
 
 # The live initramfs must stay small enough for GRUB and the kernel to place

@@ -45,6 +45,19 @@ expect() {
   ok "$desc"
 }
 lacks() { if [[ $2 == *"$3"* ]]; then fail "$1: got $2"; else ok "$1"; fi; }
+# screen <rows> <cols> [shown]: the console after the last layout, over a
+# console showing the file shown (vt-screen.py), then which of shown's cells
+# went blank on the way to showing the same again.
+screen() { python3 "$ROOT/test/unit/vt-screen.py" "$@" <"$work/tty"; }
+# layout <rows> <cols> <top> <left> <logo>: a console with only the logo on it.
+layout() {
+  local r line
+  for ((r = 1; r <= $1; r++)); do
+    if ((r >= $3)) && IFS= read -r line; then printf '%*s%s\n' $(($4 - 1)) '' "$line"; else echo; fi
+  done <"$5"
+}
+# junk <rows> <cols>: a console full of x.
+junk() { local r; for ((r = 0; r < $1; r++)); do printf "%${2}s\n" '' | tr ' ' x; done >"$work/junk"; }
 
 # The logos: the greeter's 12 columns wide, the fitted copy 11; 3 rows each.
 mkdir -p "$work/logo" "$work/share" "$work/bin" "$work/fb"
@@ -99,7 +112,12 @@ echo "(S) VGA+" >"$work/vtconsole/vtcon0/name"
 # The VGA text console: no framebuffer, 80x25. The greeter's 3-row logo in its
 # 7-row frame starts on row 10; 12 columns centred on 80 start at column 35.
 fb none; size 25 80; out=$(draw)
-expect "VGA text: palette, cursor off, clear and green before the logo" "$out" '^[]P01a1b26^[]P29ece6a^[[?25l^[[2J^[[32m^[['
+expect "VGA text: palette, cursor off and green before the logo" "$out" '^[]P01a1b26^[]P29ece6a^[[?25l^[[32m^[['
+# Drawn over the console, not after a clear: over junk only the logo is
+# left; over the logo already there (ISOLINUX's), none of it goes blank.
+junk 25 80; layout 25 80 10 35 "$work/logo/greeter.txt" >"$work/shown"
+check "VGA text: over a full console, only the logo is left" "$(screen 25 80 "$work/junk" | head -n 25)" "$(cat "$work/shown")"
+check "VGA text: over the same logo, none of it goes blank" "$(screen 25 80 "$work/shown" | tail -n 1)" "flashed: none"
 expect "VGA text: the greeter's logo on rows 10-12 at column 35" "$out" '^[[10;35H' '^[[11;35H' '^[[12;35H'
 expect "VGA text: colour reset and the cursor a blank line below" "$out" '^[[0m^[[14;1H'
 lacks "VGA text: no takeover glyph without a framebuffer" "$out" '.^[[0m^M'
@@ -110,6 +128,13 @@ check "VGA text: consoles opened from here on get their cursor" "$(cat "$work/gl
 # A console narrower than the greeter's logo gets the fitted copy at column 1.
 size 25 11; out=$(draw)
 expect "11 columns: the fitted logo at column 1" "$out" '^[[10;1H' 'LOGO   '
+# Its rows end in the last column, where erasing the rest of the row would
+# take the last character with it.
+junk 25 11; layout 25 11 10 1 "$work/logo/fitted.txt" >"$work/shown"
+check "11 columns: over a full console, the logo to its last column" "$(screen 25 11 "$work/junk")" "$(cat "$work/shown"; echo "flashed: none")"
+size 25 13; out=$(draw); junk 25 13; layout 25 13 10 1 "$work/logo/greeter.txt" >"$work/shown"
+check "13 columns: the logo at column 1, over a full console" "$(screen 25 13 "$work/junk" | head -n 25)" "$(cat "$work/shown")"
+check "13 columns: over the same logo, none of it goes blank" "$(screen 25 13 "$work/shown" | tail -n 1)" "flashed: none"
 
 # The half-size logo in its font: 6 cells by 2 rows here. Its frame is the
 # greeter's in half-size cells, so it starts on row (25-2-2)/2+1 = 11, at
@@ -121,7 +146,11 @@ echo 6 >"$work/logo/vga.cols"
 fb none; size 25 80; out=$(draw)
 check "VGA font: the logo's font is loaded" "$(setfont_calls)" "setfont -C $work/tty $work/logo/vga.psf"
 expect "VGA font: the half-size logo on rows 11-12 at column 38" "$out" '^[[11;38H' '^[[12;38H'
-expect "VGA font: in ISOLINUX's colors, bright green and the palette left alone" "$out" '^[[?25l^[[2J^[[1;32m^[[11;38H'
+expect "VGA font: in ISOLINUX's colors, bright green and the palette left alone" "$out" '^[[?25l^[[1;32m' '^[[11;38H'
+layout 25 80 11 38 "$work/logo/vga.txt" >"$work/shown"
+check "VGA font: over ISOLINUX's logo, none of it goes blank" "$(screen 25 80 "$work/shown" | tail -n 1)" "flashed: none"
+junk 25 80
+check "VGA font: over a full console, only the logo is left" "$(screen 25 80 "$work/junk" | head -n 25)" "$(cat "$work/shown")"
 lacks "VGA font: the palette left alone" "$out" '^[]P'
 if [[ -e $work/run/console-logo-vga ]]; then ok "VGA font: the console is marked as having the logo's font"; else fail "VGA font: no console-logo-vga marker"; fi
 # The next layout, on a framebuffer, loads no font for 8x16: the VGA logo's

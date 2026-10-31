@@ -211,22 +211,38 @@ omarchy_console_logo() {
     [ "$top" -lt 1 ] && top=1
     left=$(((cols - logo_cols) / 2 + 1))
     [ "$left" -lt 1 ] && left=1
+    # Drawn over what the console shows rather than after clearing it: the
+    # rows above the logo erased, each logo row drawn with what is left and
+    # right of it erased, the rows below erased. ISOLINUX's logo is on the
+    # screen already, cell for cell, and stays up instead of going dark for
+    # the clear (a frame of black in QEMU, where each of the clear's writes
+    # to the VGA's memory leaves the guest). Erasing the rest of a row that
+    # ends in the last column would erase that column (the VT holds the
+    # cursor there until the next character), so such rows are erased first.
     screen=$(
         if [ "$logo" = vga ]; then
             # ISOLINUX put this logo up already, in its colors: bright green
             # on the VGA palette's black (configs/syslinux/omarchy-logo.txt).
             # Drawn the same, it stays as it is; the installer's palette
             # comes with a GPU driver's framebuffer or the login.
-            printf '\033[?25l\033[2J\033[1;32m'
+            printf '\033[?25l\033[1;32m'
         else
             # Palette entries 0 and 2 as .automated_script.sh sets them later.
-            printf '\033]P01a1b26\033]P29ece6a\033[?25l\033[2J\033[32m'
+            printf '\033]P01a1b26\033]P29ece6a\033[?25l\033[32m'
         fi
+        [ "$top" -gt 1 ] && printf '\033[%d;%dH\033[1J' "$((top - 1))" "$cols"
         row=$top
         while IFS= read -r line; do
-            printf '\033[%d;%dH%s' "$row" "$left" "$line"
+            if [ $((left + logo_cols)) -gt "$cols" ]; then
+                printf '\033[%d;1H\033[2K\033[%d;%dH%s' "$row" "$row" "$left" "$line"
+            elif [ "$left" -gt 1 ]; then
+                printf '\033[%d;1H\033[%dX\033[%d;%dH%s\033[K' "$row" "$((left - 1))" "$row" "$left" "$line"
+            else
+                printf '\033[%d;1H%s\033[K' "$row" "$line"
+            fi
             row=$((row + 1))
         done <"$dir/$logo.txt"
+        [ "$row" -le "$rows" ] && printf '\033[%d;1H\033[J' "$row"
         printf '\033[0m\033[%d;1H' "$((row + 1))"
     )
     # In one write, and again on a fresh open if that fails: login hangs tty1

@@ -87,10 +87,11 @@ measure_terminal
 # pty) has the same problem the other way: it reports a stale 24x80 for a few
 # hundred ms after start before its real winsize is set. Either way, hold the
 # first draw until the width settles at (or above) the logo width. A real VT
-# that never widens (e.g. nomodeset) still proceeds after the cap. While a
-# BIOS machine is on its 80-column text console, which on a ThinkPad X200 is
-# until i915 brings the panel up 1.8 s after the login, the logo fitted to 80
-# columns stands in on the screen .automated_script.sh just cleared.
+# that never widens goes on at once where no GPU driver will take it over
+# (nomodeset, or a card without one: omarchy_console_no_driver_coming in
+# console-logo.sh), and after the cap otherwise. While a BIOS machine is on
+# its 80-column text console the logo fitted to 80 columns stands in, drawn
+# over the boot's half-size one.
 # The 80-column logo where greeter() will draw the real one, as the initramfs
 # hook lays it out (configs/airootfs/etc/initcpio/hooks/omarchy-logo): the
 # block of logo, tagline and hint centred vertically, the logo centred at its
@@ -130,6 +131,12 @@ wait_for_stable_terminal() {
     if (( !shown && width > 0 && width < LOGO_WIDTH )) && [[ -r $CONSOLE_LOGO_PATH ]]; then
       console_logo_draw "$width"
       shown=1
+      # Nothing widens a console that no GPU driver will take over: the VGA
+      # text console under nomodeset, or with a card the kernel has no driver
+      # for. The five seconds only held the greeter back there.
+      if declare -F omarchy_console_no_driver_coming >/dev/null && omarchy_console_no_driver_coming; then
+        break
+      fi
     fi
     last=$width
     sleep 0.1

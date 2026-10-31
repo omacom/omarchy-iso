@@ -82,6 +82,26 @@ omarchy_console_claim_tty1() {
     return 0
 }
 
+# omarchy_console_no_driver_coming: true where no GPU driver will give tty1 a
+# framebuffer any more: there is none, and either the kernel runs nomodeset or
+# no display controller has a driver bound or one to load. The live login runs
+# after udev has settled (omarchy-cidata-load), so by the configurator's first
+# screen a driver that is coming has loaded or is loading.
+omarchy_console_no_driver_coming() {
+    local fb="${OMARCHY_FB:-/sys/class/graphics/fb0}" dev class alias cmdline=""
+    [ -e "$fb" ] && return 1
+    read -r cmdline <"${OMARCHY_CMDLINE:-/proc/cmdline}" 2>/dev/null
+    case " $cmdline " in *" nomodeset "*) return 0 ;; esac
+    for dev in "${OMARCHY_SYSFS:-/sys}"/bus/pci/devices/*; do
+        read -r class <"$dev/class" 2>/dev/null || continue
+        case $class in 0x03*) ;; *) continue ;; esac
+        [ -e "$dev/driver" ] && return 1
+        read -r alias <"$dev/modalias" 2>/dev/null || continue
+        modprobe -n -b -v "$alias" 2>/dev/null | grep -q '^insmod ' && return 1
+    done
+    return 0
+}
+
 # omarchy_console_vga_bound: the VGA text console (vgacon) is still a console
 # driver; a GPU driver unregisters it when it takes the hardware over.
 omarchy_console_vga_bound() {

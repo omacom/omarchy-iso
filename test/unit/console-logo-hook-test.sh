@@ -332,6 +332,28 @@ export OMARCHY_CONSOLE_LOGO_DIR="$work/missing"
 fb none; size 25 80
 check "no logo files: nothing written" "$(draw)" ""
 
+# omarchy_console_no_driver_coming: the configurator stops waiting for a
+# wider console where no GPU driver will take the VGA one over.
+dev="$work/sysfs/bus/pci/devices/0000:00:02.0"; other="$work/sysfs/bus/pci/devices/0000:00:1f.2"
+mkdir -p "$dev" "$other"
+echo 0x010601 >"$other/class"; echo pci:v00001234d00001111sv0sd0bc01sc06i01 >"$other/modalias"
+echo 0x030000 >"$dev/class"
+echo "BOOT_IMAGE=/vmlinuz quiet" >"$work/cmdline"
+coming() { if OMARCHY_SYSFS="$work/sysfs" OMARCHY_CMDLINE="$work/cmdline" omarchy_console_no_driver_coming; then echo none; else echo coming; fi; }
+fb none
+echo pci:v00001002d00005046sv0sd0bc03sc00i00 >"$dev/modalias"
+check "no driver coming: a card without a driver (ati-vga)" "$(coming)" none
+echo pci:v00001234d00001111sv0sd0bc03sc00i00 >"$dev/modalias"
+check "no driver coming: no, one will load (bochs)" "$(coming)" coming
+echo "BOOT_IMAGE=/vmlinuz quiet nomodeset" >"$work/cmdline"
+check "no driver coming: nomodeset" "$(coming)" none
+echo "BOOT_IMAGE=/vmlinuz quiet" >"$work/cmdline"; mkdir "$dev/driver"
+echo pci:v00001002d00005046sv0sd0bc03sc00i00 >"$dev/modalias"
+check "no driver coming: no, one is bound, its framebuffer can still come" "$(coming)" coming
+rmdir "$dev/driver"; fb 1280 800 bochs-drmdrmfb
+check "no driver coming: no, there is a framebuffer" "$(coming)" coming
+fb none
+
 # omarchy_console_claim_tty1: the installer's first draw on tty1 marks it
 # taken, after a layout that holds the lock has finished.
 rm -f "$work/run/tty1-taken"

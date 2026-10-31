@@ -162,7 +162,7 @@ omarchy_console_logo() {
     local tty="${OMARCHY_TTY:-/dev/tty1}" fb="${OMARCHY_FB:-/sys/class/graphics/fb0}"
     local dir="${OMARCHY_CONSOLE_LOGO_DIR:-/usr/share/omarchy-iso/console-logo}"
     local share="${OMARCHY_ISO_SHARE:-/usr/share/omarchy-iso}" run="${OMARCHY_RUN_DIR:-/run/omarchy-iso}"
-    local logo rows cols logo_rows logo_cols top left row line fb_name=none size frame=4
+    local logo rows cols logo_rows logo_cols top left row line fb_name=none size frame=4 screen i
     [ -e "$tty" ] || return 0
     omarchy_console_takeover
     size=$(omarchy_console_font_size)
@@ -211,7 +211,7 @@ omarchy_console_logo() {
     [ "$top" -lt 1 ] && top=1
     left=$(((cols - logo_cols) / 2 + 1))
     [ "$left" -lt 1 ] && left=1
-    {
+    screen=$(
         if [ "$logo" = vga ]; then
             # ISOLINUX put this logo up already, in its colors: bright green
             # on the VGA palette's black (configs/syslinux/omarchy-logo.txt).
@@ -228,7 +228,18 @@ omarchy_console_logo() {
             row=$((row + 1))
         done <"$dir/$logo.txt"
         printf '\033[0m\033[%d;1H' "$((row + 1))"
-    } 2>/dev/null >>"$tty"
+    )
+    # In one write, and again on a fresh open if that fails: login hangs tty1
+    # up as it starts the session (util-linux login's vhangup), and a layout
+    # it cut off half way left the console cleared and the logo missing until
+    # the greeter (QEMU under load, one BIOS boot in six; the journal had the
+    # layout, the screen only its clear).
+    i=0
+    while [ "$i" -lt 3 ]; do
+        printf '%s' "$screen" 2>/dev/null >>"$tty" && break
+        i=$((i + 1))
+        sleep 0.05
+    done
 
     # Which framebuffer the logo is laid out for: omarchy-console-logo-redraw
     # compares it, and .automated_script.sh leaves the logo up while it exists.

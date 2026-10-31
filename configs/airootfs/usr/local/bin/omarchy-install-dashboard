@@ -63,11 +63,9 @@ tips=(
   progress.tip.menu
   progress.tip.keybindings
   progress.tip.superKey
-  progress.tip.signPdfs
   progress.tip.localSend
   progress.tip.webApps
   progress.tip.terminal
-  progress.tip.media
   progress.tip.presentations
   progress.tip.webcam
   progress.tip.ocr

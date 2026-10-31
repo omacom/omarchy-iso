@@ -332,4 +332,24 @@ export OMARCHY_CONSOLE_LOGO_DIR="$work/missing"
 fb none; size 25 80
 check "no logo files: nothing written" "$(draw)" ""
 
+# omarchy_console_claim_tty1: the installer's first draw on tty1 marks it
+# taken, after a layout that holds the lock has finished.
+rm -f "$work/run/tty1-taken"
+( flock 9; sleep 0.4 ) 9>>"$work/run/console-logo.lock" &
+holder=$!
+sleep 0.1
+start=$(date +%s%N)
+omarchy_console_claim_tty1
+took=$((($(date +%s%N) - start) / 1000000))
+wait "$holder"
+if [[ -e $work/run/tty1-taken ]]; then ok "claim: tty1 marked taken"; else fail "claim: no tty1-taken marker"; fi
+if ((took >= 200)); then ok "claim: waited for the layout holding the lock (${took} ms)"; else fail "claim: did not wait for the lock (${took} ms)"; fi
+OMARCHY_RUN_DIR=/proc/omarchy-no-such-dir omarchy_console_claim_tty1 && ok "claim: no run directory, no failure" || fail "claim failed without a run directory"
+# .automated_script.sh runs it under set -euo pipefail: a lock it cannot open
+# must not end the login.
+mkdir -p "$work/readonly"; chmod 500 "$work/readonly"
+survived=$(OMARCHY_RUN_DIR="$work/readonly" bash -c 'set -euo pipefail; source "$1"; omarchy_console_claim_tty1; echo survived' _ "$SHARE/console-logo.sh" 2>/dev/null || true)
+chmod 700 "$work/readonly"
+check "claim: an unwritable run directory does not end a strict caller" "$survived" survived
+
 exit "$((failures > 0))"

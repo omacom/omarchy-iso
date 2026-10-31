@@ -10,6 +10,8 @@
 # framebuffer over shows a few frames of the console's last layout in QEMU
 # (test/boot-render's --device for those).
 #
+# Under BIOS a second boot holds the GPU driver back until after the login.
+#
 # Boots the ISO alone, no base image: `./test/integration <iso> boot-render`
 # (UEFI) or `./test/integration <iso> boot-render --bios`.
 
@@ -22,6 +24,19 @@ verify_boot_render() {
   check "every frame from the boot loader to the greeter renders as it should" \
     "$ROOT/test/boot-render" "$ISO" --firmware "$FIRMWARE" "${display[@]}" --out "$out"
   sed -n '/^PROBLEMS/,$p' "$out/report.txt" 2>/dev/null || true
+  [[ $FIRMWARE == bios ]] || return 0
+
+  # A GPU driver that loads after the login, as one may on a slow machine: a
+  # udev rule passed in as a systemd credential holds it back four seconds.
+  # The VGA logo stays up until the driver's framebuffer comes and the logo
+  # is laid out again there, and the login's wait for udev keeps the
+  # configurator back until then.
+  local rule='ACTION=="add", SUBSYSTEM=="pci", ATTR{class}=="0x03*", RUN+="/usr/bin/sleep 4"'
+  log "Checking it again with the GPU driver loading after the login"
+  check "every frame renders as it should with a GPU driver that loads after the login" \
+    "$ROOT/test/boot-render" "$ISO" --firmware bios "${display[@]}" --out "$out-late-driver" --qemu-arg=-smbios \
+    --qemu-arg="type=11,value=io.systemd.credential.binary:udev.rules.71-omarchy-late-gpu=$(printf '%s\n' "$rule" | base64 -w0)"
+  sed -n '/^PROBLEMS/,$p' "$out-late-driver/report.txt" 2>/dev/null || true
 }
 
 verify_boot_render

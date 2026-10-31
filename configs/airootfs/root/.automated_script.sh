@@ -12,13 +12,16 @@ set -euo pipefail
 
 [[ $(tty) == /dev/tty1 ]] || exit 0
 
-# tty1 is the installer's from here: omarchy-console-logo-redraw no longer
-# lays the boot logo out again when a GPU driver replaces the framebuffer.
-mkdir -p /run/omarchy-iso && : >/run/omarchy-iso/tty1-taken
+# The boot logo stays up, and is laid out again when a GPU driver replaces the
+# framebuffer, until something here or the configurator draws on tty1: that
+# claims it first (omarchy_console_claim_tty1).
+# shellcheck source=/dev/null
+source /usr/share/omarchy-iso/console-logo.sh 2>/dev/null || omarchy_console_claim_tty1() { :; }
 
 # The N1x recovery boot entry is a diagnostic shell, never the installer: record
 # the hardware probe, show how to reach the machine, and leave tty1 at a prompt.
 if grep -qw 'omarchy.n1x_recovery=1' /proc/cmdline; then
+  omarchy_console_claim_tty1
   /usr/local/sbin/omarchy-n1x-live-probe || true
   exit 0
 fi
@@ -53,10 +56,11 @@ set_tokyo_night_colors() {
   echo -en "\e]PFc0caf5"
   echo -en "\033[0m"
   # The boot logo stays up until the greeter draws over it in place
-  # (/usr/share/omarchy-iso/console-logo.sh) rather than a blank screen; not
-  # the VGA console's half-size one, still up where no framebuffer came, whose
-  # glyphs the greeter's font does not have.
-  if [[ ! -e /run/omarchy-iso/console-logo || -e /run/omarchy-iso/console-logo-vga ]]; then
+  # (/usr/share/omarchy-iso/console-logo.sh) rather than a blank screen. The
+  # VGA console's half-size one too: a GPU driver loading later has it
+  # cleared and the logo laid out again on its framebuffer, and where none
+  # comes the configurator draws the full one over it before anything else.
+  if [[ ! -e /run/omarchy-iso/console-logo ]]; then
     clear
   fi
 }
@@ -72,6 +76,7 @@ export CLICOLOR_FORCE=1
 export FORCE_COLOR=1
 
 if [[ ${OMARCHY_INSTALL_DEBUG:-} == "1" ]]; then
+  omarchy_console_claim_tty1
   echo "=== Omarchy ISO debug build ==="
   [[ -f /usr/share/omarchy-iso/build-info ]] && cat /usr/share/omarchy-iso/build-info
   pacman -Q omarchy-settings omarchy-keyring 2>/dev/null || true
@@ -153,6 +158,7 @@ cd /root
 # stands in for the wizard. omarchy-cidata-load copies them into /root and
 # everything downstream runs the ordinary path against ordinary inputs.
 if /usr/local/bin/omarchy-cidata-load; then
+  omarchy_console_claim_tty1
   echo "Autoinstall configuration found on cidata drive; skipping the configurator."
   export OMARCHY_UI_INTERACTIVE=no
   # No greeter to wait for: hash the install medium from now on (see

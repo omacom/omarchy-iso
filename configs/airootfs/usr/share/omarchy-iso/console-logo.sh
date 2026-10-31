@@ -62,6 +62,26 @@ omarchy_console_takeover() {
     done
 }
 
+# omarchy_console_claim_tty1: the installer draws on tty1 from here, and the
+# boot logo is no longer laid out again when a GPU driver replaces the
+# framebuffer, nor the VGA one cleared (omarchy-console-logo-redraw). Taken
+# under the layout lock, so a layout in progress finishes first. Until then
+# the redraw goes on after the login too: the login waits for udev to settle
+# (omarchy-cidata-load), GPU drivers and all, before the configurator starts,
+# and a driver that loaded after the login left the console blank until the
+# greeter (test/boot-render with a udev rule that holds the driver back). A
+# layout takes three seconds at most (the takeover's two, the 32 px font's
+# one); the claim waits five, and never fails its caller (set -e).
+omarchy_console_claim_tty1() {
+    local run="${OMARCHY_RUN_DIR:-/run/omarchy-iso}"
+    mkdir -p "$run" 2>/dev/null || return 0
+    {
+        flock -w 5 9 || true
+        : >"$run/tty1-taken"
+    } 9>>"$run/console-logo.lock" 2>/dev/null || true
+    return 0
+}
+
 # omarchy_console_vga_bound: the VGA text console (vgacon) is still a console
 # driver; a GPU driver unregisters it when it takes the hardware over.
 omarchy_console_vga_bound() {

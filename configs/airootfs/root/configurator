@@ -96,19 +96,25 @@ measure_terminal
 # block of logo, tagline and hint centred vertically, the logo centred at its
 # full width. The cursor ends up a blank line below it.
 console_logo_draw() {
-  local cols=$1 rows logo_rows top left row line
+  local cols=$1 rows logo_rows top left row line lock=${OMARCHY_RUN_DIR:-/run/omarchy-iso}/console-logo.lock
+  [[ -d ${lock%/*} ]] || lock=/dev/null
   rows=$(stty size 2>/dev/null </dev/tty | awk '{print $1}')
   [[ $rows =~ ^[0-9]+$ ]] || rows=25
   logo_rows=$(wc -l <"$CONSOLE_LOGO_PATH")
   top=$(((rows - logo_rows - 4) / 2 + 1)); (( top < 1 )) && top=1
   left=$(((cols - LOGO_WIDTH) / 2 + 1)); (( left < 1 )) && left=1
-  printf '\033[2J\033[32m'
-  row=$top
-  while IFS= read -r line; do
-    printf '\033[%d;%dH%s' "$row" "$left" "$line"
-    ((row++))
-  done <"$CONSOLE_LOGO_PATH"
-  printf '\033[0m\033[%d;1H' "$((row + 1))"
+  # Under the boot logo's layout lock (console-logo.sh): a GPU driver's
+  # framebuffer can have the logo laid out again at this very moment.
+  {
+    flock -w 5 9 2>/dev/null || true
+    printf '\033[2J\033[32m'
+    row=$top
+    while IFS= read -r line; do
+      printf '\033[%d;%dH%s' "$row" "$left" "$line"
+      ((row++))
+    done <"$CONSOLE_LOGO_PATH"
+    printf '\033[0m\033[%d;1H' "$((row + 1))"
+  } 9>>"$lock"
 }
 
 wait_for_stable_terminal() {
@@ -1275,6 +1281,8 @@ install_target="full_disk"
 # Let the live VT reach its settled width before the first screen so the logo
 # isn't measured against the transient 80-column boot console.
 wait_for_stable_terminal
+# tty1 is the installer's from here: no more boot logo layouts behind it.
+declare -F omarchy_console_claim_tty1 >/dev/null && omarchy_console_claim_tty1
 i18n_console_font "$(tty 2>/dev/null)"
 
 greeter

@@ -32,11 +32,12 @@ source "$share/console-logo.sh" || exit 0
 
 # clear_vga_logo: clear tty1 while the VGA logo is up and the console is
 # still 80x25, the VGA one or the dummy one a driver leaves in its place,
-# under the layout lock (below), so it never lands on a layout.
+# and the installer has not claimed tty1, under the layout lock (below), so
+# it never lands on a layout or on the installer's first screen.
 clear_vga_logo() {
   (
     flock 9
-    [[ -e $run/console-logo-vga && $(omarchy_console_size) == "25 80 " ]] || exit 0
+    [[ -e $run/console-logo-vga && ! -e $run/tty1-taken && $(omarchy_console_size) == "25 80 " ]] || exit 0
     printf '\033[2J' >>"${OMARCHY_TTY:-/dev/tty1}"
   ) 9>>"$run/console-logo.lock" 2>/dev/null
 }

@@ -196,7 +196,7 @@ jobs:
         # once, as the variant changes nothing it does before it stops.
         include:
           - variant: default
-            except: &elsewhere used-disk full-nvram live-lowmem pxe slow-medium corrupt-image luks-calibration
+            except: &elsewhere used-disk full-nvram live-lowmem pxe slow-medium corrupt-image luks-calibration boot-render
           - variant: encrypted
             except: *elsewhere
             env: OMARCHY_INTEGRATION_ENCRYPT=true
@@ -221,8 +221,14 @@ jobs:
             live: true
             env: OMARCHY_INTEGRATION_ENCRYPT=true
           - variant: live-media
-            scenarios: slow-medium corrupt-image
+            scenarios: slow-medium corrupt-image boot-render
             live: true
+          # boot-render's BIOS run, the GPU driver's takeover of the VGA
+          # console with it.
+          - variant: live-render-bios
+            scenarios: boot-render
+            live: true
+            env: OMARCHY_INTEGRATION_FIRMWARE=bios
           - variant: live-misc
             scenarios: luks-calibration
             live: true

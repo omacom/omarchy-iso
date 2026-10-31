@@ -360,7 +360,9 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # saves a laptop's signed firmware from Windows with qcom-firmware-extract.
   arch_packages=("$OMARCHY_KERNEL" archlinuxarm-keyring git gum jq openssl openssh pciutils plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted systemd-ukify linux-firmware-qcom qcom-firmware-extract python)
 else
-  # linux-t2 is the live kernel on a Mac (configs/grub/grub.cfg).
+  # linux-t2 is the live kernel on a Mac (configs/grub/grub.cfg). Its APFS
+  # driver lets the installer preserve a T2 Mac's Broadcom firmware before a
+  # full-disk install removes the source volume.
   arch_packages=("$OMARCHY_KERNEL" linux-t2 git gum jq openssl plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
 fi
 live_packages_file="$build_cache_dir/packages.$OMARCHY_ARCH"
@@ -594,6 +596,16 @@ mapfile -t all_packages < <(
   } | sort -u
 )
 
+# The T2 firmware fetcher is also a live-installer tool. Do not put its package
+# in packages.x86_64: its post-install hook would run while mkarchiso builds the
+# live root and, on a T2 build host, could embed that host's proprietary Apple
+# firmware in the published ISO. Download the archive into the build cache and
+# extract only the reviewed MIT script after package download instead.
+if [[ $OMARCHY_ARCH == x86_64 ]]; then
+  all_packages+=(apple-bcm-firmware-fetcher)
+  mapfile -t all_packages < <(printf '%s\n' "${all_packages[@]}" | sort -u)
+fi
+
 # Arch dropped the prebuilt broadcom-wl on 2026-09-02 and rebuilt broadcom-wl-dkms
 # with replaces=(broadcom-wl). A replaces entry only helps upgrades of an already
 # installed package; as an explicit pacman target the old name now fails with
@@ -778,6 +790,47 @@ download_offline_packages() {
 if ! download_offline_packages; then
   echo "Offline package download failed; retrying after pacman cleaned invalid cached files..." >&2
   download_offline_packages
+fi
+
+# The arch-mact2 repository is unsigned. Pacman verifies the archive checksum
+# from its database, but that database is not an authenticity boundary, so pin
+# the reviewed fetcher script itself. A publisher change must stop the build
+# until the new script is reviewed and this digest is deliberately updated.
+if [[ $OMARCHY_ARCH == x86_64 ]]; then
+  t2_fetcher_file=$(
+    pacman --config "$online_pacman_conf" --dbpath /tmp/offlinedb \
+      -Sp --print-format '%n %f' apple-bcm-firmware-fetcher |
+      awk '$1 == "apple-bcm-firmware-fetcher" { print $2 }'
+  )
+  [[ -n $t2_fetcher_file && $t2_fetcher_file != *$'\n'* ]] || {
+    echo "ERROR: could not resolve exactly one apple-bcm-firmware-fetcher archive" >&2
+    exit 1
+  }
+  t2_fetcher_archive="$offline_mirror_dir/$t2_fetcher_file"
+  [[ -f $t2_fetcher_archive ]] || {
+    echo "ERROR: apple-bcm-firmware-fetcher archive is missing from the build cache" >&2
+    exit 1
+  }
+  echo "7f6e23722c3ab26a7674b535c4ea899c0764f67281f945ae25cc30c730b525e2  $t2_fetcher_archive" |
+    sha256sum --check --strict --quiet - || {
+      echo "ERROR: apple-bcm-firmware-fetcher archive changed; review it before updating the pinned SHA-256" >&2
+      exit 1
+    }
+
+  t2_fetcher="$build_cache_dir/airootfs/usr/bin/apple-bcm-firmware-fetcher"
+  mkdir -p "${t2_fetcher%/*}"
+  bsdtar -xOf "$t2_fetcher_archive" usr/bin/apple-bcm-firmware-fetcher >"$t2_fetcher.new"
+  echo "873f78849627293781c6eb7c7a36d9a621a340ce8aaba292023eefa6aa481ba6  $t2_fetcher.new" |
+    sha256sum --check --strict --quiet - || {
+      echo "ERROR: apple-bcm-firmware-fetcher changed; review it before updating the pinned SHA-256" >&2
+      exit 1
+    }
+  install -m0755 "$t2_fetcher.new" "$t2_fetcher"
+  rm -f "$t2_fetcher.new"
+
+  t2_fetcher_license="$build_cache_dir/airootfs/usr/share/licenses/apple-bcm-firmware-fetcher/LICENSE"
+  mkdir -p "${t2_fetcher_license%/*}"
+  bsdtar -xOf "$t2_fetcher_archive" usr/share/licenses/apple-bcm-firmware-fetcher/LICENSE >"$t2_fetcher_license"
 fi
 
 # mkarchiso expects the mirror at /var/cache/omarchy/mirror/offline inside the

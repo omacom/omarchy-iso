@@ -48,6 +48,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
+from . import apple_efi
 from . import archinstall_adapter as arch
 from .command import capture, capture_identifier, require_text
 from .context import InstallContext, hw_platform, iso_kernel
@@ -272,6 +273,9 @@ def prepare_live(ctx: InstallContext) -> None:
     else:
         disk = _install_disk(ctx)
         if disk:
+            # An Apple ESP carries the T1/T2 coprocessor's firmware, and the
+            # wipe below is the last moment it exists (omarchy#8271).
+            apple_efi.preserve(disk, _apple_efi_stash(ctx))
             info(f"› cleaning up holders on install disk: {disk}")
             result = capture(["omarchy-iso-cleanup-disk", disk])
             for line in (result.stdout + result.stderr).splitlines():
@@ -286,6 +290,13 @@ def prepare_live(ctx: InstallContext) -> None:
         ctx.arch_config_path, ctx.creds_path
     )
     ctx.state["mirror_handler"] = arch.make_mirror_handler(offline=True)
+
+
+def _apple_efi_stash(ctx: InstallContext) -> Path:
+    """Where Apple's coprocessor firmware waits out the wipe: the state
+    directory, which is tmpfs on the live ISO and so survives the disk but
+    not the reboot."""
+    return ctx.state_dir / "apple-efi"
 
 
 def _install_disk(ctx: InstallContext) -> str | None:
@@ -1341,9 +1352,16 @@ def _install_limine_omarchy(ctx: InstallContext, installer, config) -> None:
         if not efi_partition.mountpoint:
             raise RuntimeError("EFI partition is not mounted")
 
+        esp_mount = str(efi_partition.mountpoint)
+
+        # The ESP is new and empty here; Apple's coprocessor firmware goes
+        # back on before anything else claims the partition. The mountpoint
+        # is the installed system's, so read it through the target.
+        apple_efi.restore(ctx.target / esp_mount.lstrip("/"), _apple_efi_stash(ctx))
+
         _install_limine_efi(
             ctx,
-            esp_mount=str(efi_partition.mountpoint),
+            esp_mount=esp_mount,
             disk=arch.parent_device_path(efi_partition.safe_dev_path),
             part=int(efi_partition.partn),
             removable=bootloader_removable,

@@ -160,7 +160,8 @@ if [[ ! -f $DISK || $REUSE != "reuse" ]]; then
 fi
 
 NET_ARGS=()
-if [[ $NETWORK != "0" && $NETWORK != "false" && $NETWORK != "no" ]]; then
+# Any case of 0, false, no or off disables networking.
+if [[ ! ${NETWORK,,} =~ ^(0|false|no|off)$ ]]; then
   if [[ -n $SSH_PORT && $SSH_PORT != "0" ]]; then
     NET_ARGS=(-netdev "user,id=net0,hostfwd=tcp:${SSH_HOST}:${SSH_PORT}-:22" -device virtio-net-pci,netdev=net0)
     echo "SSH forwarding enabled: ssh -p $SSH_PORT root@localhost"
@@ -170,7 +171,14 @@ if [[ $NETWORK != "0" && $NETWORK != "false" && $NETWORK != "no" ]]; then
     echo "Networking enabled without SSH port forwarding."
   fi
 else
-  echo "Networking disabled."
+  NET_ARGS=(-nic none)
+  net_message="Networking disabled."
+  for arg in "${EXTRA_QEMU_ARGS[@]}"; do
+    if [[ $arg == -nic || $arg == -netdev || $arg == -net ]]; then
+      net_message="Networking disabled, except what the QEMU arguments after -- add."
+    fi
+  done
+  echo "$net_message"
 fi
 
 # One core type only: KVM vCPUs that move between big and little cores see

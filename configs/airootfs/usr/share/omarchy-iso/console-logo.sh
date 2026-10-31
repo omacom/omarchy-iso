@@ -99,6 +99,25 @@ omarchy_console_font_size() {
     fi
 }
 
+# omarchy_console_font_32 TTY FONT: load the 32 px font, and again while the
+# console's columns still count 8-pixel cells. A font loaded as fbcon takes a
+# GPU driver's framebuffer over can be reset to the kernel's when the takeover
+# finishes: the logo was then laid out at 8x16, and jumped to 16x32 at the
+# greeter (QEMU under load, BIOS at 1920x1440). A second at most.
+omarchy_console_font_32() {
+    local tty="$1" font="$2" fb="${OMARCHY_FB:-/sys/class/graphics/fb0}" xres=0 yres=0 i=0
+    [ -r "$fb/virtual_size" ] && IFS=, read -r xres yres <"$fb/virtual_size"
+    while :; do
+        setfont -C "$tty" "$font" 2>/dev/null
+        # shellcheck disable=SC2046 # rows and columns, two words
+        set -- $(omarchy_console_size)
+        [ "${2:-0}" -le $((xres / 16)) ] 2>/dev/null && return 0
+        [ "$i" -lt 10 ] || return 0
+        sleep 0.1
+        i=$((i + 1))
+    done
+}
+
 omarchy_console_logo() {
     local tty="${OMARCHY_TTY:-/dev/tty1}" fb="${OMARCHY_FB:-/sys/class/graphics/fb0}"
     local dir="${OMARCHY_CONSOLE_LOGO_DIR:-/usr/share/omarchy-iso/console-logo}"
@@ -125,7 +144,7 @@ omarchy_console_logo() {
             frame=2
         fi
     elif [ "$size" = 32 ] && [ -r "$share/console-32.psf" ]; then
-        setfont -C "$tty" "$share/console-32.psf" 2>/dev/null
+        omarchy_console_font_32 "$tty" "$share/console-32.psf"
     fi
     # shellcheck disable=SC2046 # rows and columns, two words
     set -- $(omarchy_console_size)

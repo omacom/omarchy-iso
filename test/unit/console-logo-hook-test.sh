@@ -36,10 +36,10 @@ fail() { echo "FAIL: $1"; failures=$((failures + 1)); }
 check() { if [[ $2 == "$3" ]]; then ok "$1"; else fail "$1: got '$2', expected '$3'"; fi; }
 # expect <description> <string> <piece>...: the pieces occur in the string, in that order
 expect() {
-  local desc=$1 s=$2 piece
+  local desc=$1 s=$2 got=$2 piece
   shift 2
   for piece in "$@"; do
-    [[ $s == *"$piece"* ]] || { fail "$desc: got $2"; return; }
+    [[ $s == *"$piece"* ]] || { fail "$desc: got $got"; return; }
     s=${s#*"$piece"}
   done
   ok "$desc"
@@ -84,7 +84,6 @@ export PATH="$work/bin:$PATH"
 source "$SHARE/console-logo.sh"
 draw() { : >"$work/tty"; rm -f "$work/setfont.log"; omarchy_console_logo; cat -v "$work/tty"; }
 setfont_calls() { cat "$work/setfont.log" 2>/dev/null || true; }
-
 # The console drivers: the VGA text console unless a case says otherwise.
 export OMARCHY_VTCONSOLE="$work/vtconsole"
 mkdir -p "$work/vtconsole/vtcon0"; echo "(S) VGA+" >"$work/vtconsole/vtcon0/name"
@@ -174,6 +173,22 @@ expect "UEFI 1920x1080: an invisible full stop wakes fbcon before anything else"
 check "UEFI 1920x1080: the 32 px font is loaded" "$(setfont_calls)" "setfont -C $work/tty $work/share/console-32.psf"
 expect "UEFI 1920x1080: laid out for 120x33, rows 14-16 at column 55" "$out" '^[[14;55H' '^[[15;55H' '^[[16;55H'
 check "UEFI: recorded the framebuffer the logo is on" "$(cat "$work/run/console-logo")" simpledrmdrmfb
+
+# The 32 px font reset to the kernel's as fbcon finishes taking over: loaded
+# again until the console counts 16-pixel cells, and laid out for that. Here
+# the first two loads do nothing.
+cp "$work/bin/setfont" "$work/bin/setfont.real"
+cat >"$work/bin/setfont" <<EOS
+#!/bin/bash
+echo x >>"$work/setfont.tries"
+(( \$(wc -l <"$work/setfont.tries") >= 3 )) && exec "$work/bin/setfont.real" "\$@"
+echo "setfont \$*" >>"$work/setfont.log"
+EOS
+rm -f "$work/setfont.tries"
+fb 1920 1440 bochs-drmdrmfb; size 90 240; out=$(draw)
+check "32 px font reset by the takeover: loaded until it holds" "$(setfont_calls | wc -l)" 3
+expect "32 px font reset by the takeover: laid out for 120x45, rows 20-22 at column 55" "$out" '^[[20;55H' '^[[21;55H' '^[[22;55H'
+mv "$work/bin/setfont.real" "$work/bin/setfont"
 
 # 1366x768 and 1280x800 keep the kernel's 8x16 (170x48, 160x50): 32 px would
 # leave the greeter 85x24 and 80x25, the second narrower than its logo.

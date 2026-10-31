@@ -12,6 +12,8 @@
 #   that font the greeter's logo where it fits, the fitted copy where it does
 #   not; no takeover glyph. The next layout on a framebuffer loads a whole
 #   font back, and the console is cleared when the VGA console goes.
+# - No display at all (no framebuffer, no VGA console): nothing until the
+#   redraw has a framebuffer to draw on.
 # - A UEFI framebuffer still behind the dummy console: an invisible full stop
 #   first, then the layout for the size fbcon takes the console over at.
 # - The font: 32 px from 1852x800 up, so 1920x1080 gets it and 1366x768,
@@ -82,6 +84,17 @@ export PATH="$work/bin:$PATH"
 source "$SHARE/console-logo.sh"
 draw() { : >"$work/tty"; rm -f "$work/setfont.log"; omarchy_console_logo; cat -v "$work/tty"; }
 setfont_calls() { cat "$work/setfont.log" 2>/dev/null || true; }
+
+# The console drivers: the VGA text console unless a case says otherwise.
+export OMARCHY_VTCONSOLE="$work/vtconsole"
+mkdir -p "$work/vtconsole/vtcon0"; echo "(S) VGA+" >"$work/vtconsole/vtcon0/name"
+
+# No display at all: no framebuffer and no VGA console (a virtio GPU without
+# VGA before its driver). Nothing is drawn, the layout is left to the redraw.
+echo "(S) dummy device" >"$work/vtconsole/vtcon0/name"; fb none; size 25 80; out=$(draw)
+check "no display: nothing drawn" "$out" ""
+check "no display: recorded as laid out on no framebuffer, for the redraw" "$(cat "$work/run/console-logo")" none
+echo "(S) VGA+" >"$work/vtconsole/vtcon0/name"
 
 # The VGA text console: no framebuffer, 80x25. The greeter's 3-row logo in its
 # 7-row frame starts on row 10; 12 columns centred on 80 start at column 35.

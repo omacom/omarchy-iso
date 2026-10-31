@@ -108,6 +108,16 @@ omarchy_console_logo() {
     omarchy_console_takeover
     size=$(omarchy_console_font_size)
     logo=greeter
+    if [ ! -e "$fb" ] && ! omarchy_console_vga_bound; then
+        # No display yet: a GPU with neither a firmware framebuffer nor VGA
+        # (QEMU's virtio-gpu-pci on UEFI) shows nothing until its driver
+        # loads, and fbcon would then show this layout, made for the dummy
+        # console's 80x25, at the top left of the driver's framebuffer until
+        # the redraw. The console stays empty; the redraw draws the logo.
+        mkdir -p "$run" 2>/dev/null && echo none 2>/dev/null >"$run/console-logo"
+        [ -w /dev/kmsg ] && echo "omarchy-logo: no display yet, the logo waits for a framebuffer" 2>/dev/null >/dev/kmsg
+        return 0
+    fi
     if [ ! -e "$fb" ]; then
         # The VGA text console: the half-size logo, in its font.
         if [ -r "$dir/vga.psf" ] && [ -r "$dir/vga.txt" ] && setfont -C "$tty" "$dir/vga.psf" 2>/dev/null; then

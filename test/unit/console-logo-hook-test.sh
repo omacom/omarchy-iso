@@ -77,23 +77,28 @@ fb() {
   [[ $1 == none ]] && return
   mkdir -p "$work/fb"
   echo "$1,$2" >"$work/fb/virtual_size"
+  echo "U:${1}x${2}p-0" >"$work/fb/modes"
   echo "$3" >"$work/fb/name"
 }
 # setfont records its call and, for the 32 px font, halves the console in
 # both directions the way the real font change does.
+# The kernel sizes the console from the framebuffer: 16x32 cells, the VT's
+# header a byte each, 255 at most.
 cat >"$work/bin/setfont" <<EOS
 #!/bin/bash
 echo "setfont \$*" >>"$work/setfont.log"
 echo setfont >>"$work/order.log"
 [[ \$* == *console-32.psf ]] || exit 0
-read -r rows cols < <(hexdump -n 2 -v -e '1/1 "%u "' "$work/vcsa")
-printf '%b%b\000\000' "\\\\\$(printf %03o \$((rows / 2)))" "\\\\\$(printf %03o \$((cols / 2)))" >"$work/vcsa"
+IFS=, read -r xres yres <"$work/fb/virtual_size"
+printf '%b%b\000\000' "\\\\\$(printf %03o \$((yres / 32 > 255 ? 255 : yres / 32)))" "\\\\\$(printf %03o \$((xres / 16 > 255 ? 255 : xres / 16)))" >"$work/vcsa"
 EOS
 chmod 755 "$work/bin/setfont"
 
 export OMARCHY_TTY="$work/tty" OMARCHY_VCSA="$work/vcsa" OMARCHY_FB="$work/fb"
 export OMARCHY_CONSOLE_LOGO_DIR="$work/logo" OMARCHY_ISO_SHARE="$work/share" OMARCHY_RUN_DIR="$work/run"
 export OMARCHY_VT_CURSOR="$work/global_cursor_default"
+# fbcon's rotation: none, unless a case says otherwise.
+mkdir -p "$work/fbcon"; echo 0 >"$work/fbcon/rotate"; export OMARCHY_FBCON="$work/fbcon"
 export PATH="$work/bin:$PATH"
 # shellcheck source=/dev/null
 source "$SHARE/console-logo.sh"
@@ -209,6 +214,54 @@ check "UEFI 1920x1080: the 32 px font is loaded" "$(setfont_calls)" "setfont -C 
 expect "UEFI 1920x1080: laid out for 120x33, rows 14-16 at column 55" "$out" '^[[14;55H' '^[[15;55H' '^[[16;55H'
 check "UEFI: recorded the framebuffer the logo is on" "$(cat "$work/run/console-logo")" simpledrmdrmfb
 
+# OVMF's 1280x800 behind the dummy console: its 80x25 is that framebuffer in
+# 16x32 cells, but while the dummy console is bound fbcon does not have tty1:
+# the takeover glyph, the wait for 160x50, the layout for it (row 22, col 75).
+mkdir -p "$work/vtconsole/vtcon1"; echo "(S) dummy device" >"$work/vtconsole/vtcon1/name"; echo 1 >"$work/vtconsole/vtcon1/bind"
+fb 1280 800 simpledrmdrmfb; size 25 80
+(sleep 0.15; echo 0 >"$work/vtconsole/vtcon1/bind"; size 50 160) &
+out=$(draw)
+wait
+expect "UEFI 1280x800 behind the dummy console: waits for fbcon, laid out for 160x50" "$out" '^[[30;40m.^[[0m^M' '^[[22;75H'
+rm -rf "$work/vtconsole/vtcon1"
+# The same 80x25 a moment after fbcon has taken tty1 from the dummy console,
+# before it resized it (a GPU driver's framebuffer where the firmware left
+# none, QEMU's virtio-gpu-pci under UEFI): not the 1280x800 framebuffer in
+# 16x32 cells, the layout waits for 160x50 (row 22, column 75).
+echo "BOOT_IMAGE=/vmlinuz quiet" >"$work/cmdline-plain"
+fb 1280 800 virtio_gpudrmfb; size 25 80
+(sleep 0.15; size 50 160) &
+out=$(OMARCHY_CMDLINE="$work/cmdline-plain" draw)
+wait
+expect "UEFI 1280x800 just taken from the dummy console, still 80x25: laid out for 160x50" "$out" '^[[22;75H'
+lacks "UEFI 1280x800 just taken from the dummy console: not laid out for 80x25 (row 5)" "$out" '^[[5;1H'
+# Unless the command line names the font: fbcon=font:TER16x32 makes 80x25 the
+# 1280x800 console it is (rows 10-12 at column 35), at once, no 2 s wait.
+echo "BOOT_IMAGE=/vmlinuz quiet fbcon=font:TER16x32" >"$work/cmdline-font"
+fb 1280 800 virtio_gpudrmfb; size 25 80
+start=$(date +%s%N); out=$(OMARCHY_CMDLINE="$work/cmdline-font" draw); took=$(( ($(date +%s%N) - start) / 1000000 ))
+expect "fbcon=font:TER16x32 at 1280x800: 80x25 is its console, laid out for it" "$out" '^[[10;35H'
+if (( took < 1000 )); then ok "fbcon=font:TER16x32 at 1280x800: no wait (${took} ms)"; else fail "fbcon=font:TER16x32 at 1280x800: waited ${took} ms"; fi
+
+# A GPU driver's framebuffer in sysfs while the console is still the old
+# one's (1280x800's 160x50): the layout waits for fbcon to have it on the
+# 2560x1440 one (320x90, which the VT's header holds as 90x255, a byte each,
+# 255 at most; 160x45 in 32 px: row 20, column 75), not laid out for the old
+# size at the new screen's top left.
+fb 2560 1440 bochs-drmdrmfb; size 50 160
+(sleep 0.15; size 90 255) &
+out=$(draw)
+wait
+expect "a GPU driver's framebuffer: waits for the console to be on it, laid out for 160x45" "$out" '^[[30;40m.^[[0m^M' '^[[20;75H'
+# A console fbcon turns a quarter turn (a portrait panel, rotate 1): as wide
+# as the framebuffer is tall, on it already (240x75 on 1200x1920): no wait,
+# no takeover glyph.
+echo 1 >"$work/fbcon/rotate"
+fb 1200 1920 i915drmfb; size 75 240
+start=$(date +%s%N); out=$(draw); took=$(( ($(date +%s%N) - start) / 1000000 ))
+lacks "rotated console: on the framebuffer already, no takeover glyph" "$out" '.^[[0m^M'
+if (( took < 1000 )); then ok "rotated console: no wait (${took} ms)"; else fail "rotated console: waited ${took} ms"; fi
+echo 0 >"$work/fbcon/rotate"
 # The 32 px font reset to the kernel's as fbcon finishes taking over: loaded
 # again until the console counts 16-pixel cells, and laid out for that. Here
 # the first two loads do nothing.

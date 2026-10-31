@@ -46,17 +46,84 @@ omarchy_console_size() {
     hexdump -n 2 -v -e '1/1 "%u "' "${OMARCHY_VCSA:-/dev/vcsa1}" 2>/dev/null
 }
 
-# omarchy_console_takeover: on a framebuffer still behind the dummy console,
-# write a full stop in black on black so fbcon takes the console over, and
-# give the takeover two seconds: on UEFI it runs from a workqueue as soon as
-# something is written, and a GPU driver taking over from the VGA console has
-# its framebuffer in sysfs before the modeset of fbcon's takeover is done
-# (in QEMU under load, longer than half a second).
+# omarchy_fb_size: "xres yres" of the framebuffer's mode, the one fbcon sizes
+# the console by: the first of its modes (the mode it registered with). Its
+# virtual size is the whole surface, which a GPU driver makes as big as its
+# biggest output: a laptop's panel with a bigger monitor plugged in has the
+# console on the panel's mode in the monitor's surface.
+omarchy_fb_size() {
+    local fb="${OMARCHY_FB:-/sys/class/graphics/fb0}" mode="" xres yres
+    read -r mode 2>/dev/null <"$fb/modes"
+    mode=${mode#*:}
+    mode=${mode%%[pi]*}
+    case $mode in
+        [0-9]*x[0-9]*) echo "${mode%x*} ${mode#*x}" ;;
+        *) [ -r "$fb/virtual_size" ] && IFS=, read -r xres yres <"$fb/virtual_size" && echo "$xres $yres" ;;
+    esac
+}
+
+# omarchy_console_fits_fb: tty1 is the framebuffer's size in cells of 8x16,
+# 8x8 or 16x32 pixels (the kernel's fonts and the 32 px one), turned a quarter
+# turn where fbcon turns the console (a portrait panel): fbcon has tty1 on
+# it. Columns and rows both: a framebuffer twice as wide as the one before
+# has as many 16-pixel columns as the old console had 8-pixel ones. The VT's
+# header holds each in a byte, 255 at most (2560 pixels of 8 read 255
+# columns, as do 2048 of 8: both are told apart by the rows). Never while
+# the dummy console is bound, and never 80x25 in 16x32 cells: that is a
+# 1280x800 framebuffer's console (OVMF's default mode), but also the dummy
+# console's size, which tty1 keeps for a moment after fbcon has taken it
+# from the dummy one (QEMU's virtio-gpu-pci under UEFI, no firmware
+# framebuffer before it); neither the kernel nor the 32 px font's rule puts
+# a 1280x800 framebuffer in 16x32 cells, only a font named on the command
+# line (fbcon=font:) does.
+omarchy_console_fits_fb() {
+    local size xres yres rotate=0 across down cw con
+    size=$(omarchy_fb_size)
+    xres=${size% *} yres=${size#* }
+    [ "${xres:-0}" -gt 0 ] 2>/dev/null && [ "${yres:-0}" -gt 0 ] 2>/dev/null || return 1
+    for con in "${OMARCHY_VTCONSOLE:-/sys/class/vtconsole}"/vtcon*; do
+        case $(cat "$con/name" 2>/dev/null) in
+            *dummy*) [ "$(cat "$con/bind" 2>/dev/null)" = 1 ] && return 1 ;;
+        esac
+    done
+    read -r rotate 2>/dev/null <"${OMARCHY_FBCON:-/sys/class/graphics/fbcon}/rotate"
+    across=$xres down=$yres
+    case $rotate in 1 | 3) across=$yres down=$xres ;; esac
+    # shellcheck disable=SC2046 # rows and columns, two words
+    set -- $(omarchy_console_size)
+    [ "${2:-0}" -gt 0 ] 2>/dev/null || return 1
+    for cw in 8 16; do
+        if [ "$cw" = 16 ] && [ "$1" -eq 25 ] && [ "$2" -eq 80 ]; then
+            case " $(cat "${OMARCHY_CMDLINE:-/proc/cmdline}" 2>/dev/null) " in
+                *" fbcon="*font:*) ;;
+                *) continue ;;
+            esac
+        fi
+        # The virtual height may count a second, panning screen.
+        if [ "$2" -eq $((across / cw > 255 ? 255 : across / cw)) ] &&
+            { [ "$1" -eq $((down / cw / 2 > 255 ? 255 : down / cw / 2)) ] ||
+                [ "$1" -eq $((down / cw / 4 > 255 ? 255 : down / cw / 4)) ] ||
+                { [ "$cw" = 8 ] && [ "$1" -eq $((down / 8 > 255 ? 255 : down / 8)) ]; }; }; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# omarchy_console_takeover: on a framebuffer the console is not on yet, the
+# dummy console's 80x25 or the framebuffer a GPU driver just replaced, write
+# a full stop in black on black so fbcon takes the console over, and give the
+# takeover two seconds: on UEFI it runs from a workqueue as soon as something
+# is written, and a GPU driver taking over from the VGA console or the
+# firmware's framebuffer has its framebuffer in sysfs before the modeset of
+# fbcon's takeover is done (in QEMU under load, longer than half a second; a
+# layout made before then was for the old console, at its top left).
 omarchy_console_takeover() {
     local tty="${OMARCHY_TTY:-/dev/tty1}" fb="${OMARCHY_FB:-/sys/class/graphics/fb0}" i=0
-    [ -e "$fb" ] && [ "$(omarchy_console_size)" = "25 80 " ] || return 0
+    [ -e "$fb" ] || return 0
+    omarchy_console_fits_fb && return 0
     printf '\033[30;40m.\033[0m\r' 2>/dev/null >>"$tty"
-    while [ "$i" -lt 40 ] && [ "$(omarchy_console_size)" = "25 80 " ]; do
+    while [ "$i" -lt 40 ] && ! omarchy_console_fits_fb; do
         sleep 0.05
         i=$((i + 1))
     done

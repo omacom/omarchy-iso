@@ -42,18 +42,61 @@ clear_vga_logo() {
   ) 9>>"$run/console-logo.lock" 2>/dev/null
 }
 
+# freeze_fb_logo: while the logo is up on the firmware's framebuffer, which
+# a GPU driver replaces, put tty1 in graphics mode, where the console draws
+# nothing and the screen keeps the logo. A GPU driver replacing the framebuffer hands the console to the dummy
+# console's 80x25 and back, and fbcon draws the text it kept on the driver's
+# framebuffer, cut and scrolled: in QEMU a frame or three of the logo's lower
+# rows at the top left before the redraw. The redraw for the driver's
+# framebuffer erases that text while nothing is drawn yet and gives tty1 its
+# text mode back (below); the installer's claim on tty1 gives it back if no
+# framebuffer comes, the logo still there (console-logo.sh). Under the layout
+# lock, not once the installer has tty1, and marked before the mode changes:
+# a claim that ran out of waiting for the lock finds the mark, or is found
+# here after.
+freeze_fb_logo() {
+  (
+    flock -w 5 9 || exit 0
+    [[ ! -e $run/tty1-taken && ! -e $run/console-frozen ]] || exit 0
+    read -r laid_out <"$run/console-logo" || exit 0
+    case $laid_out in
+      simpledrm* | "EFI VGA" | "VESA VGA" | simple) ;;
+      *) exit 0 ;;
+    esac
+    echo "$laid_out" >"$run/console-frozen" || exit 0
+    if ! omarchy_console_kd_mode 1; then
+      rm -f "$run/console-frozen"
+      exit 0
+    fi
+    [[ -e $run/tty1-taken ]] && omarchy_console_thaw
+  ) 9>>"$run/console-logo.lock" 2>/dev/null
+}
+
 # --before-driver: udev, for a display controller (or a virtio GPU), ahead of
-# the rule that loads its driver (72-omarchy-console-logo.rules). While the VGA logo is up
-# in its font, clear the console if a driver is about to load: a GPU driver
-# takes the console over within milliseconds of unregistering the VGA one on
-# some machines (QEMU's bochs-drm), faster than the --wait watcher polls, and
-# fbcon would show the logo's cells in a font without its glyphs. A device
-# without a driver for it keeps the logo up.
+# the rule that loads its driver (72-omarchy-console-logo.rules), if a driver
+# is about to load. While the VGA logo is up in its font and this is the boot
+# VGA device, whose driver takes the VGA console over, clear the console: a
+# GPU driver takes the console over within milliseconds of unregistering the
+# VGA one on some machines (QEMU's bochs-drm), faster than the --wait watcher
+# polls, and fbcon would show the logo's cells in a font without its glyphs.
+# While it is up on a framebuffer, freeze the console (freeze_fb_logo; the
+# firmware's framebuffer can sit on a display controller that is no VGA one,
+# QEMU's bochs-display). A device without a driver for it keeps the logo up,
+# and so does nomodeset, where the GPU drivers load and take nothing over.
 if [[ ${1:-} == --before-driver ]]; then
-  [[ -e $run/console-logo-vga && ! -e $run/tty1-taken ]] || exit 0
+  [[ -e $run/console-logo && ! -e $run/tty1-taken ]] || exit 0
   [[ -e ${OMARCHY_SYSFS:-/sys}${DEVPATH:-/none}/driver ]] && exit 0
+  read -r cmdline <"${OMARCHY_CMDLINE:-/proc/cmdline}" 2>/dev/null
+  [[ " ${cmdline:-} " == *" nomodeset "* ]] && exit 0
   [[ -n ${MODALIAS:-} ]] && modprobe -n -b -v "$MODALIAS" 2>/dev/null | grep -q '^insmod ' || exit 0
-  clear_vga_logo
+  if [[ -e $run/console-logo-vga ]]; then
+    dev=${OMARCHY_SYSFS:-/sys}${DEVPATH:-/none}
+    # The PCI device's, or the PCI device's under a virtio GPU.
+    boot_vga=$(cat "$dev/boot_vga" 2>/dev/null || cat "$dev/../boot_vga" 2>/dev/null)
+    [[ $boot_vga == 1 ]] && clear_vga_logo
+  else
+    freeze_fb_logo
+  fi
   exit 0
 fi
 
@@ -84,6 +127,17 @@ fi
 if exec 9>>"$run/console-logo.lock"; then
   flock 9
 fi 2>/dev/null
+# A framebuffer other than the frozen one: the text kept for the old one
+# erased while the console still draws nothing, so fbcon shows black, then
+# tty1 gets its text mode back before anything draws (a font loads only in
+# text mode). The installer's screen, should it have tty1, is not erased.
+if [[ -e $run/console-frozen ]]; then
+  name=$(cat "$fb/name" 2>/dev/null)
+  if [[ -n $name && $name != "$(cat "$run/console-frozen" 2>/dev/null)" ]]; then
+    [[ -e $run/tty1-taken ]] || printf '\033[2J' >>"${OMARCHY_TTY:-/dev/tty1}" 2>/dev/null
+    omarchy_console_thaw
+  fi
+fi
 [[ -e $run/tty1-taken ]] && exit 0
 [[ -r $run/console-logo ]] || exit 0
 name=$(cat "$fb/name" 2>/dev/null) || exit 0

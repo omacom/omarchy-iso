@@ -84,6 +84,7 @@ fb() {
 cat >"$work/bin/setfont" <<EOS
 #!/bin/bash
 echo "setfont \$*" >>"$work/setfont.log"
+echo setfont >>"$work/order.log"
 [[ \$* == *console-32.psf ]] || exit 0
 read -r rows cols < <(hexdump -n 2 -v -e '1/1 "%u "' "$work/vcsa")
 printf '%b%b\000\000' "\\\\\$(printf %03o \$((rows / 2)))" "\\\\\$(printf %03o \$((cols / 2)))" >"$work/vcsa"
@@ -336,22 +337,29 @@ expect "redraw --wait: then the logo for the framebuffer, rows 22-24 at column 7
 check "redraw --wait: in the kernel's font, none loaded" "$(setfont_calls)" ""
 
 # --before-driver: udev, for a display controller before its driver loads.
-# While the VGA logo is up it clears the console if a driver will load, and
-# leaves it alone when one is bound already, none exists, or no VGA logo is up.
-mkdir -p "$work/sysfs/devices/pci0000:00/0000:00:02.0"
+# While the VGA logo is up it clears the console if a driver will load for the
+# boot VGA device (or a virtio GPU on it), and leaves it alone when one is
+# bound already, none exists, the device is another GPU, or no VGA logo is up.
+mkdir -p "$work/sysfs/devices/pci0000:00/0000:00:02.0/virtio1" "$work/sysfs/devices/pci0000:00/0000:00:03.0"
+echo 1 >"$work/sysfs/devices/pci0000:00/0000:00:02.0/boot_vga"
+echo 0 >"$work/sysfs/devices/pci0000:00/0000:00:03.0/boot_vga"
+echo "BOOT_IMAGE=/vmlinuz quiet" >"$work/cmdline"; export OMARCHY_CMDLINE="$work/cmdline"
 cat >"$work/bin/modprobe" <<'EOS'
 #!/bin/bash
 [[ $* == *pci:v00001234* ]] && echo "insmod /lib/modules/x/kernel/drivers/gpu/drm/tiny/bochs.ko.zst"
+[[ $* == *virtio:d00000010* ]] && echo "insmod /lib/modules/x/kernel/drivers/gpu/drm/virtio/virtio-gpu.ko.zst"
 exit 0
 EOS
 chmod 755 "$work/bin/modprobe"
-before() {
+before() {  # before <modalias> [devpath]
   : >"$work/tty"
-  OMARCHY_SYSFS="$work/sysfs" DEVPATH=/devices/pci0000:00/0000:00:02.0 MODALIAS=$1 "$REDRAW" --before-driver
+  OMARCHY_SYSFS="$work/sysfs" DEVPATH=${2:-/devices/pci0000:00/0000:00:02.0} MODALIAS=$1 "$REDRAW" --before-driver
   cat -v "$work/tty"
 }
 rm -f "$work/run/tty1-taken"; : >"$work/run/console-logo-vga"; size 25 80
 check "before a driver: the console cleared when one will load" "$(before pci:v00001234d00001111sv0bc03sc00i00)" '^[[2J'
+check "before a driver: cleared for a virtio GPU on the boot VGA device" "$(before virtio:d00000010v00001AF4 /devices/pci0000:00/0000:00:02.0/virtio1)" '^[[2J'
+check "before a driver: nothing for another GPU's driver" "$(before pci:v00001234d00001111sv0bc03sc00i00 /devices/pci0000:00/0000:00:03.0)" ""
 size 50 160
 check "before a driver: no clear on a console another driver has already" "$(before pci:v00001234d00001111sv0bc03sc00i00)" ""
 size 25 80
@@ -360,6 +368,66 @@ mkdir -p "$work/sysfs/devices/pci0000:00/0000:00:02.0/driver"
 check "before a driver: nothing when one is bound already" "$(before pci:v00001234d00001111sv0bc03sc00i00)" ""
 rmdir "$work/sysfs/devices/pci0000:00/0000:00:02.0/driver"; rm -f "$work/run/console-logo-vga"
 check "before a driver: nothing without the VGA logo up" "$(before pci:v00001234d00001111sv0bc03sc00i00)" ""
+
+# On a framebuffer the console is frozen instead: tty1 in graphics mode, the
+# screen keeps the logo, nothing is drawn. The redraw for the driver's
+# framebuffer erases the text kept for the old one while still frozen (fbcon
+# shows black, not that text cut and scrolled), gives the text mode back, then
+# loads its font; udev's replay of the frozen framebuffer changes nothing; the
+# installer's claim gives the text mode back if no framebuffer came, the logo
+# kept. perl makes the KDSETMODE call: a stand-in records the mode, or fails
+# as without perl, or plays the installer claiming tty1 in the meantime.
+cat >"$work/bin/perl" <<EOS
+#!/bin/bash
+[[ -e $work/no-perl ]] && exit 1
+[[ -e $work/claim-meanwhile && \$4 == 1 ]] && : >"$work/run/tty1-taken"
+echo "kd \$4" >>"$work/order.log"
+EOS
+chmod 755 "$work/bin/perl"
+rm -f "$work/order.log" "$work/run/console-frozen"; echo simpledrmdrmfb >"$work/run/console-logo"
+fb 1280 800 simpledrmdrmfb; size 50 160
+check "before a driver, framebuffer: nothing drawn" "$(before pci:v00001234d00001111sv0bc03sc00i00)" ""
+check "before a driver, framebuffer: tty1 in graphics mode" "$(cat "$work/order.log")" "kd 1"
+check "before a driver, framebuffer: marked frozen on its framebuffer" "$(cat "$work/run/console-frozen")" simpledrmdrmfb
+check "before a driver, framebuffer: once" "$(before pci:v00001234d00001111sv0bc03sc00i00)$(cat "$work/order.log")" "kd 1"
+: >"$work/tty"; "$REDRAW"
+check "redraw, frozen: udev's replay of the frozen framebuffer changes nothing" "$(cat -v "$work/tty")$(cat "$work/order.log")" "kd 1"
+rm -f "$work/order.log"; fb 1920 1080 bochs-drmdrmfb; size 67 240
+expect "redraw, frozen: the old text erased, then the logo for the driver's framebuffer" "$(redraw)" '^[[2J' '^[[14;55H'
+check "redraw, frozen: text mode back before the font loads" "$(cat "$work/order.log")" "$(printf 'kd 0\nsetfont')"
+if [[ -e $work/run/console-frozen ]]; then fail "redraw, frozen: still marked frozen"; else ok "redraw, frozen: no longer marked frozen"; fi
+rm -f "$work/order.log"; echo simpledrmdrmfb >"$work/run/console-logo"; fb 1280 800 simpledrmdrmfb; size 50 160
+before pci:v00001234d00001111sv0bc03sc00i00 >/dev/null; : >"$work/tty"
+omarchy_console_claim_tty1
+check "claim, frozen: text mode back for the installer, the logo not erased" "$(cat -v "$work/tty")$(cat "$work/order.log")" "$(printf 'kd 1\nkd 0')"
+if [[ -e $work/run/console-frozen ]]; then fail "claim, frozen: still marked frozen"; else ok "claim, frozen: no longer marked frozen"; fi
+check "before a driver, framebuffer: nothing once the installer has tty1" "$(before pci:v00001234d00001111sv0bc03sc00i00)" ""
+rm -f "$work/run/tty1-taken" "$work/order.log"; : >"$work/claim-meanwhile"
+before pci:v00001234d00001111sv0bc03sc00i00 >/dev/null
+check "before a driver, framebuffer: a claim during the freeze gets the text mode back" "$(cat "$work/order.log")" "$(printf 'kd 1\nkd 0')"
+if [[ -e $work/run/console-frozen ]]; then fail "claim during the freeze: still marked frozen"; else ok "claim during the freeze: not marked frozen"; fi
+rm -f "$work/claim-meanwhile" "$work/run/tty1-taken" "$work/order.log"
+before pci:v00001234d00001111sv0bc03sc00i00 >/dev/null; : >"$work/no-perl"
+omarchy_console_claim_tty1
+if [[ -e $work/run/console-frozen ]]; then ok "claim, text mode not back: the mark stays for the next try"; else fail "claim, text mode not back: mark gone"; fi
+rm -f "$work/run/tty1-taken" "$work/run/console-frozen" "$work/order.log"
+check "before a driver, framebuffer: nothing where tty1 can not be frozen" "$(before pci:v00001234d00001111sv0bc03sc00i00)$(cat "$work/order.log" 2>/dev/null)" ""
+if [[ -e $work/run/console-frozen ]]; then fail "before a driver, no perl: marked frozen"; else ok "before a driver, no perl: not frozen"; fi
+rm -f "$work/no-perl"; echo none >"$work/run/console-logo"
+check "before a driver: nothing without a logo on the screen" "$(before pci:v00001234d00001111sv0bc03sc00i00)" ""
+echo i915drmfb >"$work/run/console-logo"
+check "before a driver: nothing on a GPU driver's framebuffer already" "$(before pci:v00001234d00001111sv0bc03sc00i00 /devices/pci0000:00/0000:00:03.0)$(cat "$work/order.log" 2>/dev/null)" ""
+echo "EFI VGA" >"$work/run/console-logo"
+before pci:v00001234d00001111sv0bc03sc00i00 /devices/pci0000:00/0000:00:03.0 >/dev/null
+check "before a driver: frozen on efifb, for any display controller's driver" "$(cat "$work/order.log" 2>/dev/null)" "kd 1"
+omarchy_console_claim_tty1; rm -f "$work/run/tty1-taken" "$work/order.log"
+echo "BOOT_IMAGE=/vmlinuz quiet nomodeset" >"$work/cmdline"
+echo simpledrmdrmfb >"$work/run/console-logo"
+check "before a driver, nomodeset: no freeze" "$(before pci:v00001234d00001111sv0bc03sc00i00)$(cat "$work/order.log" 2>/dev/null)" ""
+: >"$work/run/console-logo-vga"; size 25 80
+check "before a driver, nomodeset: the VGA logo kept" "$(before pci:v00001234d00001111sv0bc03sc00i00)" ""
+echo "BOOT_IMAGE=/vmlinuz quiet" >"$work/cmdline"
+rm -f "$work/run/console-logo" "$work/run/console-logo-vga" "$work/order.log"
 
 # One layout at a time: a redraw waits for one in progress (the lock), then
 # finds the logo laid out on this framebuffer and draws nothing.

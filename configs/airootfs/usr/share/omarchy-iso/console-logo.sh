@@ -62,6 +62,26 @@ omarchy_console_takeover() {
     done
 }
 
+# omarchy_console_kd_mode 0|1: tty1 in text mode (0) or graphics mode (1),
+# where the console keeps its text but draws none of it and the screen keeps
+# what it shows. KDSETMODE, by perl: no command in the live root makes the
+# call, and the initramfs, which has no perl, needs none. Fails where it can
+# not (the caller goes on without).
+omarchy_console_kd_mode() {
+    command -v perl >/dev/null 2>&1 || return 1
+    perl -e 'open(my $t, "+<", $ARGV[0]) or exit 1; ioctl($t, 0x4B3A, $ARGV[1] + 0) or exit 1' \
+        "${OMARCHY_TTY:-/dev/tty1}" "$1" 2>/dev/null
+}
+
+# omarchy_console_thaw: tty1 back in text mode, if omarchy-console-logo-redraw
+# put it in graphics mode ahead of a GPU driver (its --before-driver). The
+# mark stays until that worked, for the next caller to try again.
+omarchy_console_thaw() {
+    local run="${OMARCHY_RUN_DIR:-/run/omarchy-iso}"
+    [ -e "$run/console-frozen" ] || return 0
+    omarchy_console_kd_mode 0 && rm -f "$run/console-frozen"
+}
+
 # omarchy_console_claim_tty1: the installer draws on tty1 from here, and the
 # boot logo is no longer laid out again when a GPU driver replaces the
 # framebuffer, nor the VGA one cleared (omarchy-console-logo-redraw). Taken
@@ -71,13 +91,17 @@ omarchy_console_takeover() {
 # and a driver that loaded after the login left the console blank until the
 # greeter (test/boot-render with a udev rule that holds the driver back). A
 # layout takes three seconds at most (the takeover's two, the 32 px font's
-# one); the claim waits five, and never fails its caller (set -e).
+# one); the claim waits five, and never fails its caller (set -e). A console
+# still in graphics mode for a GPU driver that brought no framebuffer gets
+# its text mode back, or the installer would draw unseen: after the claim, so
+# that a freeze the wait ran out on finds tty1 taken, or is found here.
 omarchy_console_claim_tty1() {
     local run="${OMARCHY_RUN_DIR:-/run/omarchy-iso}"
     mkdir -p "$run" 2>/dev/null || return 0
     {
         flock -w 5 9 || true
         : >"$run/tty1-taken"
+        omarchy_console_thaw
     } 9>>"$run/console-logo.lock" 2>/dev/null || true
     return 0
 }

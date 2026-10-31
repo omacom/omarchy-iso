@@ -29,7 +29,7 @@ grep -q '^ttfx_frames() {' "$work/frames.sh" || { echo "FAIL: no ttfx_frames() i
 
 printf '%s\n' '▄▄▄▄' '█  █' '▀▀▀▀' >"$work/logo.txt"
 out=$(
-  LOGO_PATH="$work/logo.txt"
+  LOGO_PATH="$work/logo.txt" CONSOLE_LOGO_PATH="$work/none.txt" LOGO_WIDTH=4
   measure_terminal() { TERM_WIDTH=160; PADDING_LEFT_SPACES=$(printf '%*s' 78 ''); }
   stty() { return 1; }
   ttfx() { :; }
@@ -49,6 +49,24 @@ if [[ $first == *'^[[H^[[2J'* ]]; then fail "the greeter clears the whole screen
 n=$(grep -o '\^\[\[2K' <<<"$first" | wc -l)
 [[ $n == 3 ]] && ok "three logo rows, three erasures" || fail "$n erasures for three logo rows"
 [[ $first == *'^[[0m'$'\n''^[[J'* ]] && ok "the rows below the logo cleared" || fail "rows below the logo not cleared: $first"
+
+# A console narrower than the logo (the VGA text console's 80 columns): the
+# copy fitted to 80 columns, and no color shift, which would wrap.
+printf '%s\n' "$(printf '█%.0s' {1..81})" "$(printf '▀%.0s' {1..81})" >"$work/wide.txt"
+printf '%s\n' "$(printf 'F%.0s' {1..80})" "$(printf 'G%.0s' {1..80})" >"$work/fitted.txt"
+narrow=$(
+  LOGO_PATH="$work/wide.txt" CONSOLE_LOGO_PATH="$work/fitted.txt" LOGO_WIDTH=81
+  measure_terminal() { TERM_WIDTH=80; PADDING_LEFT_SPACES=""; }
+  stty() { return 1; }
+  ttfx() { echo "ttfx ran" >>"$work/ttfx.log"; }
+  systemctl() { :; }
+  LINES=25
+  # shellcheck source=/dev/null
+  source "$work/greeter.sh"
+  greeter </dev/null 2>/dev/null | cat -v
+)
+[[ $narrow == *"$(printf 'F%.0s' {1..80})"* && $narrow != *'█'* && $narrow != *'M-bM-^VM-^H'* ]] && ok "80 columns: the fitted logo" || fail "80 columns: not the fitted logo"
+[[ ! -e $work/ttfx.log ]] && ok "80 columns: no color shift" || fail "80 columns: ttfx ran"
 
 # ttfx's own opening: hide the cursor, restore and save it, go up to the
 # canvas, the canvas in spaces; then frames, each from the saved cursor.

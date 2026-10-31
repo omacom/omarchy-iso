@@ -11,6 +11,10 @@
 #   everything a medium is reached through: USB storage, SATA and NVMe,
 #   SD cards, optical drives, and the VM controllers (virtio, Hyper-V, VMware,
 #   Xen, the LSI Logic one QEMU and VMware emulate).
+# - on x86 block leaves out the power (regulator) and clock chips of device
+#   tree boards, which an aarch64 kernel keeps; everywhere it leaves out the
+#   cs42l43 codec's SPI and MFD parts and keeps the other SPI controllers and
+#   MFD drivers (Intel's LPSS: the SPI keyboards of older MacBooks).
 # - the rest of block is mkinitcpio's own, line for line, when mkinitcpio is
 #   installed here: an upstream change to it shows up as a failure.
 # - filesystems adds the ISO's and a host partition's filesystems and the
@@ -38,6 +42,11 @@ add_checked_modules() {
   calls+=("checked $*")
 }
 
+# The kernel's module tree: an x86 one, with arch/x86.
+kmod=$(mktemp -d)
+trap 'rm -rf "$kmod"' EXIT
+mkdir -p "$kmod/x86/kernel/arch/x86" "$kmod/arm64/kernel/arch/arm64"
+_d_kmoduledir=$kmod/x86
 # shellcheck source=/dev/null
 source "$INSTALL/block"
 build
@@ -80,6 +89,31 @@ for want in 'checked /drivers/usb/storage/' 'checked /(drivers/mmc|tifm_)' 'modu
   if printf '%s\n' "${calls[@]}" | grep -qxF -- "$want"; then ok "block still asks for: $want"; else fail "block no longer asks for: $want"; fi
 done
 
+# The boards' power and clock chips: not for an x86 kernel, for an arm64 one.
+x86_calls=$(printf '%s\n' "${calls[@]}")
+for dir in regulator clk; do
+  if grep -q "^checked /drivers/$dir/" <<<"$x86_calls"; then fail "x86: block adds /drivers/$dir/"; else ok "x86: no /drivers/$dir/"; fi
+done
+calls=()
+_d_kmoduledir=$kmod/arm64 build
+for dir in regulator clk; do
+  if printf '%s\n' "${calls[@]}" | grep -qx "checked /drivers/$dir/"; then ok "arm64: block adds /drivers/$dir/"; else fail "arm64: no /drivers/$dir/"; fi
+done
+# The cs42l43 codec's SPI controller and MFD core and its buses out, the rest in.
+for dir in spi mfd; do
+  f=$(sed -n "s|^checked -f \(.*\) /drivers/$dir/\$|\1|p" <<<"$x86_calls")
+  [[ -n $f ]] || { fail "no filter on /drivers/$dir/"; continue; }
+  for m in drivers/spi/spi-cs42l43.ko.zst drivers/mfd/cs42l43.ko.zst drivers/mfd/cs42l43-sdw.ko.zst drivers/mfd/cs42l43-i2c.ko.zst; do
+    [[ $m == drivers/$dir/* ]] || continue
+    if [[ $k/$m =~ $f ]]; then ok "drops ${m##*/}"; else fail "keeps ${m##*/}"; fi
+  done
+  for m in drivers/spi/spi-pxa2xx-pci.ko.zst drivers/spi/spi-intel-pci.ko.zst drivers/mfd/intel-lpss-pci.ko.zst \
+    drivers/mfd/intel-lpss-acpi.ko.zst drivers/mfd/lpc_ich.ko.zst drivers/mfd/cros_ec_dev.ko.zst; do
+    [[ $m == drivers/$dir/* ]] || continue
+    if [[ $k/$m =~ $f ]]; then fail "drops ${m##*/}"; else ok "keeps ${m##*/}"; fi
+  done
+done
+
 # The rest of the hook is mkinitcpio's own.
 upstream=/usr/lib/initcpio/install/block
 if [[ -r $upstream ]]; then
@@ -90,7 +124,7 @@ if [[ -r $upstream ]]; then
     NR >= 3 && !header_done { if ($0 == "") { header_done = 1; print }; next }
     /^    # Not / { ours = 1; next }
     ours && /^    #/ { next }
-    ours { sub(/-f \047[^\047]*\047 /, ""); ours = 0 }
+    ours { sub(/-f \047[^\047]*\047 /, ""); sub(/\[\[ [^]]* \]\] \|\| /, ""); ours = 0 }
     { print }' "$INSTALL/block")
   if diff <(printf '%s\n' "$ours") "$upstream" >/dev/null; then
     ok "the rest of block matches mkinitcpio's $(pacman -Q mkinitcpio 2>/dev/null | cut -d' ' -f2)"

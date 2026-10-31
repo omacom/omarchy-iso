@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
+# shellcheck disable=SC2154 # _d_kmoduledir: the kernel's module tree, set by mkinitcpio
 # The live initramfs's block hook: mkinitcpio's own (install/block of
 # mkinitcpio 42.2, by the same name so it takes its place in HOOKS) with the
-# server storage controllers filtered out. The live initramfs only has to find
-# the install medium (USB, SATA or NVMe, SD card, optical drive, VM disk), and
-# every byte of it is read by the firmware before the kernel starts: 1.4 s for
-# 27 MB on a ThinkPad X200's USB 2.0 port. test/unit/initramfs-hooks-test.sh
-# diffs this against mkinitcpio's copy, so an upstream change shows up.
+# server storage controllers and, on x86, the boards' power and clock chips
+# filtered out. The live initramfs only has to find the install medium (USB,
+# SATA or NVMe, SD card, optical drive, VM disk), and every byte of it is read
+# by the firmware before the kernel starts: 1.4 s for 27 MB on a ThinkPad
+# X200's USB 2.0 port. test/unit/initramfs-hooks-test.sh diffs this against
+# mkinitcpio's copy, so an upstream change shows up.
 
 build() {
     map add_module 'ahci?' 'sd_mod?' 'usb_storage?' 'uas?' 'mmc_block?' 'nvme?' 'virtio_scsi?' 'virtio_blk?'
@@ -35,10 +37,15 @@ build() {
     add_checked_modules '/(drivers/mmc|tifm_)'
 
     # spi (mmc in spi mode)
-    add_checked_modules '/drivers/spi/'
+    # Not cs42l43's: a laptop sound codec's SPI side, which brings the codec,
+    # SoundWire and ALSA's core with it (0.6 MB).
+    add_checked_modules -f 'cs42l43' '/drivers/spi/'
 
     # regulator (for mmc)
-    add_checked_modules '/drivers/regulator/'
+    # Not on x86, where an SD host powers its card itself or through ACPI:
+    # the power chips of boards a device tree describes, 122 modules (1 MB)
+    # the aarch64 image keeps.
+    [[ -d $_d_kmoduledir/kernel/arch/x86 ]] || add_checked_modules '/drivers/regulator/'
 
     # virtio
     # Not the virtio devices that are no disk (network, sound, Bluetooth,
@@ -54,8 +61,10 @@ build() {
     add_checked_modules '/drivers/pci/controller/'
 
     # low-level drivers for certain pci/usb controllers
-    add_checked_modules '/drivers/mfd/'
-    add_checked_modules '/drivers/clk/'
+    # Not cs42l43 (spi above).
+    add_checked_modules -f 'cs42l43' '/drivers/mfd/'
+    # Not on x86: the clock chips of device tree boards (regulator above).
+    [[ -d $_d_kmoduledir/kernel/arch/x86 ]] || add_checked_modules '/drivers/clk/'
     add_checked_modules '/drivers/phy/'
 
     # ufs

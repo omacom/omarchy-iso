@@ -73,11 +73,21 @@ guest_layer_absent() {
   ! guest_layer_present "$1"
 }
 
-cleanup_shortcut_state() {
+# Close every shortcut surface, so one left open by a failed check cannot hold
+# the keyboard for the checks after it. The dock's app picker has no hide
+# command; its apps command toggles it.
+close_shortcut_surfaces() {
   ssh_session 'for plugin in omarchy.menu omarchy.emojis omarchy.clipboard omarchy.audio; do
     omarchy-shell shell hide "$plugin" >/dev/null 2>&1 || true
   done
-  while read -r address; do
+  if hyprctl -j layers | jq -e '\''[.. | objects | select(.namespace? == "omarchy-dock-apps")] | length > 0'\'' >/dev/null; then
+    omarchy-shell omarchy.dock apps >/dev/null 2>&1 || true
+  fi' >/dev/null 2>&1 || true
+}
+
+cleanup_shortcut_state() {
+  close_shortcut_surfaces
+  ssh_session 'while read -r address; do
     hyprctl dispatch "hl.dsp.window.close({ window = \"address:$address\" })" >/dev/null 2>&1 ||
       hyprctl dispatch closewindow "address:$address" >/dev/null 2>&1 || true
   done < <(hyprctl -j clients | jq -r '\''.[] | select(.class == "foot") | .address'\'')
@@ -85,12 +95,12 @@ cleanup_shortcut_state() {
 }
 
 verify_surface_shortcut() {
-  local name="$1" chord="$2" namespace="$3" plugin="$4"
+  local name="$1" chord="$2" namespace="$3"
 
   press "$chord"
   if ! wait_for_guest_state "$name shortcut opens" 15 guest_layer_present "$namespace"; then
     capture_console "failure-shortcut-$name-open"
-    ssh_session "omarchy-shell shell hide '$plugin' >/dev/null 2>&1 || true" || true
+    close_shortcut_surfaces
     return 1
   fi
   capture_console "success-shortcut-$name"
@@ -98,7 +108,7 @@ verify_surface_shortcut() {
   press esc
   if ! wait_for_guest_state "$name shortcut surface closes" 15 guest_layer_absent "$namespace"; then
     capture_console "failure-shortcut-$name-close"
-    ssh_session "omarchy-shell shell hide '$plugin' >/dev/null 2>&1 || true" || true
+    close_shortcut_surfaces
     return 1
   fi
 }
@@ -249,16 +259,16 @@ verify_universal_clipboard_shortcuts() {
 shortcut_smoke_phase() {
   log "Exercising primary desktop shortcuts through the VM keyboard"
 
-  local name chord namespace plugin
-  local shortcuts='menu|meta_l-spc|omarchy-menu|omarchy.menu
-apps-menu|meta_l-alt-spc|omarchy-menu|omarchy.menu
-emojis|meta_l-ctrl-e|omarchy-emojis|omarchy.emojis
-clipboard|meta_l-ctrl-v|omarchy-clipboard|omarchy.clipboard
-audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel|omarchy.audio'
+  local name chord namespace
+  local shortcuts='menu|meta_l-spc|omarchy-menu
+apps|meta_l-alt-spc|omarchy-dock-apps
+emojis|meta_l-ctrl-e|omarchy-emojis
+clipboard|meta_l-ctrl-v|omarchy-clipboard
+audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel'
 
   cleanup_shortcut_state
-  while IFS='|' read -r name chord namespace plugin; do
-    verify_surface_shortcut "$name" "$chord" "$namespace" "$plugin" || true
+  while IFS='|' read -r name chord namespace; do
+    verify_surface_shortcut "$name" "$chord" "$namespace" || true
   done <<<"$shortcuts"
 
   verify_desktop_shortcuts || true

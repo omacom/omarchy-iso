@@ -115,7 +115,7 @@ class KernelSelectionTest(unittest.TestCase):
                     ctx = types.SimpleNamespace(
                         state={"arch_config_handler": types.SimpleNamespace(config=config), "mirror_handler": None},
                         target=Path("/unused"), tailscale_authkey_path=None, defer_provisioning=False,
-                        omarchy_install={},
+                        omarchy_install={}, region="global",
                     )
                     # _start_target_keyring_init starts a real systemd-run unit
                     # on whatever machine runs the tests, left running

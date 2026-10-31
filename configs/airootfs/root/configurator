@@ -373,11 +373,19 @@ user_step() {
       continue
     fi
 
+    # Use the orchestrator's timezone lookup without adding another prompt.
+    # World installs keep the summary exactly as it was.
+    region=$(cd "$OMARCHY_ISO_SHARE" && python -m orchestrator.region "$timezone") || region="global"
+    region_row=""
+    if [[ $region != "global" ]]; then
+      region_row="\n$(t summary.region),$region"
+    fi
+
     # Add manual padding since gum table -p doesn't respect padding
     echo -e "$(t summary.field),$(t summary.value)
 $(t summary.language),$(language_label "$language")
 $(t summary.keyboard),$keyboard
-$(t summary.timezone),$timezone
+$(t summary.timezone),$timezone$region_row
 $(t summary.username),$username
 $(t summary.password),$(printf "%${#password}s" | tr ' ' '*')
 $(t summary.hostname),$hostname" |

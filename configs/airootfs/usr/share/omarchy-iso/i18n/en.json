@@ -17,6 +17,7 @@
   "summary.password": "Password",
   "summary.hostname": "Hostname",
   "summary.timezone": "Timezone",
+  "summary.region": "Region",
   "summary.keyboard": "Keyboard",
   "summary.language": "Language",
   "summary.prompt": "Does this look right?",

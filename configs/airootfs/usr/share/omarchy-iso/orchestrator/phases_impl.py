@@ -53,6 +53,7 @@ from .command import capture, capture_identifier, require_text
 from .context import InstallContext, hw_platform, iso_kernel
 from .keyboard import configure_keyboard
 from .phases import write_state
+from .region import GLOBAL
 from .ui import error, info
 
 
@@ -712,6 +713,10 @@ def arch_install_system(ctx: InstallContext) -> None:
                 arch.install_applications(installer, config)
 
             _write_language_marker(ctx)
+            # The root image is shared by every region. Write the machine's
+            # selection only after it has been unpacked, before the runtime's
+            # system finalizer restores the online pacman configuration.
+            _write_region_marker(ctx)
 
             # Tailscale is bundled in the offline mirror but only installed
             # when an autoinstall drive staged an auth key; must happen here,
@@ -1862,6 +1867,17 @@ def _unmask_mkinitcpio_pacman_hooks(
                 backup.rename(path)
         except OSError as exc:
             info(f"warning: failed to restore pacman hook mask for {name}: {exc}")
+
+
+def _write_region_marker(ctx: InstallContext) -> None:
+    """Tell the runtime's pacman finalizer which profile to apply. World
+    installs write nothing, so the shared root image stays unchanged."""
+    if ctx.region == GLOBAL:
+        return
+    marker = ctx.target / "etc/omarchy/region"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(ctx.region + "\n")
+    marker.chmod(0o644)
 
 
 def _write_language_marker(ctx: InstallContext) -> None:

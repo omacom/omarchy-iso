@@ -1187,6 +1187,14 @@ boot_files_sort="$build_cache_dir/airootfs/usr/share/omarchy-iso/boot-files.sort
 [[ -s $boot_files_sort ]] || { echo "ERROR: $boot_files_sort is missing or empty" >&2; exit 1; }
 printf '%s\n' "airootfs_image_tool_options+=('-sort' '$boot_files_sort')" >>"$build_cache_dir/profiledef.sh"
 
+# The BIOS boot logo's font and screen (configs/syslinux/omarchy-logo.cfg) go
+# where mkarchiso puts the ISOLINUX files: it copies only the profile's .cfg
+# files and splash there, and packs work/iso as is.
+if [[ $OMARCHY_ARCH == x86_64 ]]; then
+  install -D -m 0644 -t "$build_cache_dir/work/iso/boot/syslinux" \
+    "$build_cache_dir/syslinux/omarchy-logo.psf" "$build_cache_dir/syslinux/omarchy-logo.txt"
+fi
+
 # Build the ISO. profiledef.sh reads OMARCHY_ARCH for the archiso arch/bootmodes.
 # On x86_64 its EFI images get GRUB with the modules and the menu font the boot
 # uses, not all of them (builder/grub/grub-mkstandalone, first on its PATH).

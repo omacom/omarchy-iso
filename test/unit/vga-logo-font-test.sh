@@ -99,6 +99,36 @@ else
   echo "skip: no /usr/share/omarchy/logo.txt here"
 fi
 
+# ISOLINUX's copy: the same 256 glyphs as PSF1, and a DISPLAY file that puts
+# the logo where console-logo.sh draws it on the 80x25 VGA console, in bright
+# green, the screen cleared black on black first and left so after it.
+python3 - "$work/out" <<'EOF' >"$work/isolinux" || true
+import struct, sys
+out = sys.argv[1]
+psf2, psf1 = open(f"{out}/vga.psf", "rb").read(), open(f"{out}/isolinux.psf", "rb").read()
+_, _, header, flags, count, size, height, width = struct.unpack("<4sIIIIIII", psf2[:32])
+print("psf1", psf1[:4].hex(), psf1[4:] == psf2[header:header + 256 * size])
+screen = open(f"{out}/isolinux.txt", "rb").read()
+print("start", screen[:7].hex(), "end", screen[-3:].hex())
+body = screen[7:-3].split(b"\r\n")
+top = next(i for i, line in enumerate(body) if line)
+print("logo row", top + 1, "column", len(body[top]) - len(body[top].lstrip(b" ")) + 1)
+EOF
+grep -qx 'psf1 36040010 True' "$work/isolinux" && ok "ISOLINUX font: PSF1, the VGA font's 256 glyphs" || fail "ISOLINUX font: $(grep psf1 "$work/isolinux")"
+grep -qx 'start 0f30300c0f3041 end 0f3030' "$work/isolinux" && ok "ISOLINUX screen: cleared black on black, the logo bright green, black on black after" || fail "ISOLINUX screen colors: $(grep start "$work/isolinux")"
+# The fixture is 3 cells by 1 row: console-logo.sh puts it on row (25-1-2)/2+1
+# = 12 at column (80-3)/2+1 = 39.
+grep -qx 'logo row 12 column 39' "$work/isolinux" && ok "ISOLINUX screen: the logo where console-logo.sh draws it" || fail "ISOLINUX screen: $(grep 'logo row' "$work/isolinux")"
+
+if [[ -r /usr/share/omarchy/logo.txt ]]; then
+  if cmp -s "$work/real/isolinux.psf" "$ROOT/configs/syslinux/omarchy-logo.psf" &&
+    cmp -s "$work/real/isolinux.txt" "$ROOT/configs/syslinux/omarchy-logo.txt"; then
+    ok "configs/syslinux's ISOLINUX logo is this logo's (bin/omarchy-isolinux-logo)"
+  else
+    fail "configs/syslinux/omarchy-logo.{psf,txt} are not this logo's: run bin/omarchy-isolinux-logo"
+  fi
+fi
+
 printf '%s\n' 'OMARCHY' >"$work/letters.txt"
 if python3 "$TOOL" "$work/letters.txt" "$BASE" "$work/letters" 2>/dev/null; then fail "a logo of letters was drawn"; else ok "refuses a logo with other glyphs than blocks"; fi
 if [[ -r /usr/share/kbd/consolefonts/ter-v32b.psf.gz ]]; then

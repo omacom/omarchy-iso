@@ -212,8 +212,16 @@ omarchy_console_logo() {
     left=$(((cols - logo_cols) / 2 + 1))
     [ "$left" -lt 1 ] && left=1
     {
-        # Palette entries 0 and 2 as .automated_script.sh sets them later.
-        printf '\033]P01a1b26\033]P29ece6a\033[?25l\033[2J\033[32m'
+        if [ "$logo" = vga ]; then
+            # ISOLINUX put this logo up already, in its colors: bright green
+            # on the VGA palette's black (configs/syslinux/omarchy-logo.txt).
+            # Drawn the same, it stays as it is; the installer's palette
+            # comes with a GPU driver's framebuffer or the login.
+            printf '\033[?25l\033[2J\033[1;32m'
+        else
+            # Palette entries 0 and 2 as .automated_script.sh sets them later.
+            printf '\033]P01a1b26\033]P29ece6a\033[?25l\033[2J\033[32m'
+        fi
         row=$top
         while IFS= read -r line; do
             printf '\033[%d;%dH%s' "$row" "$left" "$line"
@@ -235,5 +243,9 @@ omarchy_console_logo() {
         fi
     fi
     [ -w /dev/kmsg ] && echo "omarchy-logo: ${cols}x$rows on $fb_name, $logo logo at row $top column $left" 2>/dev/null >/dev/kmsg
+    # The BIOS boot starts without a cursor, so none shows below ISOLINUX's
+    # logo (configs/syslinux/omarchy-logo.cfg); tty1 keeps its own hidden,
+    # the consoles opened from here on get theirs.
+    echo 1 2>/dev/null >"${OMARCHY_VT_CURSOR:-/sys/module/vt/parameters/global_cursor_default}"
     return 0
 }

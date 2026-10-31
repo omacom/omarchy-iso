@@ -79,6 +79,7 @@ chmod 755 "$work/bin/setfont"
 
 export OMARCHY_TTY="$work/tty" OMARCHY_VCSA="$work/vcsa" OMARCHY_FB="$work/fb"
 export OMARCHY_CONSOLE_LOGO_DIR="$work/logo" OMARCHY_ISO_SHARE="$work/share" OMARCHY_RUN_DIR="$work/run"
+export OMARCHY_VT_CURSOR="$work/global_cursor_default"
 export PATH="$work/bin:$PATH"
 # shellcheck source=/dev/null
 source "$SHARE/console-logo.sh"
@@ -104,6 +105,7 @@ expect "VGA text: colour reset and the cursor a blank line below" "$out" '^[[0m^
 lacks "VGA text: no takeover glyph without a framebuffer" "$out" '.^[[0m^M'
 check "VGA text: the kernel's font stays" "$(setfont_calls)" ""
 check "VGA text: recorded as laid out on no framebuffer" "$(cat "$work/run/console-logo")" none
+check "VGA text: consoles opened from here on get their cursor" "$(cat "$work/global_cursor_default")" 1
 
 # A console narrower than the greeter's logo gets the fitted copy at column 1.
 size 25 11; out=$(draw)
@@ -119,6 +121,8 @@ echo 6 >"$work/logo/vga.cols"
 fb none; size 25 80; out=$(draw)
 check "VGA font: the logo's font is loaded" "$(setfont_calls)" "setfont -C $work/tty $work/logo/vga.psf"
 expect "VGA font: the half-size logo on rows 11-12 at column 38" "$out" '^[[11;38H' '^[[12;38H'
+expect "VGA font: in ISOLINUX's colors, bright green and the palette left alone" "$out" '^[[?25l^[[2J^[[1;32m^[[11;38H'
+lacks "VGA font: the palette left alone" "$out" '^[]P'
 if [[ -e $work/run/console-logo-vga ]]; then ok "VGA font: the console is marked as having the logo's font"; else fail "VGA font: no console-logo-vga marker"; fi
 # The next layout, on a framebuffer, loads no font for 8x16: the VGA logo's
 # font maps the blocks where the kernel's default font has them.

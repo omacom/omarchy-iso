@@ -23,10 +23,16 @@ the console needs no font loaded after the takeover (a font loaded as the
 driver registers its framebuffer can be undone by it, QEMU showed).
 
 Writes into DIRECTORY:
-  vga.psf   a PSF2 font, 256 glyphs of 8x16: BASE-FONT with the logo's pieces,
-            which its Unicode table maps to U+E000 onwards
-  vga.txt   the logo in those private-use characters, a line per cell row
-  vga.cols  its width in cells
+  vga.psf       a PSF2 font, 256 glyphs of 8x16: BASE-FONT with the logo's
+                pieces, which its Unicode table maps to U+E000 onwards
+  vga.txt       the logo in those private-use characters, a line per cell row
+  vga.cols      its width in cells
+  isolinux.psf  the same glyphs as a PSF1 font, for ISOLINUX's FONT
+  isolinux.txt  ISOLINUX's DISPLAY file: the logo in the font's own bytes,
+                in bright green, where console-logo.sh draws it on the 80x25
+                VGA console; the screen cleared black on black first and the
+                color left there after it, so neither the cursor nor what
+                ISOLINUX prints while it loads the kernel shows
 
 Usage: vga-logo-font.py LOGO.txt BASE-FONT.psf[.gz] DIRECTORY
 """
@@ -157,8 +163,26 @@ def main() -> None:
         lines.append(line.rstrip())
     (out / "vga.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     (out / "vga.cols").write_text(f"{max(len(line) for line in lines)}\n")
+    write_isolinux(out, glyphs, cells, pieces, slot_of, blank)
     print(f"vga-logo-font: {max(len(line) for line in lines)}x{len(lines)} cells, "
           f"{len(pieces)} pieces ({len(continuing)} continuing)", file=sys.stderr)
+
+
+ISOLINUX_COLOR, ISOLINUX_HIDDEN = b"\x0f0A", b"\x0f00"  # ^O, then background and foreground
+
+
+def write_isolinux(out: Path, glyphs: list[bytes], cells, pieces, slot_of, blank) -> None:
+    """The logo for ISOLINUX: its font (PSF1, no Unicode table) and a DISPLAY
+    file laid out as console-logo.sh lays the VGA logo out: frame=2 rows below
+    it, centred on 80x25."""
+    (out / "isolinux.psf").write_bytes(b"\x36\x04\x00\x10" + b"".join(glyphs))
+    rows = ["".join(" " if piece == blank else chr(slot_of[piece]) for piece in row).rstrip() for row in cells]
+    width = max(len(row) for row in rows)
+    top, left = (25 - len(rows) - 2) // 2, (80 - width) // 2
+    screen = ISOLINUX_HIDDEN + b"\x0c" + ISOLINUX_COLOR + b"\r\n" * top
+    for row in rows:
+        screen += b" " * left + row.encode("latin-1") + b"\r\n"
+    (out / "isolinux.txt").write_bytes(screen + ISOLINUX_HIDDEN)
 
 
 if __name__ == "__main__":

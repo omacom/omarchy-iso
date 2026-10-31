@@ -10,6 +10,11 @@
 #
 # The color shift over the logo goes through ttfx_frames, which drops ttfx's
 # first write, its canvas in spaces over the logo, and passes the frames on.
+#
+# On the VGA text console with the boot's half-size logo up in its font, the
+# greeter keeps that logo where the boot drew it (greeter_vga), drawn again
+# over itself, the tagline and hint under it, and no color shift: played on
+# the VT (vt-screen.py) over the boot's screen, no cell of the logo goes blank.
 
 set -euo pipefail
 
@@ -25,6 +30,10 @@ fail() { echo "FAIL: $1"; failures=$((failures + 1)); }
 awk '/^greeter\(\) \{/ { on = 1 } on { print } on && /^\}/ { exit }' "$CONFIGURATOR" >"$work/greeter.sh"
 grep -q '^greeter() {' "$work/greeter.sh" || { echo "FAIL: no greeter() in the configurator"; exit 1; }
 awk '/^ttfx_frames\(\) \{/ { on = 1 } on { print } on && /^\}/ { exit }' "$CONFIGURATOR" >"$work/frames.sh"
+for f in greeter_vga_logo greeter_vga; do
+  awk -v f="$f" '$0 ~ "^" f "\\(\\) \\{" { on = 1 } on { print } on && /^\}/ { exit }' "$CONFIGURATOR" >>"$work/vga.sh"
+  grep -q "^$f() {" "$work/vga.sh" || { echo "FAIL: no $f() in the configurator"; exit 1; }
+done
 grep -q '^ttfx_frames() {' "$work/frames.sh" || { echo "FAIL: no ttfx_frames() in the configurator"; exit 1; }
 
 printf '%s\n' '▄▄▄▄' '█  █' '▀▀▀▀' >"$work/logo.txt"
@@ -72,6 +81,67 @@ narrow=$(
 # canvas, the canvas in spaces; then frames, each from the saved cursor.
 canvas=$'\e[?25l\e8\e7\e[3A    \n    \n    \n'
 frame=$'\e8\e7\e[3A\e[38;5;35m\xe2\x96\x84\e[0m'
+# The VGA case: a 6-column, 2-row half-size logo; the boot lays it out on
+# rows 11-12 at column 38 of 80x25 (console-logo.sh), the tagline goes to row
+# 14 and the hint to row 16, each centred.
+mkdir -p "$work/vga" "$work/run"
+vga=$'\uE000\uE001\uE002\uE003\uE004\uE005'
+# The boot leaves the logo it drew beside its record (console-logo.sh).
+printf '%s\n' "$vga" "$vga" >"$work/run/vga.txt"; echo 6 >"$work/run/vga.cols"; : >"$work/run/console-logo-vga"
+boot=$(for ((r = 1; r <= 25; r++)); do if ((r == 11 || r == 12)); then printf '%37s%s\n' '' "$vga"; else echo; fi; done)
+printf '%s\n' "$boot" >"$work/boot.txt"
+vga_out=$(
+  LOGO_PATH="$work/logo.txt" CONSOLE_LOGO_PATH="$work/vga/fitted.txt" LOGO_WIDTH=81
+  OMARCHY_RUN_DIR="$work/run" OMARCHY_FB="$work/no-fb"
+  # tty1's stand-in: whatever tty(1) says for the greeter's stdin here.
+  OMARCHY_GREETER_TTY=$(tty 2>/dev/null </dev/null)
+  ttfx() { echo "ttfx ran" >>"$work/vga-ttfx.log"; }
+  systemctl() { :; }
+  # shellcheck source=/dev/null
+  source "$ROOT/configs/airootfs/usr/share/omarchy-iso/console-logo.sh"
+  # shellcheck source=/dev/null
+  source "$work/greeter.sh"
+  # shellcheck source=/dev/null
+  source "$work/vga.sh"
+  greeter </dev/null 2>/dev/null
+)
+# Until the Return: the reset after it clears the screen.
+printf '%s' "${vga_out%%$'\033[0m\033[H\033[2J'*}" >"$work/vga-greeter"
+screen=$(python3 "$ROOT/test/unit/vt-screen.py" 25 80 "$work/boot.txt" <"$work/vga-greeter")
+expected=$(for ((r = 1; r <= 25; r++)); do
+  case $r in
+    11 | 12) printf '%37s%s\n' '' "$vga" ;;
+    14) printf '%21s%s\n' '' "Beautiful, Fun & Agentic Linux by DHH" ;;
+    16) printf '%25s%s\n' '' "Press Return to Start Install" ;;
+    *) echo ;;
+  esac
+done; echo "flashed: none")
+[[ $screen == "$expected" ]] && ok "VGA: the boot's logo kept in place, the tagline and hint under it, nothing of it blanked" || fail "VGA: the screen was:"$'\n'"$screen"
+[[ ! -e $work/vga-ttfx.log ]] && ok "VGA: no color shift" || fail "VGA: ttfx ran"
+
+# A GPU driver's framebuffer coming while the VGA greeter waits for the
+# Return: the screen cleared, the console waited for, the installer's font,
+# then the framebuffer's greeter. script(1) gives the wait a terminal to time
+# out on; the framebuffer appears 0.7 s in.
+cat >"$work/late.sh" <<EOS
+OMARCHY_RUN_DIR="$work/run" OMARCHY_FB="$work/late-fb" CONSOLE_LOGO_PATH="$work/vga/fitted.txt"
+source "$ROOT/configs/airootfs/usr/share/omarchy-iso/console-logo.sh"
+source "$work/vga.sh"
+systemctl() { :; }
+wait_for_stable_terminal() { echo wait >>"$work/late.log"; }
+i18n_console_font() { echo font >>"$work/late.log"; }
+greeter() { echo "framebuffer greeter" >>"$work/late.log"; }
+( sleep 0.7; mkdir -p "$work/late-fb" ) &
+greeter_vga >"$work/late.out"
+EOS
+rm -f "$work/late.log"
+# script(1) passes the end of its input on to the terminal, which the wait
+# reads as no Return ever coming: its input stays open for two seconds.
+sleep 2 | timeout 10 script -qec "bash $work/late.sh" /dev/null >/dev/null 2>&1 || true
+check_late=$(tr '\n' ' ' <"$work/late.log" 2>/dev/null || true)
+[[ $check_late == "wait font framebuffer greeter " ]] && ok "VGA, a framebuffer while it waits: the console waited for, the font, the framebuffer's greeter" || fail "VGA, a framebuffer while it waits: '$check_late'"
+[[ $(cat -v "$work/late.out") == *'^[[0m^[[H^[[2J' ]] && ok "VGA, a framebuffer while it waits: the screen cleared first" || fail "VGA, a framebuffer while it waits: not cleared: $(cat -v "$work/late.out" | tail -c 80)"
+
 frames=$(
   # shellcheck source=/dev/null
   source "$work/frames.sh"

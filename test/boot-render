@@ -454,8 +454,11 @@ def bands(frame: Frame) -> list[list[int]]:
 
 def text_rows(g: Geometry, logo: Logo) -> tuple[int, int]:
     """The greeter's tagline and hint rows, in pixels from the frame's top:
-    logo, blank, tagline, blank, hint."""
-    return g.oy + (logo.rows + 1) * g.ch, g.oy + (logo.rows + 3) * g.ch
+    logo, blank, tagline, blank, hint. The half-size VGA logo is half its
+    rows in cells, the text under it full size (the configurator's
+    greeter_vga)."""
+    rows = (logo.rows + 1) // 2 if g.vga else logo.rows
+    return g.oy + (rows + 1) * g.ch, g.oy + (rows + 3) * g.ch
 
 
 def classify(frame: Frame, logos: list[Logo]) -> Verdict:
@@ -482,25 +485,24 @@ def classify(frame: Frame, logos: list[Logo]) -> Verdict:
     logo, g, _ = best
     verdict = Verdict("logo", box=box, geometry=g)
     allowed = [box]
-    if not g.vga:
-        tagline_y, hint_y = text_rows(g, logo)
-        tagline = frame.lit(0, tagline_y, frame.width, tagline_y + g.ch)
-        hint = frame.lit(0, hint_y, frame.width, hint_y + g.ch)
-        if tagline:
-            verdict.kind = "greeter"
-            allowed += [(0, tagline_y, frame.width - 1, tagline_y + g.ch - 1),
-                        (0, hint_y, frame.width - 1, hint_y + g.ch - 1)]
-            cols = frame.width // g.cw
-            for name, text, y, lit in (("tagline", TAGLINE, tagline_y, tagline), ("hint", HINT, hint_y, hint)):
-                if not lit:
-                    verdict.notes.append(f"no {name}")
-                    continue
-                row = [band for band in bands_in(frame, y, y + g.ch)]
-                left = min(band[0] for band in row) // g.cw
-                right = max(band[1] for band in row) // g.cw
-                expected = (cols - len(text)) // 2
-                if not (expected - 1 <= left <= expected + 1 and right <= expected + len(text)):
-                    verdict.notes.append(f"{name} at columns {left}-{right}, not {expected}-{expected + len(text) - 1}")
+    tagline_y, hint_y = text_rows(g, logo)
+    tagline = frame.lit(0, tagline_y, frame.width, tagline_y + g.ch)
+    hint = frame.lit(0, hint_y, frame.width, hint_y + g.ch)
+    if tagline:
+        verdict.kind = "greeter"
+        allowed += [(0, tagline_y, frame.width - 1, tagline_y + g.ch - 1),
+                    (0, hint_y, frame.width - 1, hint_y + g.ch - 1)]
+        cols = frame.width // g.cw
+        for name, text, y, lit in (("tagline", TAGLINE, tagline_y, tagline), ("hint", HINT, hint_y, hint)):
+            if not lit:
+                verdict.notes.append(f"no {name}")
+                continue
+            row = [band for band in bands_in(frame, y, y + g.ch)]
+            left = min(band[0] for band in row) // g.cw
+            right = max(band[1] for band in row) // g.cw
+            expected = (cols - len(text)) // 2
+            if not (expected - 1 <= left <= expected + 1 and right <= expected + len(text)):
+                verdict.notes.append(f"{name} at columns {left}-{right}, not {expected}-{expected + len(text) - 1}")
     stray = frame.lit(0, 0, frame.width, frame.height)
     for x0, y0, x1, y1 in allowed:
         stray -= frame.lit(x0, y0, x1 + 1, y1 + 1)

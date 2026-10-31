@@ -182,6 +182,34 @@ omarchy_console_font_32() {
     done
 }
 
+# omarchy_console_layout TOP LEFT ROWS COLS LOGO_COLS FILE: the escapes that
+# draw FILE's lines from row TOP, column LEFT, on a ROWS x COLS console, over
+# what it shows rather than after clearing it: the rows above erased, each
+# line drawn with what is left and right of it erased, the rows below erased.
+# A logo on the screen already, cell for cell (ISOLINUX's, the boot's under
+# the greeter), stays up instead of going dark for a clear (a frame of black
+# in QEMU, where each of the clear's writes to the VGA's memory leaves the
+# guest). Erasing the rest of a row that ends in the last column would erase
+# that column (the VT holds the cursor there until the next character), so
+# such rows are erased first. LOGO_COLS is the widest line's width.
+omarchy_console_layout() {
+    local top="$1" left="$2" rows="$3" cols="$4" logo_cols="$5" file="$6" row line
+    [ "$top" -gt 1 ] && printf '\033[%d;%dH\033[1J' "$((top - 1))" "$cols"
+    row=$top
+    while IFS= read -r line; do
+        if [ $((left + logo_cols)) -gt "$cols" ]; then
+            printf '\033[%d;1H\033[2K\033[%d;%dH%s' "$row" "$row" "$left" "$line"
+        elif [ "$left" -gt 1 ]; then
+            printf '\033[%d;1H\033[%dX\033[%d;%dH%s\033[K' "$row" "$((left - 1))" "$row" "$left" "$line"
+        else
+            printf '\033[%d;1H%s\033[K' "$row" "$line"
+        fi
+        row=$((row + 1))
+    done <"$file"
+    [ "$row" -le "$rows" ] && printf '\033[%d;1H\033[J' "$row"
+    return 0
+}
+
 omarchy_console_logo() {
     local tty="${OMARCHY_TTY:-/dev/tty1}" fb="${OMARCHY_FB:-/sys/class/graphics/fb0}"
     local dir="${OMARCHY_CONSOLE_LOGO_DIR:-/usr/share/omarchy-iso/console-logo}"
@@ -235,14 +263,6 @@ omarchy_console_logo() {
     [ "$top" -lt 1 ] && top=1
     left=$(((cols - logo_cols) / 2 + 1))
     [ "$left" -lt 1 ] && left=1
-    # Drawn over what the console shows rather than after clearing it: the
-    # rows above the logo erased, each logo row drawn with what is left and
-    # right of it erased, the rows below erased. ISOLINUX's logo is on the
-    # screen already, cell for cell, and stays up instead of going dark for
-    # the clear (a frame of black in QEMU, where each of the clear's writes
-    # to the VGA's memory leaves the guest). Erasing the rest of a row that
-    # ends in the last column would erase that column (the VT holds the
-    # cursor there until the next character), so such rows are erased first.
     screen=$(
         if [ "$logo" = vga ]; then
             # ISOLINUX put this logo up already, in its colors: bright green
@@ -254,20 +274,8 @@ omarchy_console_logo() {
             # Palette entries 0 and 2 as .automated_script.sh sets them later.
             printf '\033]P01a1b26\033]P29ece6a\033[?25l\033[32m'
         fi
-        [ "$top" -gt 1 ] && printf '\033[%d;%dH\033[1J' "$((top - 1))" "$cols"
-        row=$top
-        while IFS= read -r line; do
-            if [ $((left + logo_cols)) -gt "$cols" ]; then
-                printf '\033[%d;1H\033[2K\033[%d;%dH%s' "$row" "$row" "$left" "$line"
-            elif [ "$left" -gt 1 ]; then
-                printf '\033[%d;1H\033[%dX\033[%d;%dH%s\033[K' "$row" "$((left - 1))" "$row" "$left" "$line"
-            else
-                printf '\033[%d;1H%s\033[K' "$row" "$line"
-            fi
-            row=$((row + 1))
-        done <"$dir/$logo.txt"
-        [ "$row" -le "$rows" ] && printf '\033[%d;1H\033[J' "$row"
-        printf '\033[0m\033[%d;1H' "$((row + 1))"
+        omarchy_console_layout "$top" "$left" "$rows" "$cols" "$logo_cols" "$dir/$logo.txt"
+        printf '\033[0m\033[%d;1H' "$((top + logo_rows + 1))"
     )
     # In one write, and again on a fresh open if that fails: login hangs tty1
     # up as it starts the session (util-linux login's vhangup), and a layout
@@ -283,12 +291,15 @@ omarchy_console_logo() {
 
     # Which framebuffer the logo is laid out for: omarchy-console-logo-redraw
     # compares it, and .automated_script.sh leaves the logo up while it exists.
-    # console-logo-vga: the console has the VGA logo's font.
+    # console-logo-vga: the console has the VGA logo's font; vga.txt and
+    # vga.cols beside it are the logo on the screen, for the greeter to keep
+    # (the configurator's greeter_vga; the live root has no copy of its own).
     [ -r "$fb/name" ] && read -r fb_name <"$fb/name"
     if mkdir -p "$run" 2>/dev/null; then
         echo "$fb_name" 2>/dev/null >"$run/console-logo"
         if [ "$logo" = vga ]; then
             : 2>/dev/null >"$run/console-logo-vga"
+            cp "$dir/vga.txt" "$dir/vga.cols" "$run/" 2>/dev/null
         else
             rm -f "$run/console-logo-vga"
         fi

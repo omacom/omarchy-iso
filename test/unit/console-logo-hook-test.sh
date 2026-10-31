@@ -154,6 +154,7 @@ junk 25 80
 check "VGA font: over a full console, only the logo is left" "$(screen 25 80 "$work/junk" | head -n 25)" "$(cat "$work/shown")"
 lacks "VGA font: the palette left alone" "$out" '^[]P'
 if [[ -e $work/run/console-logo-vga ]]; then ok "VGA font: the console is marked as having the logo's font"; else fail "VGA font: no console-logo-vga marker"; fi
+check "VGA font: the logo it drew left for the greeter" "$(cat "$work/run/vga.txt" "$work/run/vga.cols" 2>/dev/null)" "$(cat "$work/logo/vga.txt" "$work/logo/vga.cols")"
 # The next layout, on a framebuffer, loads no font for 8x16: the VGA logo's
 # font maps the blocks where the kernel's default font has them.
 fb 1280 800 i915drmfb; size 50 160; out=$(draw)

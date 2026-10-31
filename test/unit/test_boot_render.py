@@ -631,6 +631,15 @@ class FontTest(unittest.TestCase):
         self.assertTrue(v.geometry.vga)
         self.assertEqual((v.geometry.ox, v.geometry.oy), (col * 9, row * 16))
         self.assertIsNone(v.stray)
+        # The configurator's greeter_vga: that logo, the tagline and hint in full
+        # size cells under it, centred, the boot's logo to the greeter one size.
+        logo_frame = canvas.frame()
+        text(canvas, br.TAGLINE, (80 - len(br.TAGLINE)) // 2, row + 5 + 1, 9, 16)
+        text(canvas, br.HINT, (80 - len(br.HINT)) // 2, row + 5 + 3, 9, 16)
+        v = br.classify(canvas.frame(), self.logos)
+        self.assertEqual((v.kind, v.notes, v.stray), ("greeter", [], None))
+        _, problems, _ = br.analyse([(5.0, logo_frame), (8.0, canvas.frame())], self.logos, 0.5)
+        self.assertEqual(problems, [])
 
 
 def newc(files):

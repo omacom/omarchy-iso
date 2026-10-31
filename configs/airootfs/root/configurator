@@ -147,7 +147,8 @@ wait_for_stable_terminal() {
       stable=0
     fi
     if (( !shown && width > 0 && width < LOGO_WIDTH )) && [[ -r $CONSOLE_LOGO_PATH ]]; then
-      console_logo_draw "$width"
+      # The boot's half-size VGA logo stays: it is the greeter's there.
+      greeter_vga_logo || console_logo_draw "$width"
       shown=1
       # Nothing widens a console that no GPU driver will take over: the VGA
       # text console under nomodeset, or with a card the kernel has no driver
@@ -186,7 +187,65 @@ ttfx_frames() {
 # frame the deferred-provisioning first boot opens on, so install and first boot
 # bookend the setup identically. Logo, the Omarchy tagline, and a single button,
 # centered like the boot logo. No animation.
+# greeter_vga_logo: tty1 on the VGA text console with the boot's half-size
+# logo up in its own font, where greeter_vga draws the greeter. The boot left
+# the logo it drew beside its record (console-logo.sh); the mark goes once
+# the installer's font has replaced the logo's (below), for a second run.
+greeter_vga_logo() {
+  local run=${OMARCHY_RUN_DIR:-/run/omarchy-iso}
+  [[ $(tty 2>/dev/null) == "${OMARCHY_GREETER_TTY:-/dev/tty1}" ]] &&
+    [[ -e $run/console-logo-vga && ! -e ${OMARCHY_FB:-/sys/class/graphics/fb0} ]] &&
+    [[ -r $run/vga.txt && -r $run/vga.cols ]] &&
+    declare -F omarchy_console_layout >/dev/null
+}
+
+# greeter_vga: the greeter on that console. The boot's half-size logo is the
+# size the greeter has on a framebuffer console (the copy fitted to 80
+# columns is twice that, and the greeter jumped to it): it stays where it is,
+# drawn again over itself (omarchy_console_layout), with the tagline and the
+# hint under it in its font's ASCII. No color shift: ttfx draws the full
+# logo. The installer's font loads after the Return (the first steps below).
+# A GPU driver whose framebuffer comes while it waits takes the console over
+# with the logo's cells in its own font (box drawing): the screen is cleared
+# then, and the greeter drawn on the framebuffer once the console settles.
+greeter_vga() {
+  local dir=${OMARCHY_RUN_DIR:-/run/omarchy-iso} size rows cols logo_rows logo_cols top left
+  local tagline="Beautiful, Fun & Agentic Linux by DHH" hint="Press Return to Start Install"
+  size=$(stty size 2>/dev/null </dev/tty)
+  rows=${size% *} cols=${size#* }
+  [[ $rows =~ ^[0-9]+$ && $cols =~ ^[0-9]+$ ]] || { rows=25; cols=80; }
+  logo_rows=$(wc -l <"$dir/vga.txt")
+  logo_cols=$(<"$dir/vga.cols")
+  # Where console-logo.sh laid it out: its frame in half-size cells.
+  top=$(((rows - logo_rows - 2) / 2 + 1)); (( top < 1 )) && top=1
+  left=$(((cols - logo_cols) / 2 + 1)); (( left < 1 )) && left=1
+  printf '\033[?25l\033[1;32m'
+  omarchy_console_layout "$top" "$left" "$rows" "$cols" "$logo_cols" "$dir/vga.txt"
+  printf '\033[0m\033[%d;%dH%s' "$((top + logo_rows + 1))" "$(((cols - ${#tagline}) / 2 + 1))" "$tagline"
+  printf '\033[%d;%dH\033[2m%s\033[0m' "$((top + logo_rows + 3))" "$(((cols - ${#hint}) / 2 + 1))" "$hint"
+  systemctl start --no-block omarchy-medium-verify.target 2>/dev/null || true
+  local status
+  while :; do
+    IFS= read -r -t 0.5 _ </dev/tty && break
+    status=$?
+    # Not a timeout: no terminal to read (the Return can not come).
+    (( status > 128 )) || break
+    if [[ -e ${OMARCHY_FB:-/sys/class/graphics/fb0} ]]; then
+      printf '\033[0m\033[H\033[2J'
+      wait_for_stable_terminal
+      i18n_console_font "$(tty 2>/dev/null)"
+      greeter
+      return
+    fi
+  done
+  printf '\033[0m\033[H\033[2J\033[?25h'
+}
+
 greeter() {
+  if greeter_vga_logo; then
+    greeter_vga
+    return
+  fi
   measure_terminal
 
   local rows logo_h content_h top cols logo_row tagline_row hint_row
@@ -1319,9 +1378,15 @@ install_target="full_disk"
 wait_for_stable_terminal
 # tty1 is the installer's from here: no more boot logo layouts behind it.
 declare -F omarchy_console_claim_tty1 >/dev/null && omarchy_console_claim_tty1
-i18n_console_font "$(tty 2>/dev/null)"
-
-greeter
+if greeter_vga_logo; then
+  # The VGA logo's font stays for the greeter, which draws that logo.
+  greeter
+  i18n_console_font "$(tty 2>/dev/null)"
+  rm -f "${OMARCHY_RUN_DIR:-/run/omarchy-iso}/console-logo-vga"
+else
+  i18n_console_font "$(tty 2>/dev/null)"
+  greeter
+fi
 
 language_form
 

@@ -191,10 +191,24 @@ mkdir -p "$build_cache_dir" "$offline_mirror_dir"
 cp -r /archiso/configs/releng/* "$build_cache_dir/"
 rm "$build_cache_dir/airootfs/etc/motd"
 
-# We rely on the global CDN; drop reflector.
-rm -rf "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/reflector.service"
-rm -rf "$build_cache_dir/airootfs/etc/systemd/system/reflector.service.d"
-rm -rf "$build_cache_dir/airootfs/etc/xdg/reflector"
+# Nothing on the live image reads its pacman keyring: the live pacman.conf has
+# the offline mirror alone, at SigLevel Never (configs/pacman-offline.conf),
+# and the installer gives the target a keyring of its own (phases_impl.py,
+# _start_target_keyring_init). releng's pacman-init.service would still
+# generate a master key and populate every keyring on each boot: 2.5 s of gpg
+# in QEMU, minutes on a slow stick, reading gpg, libalpm and the keyrings
+# beside the boot.
+rm -f "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/pacman-init.service"
+rm -f "$build_cache_dir/airootfs/etc/systemd/system/pacman-init.service"
+# Its tmpfs for the keyring goes too: a mount unit on the boot costs far more
+# than the mount. systemd throttles its watch on the mount table to five
+# changes a second, the first services' sandboxes trip that within the boot's
+# first milliseconds, and every mount unit's job then waits for the second to
+# run out, with local-fs.target and sysinit.target behind it (0.45 s a boot;
+# airootfs/etc/systemd/system/var-lib-machines.mount is masked for the same
+# reason). gnupg's socket units for the keyring stay and bind the directory
+# on the live root's overlay instead.
+rm -f "$build_cache_dir/airootfs/etc/systemd/system/etc-pacman.d-gnupg.mount"
 
 # Bring in our archiso profile additions.
 cp -r /configs/* "$build_cache_dir/"
@@ -219,7 +233,7 @@ cp "/builder/${OMARCHY_KERNEL}.preset" "$build_cache_dir/airootfs/etc/mkinitcpio
 # GRUB entries.
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # releng's live package list is x86-flavoured; drop what arm64 cannot use.
-  arm_live_excludes=(amd-ucode broadcom-wl edk2-shell hyperv intel-ucode linux memtest86+ memtest86+-efi open-vm-tools refind reflector syslinux virtualbox-guest-utils-nox)
+  arm_live_excludes=(amd-ucode broadcom-wl edk2-shell intel-ucode linux memtest86+ memtest86+-efi syslinux)
   cp "$build_cache_dir/packages.x86_64" "$build_cache_dir/packages.aarch64"
   for excluded_package in "${arm_live_excludes[@]}"; do
     escaped_package=${excluded_package//+/[+]}
@@ -227,6 +241,9 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   done
   rm -f "$build_cache_dir/packages.x86_64"
   rm -f "$build_cache_dir/airootfs/etc/mkinitcpio.d/linux.preset" "$build_cache_dir/airootfs/etc/mkinitcpio.d/linux-t2.preset"
+  # No PXE entries on aarch64: the local-media image only.
+  sed -i "s/^PRESETS=.*/PRESETS=('archiso')/" "$build_cache_dir/airootfs/etc/mkinitcpio.d/${OMARCHY_KERNEL}.preset"
+  grep -q "^PRESETS=('archiso')$" "$build_cache_dir/airootfs/etc/mkinitcpio.d/${OMARCHY_KERNEL}.preset" || { echo "ERROR: could not trim the live preset to the local-media image" >&2; exit 1; }
   # Drops the x86-only microcode/memdisk hooks and adds the Tegra/MediaTek
   # I2C-HID keyboard modules.
   configure_archiso_aarch64_mkinitcpio "$build_cache_dir/airootfs/etc/mkinitcpio.conf.d/archiso.conf"
@@ -248,6 +265,10 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   customize="$build_cache_dir/airootfs/root/customize_airootfs.sh"
   grep -qx 'set -euo pipefail' "$customize" || { echo "ERROR: $customize has no 'set -euo pipefail' line to start after" >&2; exit 1; }
   sed -i "0,/^set -euo pipefail\$/s||set -euo pipefail\\n\\n# The Snapdragon laptops' live UKI.\\nbash /root/qualcomm-live-uki.sh $OMARCHY_KERNEL\\nrm -f /root/qualcomm-live-uki.sh|" "$customize"
+  # Plymouth stays in the aarch64 live boot (its hook goes back into the
+  # initramfs above); x86_64's customize_airootfs.sh removes the package.
+  grep -q '^# >>> no plymouth' "$customize" && grep -q '^# <<< no plymouth' "$customize" || { echo "ERROR: $customize has no 'no plymouth' block to take out" >&2; exit 1; }
+  sed -i '/^# >>> no plymouth/,/^# <<< no plymouth/d' "$customize"
   # Keep the existing late-start path when early firmware is unavailable.
   install -Dm0755 /builder/qualcomm/omarchy-live-dsp "$build_cache_dir/airootfs/usr/local/bin/omarchy-live-dsp"
   install -Dm0644 /builder/qualcomm/omarchy-live-dsp.service "$build_cache_dir/airootfs/etc/systemd/system/omarchy-live-dsp.service"
@@ -259,8 +280,19 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   install -Dm0644 /builder/qualcomm/early-firmware.py "$build_cache_dir/airootfs/usr/lib/initcpio/qcom-early-firmware.py"
   rm -rf "$build_cache_dir/syslinux" "$build_cache_dir/efiboot"
 else
-  boot_splash_kernel_options="quiet splash "
-  kernel_options="xe.enable_panel_replay=0 initramfs_async=0 intel_idle.states_off=0x3fc"
+  # sshd starts with the install medium's hashes once the greeter is up
+  # (configs/airootfs/etc/systemd/system/omarchy-medium-verify.target), not
+  # at boot: its host keys are generated on every boot, beside the login.
+  rm -f "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/sshd.service"
+  # No Plymouth in the x86_64 live boot (configs/airootfs/etc/mkinitcpio.conf.d/
+  # archiso.conf): neither splash nor plymouth.use-simpledrm.
+  # Nothing but the boot logo and the installer on the console: loglevel=3
+  # keeps the kernel's error lines (a firmware's ACPI complaints, a driver's
+  # probe failures) in the journal, which quiet alone prints, and
+  # systemd.show_status=false keeps systemd's failure and slow-job lines there
+  # too until getty@tty1 turns its status off for good (omarchy-no-idle.conf).
+  boot_splash_kernel_options="quiet "
+  kernel_options="xe.enable_panel_replay=0 initramfs_async=0 intel_idle.states_off=0x3fc usb-storage.delay_use=0 loglevel=3 systemd.show_status=false"
 fi
 for grub_config in "$build_cache_dir/grub/grub.cfg" "$build_cache_dir/grub/loopback.cfg"; do
   configure_grub_platform "$grub_config" "$OMARCHY_ARCH"
@@ -350,11 +382,12 @@ if [[ -d /omarchy-source && -d /omarchy-pkgs ]]; then
 fi
 
 # Packages installed into the live ISO environment itself (NOT the target system).
-# The selected omarchy-settings package is needed here so its post_install hook
-# drops Omarchy's plymouthd.conf into /etc/plymouth before mkarchiso builds the
-# live initramfs.
+# The selected omarchy-settings package is needed here: it ships the logo the
+# greeter and the console draw, and on aarch64 its post_install hook drops
+# Omarchy's plymouthd.conf into /etc/plymouth before mkarchiso builds the live
+# initramfs.
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
-  # Plymouth stays out of the live initramfs (archiso-aarch64-mkinitcpio.sh);
+  # Plymouth stays in the live initramfs (archiso-aarch64-mkinitcpio.sh);
   # openssh and pciutils serve the recovery entry and remote debugging.
   # For the Snapdragon laptops: ukify builds the live UKI, and the installer
   # saves a laptop's signed firmware from Windows with qcom-firmware-extract.
@@ -366,17 +399,80 @@ fi
 live_packages_file="$build_cache_dir/packages.$OMARCHY_ARCH"
 printf '%s\n' "${arch_packages[@]}" >> "$live_packages_file"
 
-# The live ISO boots linux-omarchy, or linux-t2 on a Mac, so stock linux is a
-# kernel nobody boots: ~147MB of ISO, plus its own archiso initramfs.
+# releng's live package list is written for a rescue system; the installer
+# is not one, and every package here is read cold off the install medium or
+# starts a unit on the way to the greeter. What goes, and why it would
+# otherwise stay:
 #
-# It cannot just be deleted — releng's broadcom-wl hard-depends on it, and it is
-# the only releng package that does, so pacman would drag the kernel straight back
-# in. broadcom-wl is a prebuilt module for stock linux and cannot load on the
-# kernel we boot, so it has done nothing since we started booting T2 anyway. The
-# install is entirely offline and the live environment needs no Wi-Fi driver.
+# - linux, broadcom-wl: the live ISO boots linux-omarchy, or linux-t2 on a
+#   Mac, so stock linux is a kernel nobody boots, ~147 MB of ISO plus its own
+#   archiso initramfs. releng's broadcom-wl hard-depends on it, the only
+#   package that does, and is a prebuilt module for that kernel that cannot
+#   load on the one we boot. Anchored matches keep linux-omarchy, linux-t2
+#   and linux-firmware.
+# - bcachefs-tools: the installer writes btrfs; its 9.3 MB bcachefs binary
+#   was read in full on every boot, and the filesystems hook copied it into
+#   the initramfs.
+# - reflector: the live pacman has the offline mirror alone.
+# - iwd, wpa_supplicant, iw, wireless_tools, wireless-regdb, b43-fwcutter,
+#   linux-firmware-marvell, linux-atm: customize_airootfs.sh leaves every
+#   radio's firmware out of the live image, so there is nothing to drive;
+#   iwd's start also sat between basic.target and network.target on the way
+#   to the login (60 to 190 ms, with cfg80211 and the regulatory database's
+#   certificates). The installed system gets its Wi-Fi from the root image.
+# - irssi, lynx, lftp, nmap, tcpdump, ethtool, ndisc6, ldns, bind,
+#   darkhttpd, dnsmasq, and the VPN and modem stack (openconnect, openvpn,
+#   vpnc, xl2tpd, pptpclient, ppp, wvdial, usb_modeswitch, usbmuxd,
+#   modemmanager, systemd-resolvconf): a rescue system's network clients;
+#   the install is offline and nothing in the installer names them.
+# - clonezilla, fsarchiver, partclone, partimage, testdisk, ddrescue, gpart,
+#   dmraid: imaging and recovery tools the installer never runs. mdadm stays
+#   for omarchy-iso-cleanup-disk.
+# - vim, nano, mc, tmux, screen, man-db, man-pages, xdg-utils, gpm: for a
+#   person at a rescue shell; customize_airootfs.sh removes /usr/share/man
+#   anyway.
+# - smartmontools, sdparm, hdparm, lsscsi, nvme-cli, sg3_utils, usbutils:
+#   diagnostics nothing in the installer runs (it reads lsblk, lspci and
+#   dmidecode).
+# - jfsutils, nilfs-utils, xfsprogs, f2fs-tools, udftools, exfatprogs,
+#   ntfs-3g, fatresize: tools for filesystems the installer never makes;
+#   reading one on a disk goes through the kernel's own drivers.
+# - hyperv, open-vm-tools, virtualbox-guest-utils-nox, qemu-guest-agent:
+#   guest services for a desktop in a VM; the installer is a TUI, and the
+#   integration harness drives QEMU over QMP and SSH.
+# - sequoia-sq, openpgp-card-tools, libfido2, pcsclite, tpm2-tools,
+#   tpm2-tss: keys, cards and TPM; the live pacman verifies nothing
+#   (SigLevel Never, pacman-init gone), and enrolment is the installed
+#   system's job.
+# - open-iscsi, dhcpcd, pv, rsync, squashfs-tools, refind, libusb-compat:
+#   unreferenced. The live root takes its address from systemd-networkd;
+#   the PXE initramfs from mkinitcpio-nfs-utils' ipconfig, which stays with
+#   nbd and nfs-utils.
 #
-# Anchored so linux-omarchy, linux-t2 and linux-firmware are untouched.
-sed -i -E '/^(linux|broadcom-wl)$/d' "$live_packages_file"
+# cloud-init stays: the integration harness hands the live root its SSH key
+# through NoCloud user-data on the cidata drive. The accessibility entry's
+# espeakup, brltty, alsa-utils, sof-firmware and livecd-sounds stay, as do
+# bolt for Thunderbolt docks and the terminfo packages for SSH sessions.
+live_excludes=(
+  linux broadcom-wl bcachefs-tools reflector
+  iwd wpa_supplicant iw wireless_tools wireless-regdb b43-fwcutter linux-firmware-marvell linux-atm
+  irssi lynx lftp nmap tcpdump ethtool ndisc6 ldns bind darkhttpd dnsmasq
+  openconnect openvpn vpnc xl2tpd pptpclient ppp wvdial usb_modeswitch usbmuxd modemmanager systemd-resolvconf
+  clonezilla fsarchiver partclone partimage testdisk ddrescue gpart dmraid
+  vim nano mc tmux screen man-db man-pages xdg-utils gpm
+  smartmontools sdparm hdparm lsscsi nvme-cli sg3_utils usbutils
+  jfsutils nilfs-utils xfsprogs f2fs-tools udftools exfatprogs ntfs-3g fatresize
+  hyperv open-vm-tools virtualbox-guest-utils-nox qemu-guest-agent
+  sequoia-sq openpgp-card-tools libfido2 pcsclite tpm2-tools tpm2-tss
+  open-iscsi dhcpcd pv rsync squashfs-tools refind libusb-compat
+)
+for excluded_package in "${live_excludes[@]}"; do
+  escaped_package=${excluded_package//+/[+]}
+  sed -i "\\|^${escaped_package}\$|d" "$live_packages_file"
+done
+# releng enables units of packages that are no longer installed; the dangling
+# links would be ignored, but not silently.
+rm -f "$build_cache_dir"/airootfs/etc/systemd/system/multi-user.target.wants/{hv_fcopy_daemon,hv_kvp_daemon,hv_vss_daemon,iwd,ModemManager,vboxservice,vmtoolsd,vmware-vmblock-fuse}.service
 
 # Build the offline mirror: everything pacstrap might want during the target
 # install. With --local-source, the omarchy* packages we just built are
@@ -1080,6 +1176,17 @@ done
 
 # Live ISO uses the same offline pacman.conf.
 cp "$build_cache_dir/pacman-offline.conf" "$build_cache_dir/airootfs/etc/pacman.conf"
+
+# The files the live boot reads on its way to the installer's first screen go
+# first in the squashfs, packed together: a boot touches some 1200 files, most
+# of them small, and a small file costs the whole 1 MiB fragment block it was
+# packed into with whatever mksquashfs met next in the tree. The list is what a
+# QEMU boot of a built ISO had in its page cache when the greeter appeared
+# (bin/omarchy-iso-boot-files regenerates it); files it names that an image no
+# longer has are ignored, files it misses are merely laid out as before.
+boot_files_sort="$build_cache_dir/airootfs/usr/share/omarchy-iso/boot-files.sort"
+[[ -s $boot_files_sort ]] || { echo "ERROR: $boot_files_sort is missing or empty" >&2; exit 1; }
+printf '%s\n' "airootfs_image_tool_options+=('-sort' '$boot_files_sort')" >>"$build_cache_dir/profiledef.sh"
 
 # Build the ISO. profiledef.sh reads OMARCHY_ARCH for the archiso arch/bootmodes.
 echo "[timing] mkarchiso start $(date +%s)"

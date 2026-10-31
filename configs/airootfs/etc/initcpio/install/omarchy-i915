@@ -1,0 +1,30 @@
+#!/bin/bash
+# mkinitcpio install hook: i915 in the initramfs for the Intel GPUs that need
+# no firmware (hooks/omarchy-i915).
+
+build() {
+    local tmp
+    # Optional: the aarch64 kernel has no i915.
+    add_module 'i915?' || return 0
+    # add_module brings every firmware file i915 names, 40 MB for the
+    # generations this hook never loads it on; the ones it does need none.
+    rm -rf "$BUILDROOT/usr/lib/firmware/i915"
+    add_file /usr/share/omarchy-iso/i915-early.ids
+    # udev loads modules by alias with the blacklist applied; the hook loads
+    # i915 by name, which the blacklist does not cover.
+    tmp=$(mktemp)
+    printf '# Loaded by name from hooks/omarchy-i915 on the GPUs that need no firmware.\nblacklist i915\n' >"$tmp"
+    add_file "$tmp" /etc/modprobe.d/omarchy-i915.conf 644
+    rm -f "$tmp"
+    add_runscript
+}
+
+help() {
+    cat <<HELPEOF
+Loads i915 in the initramfs when the machine's Intel GPU is one of the
+generations before Skylake, which need no firmware, so the panel comes up
+while the install medium is still being read and the console is a
+framebuffer by the time the installer's greeter draws. Later generations
+keep loading i915 from the live root, where their firmware is.
+HELPEOF
+}

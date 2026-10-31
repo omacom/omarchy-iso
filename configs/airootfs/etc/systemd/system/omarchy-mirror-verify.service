@@ -22,6 +22,18 @@ ExecStart=/usr/bin/sha256sum --check --strict --quiet /usr/share/omarchy-iso/off
 # Background work: never compete with the console or anything interactive.
 Nice=19
 IOSchedulingClass=idle
+# The idle class is lost on this hash: the mirror sits in the airootfs, so
+# its reads reach the stick through the loop device, which issues them at
+# its own priority, and the boot's reads of every binary it execs queue
+# behind them. On the usb2 boot benchmark (40 MB/s, UEFI) the greeter
+# showed at 35.6 s after power-on, 541 MB off the stick between kernel
+# start and the greeter against the boot's own 154 MB; with this hash
+# alone the same 35.6 s, with the root image's (direct reads, idle class
+# honored) alone 29.6 s, with neither 27.2 s. With the io controller on,
+# BFQ schedules by cgroup and weighs this unit's share against each of
+# the boot's units: the greeter at 28.3 s, userspace to greeter 6.6 s
+# instead of 14.2 s. IOWeight=1 on top gained nothing more.
+IOAccounting=yes
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=omarchy-medium-verify.target

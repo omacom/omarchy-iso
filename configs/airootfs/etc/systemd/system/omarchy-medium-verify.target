@@ -1,0 +1,15 @@
+# The two hashes of the install medium read all of it. The installer starts
+# this target once its first screen is up (the configurator's greeter), or at
+# once on an autoinstall (.automated_script.sh); nothing starts it at boot.
+# Every binary the boot execs comes off the same stick, and hashing beside them
+# cost the greeter 0.4 s (usb3) to 0.8 s (usb2) on the boot benchmark.
+# omarchy-wait-root-image-verify starts the units itself when nothing did.
+#
+# sshd rides on it too, on x86_64 (build-iso.sh takes it out of
+# multi-user.target): its host keys are generated at every boot, four key
+# types, a second or more of a slow CPU beside the login, and nothing needs
+# SSH before the installer is on screen. The boot benchmark, the
+# integration harness and bin/omarchy-iso-boot-files all retry until it
+# answers. The aarch64 recovery entry has no greeter and keeps sshd at boot.
+[Unit]
+Description=Verify the install medium behind the installer

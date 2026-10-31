@@ -245,6 +245,30 @@ class ConsoleFontTest(unittest.TestCase):
                 expected = {module.UPPER_HALF, module.LOWER_HALF} | set(module.RUSSIAN_FORMS[(width, height)])
                 self.assertEqual(redrawn, expected)
 
+    def test_the_blocks_keep_the_slots_of_the_kernels_font(self):
+        # The boot logo is on screen in the kernel's font when the installer
+        # loads this one, which draws the logo's cells at their slots again.
+        module = console_font()
+        import gzip
+
+        for size in ("16", "32"):
+            source = TERMINUS / f"ter-v{size}b.psf.gz"
+            if not source.is_file():
+                self.skipTest("terminus-font is not installed")
+            width, height, glyphs, table = module.read_font(gzip.decompress(source.read_bytes()))
+            module.patch(width, height, glyphs, table)
+            patched = {codepoint: glyphs[index] for index, codepoints in enumerate(table) for codepoint in codepoints}
+            with tempfile.TemporaryDirectory() as work:
+                output = Path(work) / "console.psf"
+                subprocess.run([sys.executable, str(SHARE / "console-font.py"), str(source), str(output)], check=True)
+                _, _, glyphs, table = module.read_font(output.read_bytes())
+            built = {codepoint: glyphs[index] for index, codepoints in enumerate(table) for codepoint in codepoints}
+
+            with self.subTest(size=size):
+                for codepoint, slot in ((0x2588, 0xDB), (0x2584, 0xDC), (0x2580, 0xDF)):
+                    self.assertIn(codepoint, table[slot])
+                self.assertEqual(built, patched)  # every character keeps its glyph, wherever it moved
+
     def test_half_blocks_fill_the_top_or_bottom_half_of_the_cell(self):
         module = console_font()
         upper = module.half_block(16, 32, True)

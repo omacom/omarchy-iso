@@ -1,0 +1,11 @@
+# The boot logo, laid out again when a GPU driver replaces the framebuffer
+# it was drawn on (omarchy-console-logo-redraw decides whether it is still
+# what tty1 shows).
+ACTION=="add", SUBSYSTEM=="graphics", KERNEL=="fb0", RUN+="/usr/local/bin/omarchy-console-logo-redraw"
+# A display controller about to get its driver, while the VGA logo is up in its
+# font: this runs before 80-drivers.rules loads the driver, and the helper
+# clears the console first if one will load (see --before-driver there).
+ACTION=="add", SUBSYSTEM=="pci", ATTR{class}=="0x03*", TEST=="/run/omarchy-iso/console-logo-vga", RUN+="/usr/local/bin/omarchy-console-logo-redraw --before-driver"
+# A virtio GPU (QEMU's virtio-vga: device 16) gets its driver on the virtio
+# device; the PCI one under it is virtio-pci's from the initramfs on.
+ACTION=="add", SUBSYSTEM=="virtio", ENV{MODALIAS}=="virtio:d00000010v*", TEST=="/run/omarchy-iso/console-logo-vga", RUN+="/usr/local/bin/omarchy-console-logo-redraw --before-driver"

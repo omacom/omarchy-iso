@@ -1,8 +1,10 @@
 #!/bin/bash
 #
 # .automated_script.sh warms the page cache off the install medium while the
-# user is in the wizard, but only once both boot-time checks of that medium
-# are done: two readers on one USB stick seek against each other. This runs
+# user is in the wizard, but only once both checks of that medium are done:
+# two readers on one USB stick seek against each other. The checks start with
+# omarchy-medium-verify.target once the installer is on screen, so the warm-up
+# must also not run before they have started. This runs
 # its warm_offline_mirror against a systemctl stub that replays a boot as
 # systemd reports it, and a cat stub that records which part of the boot each
 # read of the medium landed in.
@@ -29,6 +31,8 @@ echo "MemAvailable:    8388608 kB" >"$fixture/meminfo"
 
 # Each systemctl call answers for the next phase of the boot (the last one
 # repeats), the way systemd reports it in that phase:
+#   idle      the installer has not started omarchy-medium-verify.target yet:
+#             no jobs, both units inactive
 #   mirror    omarchy-mirror-verify.service hashing; the image's start job
 #             queued behind it (Before=), so that unit is still inactive
 #   image     the mirror check finished, the image hashing
@@ -40,6 +44,7 @@ phase=\${phases[0]}
 ((\${#phases[@]} == 1)) || printf '%s\n' "\${phases[@]:1}" >"$fixture/phases"
 echo "\$phase" >"$fixture/now"
 case "\$1 \$phase" in
+  "is-active idle")     echo inactive ;;
   "is-active mirror")   [[ \$* == *omarchy-mirror-verify* ]] && echo activating || echo inactive ;;
   "is-active image")    [[ \$* == *omarchy-mirror-verify* ]] && echo active || echo activating ;;
   "is-active finished") echo active ;;
@@ -70,6 +75,10 @@ warm_reads() { # the boot's phases, one per systemctl call -> the reads, one per
 reads=$(warm_reads mirror mirror image image finished)
 [[ $reads == $'finished omarchy-root.img.zst\nfinished linux-firmware-1-1-any.pkg.tar.zst' ]] \
   || fail "the warm-up read the medium before both checks had finished: $(paste -sd, <<<"$reads")"
+
+reads=$(warm_reads idle idle mirror image finished)
+[[ $reads == $'finished omarchy-root.img.zst\nfinished linux-firmware-1-1-any.pkg.tar.zst' ]] \
+  || fail "the warm-up read the medium before the checks had even started: $(paste -sd, <<<"$reads")"
 
 reads=$(warm_reads finished)
 [[ $reads == $'finished omarchy-root.img.zst\nfinished linux-firmware-1-1-any.pkg.tar.zst' ]] \

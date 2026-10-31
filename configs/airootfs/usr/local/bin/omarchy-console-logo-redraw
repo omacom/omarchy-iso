@@ -1,0 +1,91 @@
+#!/bin/bash
+#
+# Lay the boot logo out again when a GPU driver replaces the framebuffer it
+# was drawn on. The live initramfs loads no GPU driver on most machines
+# (only i915 on the Intel generations that need no firmware), so in the live
+# root the real driver takes the framebuffer from simpledrm, or the VGA text
+# console from vgacon, and fbcon rebuilds the console with the kernel's
+# default font: the logo is left at a corner, at the wrong size. Run by udev
+# when a framebuffer appears (etc/udev/rules.d/72-omarchy-console-logo.rules),
+# this redraws it where the greeter will draw (console-logo.sh), but only
+# while the logo is what tty1 shows: not once .automated_script.sh has tty1,
+# and not for udev's replay of the framebuffer the logo is already on.
+#
+# --wait: started by the i915 initramfs hook (etc/initcpio/hooks/omarchy-i915)
+# inside the new root, just before switch_root, while i915 is still bringing
+# the panel up. /dev, /sys and /run are not there yet, so it reads what it
+# needs from the root first, then waits without touching them (no
+# redirections) until a framebuffer other than the one the logo was laid out
+# on appears, ten seconds at most. From the VGA text console it also waits
+# for fbcon to have the panel: i915 registers its framebuffer before the
+# takeover's modeset is done, 0.6 s before on the X200, and the console is
+# 80x25 until then. While the half-size VGA logo is up it clears the console
+# as soon as the VGA console is gone, before fbcon shows that logo's glyphs
+# in a font that has none of them (console-logo.sh).
+
+run=${OMARCHY_RUN_DIR:-/run/omarchy-iso}
+fb=${OMARCHY_FB:-/sys/class/graphics/fb0}
+share=${OMARCHY_ISO_SHARE:-/usr/share/omarchy-iso}
+
+# shellcheck source=/dev/null
+source "$share/console-logo.sh" || exit 0
+
+# clear_vga_logo: clear tty1 while the VGA logo is up and the console is
+# still 80x25, the VGA one or the dummy one a driver leaves in its place,
+# under the layout lock (below), so it never lands on a layout.
+clear_vga_logo() {
+  (
+    flock 9
+    [[ -e $run/console-logo-vga && $(omarchy_console_size) == "25 80 " ]] || exit 0
+    printf '\033[2J' >>"${OMARCHY_TTY:-/dev/tty1}"
+  ) 9>>"$run/console-logo.lock" 2>/dev/null
+}
+
+# --before-driver: udev, for a display controller (or a virtio GPU), ahead of
+# the rule that loads its driver (72-omarchy-console-logo.rules). While the VGA logo is up
+# in its font, clear the console if a driver is about to load: a GPU driver
+# takes the console over within milliseconds of unregistering the VGA one on
+# some machines (QEMU's bochs-drm), faster than the --wait watcher polls, and
+# fbcon would show the logo's cells in a font without its glyphs. A device
+# without a driver for it keeps the logo up.
+if [[ ${1:-} == --before-driver ]]; then
+  [[ -e $run/console-logo-vga && ! -e $run/tty1-taken ]] || exit 0
+  [[ -e ${OMARCHY_SYSFS:-/sys}${DEVPATH:-/none}/driver ]] && exit 0
+  [[ -n ${MODALIAS:-} ]] && modprobe -n -b -v "$MODALIAS" 2>/dev/null | grep -q '^insmod ' || exit 0
+  clear_vga_logo
+  exit 0
+fi
+
+if [[ ${1:-} == --wait ]]; then
+  cleared=
+  for ((i = 0; ; i++)); do
+    (( i < ${OMARCHY_REDRAW_WAIT_STEPS:-200} )) || exit 0
+    [[ -e $run/tty1-taken ]] && exit 0
+    if [[ -z $cleared && -e $run/console-logo-vga && -d ${OMARCHY_VTCONSOLE:-/sys/class/vtconsole} ]] && ! omarchy_console_vga_bound; then
+      clear_vga_logo
+      cleared=1
+    fi
+    if [[ -r $fb/name && -r $run/console-logo ]]; then
+      read -r name <"$fb/name"
+      read -r laid_out <"$run/console-logo"
+      if [[ $name != "$laid_out" ]]; then
+        [[ $laid_out != none || $(omarchy_console_size) != "25 80 " ]] && break
+      fi
+    fi
+    sleep 0.05
+  done
+  rm -f "$run/i915-loading"
+fi
+
+# One layout at a time: udev's and the --wait helper's can come at the same
+# moment, and their escapes would interleave on tty1. The second finds the
+# logo laid out on this framebuffer already.
+if exec 9>>"$run/console-logo.lock"; then
+  flock 9
+fi 2>/dev/null
+[[ -e $run/tty1-taken ]] && exit 0
+[[ -r $run/console-logo ]] || exit 0
+name=$(cat "$fb/name" 2>/dev/null) || exit 0
+[[ $name != "$(cat "$run/console-logo" 2>/dev/null)" ]] || exit 0
+omarchy_console_logo
+exit 0

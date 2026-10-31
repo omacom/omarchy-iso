@@ -259,12 +259,17 @@ verify_universal_clipboard_shortcuts() {
 shortcut_smoke_phase() {
   log "Exercising primary desktop shortcuts through the VM keyboard"
 
-  local name chord namespace
-  local shortcuts='menu|meta_l-spc|omarchy-menu
-apps|meta_l-alt-spc|omarchy-dock-apps
+  local name chord namespace apps_namespace=omarchy-menu
+  # Super+Alt+Space opens the dock's app picker since omacom/omarchy#15263
+  # and the menu before it. Expect whichever the installed Omarchy binds.
+  if ssh_session "grep -q 'omarchy.dock apps' /usr/share/omarchy/default/hypr/bindings/utilities.lua"; then
+    apps_namespace=omarchy-dock-apps
+  fi
+  local shortcuts="menu|meta_l-spc|omarchy-menu
+apps|meta_l-alt-spc|$apps_namespace
 emojis|meta_l-ctrl-e|omarchy-emojis
 clipboard|meta_l-ctrl-v|omarchy-clipboard
-audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel'
+audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel"
 
   cleanup_shortcut_state
   while IFS='|' read -r name chord namespace; do

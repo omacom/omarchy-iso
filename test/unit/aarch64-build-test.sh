@@ -279,7 +279,7 @@ printf '#!/bin/bash\necho no strict mode\n' >"$live_customize"
 grep -Fq -- '--devicetree-auto=$dtb' "$uki" || fail "the live UKI carries no device trees"
 grep -Fq '*-el2.dtb' "$uki" || fail "EL2 device trees, which share hardware ids with their base trees, are not left out"
 # A kernel that ships no Snapdragon device trees gets no UKI, and the build goes on.
-if [[ ! -d /boot/dtbs/linux-omarchy/qcom ]]; then
+if [[ ! -d /usr/lib/dtbs/linux-omarchy/qcom && ! -d /boot/dtbs/linux-omarchy/qcom ]]; then
   out=$(bash "$uki" linux-omarchy) || fail "a kernel without Snapdragon device trees stops the build"
   grep -Fq 'ships no Windows-on-ARM device trees' <<<"$out" || fail "a missing live UKI is not explained: $out"
 fi
@@ -288,7 +288,8 @@ grep -F 'chainloader /%INSTALL_DIR%/boot/%ARCH%/omarchy-live.efi' "$ROOT/configs
 grep -F 'chainloader /%INSTALL_DIR%/boot/%ARCH%/omarchy-live.efi' "$ROOT/configs/grub/grub.cfg" | grep -Fq 'modprobe.blacklist=qcom_q6v5_pas' || fail "the live UKI must protect the legacy path from automatic DSP startup"
 grep -F 'omarchy-live.efi' "$ROOT/configs/grub/grub.cfg" | grep -Fq ' iommu.passthrough=0 ' || fail "the live UKI entry leaves device memory access untranslated"
 grep -F 'chainloader /%INSTALL_DIR%/boot/%ARCH%/omarchy-live.efi' "$ROOT/configs/grub/grub.cfg" | grep -Fq '%BOOT_SPLASH_KERNEL_OPTIONS%%KERNEL_OPTIONS%' || fail "the live UKI entry does not pin the panel console"
-grep -Fqx 'dtb_dir=/boot/dtbs/$1/qcom' "$uki" || fail "the live UKI does not take the device trees the kernel keeps under its own name"
+grep -Fqx 'dtb_dir=/usr/lib/dtbs/$1/qcom' "$uki" || fail "the live UKI does not take the device trees the kernel keeps under its own name"
+grep -Fqx '[[ -d $dtb_dir ]] || dtb_dir=/boot/dtbs/$1/qcom' "$uki" || fail "the live UKI does not fall back to a kernel that keeps its device trees on /boot"
 # mkarchiso copies the UKI onto the ISO only with this patch, applied after the GRUB one.
 if have_archiso; then
   cp "$ROOT/archiso/archiso/mkarchiso" "$fixture/mkarchiso-qualcomm"

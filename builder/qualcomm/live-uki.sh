@@ -13,8 +13,10 @@ initrd=/boot/initramfs-$1.img
 uki=/boot/omarchy-live.efi
 hwids=/usr/lib/systemd/boot/hwids/aa64
 
-# The kernel package keeps its Snapdragon device trees under its own name.
-dtb_dir=/boot/dtbs/$1/qcom
+# The kernel package keeps its Snapdragon device trees under its own name, in
+# /usr/lib/dtbs since linux-omarchy 7.3-8 and in /boot/dtbs before that.
+dtb_dir=/usr/lib/dtbs/$1/qcom
+[[ -d $dtb_dir ]] || dtb_dir=/boot/dtbs/$1/qcom
 
 # Include supported Snapdragon generations while staying below the UKI section limit.
 # EL2 variants share hardware IDs with their base DTBs and would be ambiguous.

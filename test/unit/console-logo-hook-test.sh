@@ -216,6 +216,19 @@ for res in 1280x800:16 1366x768:16 1600x900:16 1920x1080:32 2560x1440:32 1920x72
   check "${x}x$y: the greeter loads the same $want px font" "$(greeter_font)" "$want"
 done
 
+# The VGA text console with the greeter's 512-glyph font has eight foreground
+# colors: dim text gets the normal color and secondary text 7, not 8.
+muted() {
+  : >"$work/tty"
+  bash -c 'source "$1/i18n.sh"; i18n_console_font /dev/tty1; echo "$OMARCHY_ISO_MUTED"' _ "$work/share-i18n" 2>/dev/null
+}
+fb none; size 25 80
+check "VGA text: secondary text in color 7" "$(muted)" 7
+check "VGA text: dim text in the normal color" "$(cat -v "$work/tty")" '^[[2;7]'
+fb 1280 800 x
+check "framebuffer: secondary text in color 8" "$(muted)" 8
+check "framebuffer: dim left alone" "$(cat -v "$work/tty")" ""
+
 # omarchy-console-logo-redraw: redraws only for a framebuffer the logo is not
 # laid out on yet, and only while the installer has not taken tty1.
 redraw() { : >"$work/tty"; "$REDRAW"; cat -v "$work/tty"; }

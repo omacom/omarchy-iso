@@ -363,7 +363,7 @@ language_form() {
       clear_logo
       echo
       say "$(t keyboard.intro)"
-      say --foreground 8 "$(t keyboard.anotherOwner)"
+      say --foreground "$OMARCHY_ISO_MUTED" "$(t keyboard.anotherOwner)"
       echo
       choice=$(language_rows | gum choose --height 10 --label-delimiter $'\t' \
         --selected "$(language_label "$language")" --header "$(t language.header)") && status=0 || status=$?
@@ -392,7 +392,7 @@ keyboard_form() {
     echo
     if ! i18n_translated "$language"; then
       # English on purpose: there is no catalog for this language to say it in.
-      say --foreground 8 "The installer stays in English. Omarchy will be in $(language_label "$language") once installed."
+      say --foreground "$OMARCHY_ISO_MUTED" "The installer stays in English. Omarchy will be in $(language_label "$language") once installed."
     fi
     echo
 
@@ -424,7 +424,7 @@ confirm_prepare_for_another_owner() {
   clear_logo
   echo
   say "$(t owner.title)"
-  say --foreground 8 "$(t owner.detail)"
+  say --foreground "$OMARCHY_ISO_MUTED" "$(t owner.detail)"
   echo
   gum confirm --affirmative "$(t owner.yes)" --negative "$(t owner.no)" "$(t owner.prompt)"
 }
@@ -853,7 +853,7 @@ run_partition_decide() {
 
     case $mode in
       encrypted)
-        say --foreground 8 "$(t encryption.hint)"
+        say --foreground "$OMARCHY_ISO_MUTED" "$(t encryption.hint)"
         affirmative="$(t install.yes)"
         ;;
       unencrypted)
@@ -1147,8 +1147,8 @@ disk_form() {
 open_partition_tool() {
   step "$(t tool.title "$disk")"
   say "$(t tool.hint)"
-  say --foreground 8 "$(t tool.warning)"
-  say --foreground 8 "$(t tool.tip)"
+  say --foreground "$OMARCHY_ISO_MUTED" "$(t tool.warning)"
+  say --foreground "$OMARCHY_ISO_MUTED" "$(t tool.tip)"
   echo
   gum confirm --affirmative "$(t tool.open)" --negative "$(t common.back)" "$(t tool.prompt "$disk")" || return 0
 
@@ -1211,7 +1211,7 @@ confirm_disk_overwrite() {
     say "$(t overwrite.warning)"
 
     if [[ $mode == "encrypted" ]]; then
-      say --foreground 8 "$(t encryption.hint)"
+      say --foreground "$OMARCHY_ISO_MUTED" "$(t encryption.hint)"
       affirmative="$(t install.yes)"
     else
       affirmative="$(t install.yesUnencrypted)"

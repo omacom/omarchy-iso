@@ -11,6 +11,9 @@ OMARCHY_ISO_I18N_DIR=${OMARCHY_ISO_I18N_DIR:-$OMARCHY_ISO_SHARE/i18n}
 [[ -r $OMARCHY_ISO_SHARE/console-logo.sh ]] && source "$OMARCHY_ISO_SHARE/console-logo.sh"
 
 declare -gA OMARCHY_ISO_TEXT=()
+# The color of secondary text (hints, notes): 8, bright black, but 7 where the
+# console has eight foreground colors only (i18n_console_font).
+OMARCHY_ISO_MUTED=${OMARCHY_ISO_MUTED:-8}
 
 i18n_load() {
   local code=en file key value
@@ -59,6 +62,15 @@ i18n_console_font() {
     python3 "$OMARCHY_ISO_SHARE/console-font.py" "/usr/share/kbd/consolefonts/ter-v${size}b.psf.gz" "$font" 2>/dev/null || return 0
   fi
   setfont -C "$tty" "$font" 2>/dev/null || true
+  # The VGA text console draws a 512-glyph font in eight foreground colors:
+  # color 8 and the dim attribute's color fell on the background, and the
+  # greeter's "Press Return", the forms' hints and the dashboard's tips were
+  # not there (a BIOS boot no GPU driver takes over, test/boot-render). There
+  # dim text gets the normal color (ESC [ 2 ; 7 ]) and secondary text 7.
+  if [[ ! -e ${OMARCHY_FB:-/sys/class/graphics/fb0} ]]; then
+    printf '\033[2;7]' 2>/dev/null >>"${OMARCHY_TTY:-$tty}" || true
+    OMARCHY_ISO_MUTED=7
+  fi
 }
 
 # t <key> [args...]: the string in the loaded language, %1.. filled from args.

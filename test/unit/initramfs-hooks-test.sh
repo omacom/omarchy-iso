@@ -14,7 +14,8 @@
 # - the rest of block is mkinitcpio's own, line for line, when mkinitcpio is
 #   installed here: an upstream change to it shows up as a failure.
 # - filesystems adds the ISO's and a host partition's filesystems and the
-#   character sets, and no network filesystem or mount helper.
+#   character sets they default to, and no network filesystem, other code
+#   page or mount helper.
 
 set -euo pipefail
 
@@ -52,7 +53,8 @@ for m in drivers/scsi/lpfc/lpfc.ko.zst drivers/scsi/qla2xxx/qla2xxx.ko.zst drive
   drivers/scsi/ch.ko.zst drivers/scsi/pcmcia/aha152x_cs.ko.zst drivers/scsi/ips.ko.zst \
   drivers/block/floppy.ko.zst drivers/block/rbd.ko.zst drivers/block/zram/zram.ko.zst drivers/block/aoe/aoe.ko.zst \
   drivers/block/rnbd/rnbd-client.ko.zst drivers/nvme/host/nvme-tcp.ko.zst drivers/nvme/host/nvme-rdma.ko.zst \
-  drivers/nvme/target/nvmet.ko.zst drivers/block/nbd.ko.zst; do
+  drivers/nvme/target/nvmet.ko.zst drivers/block/nbd.ko.zst drivers/ata/pata_parport/pata_parport.ko.zst \
+  drivers/ata/pata_parport/bpck.ko.zst; do
   if dropped "$m"; then ok "drops ${m##*/}"; else fail "keeps ${m##*/}"; fi
 done
 for m in drivers/scsi/sd_mod.ko.zst drivers/scsi/sr_mod.ko.zst drivers/scsi/scsi_mod.ko.zst drivers/scsi/sg.ko.zst \
@@ -108,7 +110,10 @@ added=$(printf '%s\n' "${calls[@]}")
 for m in isofs udf squashfs overlay vfat exfat ntfs3 ext4 btrfs xfs; do
   if grep -qx "module $m?" <<<"$added"; then ok "filesystems adds $m"; else fail "filesystems lacks $m"; fi
 done
-if grep -qx 'all /kernel/fs/nls/' <<<"$added"; then ok "filesystems adds the character sets"; else fail "no nls modules"; fi
+for m in nls_utf8 nls_iso8859-1; do
+  if grep -qx "module $m?" <<<"$added"; then ok "filesystems adds $m"; else fail "filesystems lacks $m"; fi
+done
+if grep -q '^all /kernel/fs/nls' <<<"$added"; then fail "filesystems adds every code page"; else ok "not every code page"; fi
 if grep -qE '^module (nfs|nfsv4|cifs|ceph|ocfs2|gfs2)\?' <<<"$added" || grep -q '^all /kernel/fs ' <<<"$added"; then
   fail "filesystems adds network or cluster filesystems: $added"
 else

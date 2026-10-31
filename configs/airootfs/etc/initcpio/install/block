@@ -16,12 +16,13 @@ build() {
     # HBAs and their target modes, 6.4 MB with 1.2 MB of firmware), SAN
     # multipath handlers, tape, changer and PCMCIA SCSI drivers, the network
     # and RAM block devices (Ceph, DRBD, ATA over Ethernet, RDMA, zram,
-    # floppy, test devices), NVMe over fabrics or the NVMe target side: an
-    # install medium is never on one, a server's virtual media are USB, and
-    # the live root has them all. nbd comes from the PXE hook that needs it,
+    # floppy, test devices), NVMe over fabrics or the NVMe target side, the
+    # IDE drives on a parallel port (pata_parport): an install medium is
+    # never on one, a server's virtual media are USB, and the live root has
+    # them all. nbd comes from the PXE hook that needs it,
     # and what the VM controllers kept here need (scsi_transport_fc, _sas,
     # _spi) comes in as their dependencies.
-    add_checked_modules -f '/(lpfc|qla2xxx|qla4xxx|qla1280|bfa|efct|fnic|snic|mpt3sas|mpi3mr|megaraid[_a-z]*|aacraid|hpsa|smartpqi|be2iscsi|bnx2fc|bnx2i|cxgb3i|cxgb4i|libcxgbi|csiostor|qedi|qedf|isci|pm80xx|mvsas|mvumi|arcmsr|esas2r|3w-[_a-z0-9]+|hptiop|stex|ipr|pmcraid|myrb|myrs|dc395x|initio|a100u2w|advansys|aic7xxx|aic79xx|aic94xx|BusLogic|fdomain[_a-z]*|wd719x|dmx3191d|am53c974|atp870u|imm|ppa|ses|libfc|fcoe|libfcoe|libiscsi[_a-z]*|iscsi_tcp|iscsi_boot_sysfs|scsi_transport_iscsi|scsi_transport_srp|qlogicfas408|sym53c8xx|nsp32|hisi_sas[_a-z]*|ips|esp_scsi|libsas|tcm_[_a-z0-9]+|target_core_[_a-z]+|scsi_dh_[_a-z]+|scsi_debug|st|ch|[_a-z0-9]+_cs|floppy|brd|nbd|rbd|ublk_drv|zloop|aoe|drbd|null_blk|rnbd-client|rnbd-server|xen-blkback|zram|nvme-rdma|nvme-tcp|nvme-fc|nvme-fabrics|nvmet[-_a-z]*|nvme-loop|nvme-fcloop)\.ko' '/(block|ata|scsi|fusion|nvme)/'
+    add_checked_modules -f '/(lpfc|qla2xxx|qla4xxx|qla1280|bfa|efct|fnic|snic|mpt3sas|mpi3mr|megaraid[_a-z]*|aacraid|hpsa|smartpqi|be2iscsi|bnx2fc|bnx2i|cxgb3i|cxgb4i|libcxgbi|csiostor|qedi|qedf|isci|pm80xx|mvsas|mvumi|arcmsr|esas2r|3w-[_a-z0-9]+|hptiop|stex|ipr|pmcraid|myrb|myrs|dc395x|initio|a100u2w|advansys|aic7xxx|aic79xx|aic94xx|BusLogic|fdomain[_a-z]*|wd719x|dmx3191d|am53c974|atp870u|imm|ppa|ses|libfc|fcoe|libfcoe|libiscsi[_a-z]*|iscsi_tcp|iscsi_boot_sysfs|scsi_transport_iscsi|scsi_transport_srp|qlogicfas408|sym53c8xx|nsp32|hisi_sas[_a-z]*|ips|esp_scsi|libsas|tcm_[_a-z0-9]+|target_core_[_a-z]+|scsi_dh_[_a-z]+|scsi_debug|st|ch|[_a-z0-9]+_cs|floppy|brd|nbd|rbd|ublk_drv|zloop|aoe|drbd|null_blk|rnbd-client|rnbd-server|xen-blkback|zram|nvme-rdma|nvme-tcp|nvme-fc|nvme-fabrics|nvmet[-_a-z]*|nvme-loop|nvme-fcloop|pata_parport/[_a-z0-9]+)\.ko' '/(block|ata|scsi|fusion|nvme)/'
 
     # usb
     add_checked_modules -f '(_cs|sl811_hcd|isp116x_hcd)' '/usb/host'

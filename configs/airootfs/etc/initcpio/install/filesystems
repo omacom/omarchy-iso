@@ -13,14 +13,17 @@ build() {
     map add_module 'isofs?' 'udf?' 'squashfs?' 'erofs?' 'overlay?'
     # A partition holding the ISO file (loopback.cfg, a GRUB loopback boot).
     map add_module 'vfat?' 'msdos?' 'exfat?' 'ntfs3?' 'ext4?' 'btrfs?' 'xfs?' 'f2fs?'
-    # Their file name encodings.
-    add_all_modules '/kernel/fs/nls/'
+    # Their file name encodings: the kernel's defaults, UTF-8 (ISO 9660's
+    # Joliet names, exFAT, NTFS, and FAT, which reads its short names in the
+    # built-in code page 437) and ISO 8859-1, not the other 48 code pages
+    # (0.4 MB), which only a mount option asks for.
+    map add_module 'nls_utf8?' 'nls_iso8859-1?'
 }
 
 help() {
     cat <<HELPEOF
 Adds the filesystem modules an Omarchy install medium can need: ISO 9660 and
 UDF, squashfs and overlay, and the filesystems an ISO file can sit on (FAT,
-exFAT, NTFS, ext4, btrfs, XFS, F2FS), with their character sets.
+exFAT, NTFS, ext4, btrfs, XFS, F2FS), with the character sets they default to.
 HELPEOF
 }

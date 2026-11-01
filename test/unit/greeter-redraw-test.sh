@@ -57,7 +57,7 @@ if [[ $first == *'^[[H^[[2J'* ]]; then fail "the greeter clears the whole screen
 [[ $first == *'^[[22;1H^[[2K'* ]] && ok "each logo row erased and printed in one write" || fail "logo rows: $first"
 n=$(grep -o '\^\[\[2K' <<<"$first" | wc -l)
 [[ $n == 3 ]] && ok "three logo rows, three erasures" || fail "$n erasures for three logo rows"
-[[ $first == *'^[[0m'$'\n''^[[J'* ]] && ok "the rows below the logo cleared" || fail "rows below the logo not cleared: $first"
+[[ $first == *'^[[0m^[[25;1H^[[J'* ]] && ok "the rows below the logo cleared" || fail "rows below the logo not cleared: $first"
 
 # A console narrower than the logo (the VGA text console's 80 columns): the
 # copy fitted to 80 columns, and no color shift, which would wrap.
@@ -76,6 +76,46 @@ narrow=$(
 )
 [[ $narrow == *"$(printf 'F%.0s' {1..80})"* && $narrow != *'█'* && $narrow != *'M-bM-^VM-^H'* ]] && ok "80 columns: the fitted logo" || fail "80 columns: not the fitted logo"
 [[ ! -e $work/ttfx.log ]] && ok "80 columns: no color shift" || fail "80 columns: ttfx ran"
+
+# A console narrower than even the fitted logo (75 columns of a 600-pixel-wide
+# framebuffer): the boot lays the fitted logo out from the first column, each
+# line cut at the last (console-logo.sh), and the greeter leaves it so, the
+# tagline and hint on their rows. Played on the VT with the tty's line feed
+# as CR LF: after a line feed each line's wrapped end took a row of its own
+# and the tagline went over the logo.
+digits=$(printf '0123456789%.0s' {1..8})
+printf '%s\n' "$digits" "$digits" >"$work/fitted75.txt"
+boot75=$(
+  # shellcheck source=/dev/null
+  source "$ROOT/configs/airootfs/usr/share/omarchy-iso/console-logo.sh"
+  omarchy_console_layout 10 1 25 75 80 "$work/fitted75.txt"
+)
+python3 "$ROOT/test/unit/vt-screen.py" 25 75 <<<"$boot75" | head -n 25 >"$work/boot75.txt"
+out75=$(
+  LOGO_PATH="$work/wide.txt" CONSOLE_LOGO_PATH="$work/fitted75.txt" LOGO_WIDTH=81
+  measure_terminal() { TERM_WIDTH=75; PADDING_LEFT_SPACES=""; }
+  stty() { return 1; }
+  ttfx() { :; }
+  systemctl() { :; }
+  LINES=25
+  # shellcheck source=/dev/null
+  source "$work/greeter.sh"
+  greeter </dev/null 2>/dev/null
+)
+# Up to the hint, which ends the drawing.
+out75=${out75%"${out75##*Start Install}"}
+screen75=$(sed 's/$/\r/' <<<"$out75" | python3 "$ROOT/test/unit/vt-screen.py" 25 75 "$work/boot75.txt" | head -n 25)
+expected75=$(for ((r = 1; r <= 25; r++)); do
+  case $r in
+    10 | 11) echo "${digits:0:75}" ;;
+    13) printf '%19s%s\n' '' "Beautiful, Fun & Agentic Linux by DHH" ;;
+    15) printf '%23s%s\n' '' "Press Return to Start Install" ;;
+    *) echo ;;
+  esac
+done)
+boot_expected75=$(for ((r = 1; r <= 25; r++)); do if ((r == 10 || r == 11)); then echo "${digits:0:75}"; else echo; fi; done)
+[[ $(cat "$work/boot75.txt") == "$boot_expected75" ]] && ok "75 columns: the boot's logo cut at the last column" || fail "75 columns: the boot's screen was:"$'\n'"$(cat "$work/boot75.txt")"
+[[ $screen75 == "$expected75" ]] && ok "75 columns: the greeter keeps the logo's rows, cut at the last column, and draws the tagline and hint under it" || fail "75 columns: the screen was:"$'\n'"$screen75"
 
 # ttfx's own opening: hide the cursor, restore and save it, go up to the
 # canvas, the canvas in spaces; then frames, each from the saved cursor.

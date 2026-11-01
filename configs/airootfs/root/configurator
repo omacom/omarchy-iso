@@ -252,7 +252,7 @@ greeter() {
   fi
   measure_terminal
 
-  local rows logo_h content_h top cols logo_row tagline_row hint_row
+  local rows logo_h content_h top cols logo_row tagline_row hint_row row line
   local tagline hint tpad hpad anim="" logo=$LOGO_PATH
   cols=$TERM_WIDTH
   rows=$(stty size 2>/dev/null </dev/tty | awk '{print $1}')
@@ -279,19 +279,25 @@ greeter() {
   # frame between the boot and the greeter, so clear around it instead: the
   # rows above, each logo row as it is printed again (erase and print in one
   # write, which the console draws in one go), and the rows below. Whatever
-  # else was on the console goes all the same.
+  # else was on the console goes all the same. Each row goes to its own row
+  # by number rather than after a line feed: on a console narrower than even
+  # the fitted logo (75 columns of a 600-pixel-wide framebuffer) a line's end
+  # wraps, the next row's erase takes it away, and the logo keeps its rows,
+  # cut at the right edge as console-logo.sh lays it out. After a line feed
+  # every line took two rows and the tagline went over the logo.
   printf '\033[?25l'
   (( logo_row > 1 )) && printf '\033[%d;%dH\033[1J' "$((logo_row - 1))" "$cols"
 
-  printf '\033[%d;1H' "$logo_row"
   # Plain escapes rather than gum style: gum is a 14 MB binary and this was
   # the first thing to need it, every byte of it read off the install medium
   # before the first screen (0.4 s on a USB 2 stick). The language form right
   # after this loads it anyway, once the user is reading.
+  row=$logo_row
   while IFS= read -r line; do
-    printf '\033[2K%s\033[32m%s\033[0m\n' "$PADDING_LEFT_SPACES" "$line"
+    printf '\033[%d;1H\033[2K%s\033[32m%s\033[0m' "$row" "$PADDING_LEFT_SPACES" "$line"
+    row=$((row + 1))
   done <"$logo"
-  printf '\033[J'
+  (( row <= rows )) && printf '\033[%d;1H\033[J' "$row"
 
   tagline="Beautiful, Fun & Agentic Linux by DHH"
   tpad=$(((cols - ${#tagline}) / 2)); (( tpad < 0 )) && tpad=0

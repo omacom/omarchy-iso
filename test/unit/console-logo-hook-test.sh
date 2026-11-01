@@ -340,6 +340,21 @@ fb 1920 1080 amdgpudrmfb; : >"$work/run/tty1-taken"
 check "redraw: nothing once the installer has tty1" "$(redraw)" ""
 rm -f "$work/run/tty1-taken" "$work/run/console-logo"
 check "redraw: nothing when no boot logo was drawn" "$(redraw)" ""
+# A GPU driver's framebuffer in place of the firmware's while the layout is
+# written: the logo is recorded as laid out on the firmware's, the one it was
+# measured on, so the redraw for the driver's lays it out again (rows 14-16
+# at column 55 in 32 px) instead of finding it laid out there already.
+fb 1920 1080 simpledrmdrmfb; size 33 120
+out=$(
+  eval "real_$(declare -f omarchy_console_layout)"
+  # shellcheck disable=SC2329 # called by the layout under test
+  omarchy_console_layout() { echo bochs-drmdrmfb >"$work/fb/name"; real_omarchy_console_layout "$@"; }
+  draw
+)
+check "framebuffer replaced during the layout: recorded as laid out on the one measured" "$(cat "$work/run/console-logo")" simpledrmdrmfb
+expect "framebuffer replaced during the layout: the redraw lays the logo out on the new one" "$(redraw)" '^[[14;55H' '^[[15;55H' '^[[16;55H'
+check "framebuffer replaced during the layout: the redraw records the new one" "$(cat "$work/run/console-logo")" bochs-drmdrmfb
+rm -f "$work/run/console-logo"
 
 # --wait: the i915 hook starts it inside the new root before switch_root, and
 # it lays the logo out once the panel's framebuffer replaces the one the logo

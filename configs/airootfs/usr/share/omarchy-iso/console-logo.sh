@@ -286,6 +286,10 @@ omarchy_console_logo() {
     local logo rows cols logo_rows logo_cols top left row line fb_name=none size frame=4 screen i
     [ -e "$tty" ] || return 0
     omarchy_console_takeover
+    # The framebuffer the layout is for, read before the console is measured:
+    # one a GPU driver puts in its place while the layout is made is not taken
+    # as laid out, and its redraw lays the logo out again.
+    [ -r "$fb/name" ] && read -r fb_name <"$fb/name"
     size=$(omarchy_console_font_size)
     logo=greeter
     if [ ! -e "$fb" ] && ! omarchy_console_vga_bound; then
@@ -363,7 +367,6 @@ omarchy_console_logo() {
     # console-logo-vga: the console has the VGA logo's font; vga.txt and
     # vga.cols beside it are the logo on the screen, for the greeter to keep
     # (the configurator's greeter_vga; the live root has no copy of its own).
-    [ -r "$fb/name" ] && read -r fb_name <"$fb/name"
     if mkdir -p "$run" 2>/dev/null; then
         echo "$fb_name" 2>/dev/null >"$run/console-logo"
         if [ "$logo" = vga ]; then

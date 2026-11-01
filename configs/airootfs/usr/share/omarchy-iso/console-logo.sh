@@ -221,8 +221,9 @@ omarchy_console_vga_watch() {
 
 # omarchy_console_font_size: 32 or 16, the console font for this framebuffer.
 omarchy_console_font_size() {
-    local fb="${OMARCHY_FB:-/sys/class/graphics/fb0}" xres=0 yres=0
-    [ -r "$fb/virtual_size" ] && IFS=, read -r xres yres <"$fb/virtual_size"
+    local size xres yres
+    size=$(omarchy_fb_size)
+    xres=${size% *} yres=${size#* }
     if [ "${xres:-0}" -ge 1852 ] 2>/dev/null && [ "${yres:-0}" -ge 800 ] 2>/dev/null; then
         echo 32
     else
@@ -236,8 +237,9 @@ omarchy_console_font_size() {
 # finishes: the logo was then laid out at 8x16, and jumped to 16x32 at the
 # greeter (QEMU under load, BIOS at 1920x1440). A second at most.
 omarchy_console_font_32() {
-    local tty="$1" font="$2" fb="${OMARCHY_FB:-/sys/class/graphics/fb0}" xres=0 yres=0 i=0
-    [ -r "$fb/virtual_size" ] && IFS=, read -r xres yres <"$fb/virtual_size"
+    local tty="$1" font="$2" size xres i=0
+    size=$(omarchy_fb_size)
+    xres=${size% *}
     while :; do
         setfont -C "$tty" "$font" 2>/dev/null
         # shellcheck disable=SC2046 # rows and columns, two words

@@ -262,6 +262,16 @@ start=$(date +%s%N); out=$(draw); took=$(( ($(date +%s%N) - start) / 1000000 ))
 lacks "rotated console: on the framebuffer already, no takeover glyph" "$out" '.^[[0m^M'
 if (( took < 1000 )); then ok "rotated console: no wait (${took} ms)"; else fail "rotated console: waited ${took} ms"; fi
 echo 0 >"$work/fbcon/rotate"
+# A laptop's 1280x800 panel with a 1920x1080 monitor plugged in: the GPU
+# driver's surface is the monitor's size, the console the panel's mode, 160x50
+# in the kernel's 8x16 (the 32 px font would leave it 80x25): no wait, no
+# font, laid out for 160x50 (rows 22-24, column 75).
+fb 1280 800 i915drmfb; echo "1920,1080" >"$work/fb/virtual_size"; size 50 160
+start=$(date +%s%N); out=$(draw); took=$(( ($(date +%s%N) - start) / 1000000 ))
+if (( took < 1000 )); then ok "panel and monitor: no wait (${took} ms)"; else fail "panel and monitor: waited ${took} ms"; fi
+check "panel and monitor: the kernel's 8x16 kept" "$(setfont_calls)" ""
+expect "panel and monitor: laid out for the panel's 160x50" "$out" '^[[22;75H'
+
 # The 32 px font reset to the kernel's as fbcon finishes taking over: loaded
 # again until the console counts 16-pixel cells, and laid out for that. Here
 # the first two loads do nothing.

@@ -23,7 +23,7 @@ warm=${warm//\/var\/cache\/omarchy\/mirror\/offline/$fixture/mirror}
 warm=${warm//\/proc\/meminfo/$fixture/meminfo}
 
 mkdir -p "$fixture/bin" "$fixture/medium/arch/$(uname -m)" "$fixture/mirror"
-head -c 65536 /dev/zero >"$fixture/medium/arch/$(uname -m)/omarchy-root.img.zst"
+head -c 65536 /dev/zero >"$fixture/medium/arch/$(uname -m)/omarchy-root.sfs"
 head -c 65536 /dev/zero >"$fixture/mirror/linux-firmware-1-1-any.pkg.tar.zst"
 echo "MemAvailable:    8388608 kB" >"$fixture/meminfo"
 
@@ -68,11 +68,11 @@ warm_reads() { # the boot's phases, one per systemctl call -> the reads, one per
 }
 
 reads=$(warm_reads mirror mirror image image finished)
-[[ $reads == $'finished omarchy-root.img.zst\nfinished linux-firmware-1-1-any.pkg.tar.zst' ]] \
+[[ $reads == $'finished omarchy-root.sfs\nfinished linux-firmware-1-1-any.pkg.tar.zst' ]] \
   || fail "the warm-up read the medium before both checks had finished: $(paste -sd, <<<"$reads")"
 
 reads=$(warm_reads finished)
-[[ $reads == $'finished omarchy-root.img.zst\nfinished linux-firmware-1-1-any.pkg.tar.zst' ]] \
+[[ $reads == $'finished omarchy-root.sfs\nfinished linux-firmware-1-1-any.pkg.tar.zst' ]] \
   || fail "the warm-up does not read the medium once the checks are done: $(paste -sd, <<<"$reads")"
 
 echo "warm offline mirror tests passed"

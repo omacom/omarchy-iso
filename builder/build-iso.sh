@@ -259,7 +259,11 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   install -Dm0644 /builder/qualcomm/early-firmware.py "$build_cache_dir/airootfs/usr/lib/initcpio/qcom-early-firmware.py"
   rm -rf "$build_cache_dir/syslinux" "$build_cache_dir/efiboot"
 else
-  boot_splash_kernel_options="quiet splash "
+  # The live initramfs carries no GPU driver, so Plymouth draws on the
+  # firmware's framebuffer through simpledrm, which it otherwise leaves alone
+  # until its 8 s DeviceTimeout: the logo showed 7.8 s after the menu pick on
+  # an MSI Z690 from USB.
+  boot_splash_kernel_options="quiet splash plymouth.use-simpledrm "
   kernel_options="xe.enable_panel_replay=0 initramfs_async=0 intel_idle.states_off=0x3fc"
 fi
 for grub_config in "$build_cache_dir/grub/grub.cfg" "$build_cache_dir/grub/loopback.cfg"; do
@@ -908,7 +912,12 @@ sed "/^\[options\]/a CacheDir = /var/cache/omarchy/mirror/offline/" \
 iso_subdir="$(sed -n 's/^install_dir="\(.*\)"$/\1/p' "$build_cache_dir/profiledef.sh")/$OMARCHY_ARCH"
 [[ $iso_subdir == ?*/"$OMARCHY_ARCH" ]] || { echo "ERROR: could not read install_dir from profiledef.sh: '$iso_subdir'" >&2; exit 1; }
 root_image_dir="$build_cache_dir/work/iso/$iso_subdir"
-root_image="$root_image_dir/omarchy-root.img.zst"
+root_image="$root_image_dir/omarchy-root.sfs"
+# The Try Omarchy layer (builder/build-try-layer.sh) beside it, which the boot
+# menu's Try entry mounts over the image. x86_64 only for now: aarch64 boards
+# boot through device-tree UKIs that do not take the Try entry.
+try_layer=""
+[[ $OMARCHY_ARCH == x86_64 ]] && try_layer="$root_image_dir/omarchy-try.sfs"
 mkdir -p "$root_image_dir"
 # Builds from before the raw image left a send stream (and, briefly, its
 # checksum) in the persistent build cache, where they would ship inside the
@@ -917,7 +926,8 @@ rm -f "$build_cache_dir/airootfs/var/cache/omarchy/rootfs/omarchy-root.btrfs"*
 
 image_localdb=/tmp/omarchy-root-image-localdb
 echo "[timing] root image start $(date +%s)"
-OMARCHY_IMAGE_LOCALDB_COPY="$image_localdb" \
+OMARCHY_IMAGE_LOCALDB_COPY="$image_localdb" OMARCHY_TRY_LAYER="$try_layer" OMARCHY_TRY_CHANNEL="$OMARCHY_MIRROR" \
+  OMARCHY_TRY_NODE_DIR="$build_cache_dir/airootfs/opt/packages" \
   OMARCHY_RENAMED_PACKAGES="$renamed_list" OMARCHY_UNRESOLVED_PACKAGES="$unresolved_list" \
   bash /builder/build-root-image.sh "$image_pacman_conf" "$root_image" "${image_packages[@]}"
 echo "[timing] root image end $(date +%s)"
@@ -1105,7 +1115,10 @@ cp "$build_cache_dir/pacman-offline.conf" "$build_cache_dir/airootfs/etc/pacman.
 
 # Build the ISO. profiledef.sh reads OMARCHY_ARCH for the archiso arch/bootmodes.
 echo "[timing] mkarchiso start $(date +%s)"
-"$mkarchiso_command" -v -w "$build_cache_dir/work/" -o /out/ "$build_cache_dir/"
+# The live system goes in as a layer over the root image, which then carries
+# what both hold (builder/mksquashfs-shim, builder/dedup-airootfs.sh).
+OMARCHY_ROOT_IMAGE="$root_image" PATH="/builder/mksquashfs-shim:$PATH" \
+  "$mkarchiso_command" -v -w "$build_cache_dir/work/" -o /out/ "$build_cache_dir/"
 echo "[timing] mkarchiso end $(date +%s)"
 
 # The live initramfs must stay small enough for GRUB and the kernel to place
@@ -1122,6 +1135,23 @@ for live_initramfs in "$build_cache_dir/work/iso/${iso_subdir%/*}/boot/$OMARCHY_
   if (( live_initramfs_bytes > live_initramfs_limit )); then
     echo "ERROR: live initramfs is $live_initramfs_bytes bytes, over the $live_initramfs_limit limit (omarchy-iso#128)" >&2
     exit 1
+  fi
+done
+
+# The ISO has to fit an 8 GB stick, which exposes about 7.75 GB. Fail over
+# 7.7 GB and warn over 7.5 GB, so an image or mirror that grows shows up in the
+# build that grew it.
+iso_fail_bytes=7700000000
+iso_warn_bytes=7500000000
+for iso in /out/*.iso; do
+  [[ -f $iso ]] || continue
+  iso_bytes=$(stat -c %s "$iso")
+  echo "ISO $(basename "$iso"): $iso_bytes bytes"
+  if (( iso_bytes > iso_fail_bytes )); then
+    echo "ERROR: $(basename "$iso") is $iso_bytes bytes, over the $iso_fail_bytes limit for an 8 GB stick" >&2
+    exit 1
+  elif (( iso_bytes > iso_warn_bytes )); then
+    echo "WARNING: $(basename "$iso") is $iso_bytes bytes, over $iso_warn_bytes; $iso_fail_bytes fails the build" >&2
   fi
 done
 

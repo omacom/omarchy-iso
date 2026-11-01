@@ -280,6 +280,7 @@ trap cleanup EXIT
 start_vm() {
   local disk="$1" serial="$2"
   shift 2
+  SERIAL_LOG="$serial"
 
   # UEFI needs the OVMF firmware pair; BIOS boots QEMU's built-in SeaBIOS with
   # no pflash at all.
@@ -614,6 +615,21 @@ wait_for_live_root_ssh() {
   capture_console "success-live-root-ssh"
 }
 
+# How many menus GRUB has drawn on the VM start_vm last booted, while it is
+# still at one: it draws them on the serial console as well, each under a
+# "GNU GRUB" header, and says "Booting `<entry>'" when its countdown boots
+# one (a key that boots one leaves no such line). 0 once it has said so, and
+# for a hidden menu, which draws nothing there.
+grub_menus_waiting() {
+  local markers=""
+  [[ -n ${SERIAL_LOG:-} && -f $SERIAL_LOG ]] && markers=$(grep -aoE 'GNU GRUB|Booting `' "$SERIAL_LOG")
+  if [[ ${markers##*$'\n'} == "GNU GRUB" ]]; then
+    grep -c "GNU GRUB" <<<"$markers"
+  else
+    echo 0
+  fi
+}
+
 bootstrap_live_root_ssh() {
   # The live ISO's console is us, whatever layout the install was given.
   local TYPE_LAYOUT=us
@@ -647,14 +663,27 @@ EOF
   # on screen before the command is typed, the VT is selected again right
   # before each line, and an attempt that still loses its console moves to a
   # fresh getty (tty3, tty4, tty5), as bootstrap_ssh does.
-  local attempt vt waited deadline up=false
+  local attempt vt waited deadline seen menus answered=0 up=false
   for attempt in 1 2 3; do
     vt=$((attempt + 2))
     waited=0
     while true; do
       press "ctrl-alt-f$vt"
       sleep 4
-      ocr_screen | grep -qi "login:" && break
+      seen=$(ocr_screen)
+      grep -qi "login:" <<<"$seen" && break
+      # On x86_64 GRUB shows its menu for 3 s and stops counting at the first
+      # key, which the press above can be: boot the entry it highlights,
+      # Install, as the timeout would have. OCR is no signal for that menu (it
+      # has read the header as "GHU GRUE"); the serial console is, where GRUB
+      # draws it too: one Return for each menu drawn there, since the boot
+      # that follows leaves no line to say the menu is gone. A menu that
+      # draws on the screen alone is left to OCR.
+      menus=$(grub_menus_waiting)
+      if ((menus > answered)) || grep -q "GNU GRUB" <<<"$seen"; then
+        press ret
+        answered=$menus
+      fi
       ((waited += 8))
 
       if ((waited >= 300)); then

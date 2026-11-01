@@ -13,17 +13,31 @@
  * O_DIRECT. The seek table sits in a skippable frame, so the file stays an
  * ordinary .zst: `zstd -d` reads it unchanged.
  *
- *   omarchy-image-write pack  RAW IMAGE.zst
- *   omarchy-image-write write IMAGE.zst TARGET [THREADS]
+ *   omarchy-image-write pack           RAW IMAGE.zst
+ *   omarchy-image-write write          IMAGE.zst TARGET [THREADS]
+ *   omarchy-image-write write-squashfs IMAGE.sfs TARGET [THREADS]
  *
- * write leaves frames that decode to all zeros unwritten, as dd conv=sparse
- * does: the target must not care what those blocks hold (a freshly formatted
- * partition, where btrfs references none of them).
+ * write-squashfs writes the one file inside a squashfs built for it, the
+ * ISO's omarchy-root.sfs, without mounting it. squashfs compresses every
+ * block of a file on its own and lists their sizes in the file's inode, so
+ * that list is a seek table too: each block becomes a frame, decoded here
+ * with libzstd like the frames of write. Read through a mount instead, the
+ * kernel's squashfs decodes the same blocks behind one loop device and takes
+ * 1.7 s for this image where libzstd takes 1.0 s (i5-12600K, page cache warm),
+ * and the page cache it fills is the decoded file's, so the order below
+ * could not tell what the verify left cached. The squashfs must hold one
+ * regular file, compressed with zstd, without a fragment (mksquashfs
+ * -no-fragments).
  *
- * Exit status of write: 0 written and synced; 2 the image is not one this
- * tool writes (no valid seek table, or bad arguments), nothing written, so the
- * caller can write it another way; 1 failed: the target could not be used
- * (missing, in use, too small) or the write failed partway.
+ * write and write-squashfs leave frames that are all zeros unwritten, as dd
+ * conv=sparse does: the target must not care what those blocks hold (a freshly
+ * formatted partition, where btrfs references none of them).
+ *
+ * Exit status of write and write-squashfs: 0 written and synced; 2 the image
+ * is not one this tool writes (no valid seek table, a squashfs of another
+ * shape, or bad arguments), nothing written, so the caller can write it
+ * another way; 1 failed: the target could not be used (missing, in use, too
+ * small) or the write failed partway.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -57,13 +71,25 @@
 #define FOOTER			9		/* frames, descriptor, magic */
 #define ENTRY			8		/* compressed, decompressed size */
 
+/* squashfs 4.0, as in the kernel's fs/squashfs/squashfs_fs.h. */
+#define SQUASHFS_MAGIC		0x73717368u
+#define SQUASHFS_ZSTD		6
+#define SQUASHFS_SUPER		96
+#define SQUASHFS_METADATA	8192
+#define SQUASHFS_META_STORED	(1 << 15)	/* metadata block not compressed */
+#define SQUASHFS_BLOCK_STORED	(1 << 24)	/* data block not compressed */
+#define SQUASHFS_INVALID_FRAG	0xffffffffu
+#define SQUASHFS_REG_TYPE	2
+#define SQUASHFS_LREG_TYPE	9
+
 enum { FAILED = 1, REFUSED = 2 };
 
 struct frame {
 	size_t src;	/* offset in the image file */
-	size_t csize;	/* compressed size */
+	size_t csize;	/* compressed size; 0: a sparse squashfs block, zeros */
 	off_t dst;	/* offset on the target */
 	size_t dsize;	/* decompressed size */
+	int stored;	/* a squashfs block kept uncompressed: copied as it is */
 };
 
 static const uint8_t *image;
@@ -75,6 +101,7 @@ static uint8_t *zero_frame;
 static size_t zero_frame_size;
 static atomic_size_t next_frame, bytes_written, zero_frames;
 static atomic_int failed;
+static int squashfs_input;	/* write-squashfs: frames are squashfs blocks */
 /* Thread-nanoseconds, summed over the workers: decoding (including the page
  * faults on the image), in pwrite, and checking for zeros (the compressed
  * bytes against the zero frame, or a decoded frame for all zeros). */
@@ -106,6 +133,16 @@ static void on_sigbus(int sig)
 static uint32_t get_le32(const uint8_t *p)
 {
 	return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static uint16_t get_le16(const uint8_t *p)
+{
+	return p[0] | p[1] << 8;
+}
+
+static uint64_t get_le64(const uint8_t *p)
+{
+	return get_le32(p) | (uint64_t)get_le32(p + 4) << 32;
 }
 
 static void put_le32(uint8_t *p, uint32_t v)
@@ -238,7 +275,7 @@ static off_t read_seek_table(size_t size)
 
 		if (c == 0 || c > table - pos || d == 0 || d > MAX_FRAME || d % ALIGN)
 			die(REFUSED, "seek table: frame %zu: %zu bytes decoding to %zu", nframes, c, d);
-		frames[nframes] = (struct frame){ pos, c, dst, d };
+		frames[nframes] = (struct frame){ pos, c, dst, d, 0 };
 		if (d > max_dsize)
 			max_dsize = d;
 		pos += c;
@@ -246,6 +283,137 @@ static off_t read_seek_table(size_t size)
 	}
 	if (pos != table)
 		die(REFUSED, "seek table: frames cover %zu of the %zu bytes before it", pos, table);
+	return dst;
+}
+
+/*
+ * The inode table, decoded: metadata blocks of up to 8 KiB, each behind a
+ * 2-byte header with its size and whether it is compressed, from the table's
+ * start to the directory table's.
+ */
+static uint8_t *squashfs_inodes(uint64_t start, uint64_t end, size_t size, size_t *len)
+{
+	uint8_t *out = NULL;
+	uint64_t pos = start;
+	size_t cap = 0;
+
+	*len = 0;
+	while (pos < end) {
+		uint16_t h;
+		size_t c, n;
+
+		if (pos + 2 > size)
+			die(REFUSED, "squashfs: inode table runs past the file");
+		h = get_le16(image + pos);
+		c = h & ~SQUASHFS_META_STORED;
+		pos += 2;
+		if (c == 0 || c > SQUASHFS_METADATA || pos + c > end)
+			die(REFUSED, "squashfs: bad metadata block at byte %llu", (unsigned long long)pos - 2);
+		if (*len + SQUASHFS_METADATA > cap) {
+			cap = cap ? 2 * cap : 16 * SQUASHFS_METADATA;
+			out = realloc(out, cap);
+			if (!out)
+				die(REFUSED, "out of memory");
+		}
+		if (h & SQUASHFS_META_STORED) {
+			memcpy(out + *len, image + pos, c);
+			n = c;
+		} else {
+			n = ZSTD_decompress(out + *len, SQUASHFS_METADATA, image + pos, c);
+			if (ZSTD_isError(n))
+				die(REFUSED, "squashfs: inode table: %s", ZSTD_getErrorName(n));
+		}
+		*len += n;
+		pos += c;
+	}
+	return out;
+}
+
+/*
+ * write-squashfs: the frames are the data blocks of the squashfs's one file,
+ * read from its inode. mksquashfs writes a directory's entries before the
+ * directory, so with one file and the root directory the file's inode comes
+ * first. Its blocks lie back to back from start_block, each the size its list
+ * entry gives; a 0 entry is a block of zeros that was never stored.
+ */
+static off_t squashfs_frames(size_t size)
+{
+	const uint8_t *sb = image;
+	uint64_t file_size, start, used, end, pos;
+	size_t len, head, k, bs;
+	uint32_t frag;
+	uint8_t *in;
+	off_t dst = 0;
+
+	if (size < SQUASHFS_SUPER || get_le32(sb) != SQUASHFS_MAGIC || get_le16(sb + 28) != 4)
+		die(REFUSED, "not a squashfs 4.0 image");
+	if (get_le16(sb + 20) != SQUASHFS_ZSTD)
+		die(REFUSED, "squashfs: compressed with %u, not zstd", get_le16(sb + 20));
+	if (get_le32(sb + 4) != 2)
+		die(REFUSED, "squashfs: %u inodes, not one file in the root directory", get_le32(sb + 4));
+	bs = get_le32(sb + 12);
+	used = get_le64(sb + 40);
+	start = get_le64(sb + 64);
+	end = get_le64(sb + 72);
+	if (bs == 0 || bs % ALIGN || bs > MAX_FRAME || used > size || start >= end || end > used)
+		die(REFUSED, "squashfs: bad superblock");
+
+	in = squashfs_inodes(start, end, size, &len);
+	if (len < 16)
+		die(REFUSED, "squashfs: empty inode table");
+	switch (get_le16(in)) {
+	case SQUASHFS_LREG_TYPE:
+		if (len < 56)
+			die(REFUSED, "squashfs: short inode");
+		pos = get_le64(in + 16);
+		file_size = get_le64(in + 24);
+		frag = get_le32(in + 44);
+		head = 56;
+		break;
+	case SQUASHFS_REG_TYPE:
+		if (len < 32)
+			die(REFUSED, "squashfs: short inode");
+		pos = get_le32(in + 16);
+		frag = get_le32(in + 20);
+		file_size = get_le32(in + 28);
+		head = 32;
+		break;
+	default:
+		die(REFUSED, "squashfs: the first inode is not a regular file");
+	}
+	if (frag != SQUASHFS_INVALID_FRAG)
+		die(REFUSED, "squashfs: the file ends in a fragment (build it with -no-fragments)");
+	/* Bounds on what the inode claims, so no sum below can wrap: the
+	 * blocks lie between the superblock and the inode table, and the file
+	 * is no bigger than off_t, as the kernel's own reader requires. */
+	if (pos < SQUASHFS_SUPER || pos > start)
+		die(REFUSED, "squashfs: blocks start at byte %llu, outside the data", (unsigned long long)pos);
+	if (file_size == 0 || file_size % ALIGN || file_size > INT64_MAX)
+		die(REFUSED, "squashfs: the file is %llu bytes, not a multiple of %d",
+		    (unsigned long long)file_size, ALIGN);
+	nframes = file_size / bs + (file_size % bs != 0);
+	if (len < head + nframes * 4)
+		die(REFUSED, "squashfs: block list runs past the inode table");
+
+	frames = calloc(nframes, sizeof(*frames));
+	if (!frames)
+		die(REFUSED, "out of memory");
+	for (k = 0; k < nframes; k++) {
+		uint32_t e = get_le32(in + head + k * 4);
+		size_t c = e & ~SQUASHFS_BLOCK_STORED;
+		size_t d = file_size - dst < bs ? file_size - dst : bs;
+
+		if (c > MAX_FRAME || c > start - pos)
+			die(REFUSED, "squashfs: block %zu: %zu bytes at byte %llu", k, c, (unsigned long long)pos);
+		if ((e & SQUASHFS_BLOCK_STORED) && c != d)
+			die(REFUSED, "squashfs: stored block %zu is %zu bytes, not %zu", k, c, d);
+		frames[k] = (struct frame){ pos, c, dst, d, !!(e & SQUASHFS_BLOCK_STORED) };
+		if (d > max_dsize)
+			max_dsize = d;
+		pos += c;
+		dst += d;
+	}
+	free(in);
 	return dst;
 }
 
@@ -338,12 +506,17 @@ static void *worker(void *arg)
 		k = order[k];
 		f = &frames[k];
 		t0 = now_ns();
-		if (is_zero_frame(f)) {
+		if (f->csize == 0 || (!squashfs_input && is_zero_frame(f))) {
 			atomic_fetch_add(&zero_frames, 1);
 			skip += now_ns() - t0;
 			continue;
 		}
-		n = ZSTD_decompressDCtx(dctx, buf, f->dsize, image + f->src, f->csize);
+		if (f->stored) {
+			memcpy(buf, image + f->src, f->dsize);
+			n = f->dsize;
+		} else {
+			n = ZSTD_decompressDCtx(dctx, buf, f->dsize, image + f->src, f->csize);
+		}
 		t1 = now_ns();
 		decode += t1 - t0;
 		if (ZSTD_isError(n) || n != f->dsize) {
@@ -459,8 +632,12 @@ static int write_image(const char *path, const char *target, int threads)
 	t0 = now_ns();
 	image = map_file(path, &size, REFUSED);
 	cached = cache_snapshot(size);
-	total = read_seek_table(size);
-	encode_zero_frame();
+	if (squashfs_input) {
+		total = squashfs_frames(size);
+	} else {
+		total = read_seek_table(size);
+		encode_zero_frame();
+	}
 	plan_order(size, cached);
 
 	/*
@@ -514,7 +691,7 @@ int main(int argc, char **argv)
 
 	if (argc == 4 && !strcmp(argv[1], "pack"))
 		return pack(argv[2], argv[3]);
-	if ((argc == 4 || argc == 5) && !strcmp(argv[1], "write")) {
+	if ((argc == 4 || argc == 5) && (!strcmp(argv[1], "write") || !strcmp(argv[1], "write-squashfs"))) {
 		long cpus = sysconf(_SC_NPROCESSORS_ONLN);
 		int threads = cpus < 1 ? 1 : cpus > 16 ? 16 : cpus;
 
@@ -528,8 +705,10 @@ int main(int argc, char **argv)
 		}
 		if (threads < 1 || threads > MAX_THREADS)
 			die(REFUSED, "threads: 1 to %d", MAX_THREADS);
+		squashfs_input = !strcmp(argv[1], "write-squashfs");
 		return write_image(argv[2], argv[3], threads);
 	}
 	die(REFUSED, "usage: omarchy-image-write pack RAW IMAGE.zst\n"
-	    "       omarchy-image-write write IMAGE.zst TARGET [THREADS]");
+	    "       omarchy-image-write write IMAGE.zst TARGET [THREADS]\n"
+	    "       omarchy-image-write write-squashfs IMAGE.sfs TARGET [THREADS]");
 }

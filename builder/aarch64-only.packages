@@ -4,6 +4,7 @@
 # installed by the hardware setup of the model that needs it, not by a default
 # install set.
 asus-proart-p14-speaker-firmware
+asus-proart-p16-speaker-firmware
 asus-zenbook-a16-audio
 asus-zenbook-a16-firmware
 iptsd

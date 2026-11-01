@@ -21,12 +21,13 @@
 #   dummy console's 80x25. omarchy_console_takeover writes an invisible full
 #   stop and waits for the size to move.
 # - The font (omarchy_console_font_size): the 32 px Terminus where the
-#   framebuffer is at least 1852 pixels wide and 800 high, so the greeter's
-#   81-column logo fills about two thirds of the width (1920x1080 and up);
-#   8x16 below that, where it already fills about half (1366x768, 1280x800)
-#   and 32 px would leave the greeter fewer than its 81 columns. The greeter
-#   and the install dashboard load their font by the same rule
-#   (i18n_console_font).
+#   framebuffer, as the console sees it, is at least 1852 pixels wide and 800
+#   high, so the greeter's 81-column logo fills about two thirds of the width
+#   (1920x1080 and up); 8x16 below that, where it already fills about half
+#   (1366x768, 1280x800) and 32 px would leave the greeter fewer than its 81
+#   columns. The greeter and the install dashboard load their font by the
+#   same rule (i18n_console_font). The kernel's own font is not always 8x16
+#   below it: where it picked its 16x32 the 8x16 font is loaded here too.
 # - The logo: the greeter's own (81 columns) on a framebuffer console, the
 #   copy fitted to 80 columns (omarchy-console-logo) where that is narrower.
 #   The VGA text console's cells are 9x16 pixels of a 720x400 picture
@@ -62,33 +63,45 @@ omarchy_fb_size() {
     esac
 }
 
-# omarchy_console_fits_fb: tty1 is the framebuffer's size in cells of 8x16,
-# 8x8 or 16x32 pixels (the kernel's fonts and the 32 px one), turned a quarter
-# turn where fbcon turns the console (a portrait panel): fbcon has tty1 on
-# it. Columns and rows both: a framebuffer twice as wide as the one before
-# has as many 16-pixel columns as the old console had 8-pixel ones. The VT's
-# header holds each in a byte, 255 at most (2560 pixels of 8 read 255
-# columns, as do 2048 of 8: both are told apart by the rows). Never while
-# the dummy console is bound, and never 80x25 in 16x32 cells: that is a
-# 1280x800 framebuffer's console (OVMF's default mode), but also the dummy
-# console's size, which tty1 keeps for a moment after fbcon has taken it
-# from the dummy one (QEMU's virtio-gpu-pci under UEFI, no firmware
-# framebuffer before it); neither the kernel nor the 32 px font's rule puts
-# a 1280x800 framebuffer in 16x32 cells, only a font named on the command
-# line (fbcon=font:) does.
-omarchy_console_fits_fb() {
-    local size xres yres rotate=0 across down cw con
+# omarchy_fb_turned_size: "across down", omarchy_fb_size as the console sees
+# it: turned a quarter turn where fbcon turns the console, as it does for a
+# panel mounted in portrait (a handheld's 1600x2560 is a 2560x1600 console)
+# and for fbcon=rotate:.
+omarchy_fb_turned_size() {
+    local size rotate=0
     size=$(omarchy_fb_size)
-    xres=${size% *} yres=${size#* }
-    [ "${xres:-0}" -gt 0 ] 2>/dev/null && [ "${yres:-0}" -gt 0 ] 2>/dev/null || return 1
+    [ -n "$size" ] || return 0
+    read -r rotate 2>/dev/null <"${OMARCHY_FBCON:-/sys/class/graphics/fbcon}/rotate"
+    case $rotate in
+        1 | 3) echo "${size#* } ${size% *}" ;;
+        *) echo "$size" ;;
+    esac
+}
+
+# omarchy_console_fits_fb: tty1 is the framebuffer's size in cells of 8x16,
+# 8x8 or 16x32 pixels (the kernel's fonts and the 32 px one), turned as fbcon
+# turns the console (omarchy_fb_turned_size): fbcon has tty1 on it. Columns
+# and rows both: a framebuffer twice as wide as the one before has as many
+# 16-pixel columns as the old console had 8-pixel ones. The VT's header holds
+# each in a byte, 255 at most (2560 pixels of 8 read 255 columns, as do 2048
+# of 8: both are told apart by the rows). Never while the dummy console or the
+# VGA one is bound (a GPU driver's framebuffer is in sysfs before fbcon takes
+# the VGA console over), and never 80x25 in 16x32 cells: that is a 1280x800
+# framebuffer's console (OVMF's default mode), but also the dummy console's
+# size, which tty1 keeps for a moment after fbcon has taken it from the dummy
+# one (QEMU's virtio-gpu-pci under UEFI, no firmware framebuffer before it);
+# neither the kernel nor the 32 px font's rule puts a 1280x800 framebuffer in
+# 16x32 cells, only a font named on the command line (fbcon=font:) does.
+omarchy_console_fits_fb() {
+    local size across down cw con
+    size=$(omarchy_fb_turned_size)
+    across=${size% *} down=${size#* }
+    [ "${across:-0}" -gt 0 ] 2>/dev/null && [ "${down:-0}" -gt 0 ] 2>/dev/null || return 1
     for con in "${OMARCHY_VTCONSOLE:-/sys/class/vtconsole}"/vtcon*; do
         case $(cat "$con/name" 2>/dev/null) in
-            *dummy*) [ "$(cat "$con/bind" 2>/dev/null)" = 1 ] && return 1 ;;
+            *dummy* | *VGA*) [ "$(cat "$con/bind" 2>/dev/null)" = 1 ] && return 1 ;;
         esac
     done
-    read -r rotate 2>/dev/null <"${OMARCHY_FBCON:-/sys/class/graphics/fbcon}/rotate"
-    across=$xres down=$yres
-    case $rotate in 1 | 3) across=$yres down=$xres ;; esac
     # shellcheck disable=SC2046 # rows and columns, two words
     set -- $(omarchy_console_size)
     [ "${2:-0}" -gt 0 ] 2>/dev/null || return 1
@@ -219,32 +232,51 @@ omarchy_console_vga_watch() {
     done
 }
 
-# omarchy_console_font_size: 32 or 16, the console font for this framebuffer.
+# omarchy_console_font_size: 32 or 16, the console font for this framebuffer,
+# by its size as the console sees it: a portrait panel turned to landscape
+# gets the font a landscape one of its size gets, and a landscape screen
+# turned to portrait keeps the console wider than the logo.
 omarchy_console_font_size() {
-    local size xres yres
-    size=$(omarchy_fb_size)
-    xres=${size% *} yres=${size#* }
-    if [ "${xres:-0}" -ge 1852 ] 2>/dev/null && [ "${yres:-0}" -ge 800 ] 2>/dev/null; then
+    local size across down
+    size=$(omarchy_fb_turned_size)
+    across=${size% *} down=${size#* }
+    if [ "${across:-0}" -ge 1852 ] 2>/dev/null && [ "${down:-0}" -ge 800 ] 2>/dev/null; then
         echo 32
     else
         echo 16
     fi
 }
 
-# omarchy_console_font_32 TTY FONT: load the 32 px font, and again while the
-# console's columns still count 8-pixel cells. A font loaded as fbcon takes a
-# GPU driver's framebuffer over can be reset to the kernel's when the takeover
+# omarchy_console_cells: the cells tty1 counts of the framebuffer as the
+# console sees it: 16x32 (rows and columns both: the VT's header stops columns
+# at 255, which 4096 pixels of 16 reach as 2048 of 8 do), 8x8 (more rows than
+# 8x16 cells give: the kernel's font under 400 pixels high, fbcon=font:), or
+# 8x16.
+omarchy_console_cells() {
+    local size across down
+    size=$(omarchy_fb_turned_size)
+    across=${size% *} down=${size#* }
+    # shellcheck disable=SC2046 # rows and columns, two words
+    set -- $(omarchy_console_size)
+    if [ "${1:-0}" -gt 0 ] 2>/dev/null && [ "$1" -le $((${down:-0} / 32)) ] && [ "${2:-0}" -le $((${across:-0} / 16)) ]; then
+        echo 16x32
+    elif [ "${1:-0}" -gt $((${down:-0} / 16)) ] 2>/dev/null; then
+        echo 8x8
+    else
+        echo 8x16
+    fi
+}
+
+# omarchy_console_font TTY FONT CELLS: load FONT, and again until the console
+# counts its CELLS (omarchy_console_cells). A font loaded as fbcon takes a GPU
+# driver's framebuffer over can be reset to the kernel's when the takeover
 # finishes: the logo was then laid out at 8x16, and jumped to 16x32 at the
 # greeter (QEMU under load, BIOS at 1920x1440). A second at most.
-omarchy_console_font_32() {
-    local tty="$1" font="$2" size xres i=0
-    size=$(omarchy_fb_size)
-    xres=${size% *}
+omarchy_console_font() {
+    local tty="$1" font="$2" cells="$3" i=0
     while :; do
         setfont -C "$tty" "$font" 2>/dev/null
-        # shellcheck disable=SC2046 # rows and columns, two words
-        set -- $(omarchy_console_size)
-        [ "${2:-0}" -le $((xres / 16)) ] 2>/dev/null && return 0
+        [ "$(omarchy_console_cells)" = "$cells" ] && return 0
         [ "$i" -lt 10 ] || return 0
         sleep 0.1
         i=$((i + 1))
@@ -309,7 +341,16 @@ omarchy_console_logo() {
             frame=2
         fi
     elif [ "$size" = 32 ] && [ -r "$share/console-32.psf" ]; then
-        omarchy_console_font_32 "$tty" "$share/console-32.psf"
+        omarchy_console_font "$tty" "$share/console-32.psf" 16x32
+    elif [ -r "$share/console-16.psf" ] && [ "$(omarchy_console_cells)" != 8x16 ] && omarchy_console_fits_fb; then
+        # The kernel's own 16x32 where the rule and the greeter have 8x16: it
+        # picks that font by the framebuffer's unturned area, from 22000 cells
+        # of 8x16 (get_default_font, lib/fonts/fonts.c): a 2560x1440 screen
+        # turned to portrait, a portrait panel the kernel does not turn; its
+        # 8x8 under 400 pixels high; fbcon=font:. Kept, the logo would change
+        # size at the greeter. Only on the framebuffer: the dummy console's
+        # and the VGA one's 80x25 can pass for 16x32 cells of one.
+        omarchy_console_font "$tty" "$share/console-16.psf" 8x16
     fi
     # shellcheck disable=SC2046 # rows and columns, two words
     set -- $(omarchy_console_size)

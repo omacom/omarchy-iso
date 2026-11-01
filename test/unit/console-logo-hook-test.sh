@@ -80,17 +80,19 @@ fb() {
   echo "U:${1}x${2}p-0" >"$work/fb/modes"
   echo "$3" >"$work/fb/name"
 }
-# setfont records its call and, for the 32 px font, halves the console in
-# both directions the way the real font change does.
-# The kernel sizes the console from the framebuffer: 16x32 cells, the VT's
-# header a byte each, 255 at most.
+# setfont records its call and, for the greeter's 32 and 16 px fonts, sizes
+# the console the way the real font change does.
+# The kernel sizes the console from the framebuffer, turned as fbcon turns
+# the console: 16x32 or 8x16 cells, the VT's header a byte each, 255 at most.
 cat >"$work/bin/setfont" <<EOS
 #!/bin/bash
 echo "setfont \$*" >>"$work/setfont.log"
 echo setfont >>"$work/order.log"
-[[ \$* == *console-32.psf ]] || exit 0
+case \$* in *console-32.psf) cw=16 ch=32 ;; *console-16.psf) cw=8 ch=16 ;; *) exit 0 ;; esac
 IFS=, read -r xres yres <"$work/fb/virtual_size"
-printf '%b%b\000\000' "\\\\\$(printf %03o \$((yres / 32 > 255 ? 255 : yres / 32)))" "\\\\\$(printf %03o \$((xres / 16 > 255 ? 255 : xres / 16)))" >"$work/vcsa"
+read -r rotate <"$work/fbcon/rotate" 2>/dev/null || rotate=0
+[[ \$rotate == [13] ]] && read -r xres yres <<<"\$yres \$xres"
+printf '%b%b\000\000' "\\\\\$(printf %03o \$((yres / ch > 255 ? 255 : yres / ch)))" "\\\\\$(printf %03o \$((xres / cw > 255 ? 255 : xres / cw)))" >"$work/vcsa"
 EOS
 chmod 755 "$work/bin/setfont"
 
@@ -236,12 +238,34 @@ wait
 expect "UEFI 1280x800 just taken from the dummy console, still 80x25: laid out for 160x50" "$out" '^[[22;75H'
 lacks "UEFI 1280x800 just taken from the dummy console: not laid out for 80x25 (row 5)" "$out" '^[[5;1H'
 # Unless the command line names the font: fbcon=font:TER16x32 makes 80x25 the
-# 1280x800 console it is (rows 10-12 at column 35), at once, no 2 s wait.
+# 1280x800 console it is, at once, no 2 s wait; the greeter's 8x16 is loaded
+# over it, as the greeter would, and the logo laid out for 160x50 (row 22,
+# column 75), not for 80x25 to halve at the greeter.
 echo "BOOT_IMAGE=/vmlinuz quiet fbcon=font:TER16x32" >"$work/cmdline-font"
 fb 1280 800 virtio_gpudrmfb; size 25 80
 start=$(date +%s%N); out=$(OMARCHY_CMDLINE="$work/cmdline-font" draw); took=$(( ($(date +%s%N) - start) / 1000000 ))
-expect "fbcon=font:TER16x32 at 1280x800: 80x25 is its console, laid out for it" "$out" '^[[10;35H'
+check "fbcon=font:TER16x32 at 1280x800: the greeter's 16 px font loaded" "$(setfont_calls)" "setfont -C $work/tty $work/share/console-16.psf"
+expect "fbcon=font:TER16x32 at 1280x800: laid out for 160x50" "$out" '^[[22;75H'
 if (( took < 1000 )); then ok "fbcon=font:TER16x32 at 1280x800: no wait (${took} ms)"; else fail "fbcon=font:TER16x32 at 1280x800: waited ${took} ms"; fi
+# fbcon=font:VGA8x8 at 1366x768 (170x96): the greeter's 8x16 loaded over the
+# 8x8 too, laid out for 170x48 (row 21, column 80).
+echo "BOOT_IMAGE=/vmlinuz quiet fbcon=font:VGA8x8" >"$work/cmdline-font8"
+fb 1366 768 i915drmfb; size 96 170; out=$(OMARCHY_CMDLINE="$work/cmdline-font8" draw)
+check "fbcon=font:VGA8x8 at 1366x768: the greeter's 16 px font loaded" "$(setfont_calls)" "setfont -C $work/tty $work/share/console-16.psf"
+expect "fbcon=font:VGA8x8 at 1366x768: laid out for 170x48" "$out" '^[[21;80H'
+# No font is loaded on a console fbcon does not have, whose 80x25 passes for
+# 16x32 cells of the framebuffer: the dummy console still bound when the
+# takeover's wait runs out (1600x900), and the VGA console with a GPU
+# driver's framebuffer in sysfs before fbcon takes it over (BIOS, early i915,
+# fbcon=font:): no load, and no second of loads that never take.
+mkdir -p "$work/vtconsole/vtcon1"; echo "(S) dummy device" >"$work/vtconsole/vtcon1/name"; echo 1 >"$work/vtconsole/vtcon1/bind"
+fb 1600 900 simpledrmdrmfb; size 25 80; draw >/dev/null
+check "dummy console still bound after the wait: no font loaded" "$(setfont_calls)" ""
+rm -rf "$work/vtconsole/vtcon1"
+vga_name=$(cat "$work/vtconsole/vtcon0/name"); echo "(S) VGA+" >"$work/vtconsole/vtcon0/name"; echo 1 >"$work/vtconsole/vtcon0/bind"
+fb 1280 800 i915drmfb; size 25 80; OMARCHY_CMDLINE="$work/cmdline-font" draw >/dev/null
+check "VGA console bound, fbcon=font:: no font loaded" "$(setfont_calls)" ""
+rm -f "$work/vtconsole/vtcon0/bind"; echo "$vga_name" >"$work/vtconsole/vtcon0/name"
 
 # A GPU driver's framebuffer in sysfs while the console is still the old
 # one's (1280x800's 160x50): the layout waits for fbcon to have it on the
@@ -261,6 +285,25 @@ fb 1200 1920 i915drmfb; size 75 240
 start=$(date +%s%N); out=$(draw); took=$(( ($(date +%s%N) - start) / 1000000 ))
 lacks "rotated console: on the framebuffer already, no takeover glyph" "$out" '.^[[0m^M'
 if (( took < 1000 )); then ok "rotated console: no wait (${took} ms)"; else fail "rotated console: waited ${took} ms"; fi
+# A panel mounted in portrait and turned to landscape (a handheld's
+# 1600x2560, where the kernel picks its own 16x32 font: 160x50): the 32 px
+# font a landscape 2560x1600 gets, which the greeter keeps, laid out for
+# 160x50 (rows 22-24, column 75).
+fb 1600 2560 amdgpudrmfb; size 50 160; out=$(draw)
+check "portrait panel turned to landscape: the 32 px font" "$(setfont_calls)" "setfont -C $work/tty $work/share/console-32.psf"
+expect "portrait panel turned to landscape: laid out for 160x50, rows 22-24 at column 75" "$out" '^[[22;75H' '^[[23;75H' '^[[24;75H'
+# A landscape 1920x1080 turned to portrait (fbcon=rotate:1): the kernel's
+# 8x16, 135x120 (32 px would leave 67 columns, narrower than the logo and its
+# fitted copy), laid out at row 57, column 62.
+fb 1920 1080 i915drmfb; size 120 135; out=$(draw)
+check "landscape turned to portrait: 8x16 kept" "$(setfont_calls)" ""
+expect "landscape turned to portrait: laid out for 135x120, row 57 at column 62" "$out" '^[[57;62H' '^[[58;62H' '^[[59;62H'
+# A landscape 2560x1600 turned to portrait: the kernel picks its 16x32 by the
+# area (100x80), the rule 8x16 by the width the console sees, and the greeter
+# loads 8x16: loaded here too, laid out for 200x160 (row 77, column 95).
+fb 2560 1600 amdgpudrmfb; size 80 100; out=$(draw)
+check "large landscape turned to portrait: the greeter's 16 px font over the kernel's 16x32" "$(setfont_calls)" "setfont -C $work/tty $work/share/console-16.psf"
+expect "large landscape turned to portrait: laid out for 200x160, row 77 at column 95" "$out" '^[[77;95H' '^[[78;95H' '^[[79;95H'
 echo 0 >"$work/fbcon/rotate"
 # A laptop's 1280x800 panel with a 1920x1080 monitor plugged in: the GPU
 # driver's surface is the monitor's size, the console the panel's mode, 160x50
@@ -298,6 +341,20 @@ fb 1280 800 i915drmfb; size 50 160; out=$(draw)
 check "1280x800: 8x16 kept" "$(setfont_calls)" ""
 expect "1280x800: rows 22-24 at column 75" "$out" '^[[22;75H' '^[[23;75H' '^[[24;75H'
 
+# The initramfs's install hook adds both of the greeter's fonts: the 32 px one
+# for the rule, the 16 px one for where the kernel picked its own 16x32.
+# shellcheck disable=SC2329 # mkinitcpio's helpers, called by the sourced hook
+hook_files=$(
+  add_file() { echo "${2:-$1}"; }
+  add_runscript() { :; }
+  warning() { :; }
+  python3() { :; }
+  # shellcheck source=/dev/null
+  source "$ROOT/configs/airootfs/etc/initcpio/install/omarchy-logo"
+  build
+)
+expect "initramfs: both of the greeter's fonts" "$hook_files" /usr/share/omarchy-iso/console-32.psf /usr/share/omarchy-iso/console-16.psf
+
 # The font rule, and the greeter's font (i18n_console_font) agreeing with it.
 cp -r "$SHARE" "$work/share-i18n"
 echo font >"$work/share-i18n/console-16.psf"
@@ -313,6 +370,45 @@ for res in 1280x800:16 1366x768:16 1600x900:16 1920x1080:32 2560x1440:32 1920x72
   check "${x}x$y: the boot logo's font is $want px" "$(omarchy_console_font_size)" "$want"
   check "${x}x$y: the greeter loads the same $want px font" "$(greeter_font)" "$want"
 done
+# Turned a quarter turn by fbcon: by the size the console sees.
+echo 1 >"$work/fbcon/rotate"
+for res in 1600x2560:32 1200x1920:32 1080x1920:32 800x1280:16 1920x1080:16; do
+  x=${res%%x*}; rest=${res#*x}; y=${rest%%:*}; want=${res##*:}
+  fb "$x" "$y" x
+  check "${x}x$y turned: the boot logo's font is $want px" "$(omarchy_console_font_size)" "$want"
+  check "${x}x$y turned: the greeter loads the same $want px font" "$(greeter_font)" "$want"
+done
+echo 0 >"$work/fbcon/rotate"
+
+# From the console the kernel makes to the greeter's font. fbcon starts the
+# console in the kernel's default font, which get_default_font
+# (lib/fonts/fonts.c) picks by the unturned framebuffer: 8x16 scores
+# 20 - (X/8)*(Y/16)/1000 once that is over 20, TER16x32 has preference -1,
+# so 16x32 from 22000 cells of 8x16 on. Whatever the kernel picked, the boot
+# logo ends in the cells of the font the greeter loads: rows and columns of
+# the turned framebuffer in 16x32 for 32 px, in 8x16 for 16 px.
+kernel_console() {  # kernel_console X Y ROTATE
+  local cw=8 ch=16 across=$1 down=$2
+  (( ($1 / 8) * ($2 / 16) / 1000 >= 22 )) && cw=16 ch=32
+  [[ $3 == [13] ]] && across=$2 down=$1
+  size $((down / ch > 255 ? 255 : down / ch)) $((across / cw > 255 ? 255 : across / cw))
+}
+for rot in 0 1; do
+  echo "$rot" >"$work/fbcon/rotate"
+  for res in 1280x800 1366x768 1920x1080 1920x1200 1920x1440 2560x1080 2560x1440 2560x1600 3840x2160 5120x2880 4096x768 800x1280 1200x1920 1600x2560 1104x2560 1096x2560; do
+    x=${res%x*} y=${res#*x} across=${res%x*} down=${res#*x}
+    [[ $rot == 1 ]] && across=$y down=$x
+    # The greeter's font first: its setfont resizes the fake console too.
+    fb "$x" "$y" kerneldrmfb
+    if [[ $(greeter_font) == 32 ]]; then cw=16 ch=32; else cw=8 ch=16; fi
+    kernel_console "$x" "$y" "$rot"
+    start=$(date +%s%N); draw >/dev/null; took=$(( ($(date +%s%N) - start) / 1000000 ))
+    want="$((down / ch > 255 ? 255 : down / ch)) $((across / cw > 255 ? 255 : across / cw)) "
+    check "$res, rotate $rot: the boot ends in the greeter's ${cw}x$ch cells (${took} ms)" "$(omarchy_console_size)" "$want"
+    if (( $(setfont_calls | wc -l) <= 1 )); then ok "$res, rotate $rot: one font load at most"; else fail "$res, rotate $rot: $(setfont_calls | wc -l) font loads"; fi
+  done
+done
+echo 0 >"$work/fbcon/rotate"
 
 # The VGA text console with the greeter's 512-glyph font has eight foreground
 # colors: dim text gets the normal color and secondary text 7, not 8.

@@ -4,7 +4,7 @@
 # /usr/share/omarchy-iso/console-logo.sh).
 
 build() {
-    local share=/usr/share/omarchy-iso dir=/usr/share/omarchy-iso/console-logo file tmp
+    local share=/usr/share/omarchy-iso dir=/usr/share/omarchy-iso/console-logo file tmp size
     add_file "$share/console-logo.sh"
     # The greeter's logo and the copy fitted to 80 columns, with their widths
     # (omarchy-console-logo, run by 60-omarchy-live-logo.hook during the
@@ -16,16 +16,19 @@ build() {
     else
         warning "%s is missing: the live boot shows no logo before the greeter" "$dir/fitted.txt"
     fi
-    # The greeter's 32 px font: Terminus plus the half blocks the logo needs
+    # The greeter's fonts: Terminus plus the half blocks the logo needs
     # (console-font.py; customize_airootfs.sh builds the same for the live
-    # root later). PSF2 uncompressed, which busybox's setfont reads.
-    tmp=$(mktemp)
-    if python3 "$share/console-font.py" /usr/share/kbd/consolefonts/ter-v32b.psf.gz "$tmp" >/dev/null 2>&1; then
-        add_file "$tmp" "$share/console-32.psf" 644
-    else
-        warning "console-font.py could not build the 32 px console font: the boot logo keeps the kernel's font"
-    fi
-    rm -f "$tmp"
+    # root later). PSF2 uncompressed, which busybox's setfont reads. The 16 px
+    # one for where the kernel picked its 16x32 and the greeter has 8x16.
+    for size in 32 16; do
+        tmp=$(mktemp)
+        if python3 "$share/console-font.py" "/usr/share/kbd/consolefonts/ter-v${size}b.psf.gz" "$tmp" >/dev/null 2>&1; then
+            add_file "$tmp" "$share/console-$size.psf" 644
+        else
+            warning "console-font.py could not build the %s px console font: the boot logo keeps the kernel's font" "$size"
+        fi
+        rm -f "$tmp"
+    done
     # The half-size logo for the VGA text console, in a font of its own
     # (vga-logo-font.py): ASCII from the kernel's default font, plus the pieces.
     tmp=$(mktemp -d)

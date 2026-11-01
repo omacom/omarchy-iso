@@ -119,11 +119,14 @@ console_logo_draw() {
 }
 
 # console_settled: the live VT's boot logo is laid out for the framebuffer
-# it has now (console-logo.sh records which), at a width the logo fits. The
-# login waited for udev to settle (omarchy-cidata-load), GPU drivers and the
-# logo's layout for each (font and all) included, so nothing resizes the
-# console any more and the width needs no watching: 0.3 s on every boot.
-# Under the layout lock, so a layout in progress finishes first.
+# it has now (console-logo.sh records which), at a width the logo fits, or
+# narrower when the console is that framebuffer's size already (640x480 is
+# 80 columns of 8 pixels: nothing widens it, and the samples only held the
+# greeter back their 5 s). The login waited for udev to settle
+# (omarchy-cidata-load), GPU drivers and the logo's layout for each (font
+# and all) included, so nothing resizes the console any more and the width
+# needs no watching: 0.3 s on every boot. Under the layout lock, so a
+# layout in progress finishes first.
 console_settled() {
   local run=${OMARCHY_RUN_DIR:-/run/omarchy-iso} fb=${OMARCHY_FB:-/sys/class/graphics/fb0} name laid_out width
   [[ -r $run/console-logo && -r $fb/name ]] || return 1
@@ -131,7 +134,8 @@ console_settled() {
     flock -w 5 9 2>/dev/null || return 1
     read -r name <"$fb/name" && read -r laid_out <"$run/console-logo" && [[ $name == "$laid_out" ]] || return 1
     width=$(stty size 2>/dev/null </dev/tty | awk '{print $2}')
-    [[ $width =~ ^[0-9]+$ ]] && (( width >= LOGO_WIDTH ))
+    [[ $width =~ ^[0-9]+$ ]] || return 1
+    (( width >= LOGO_WIDTH )) || { declare -F omarchy_console_fits_fb >/dev/null && omarchy_console_fits_fb; }
   } 9>>"$run/console-logo.lock"
 }
 

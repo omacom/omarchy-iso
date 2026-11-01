@@ -247,14 +247,14 @@ language_label() {
   jq -r --arg code "$1" --arg field "$field" '.[$code][$field] // $code' "$LANGUAGES_JSON" 2>/dev/null || printf '%s' "$1"
 }
 
-# "label<TAB>code" rows, English first and the rest alphabetical by what is shown.
+# "label<TAB>code" rows, current language first and the rest alphabetical by what is shown.
 language_rows() {
   local translated
   translated=$(cd "$OMARCHY_ISO_I18N_DIR" && printf '%s\n' *.json | sed 's/\.json$//' | jq -R . | jq -sc .)
-  jq -r --argjson translated "$translated" '
+  jq -r --argjson translated "$translated" --arg selected "$language" '
     to_entries
     | map({code: .key, label: (if (.key | IN($translated[])) then .value.name else .value.englishName end)})
-    | sort_by(.code != "en", (.label | sub("^Í"; "I") | sub("^Č"; "C") | ascii_downcase))
+    | sort_by(.code != $selected, (.label | sub("^Í"; "I") | sub("^Č"; "C") | ascii_downcase))
     | .[] | "\(.label)\t\(.code)"
   ' "$LANGUAGES_JSON"
 }
@@ -263,7 +263,7 @@ language_rows() {
 # deferred provisioning; before a language is picked they read in English.
 # Callers re-check defer_provisioning after this returns.
 language_form() {
-  local choice status
+  local choice status rows
 
   if [[ -r $LANGUAGES_JSON ]]; then
     while true; do
@@ -272,8 +272,11 @@ language_form() {
       say "$(t keyboard.intro)"
       say --foreground 8 "$(t keyboard.anotherOwner)"
       echo
-      choice=$(language_rows | gum choose --height 10 --label-delimiter $'\t' \
-        --selected "$(language_label "$language")" --header "$(t language.header)") && status=0 || status=$?
+      # Keep the default first and the search empty, as on the timezone picker.
+      # gum filter returns the label; map it back to its language code below.
+      rows=$(language_rows)
+      choice=$(cut -f1 <<<"$rows" | gum filter --height 10 \
+        --header "$(t language.header)") && status=0 || status=$?
       ((status == 0)) && [[ -n $choice ]] && break
 
       if ((status == OMARCHY_FORM_SIGNAL)) && confirm_prepare_for_another_owner; then
@@ -282,7 +285,7 @@ language_form() {
       fi
       # Esc, or a declined Ctrl+C: nothing precedes the first screen, so ask again.
     done
-    language=$choice
+    language=$(awk -F '\t' -v label="$choice" '$1 == label {print $2; exit}' <<<"$rows")
   fi
 
   i18n_load "$language"

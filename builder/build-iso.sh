@@ -455,7 +455,7 @@ fi
 # aarch64 takes the runtime's own default sets, as omarchy-pkg-defaults composes
 # them: the base list, then the aarch64 additions (zram-generator, rtkit) and a
 # platform's own (the N1x kernel and NVIDIA stack, say), minus the base packages
-# with no aarch64 build anywhere (superwhisper-bin, say). The installer asks the
+# with no aarch64 build anywhere (its x86_64-only list). The installer asks the
 # machine which platform it is on and installs that platform's set, so the image
 # carries one list per platform and the plain aarch64 one for every other
 # machine. Apple Silicon is installed from macOS, never from this image.

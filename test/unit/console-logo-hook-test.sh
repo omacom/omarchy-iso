@@ -544,6 +544,66 @@ check "before a driver: nothing when one is bound already" "$(before pci:v000012
 rmdir "$work/sysfs/devices/pci0000:00/0000:00:02.0/driver"; rm -f "$work/run/console-logo-vga"
 check "before a driver: nothing without the VGA logo up" "$(before pci:v00001234d00001111sv0bc03sc00i00)" ""
 
+# A second GPU: its driver waits while fb0 is missing or the firmware's and
+# the boot VGA device has a driver bound or one to load, so that fb0, and
+# fbcon's console from the VGA text console, is the boot device's; four
+# seconds at most. Not the boot VGA device's own driver, not on a GPU
+# driver's framebuffer, not without a boot VGA device or a driver for it.
+# Counted in the helper's sleeps of 0.05 s (a stand-in that logs and sleeps).
+mkdir -p "$work/sysfs/bus/pci/devices" "$work/sysfs/devices/pci0000:00/0000:00:03.0/virtio2" "$work/hold-bin"
+ln -sfn "$work/sysfs/devices/pci0000:00/0000:00:02.0" "$work/sysfs/bus/pci/devices/0000:00:02.0"
+ln -sfn "$work/sysfs/devices/pci0000:00/0000:00:03.0" "$work/sysfs/bus/pci/devices/0000:00:03.0"
+boot_dev="$work/sysfs/devices/pci0000:00/0000:00:02.0"
+bochs=pci:v00001234d00001111sv0bc03sc00i00 second=/devices/pci0000:00/0000:00:03.0
+echo $bochs >"$boot_dev/modalias"
+cat >"$work/hold-bin/sleep" <<EOS
+#!/bin/bash
+echo >>"$work/sleeps"
+exec $(type -P sleep) "\$@"
+EOS
+# perl makes the freeze's KDSETMODE call: a stand-in records it.
+cat >"$work/hold-bin/perl" <<EOS
+#!/bin/bash
+echo "kd \$4" >>"$work/order.log"
+EOS
+chmod 755 "$work/hold-bin/sleep" "$work/hold-bin/perl"
+held() {  # held <modalias> <devpath> [steps]: the helper's sleeps
+  rm -f "$work/sleeps"
+  PATH="$work/hold-bin:$PATH" OMARCHY_REDRAW_HOLD_STEPS=${3:-80} before "$1" "$2" >/dev/null
+  if [[ -e $work/sleeps ]]; then echo $(($(wc -l <"$work/sleeps"))); else echo 0; fi
+}
+fb none; : >"$work/run/console-logo-vga"; size 25 80
+( sleep 0.4; fb 1280 800 bochs-drmdrmfb ) &
+n=$(held $bochs $second); wait
+if (( n >= 6 && n < 80 )); then ok "hold: another GPU's driver waits for the boot VGA device's framebuffer ($n sleeps)"; else fail "hold: another GPU's driver slept $n times, its framebuffer 0.4 s away"; fi
+fb none
+check "hold: a virtio GPU on another PCI device too, until its steps run out" "$(held virtio:d00000010v00001AF4 $second/virtio2 6)" 6
+check "hold: not the boot VGA device's own driver" "$(held $bochs /devices/pci0000:00/0000:00:02.0)" 0
+echo pci:v0000ABCDd00000001sv0bc03sc00i00 >"$boot_dev/modalias"
+check "hold: not while the boot VGA device has no driver to load" "$(held $bochs $second)" 0
+mkdir -p "$boot_dev/driver"
+check "hold: while the boot VGA device has one bound" "$(held $bochs $second 4)" 4
+rmdir "$boot_dev/driver"; echo $bochs >"$boot_dev/modalias"; echo 0 >"$boot_dev/boot_vga"
+check "hold: not without a boot VGA device" "$(held $bochs $second)" 0
+echo 1 >"$boot_dev/boot_vga"; fb 1280 800 bochs-drmdrmfb
+check "hold: not on a GPU driver's framebuffer" "$(held $bochs $second)" 0
+# UEFI: the firmware's framebuffer is fb0 until the boot device's driver
+# replaces it, and the redraw for that one records it a moment later. This
+# device's driver replaces nothing the logo is on then: no freeze, whether or
+# not the boot device's step froze the console already.
+rm -f "$work/run/console-logo-vga"
+for frozen in no yes; do
+  rm -f "$work/order.log" "$work/run/console-frozen"
+  [[ $frozen == yes ]] && echo simpledrmdrmfb >"$work/run/console-frozen"
+  fb 1280 800 simpledrmdrmfb; echo simpledrmdrmfb >"$work/run/console-logo"
+  ( sleep 0.4; fb 1280 800 bochs-drmdrmfb; sleep 0.3; echo bochs-drmdrmfb >"$work/run/console-logo" ) &
+  n=$(held $bochs $second); wait
+  if (( n >= 6 && n < 80 )); then ok "hold, UEFI (frozen: $frozen): another GPU's driver waits for the boot device's framebuffer ($n sleeps)"; else fail "hold, UEFI (frozen: $frozen): another GPU's driver slept $n times, the boot device's framebuffer 0.4 s away"; fi
+  check "hold, UEFI (frozen: $frozen): no freeze for it" "$(cat "$work/order.log" 2>/dev/null)" ""
+done
+fb none; rm -rf "$work/sysfs/bus"
+rm -f "$work/run/console-logo" "$work/run/console-frozen" "$work/order.log" "$boot_dev/modalias"
+
 # On a framebuffer the console is frozen instead: tty1 in graphics mode, the
 # screen keeps the logo, nothing is drawn. The redraw for the driver's
 # framebuffer erases the text kept for the old one while still frozen (fbcon

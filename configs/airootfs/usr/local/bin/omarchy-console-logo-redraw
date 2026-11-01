@@ -83,16 +83,50 @@ freeze_fb_logo() {
 # firmware's framebuffer can sit on a display controller that is no VGA one,
 # QEMU's bochs-display). A device without a driver for it keeps the logo up,
 # and so does nomodeset, where the GPU drivers load and take nothing over.
+# Another GPU's driver waits while the boot VGA device's comes, so that fb0,
+# and fbcon's console from the VGA text console, is the boot device's.
 if [[ ${1:-} == --before-driver ]]; then
   [[ -e $run/console-logo && ! -e $run/tty1-taken ]] || exit 0
   [[ -e ${OMARCHY_SYSFS:-/sys}${DEVPATH:-/none}/driver ]] && exit 0
   read -r cmdline <"${OMARCHY_CMDLINE:-/proc/cmdline}" 2>/dev/null
   [[ " ${cmdline:-} " == *" nomodeset "* ]] && exit 0
   [[ -n ${MODALIAS:-} ]] && modprobe -n -b -v "$MODALIAS" 2>/dev/null | grep -q '^insmod ' || exit 0
+  dev=${OMARCHY_SYSFS:-/sys}${DEVPATH:-/none}
+  # The PCI device's, or the PCI device's under a virtio GPU.
+  boot_vga=$(cat "$dev/boot_vga" 2>/dev/null || cat "$dev/../boot_vga" 2>/dev/null)
+  # fb0 is the framebuffer of the first GPU driver to register one, and so
+  # is the console from the VGA text console: the kernel's rule that moves it
+  # to the boot device's finds none in a text mode (video_is_primary_device:
+  # the mode's only memory is the legacy VGA window, in no device's BARs). A
+  # second GPU whose driver registers first has the console, the logo and the
+  # installer on its own screen, and the boot screen stays black after
+  # ISOLINUX's logo (QEMU's std VGA beside a virtio-gpu-pci: 7 boots in 8). On
+  # UEFI the rule finds the device of the firmware's framebuffer and moves the
+  # console to it, but a second GPU can still take fb0, freed by simpledrm,
+  # and the layout here and the greeter, which read fb0, then measure the
+  # wrong screen: two seconds of waiting for a console that never fits it
+  # (QEMU's std VGA beside a qxl). Another display controller's driver waits
+  # here while fb0 is missing or the firmware's and the boot VGA device has a
+  # driver bound or one to load, four seconds at most (amdgpu or nouveau can
+  # take two): fb0 is then the boot device's, unless its driver registers none
+  # in that time or one module drives both devices (it probes them in PCI
+  # order). With fb0 a GPU driver's, this device's driver replaces nothing the
+  # logo is on: nothing to clear or freeze for it.
+  if [[ $boot_vga != 1 ]]; then
+    for vga in "${OMARCHY_SYSFS:-/sys}"/bus/pci/devices/*/boot_vga; do
+      [[ $(cat "$vga" 2>/dev/null) == 1 ]] || continue
+      boot=${vga%/boot_vga}
+      if [[ -e $boot/driver ]] || modprobe -n -b -v "$(cat "$boot/modalias" 2>/dev/null)" 2>/dev/null | grep -q '^insmod '; then
+        for ((i = 0; i < ${OMARCHY_REDRAW_HOLD_STEPS:-80}; i++)); do
+          name=$(cat "$fb/name" 2>/dev/null) || name=
+          case $name in "" | simpledrm* | "EFI VGA" | "VESA VGA" | simple) ;; *) exit 0 ;; esac
+          sleep 0.05
+        done
+      fi
+      break
+    done
+  fi
   if [[ -e $run/console-logo-vga ]]; then
-    dev=${OMARCHY_SYSFS:-/sys}${DEVPATH:-/none}
-    # The PCI device's, or the PCI device's under a virtio GPU.
-    boot_vga=$(cat "$dev/boot_vga" 2>/dev/null || cat "$dev/../boot_vga" 2>/dev/null)
     [[ $boot_vga == 1 ]] && clear_vga_logo
   else
     freeze_fb_logo

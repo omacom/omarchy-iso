@@ -6,11 +6,12 @@
 # no dark stretch between the first logo and the greeter, the greeter's text
 # centred. Under BIOS on QEMU's standard VGA at 1280x800, whose driver (bochs)
 # takes the console over from the VGA text console cleanly; under UEFI on
-# ramfb, the firmware's framebuffer alone: a GPU driver taking a UEFI
-# framebuffer over shows a few frames of the console's last layout in QEMU
-# (test/boot-render's --device for those).
+# ramfb, the firmware's framebuffer alone.
 #
-# Under BIOS a second boot holds the GPU driver back until after the login.
+# Under UEFI a second boot is on the standard VGA, whose driver takes the
+# firmware's framebuffer over under the logo, as a laptop's GPU driver does:
+# the console is frozen for it (omarchy-console-logo-redraw). Under BIOS a
+# second boot holds the GPU driver back until after the login.
 #
 # Boots the ISO alone, no base image: `./test/integration <iso> boot-render`
 # (UEFI) or `./test/integration <iso> boot-render --bios`.
@@ -24,7 +25,13 @@ verify_boot_render() {
   check "every frame from the boot loader to the greeter renders as it should" \
     "$ROOT/test/boot-render" "$ISO" --firmware "$FIRMWARE" "${display[@]}" --out "$out"
   sed -n '/^PROBLEMS/,$p' "$out/report.txt" 2>/dev/null || true
-  [[ $FIRMWARE == bios ]] || return 0
+  if [[ $FIRMWARE != bios ]]; then
+    log "Checking it again with a GPU driver taking the firmware's framebuffer over"
+    check "every frame renders as it should as a GPU driver takes the firmware's framebuffer over" \
+      "$ROOT/test/boot-render" "$ISO" --firmware "$FIRMWARE" --device VGA --resolution 1280x800 --out "$out-takeover"
+    sed -n '/^PROBLEMS/,$p' "$out-takeover/report.txt" 2>/dev/null || true
+    return 0
+  fi
 
   # A GPU driver that loads after the login, as one may on a slow machine: a
   # udev rule passed in as a systemd credential holds it back four seconds.

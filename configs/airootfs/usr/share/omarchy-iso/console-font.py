@@ -1,6 +1,7 @@
 #!/usr/bin/python
 """Terminus for the live console, plus the half blocks the Omarchy logo needs,
-drawn in the slots of ŉ and ₧, which nothing the installer prints uses.
+drawn in the slots of ŉ and ₧, which nothing the installer prints uses, and
+the blocks moved to the slots the kernel's own console font has them in.
 
 Usage: console-font.py <terminus .psf[.gz]> <output .psf>
 """
@@ -18,6 +19,13 @@ PSF2_MAGIC = b"\x72\xb5\x4a\x86"
 UPPER_HALF, LOWER_HALF = 0x2580, 0x2584
 # Glyphs that draw only this one character, so nothing else loses its glyph.
 SACRIFICED = {0x0149: UPPER_HALF, 0x20A7: LOWER_HALF}
+
+# █ ▄ ▀ in the IBM PC (CP437) order of the kernel's console font, which the boot
+# logo is drawn in when the installer loads this one. Loading a font redraws the
+# cells on screen in the new font's glyphs at the same slots, before its Unicode
+# table arrives: Terminus has ├ ┴ │ in these, and the X200 showed the logo in
+# box drawing for a frame.
+CP437_BLOCKS = {0x2588: 0xDB, 0x2584: 0xDC, 0x2580: 0xDF}
 
 # Characters the installer and gum print, drawn with Terminus's closest glyph.
 ALIASES = {
@@ -129,6 +137,14 @@ def patch(width: int, height: int, glyphs: list[bytes], table: list[list[int]]) 
             table[owner[glyph_of]].append(codepoint)
 
 
+def cp437_blocks(glyphs: list[bytes], table: list[list[int]]) -> None:
+    """Swap the blocks into their CP437 slots, and what was there into theirs."""
+    for codepoint, slot in CP437_BLOCKS.items():
+        index = next(index for index, codepoints in enumerate(table) if codepoint in codepoints)
+        glyphs[index], glyphs[slot] = glyphs[slot], glyphs[index]
+        table[index], table[slot] = table[slot], table[index]
+
+
 def write_psf2(width: int, height: int, glyphs: list[bytes], table: list[list[int]]) -> bytes:
     glyph_size = (width + 7) // 8 * height
     header = struct.pack("<8I", 0x864AB572, 0, 32, 1, len(glyphs), glyph_size, height, width)
@@ -143,6 +159,7 @@ def main() -> None:
         data = gzip.decompress(data)
     width, height, glyphs, table = read_font(data)
     patch(width, height, glyphs, table)
+    cp437_blocks(glyphs, table)
     output.write_bytes(write_psf2(width, height, glyphs, table))
 
 

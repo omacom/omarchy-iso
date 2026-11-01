@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# The live initramfs's filesystems hook, by the same name as mkinitcpio's so it
+# takes its place in HOOKS: the filesystems an install medium can be, or hold
+# the ISO file loopback.cfg boots, and none of the rest. mkinitcpio's own adds
+# every module under fs/ (NFS, CIFS, Ceph, the cluster and flash filesystems,
+# 6.1 MB) and every mount helper, mount.nfs with Kerberos and libtirpc behind
+# it; the archiso hook mounts with plain mount, and the PXE image's NFS boot
+# gets nfs from archiso_pxe_nfs. Every byte here is read by the firmware before
+# the kernel starts. The live root has all of them.
+
+build() {
+    # The ISO itself, its squashfs, the writable overlay.
+    map add_module 'isofs?' 'udf?' 'squashfs?' 'erofs?' 'overlay?'
+    # A partition holding the ISO file (loopback.cfg, a GRUB loopback boot).
+    map add_module 'vfat?' 'msdos?' 'exfat?' 'ntfs3?' 'ext4?' 'btrfs?' 'xfs?' 'f2fs?'
+    # Their file name encodings.
+    add_all_modules '/kernel/fs/nls/'
+}
+
+help() {
+    cat <<HELPEOF
+Adds the filesystem modules an Omarchy install medium can need: ISO 9660 and
+UDF, squashfs and overlay, and the filesystems an ISO file can sit on (FAT,
+exFAT, NTFS, ext4, btrfs, XFS, F2FS), with their character sets.
+HELPEOF
+}

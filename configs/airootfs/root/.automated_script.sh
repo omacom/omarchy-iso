@@ -12,6 +12,10 @@ set -euo pipefail
 
 [[ $(tty) == /dev/tty1 ]] || exit 0
 
+# tty1 is the installer's from here: omarchy-console-logo-redraw no longer
+# lays the boot logo out again when a GPU driver replaces the framebuffer.
+mkdir -p /run/omarchy-iso && : >/run/omarchy-iso/tty1-taken
+
 # The N1x recovery boot entry is a diagnostic shell, never the installer: record
 # the hardware probe, show how to reach the machine, and leave tty1 at a prompt.
 if grep -qw 'omarchy.n1x_recovery=1' /proc/cmdline; then
@@ -48,7 +52,13 @@ set_tokyo_night_colors() {
   echo -en "\e]PC7aa2f7"; echo -en "\e]PDbb9af7"; echo -en "\e]PE7dcfff"
   echo -en "\e]PFc0caf5"
   echo -en "\033[0m"
-  clear
+  # The boot logo stays up until the greeter draws over it in place
+  # (/usr/share/omarchy-iso/console-logo.sh) rather than a blank screen; not
+  # the VGA console's half-size one, still up where no framebuffer came, whose
+  # glyphs the greeter's font does not have.
+  if [[ ! -e /run/omarchy-iso/console-logo || -e /run/omarchy-iso/console-logo-vga ]]; then
+    clear
+  fi
 }
 set_tokyo_night_colors
 
@@ -91,12 +101,20 @@ warm_offline_mirror() {
   ((budget_kb > 262144)) || return 0
 
   # omarchy-mirror-verify.service and then omarchy-root-image-verify.service
-  # (started at boot) read the shipped mirror and the whole image as they hash
-  # them, and two readers on one USB stick seek against each other: let both
-  # finish first, whatever their verdict. Wait on their start jobs, not on
-  # is-active: while the mirror is hashed the image's job is queued behind it
-  # (Before=) and that unit still reads inactive. The image's pass is the
-  # warm-up for the image too; the read below then keeps it cached.
+  # read the shipped mirror and the whole image as they hash them, and two
+  # readers on one USB stick seek against each other: let both finish first,
+  # whatever their verdict. They start with omarchy-medium-verify.target once
+  # the installer is on screen (the configurator's greeter, or the autoinstall
+  # branch below), so first wait for them to have started: until then neither
+  # has a job and the image unit reads inactive. Then wait on their start
+  # jobs, not on is-active: while the mirror is hashed the image's job is
+  # queued behind it (Before=) and that unit still reads inactive. The image's
+  # pass is the warm-up for the image too; the read below then keeps it cached.
+  until [[ -n $(systemctl list-jobs --no-legend omarchy-mirror-verify.service \
+    omarchy-root-image-verify.service 2>/dev/null) ]] ||
+    [[ $(systemctl is-active omarchy-root-image-verify.service 2>/dev/null) != inactive ]]; do
+    sleep 1
+  done
   while [[ -n $(systemctl list-jobs --no-legend omarchy-mirror-verify.service \
     omarchy-root-image-verify.service 2>/dev/null) ]]; do
     sleep 1
@@ -137,6 +155,9 @@ cd /root
 if /usr/local/bin/omarchy-cidata-load; then
   echo "Autoinstall configuration found on cidata drive; skipping the configurator."
   export OMARCHY_UI_INTERACTIVE=no
+  # No greeter to wait for: hash the install medium from now on (see
+  # warm_offline_mirror above and omarchy-medium-verify.target).
+  systemctl start --no-block omarchy-medium-verify.target 2>/dev/null || true
 else
   ./configurator
 fi

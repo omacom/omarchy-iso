@@ -1,0 +1,26 @@
+# The live image's udev hwdb without the vendor and model name tables.
+#
+# udevd maps hwdb.bin and its lookups touch pages all over it, which off a
+# squashfs of 1 MiB blocks means reading the whole 14 MB file during the boot
+# (fincore at the greeter: all of it resident). 8.8 of its 9.5 MB of sources
+# are the PCI, USB, OUI, ACPI, Bluetooth and SDIO vendor and model name
+# tables, which only label devices for people (ID_VENDOR_FROM_DATABASE and
+# friends); the installer names disks and GPUs through lsblk and lspci, which
+# carry their own tables. Keyboard, mouse, touchpad, sensor and autosuspend
+# quirks stay.
+#
+# A pacman hook rather than a step in customize_airootfs.sh because the live
+# initramfs is built by mkinitcpio's hook (90-) during the pacstrap, before
+# that script runs, and its udev hook copies hwdb.bin in; this one sorts
+# first and rebuilds the small hwdb.bin ahead of it. systemd's own hwdb hook
+# runs last and rebuilds it again from the same trimmed sources.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/lib/udev/hwdb.d/20-pci-vendor-model.hwdb
+
+[Action]
+Description = Leaving the vendor and model name tables out of the live udev hwdb...
+When = PostTransaction
+Exec = /usr/bin/bash -c 'cd /usr/lib/udev/hwdb.d && rm -f 20-pci-vendor-model.hwdb 20-OUI.hwdb 20-usb-vendor-model.hwdb 20-acpi-vendor.hwdb 20-bluetooth-vendor-product.hwdb 20-sdio-vendor-model.hwdb && systemd-hwdb --usr update'

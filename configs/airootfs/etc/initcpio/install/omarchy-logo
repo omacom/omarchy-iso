@@ -1,0 +1,51 @@
+#!/bin/bash
+# mkinitcpio install hook: the Omarchy logo on the console from the moment
+# the initramfs starts (hooks/omarchy-logo, laid out by
+# /usr/share/omarchy-iso/console-logo.sh).
+
+build() {
+    local share=/usr/share/omarchy-iso dir=/usr/share/omarchy-iso/console-logo file tmp
+    add_file "$share/console-logo.sh"
+    # The greeter's logo and the copy fitted to 80 columns, with their widths
+    # (omarchy-console-logo, run by 60-omarchy-live-logo.hook during the
+    # pacstrap, ahead of this).
+    if [[ -r $dir/fitted.txt ]]; then
+        for file in greeter.txt greeter.cols fitted.txt fitted.cols; do
+            [[ -r $dir/$file ]] && add_file "$dir/$file"
+        done
+    else
+        warning "%s is missing: the live boot shows no logo before the greeter" "$dir/fitted.txt"
+    fi
+    # The greeter's 32 px font: Terminus plus the half blocks the logo needs
+    # (console-font.py; customize_airootfs.sh builds the same for the live
+    # root later). PSF2 uncompressed, which busybox's setfont reads.
+    tmp=$(mktemp)
+    if python3 "$share/console-font.py" /usr/share/kbd/consolefonts/ter-v32b.psf.gz "$tmp" >/dev/null 2>&1; then
+        add_file "$tmp" "$share/console-32.psf" 644
+    else
+        warning "console-font.py could not build the 32 px console font: the boot logo keeps the kernel's font"
+    fi
+    rm -f "$tmp"
+    # The half-size logo for the VGA text console, in a font of its own
+    # (vga-logo-font.py): ASCII from the kernel's default font, plus the pieces.
+    tmp=$(mktemp -d)
+    if python3 "$share/vga-logo-font.py" /usr/share/omarchy/logo.txt \
+        /usr/share/kbd/consolefonts/default8x16.psfu.gz "$tmp" >/dev/null 2>&1; then
+        for file in vga.psf vga.txt vga.cols; do
+            add_file "$tmp/$file" "$dir/$file" 644
+        done
+    else
+        warning "vga-logo-font.py could not build the VGA logo: a BIOS boot shows the logo at full width"
+    fi
+    rm -rf "$tmp"
+    add_runscript
+}
+
+help() {
+    cat <<HELPEOF
+Prints the Omarchy logo on tty1 as the first thing the initramfs does, where
+the installer's greeter will draw it, so the screen shows it instead of black
+until the greeter. Reads /usr/share/omarchy-iso/console-logo/, written by
+omarchy-console-logo during the pacstrap.
+HELPEOF
+}

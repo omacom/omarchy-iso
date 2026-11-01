@@ -318,6 +318,38 @@ gh workflow run upgrade-test.yml -f to=edge
 
 It only runs when started. When the branch it ran on has a pull request, the result is posted there as one comment and updated in place on later runs.
 
+## Boot benchmark
+
+`test/boot-benchmark` times how long the ISO and installer keep a user waiting for the "Press Return to Start Install" screen when the ISO is on a USB stick, and how many of those seconds the screen is black. The firmware's time is measured as well, but kept out of both, since the ISO cannot shorten it. It boots the unmodified ISO as a throttled usb-storage device in one of two profiles:
+
+- `--usb2` (default): an EHCI controller at 40 MB/s, about the most a USB 2.0 port carries for mass storage.
+- `--usb3`: an xHCI controller at 150 MB/s, a mainstream USB 3 stick.
+
+The ISO is read with `O_DIRECT`, so the host's page cache never serves the guest faster than the throttle. Each run then checks it: the guest's negotiated USB link speed and the rate it actually reads from the stick, measured once the boot's own readers (the verify hashes and the installer's prefetch) are stopped and the stick has gone idle, go into the results.
+
+```bash
+./test/boot-benchmark release/omarchy.iso                   # USB 2.0, 3 boots, UEFI
+./test/boot-benchmark release/omarchy.iso --usb3            # USB 3
+./test/boot-benchmark release/omarchy.iso --bios --runs 5   # SeaBIOS, includes the 15 s ISOLINUX countdown
+```
+
+The screen is sampled at 50 Hz (`--fps`) on a QMP socket of its own, together with how many bytes the stick has delivered. A frame counts as black when under 0.5% of its subpixels are brighter than 25%: QEMU's "Display output is not active" placeholder, a lone kernel warning line and the configurator's empty console count as black, while a firmware logo, the boot splash and any real screen do not. Once the greeter shows, the guest's own clock pins kernel start, and each run's wait is split by who can shorten it:
+
+```
+  ISO and installer, to the greeter              19.6 s   (14.9 s black, longest 10.3 s)
+    boot menu countdown                           0.0 s
+    boot files (127 MB) at the stick's rate       3.2 s
+    kernel + initramfs                            2.1 s
+    userspace to greeter                         14.2 s   (the stick read 541 MB from kernel start, 13.4 s at its rate)
+  Firmware (out of our control)                  15.7 s
+    power-on to first read of the stick           1.2 s
+    boot files read slower than the stick        14.5 s   (127 MB in 17.7 s; the stick does 40.4 MB/s)
+```
+
+The firmware's time is its start-up and however much longer than the stick's rate it takes to read the kernel and initramfs (under QEMU, OVMF's EHCI driver manages ~8 MB/s whatever the stick does). It is cut out of the timeline before anything is counted: what the screen shows before the firmware's first read of the stick counts nowhere, and while the boot files load, each second counts only at the ISO's share of that loading. The menu countdown is any stretch of 2 s or more before kernel start with the stick idle. When the stick's reads alone fill most of userspace to greeter, the boot is waiting on the stick, much of it for the verify hashes competing with it.
+
+Results (`results.tsv`; and per boot a strip of the frames where the screen flipped between black and not, the greeter, `systemd-analyze blame` and the journal) land under `test-runs/<iso>-boot-benchmark/<timestamp>-<firmware>-<profile>-<speed>mbs/`.
+
 ## Signing the ISO
 
 Run `./bin/omarchy-iso-sign [release/omarchy.iso]`. The signing key is retrieved from the shared Omarchy vault with the 1Password CLI.

@@ -3,10 +3,16 @@
 archinstall's set_keyboard_language boots the installed system in a
 systemd-nspawn container just to run localectl. systemd-firstboot --root
 produces the part of that output Omarchy actually consumes — KEYMAP for the
-console plus the XKB* settings in vconsole.conf that omarchy's
-detect-keyboard-layout.sh copies into Hyprland's kb_layout — without booting
+console plus the XKB* settings in vconsole.conf that Omarchy's Hyprland input
+config (default/hypr/input.lua) reads for kb_layout — without booting
 anything. The Xorg 00-keyboard.conf that localectl also writes is not
 generated: nothing on an Omarchy system reads it.
+
+Both tools take the XKB settings from systemd's kbd-model-map, and a console
+keymap that map has no row for gets KEYMAP= alone. Hyprland's config then
+falls back to us: a Norwegian install typed Norwegian on the console and at
+the LUKS prompt and US on the desktop. XKB_ALIASES names the desktop layout
+of every keymap the setup form offers that the map leaves out.
 """
 
 from __future__ import annotations
@@ -14,6 +20,26 @@ from __future__ import annotations
 from pathlib import Path
 
 from .command import capture
+
+# Console keymap -> (XKB layout, XKB variant) for the keymaps Omarchy's setup
+# form offers that systemd's kbd-model-map (systemd 262) has no row for.
+# test_keyboard.py checks the form's whole list: a keymap neither the map nor
+# this table knows fails there instead of on an owner's desktop, and an alias
+# the map has since learnt fails too, so the table only ever shrinks.
+XKB_ALIASES: dict[str, tuple[str, str]] = {
+    "colemak": ("us", "colemak"),
+    # The form labels this one Azerbaijani, so that is the desktop layout the
+    # owner asked for. The console keymap itself is kbd's French AZERTY, an
+    # upstream mismatch this table cannot mend.
+    "azerty": ("az", ""),
+    "bg-cp1251": ("bg", ""),
+    "cz": ("cz", ""),
+    "de_CH-latin1": ("ch", "de"),
+    "kyrgyz": ("kg", ""),
+    "no-latin1": ("no", ""),
+    "pl": ("pl", ""),
+    "ua": ("ua", ""),
+}
 
 
 def configure_keyboard(target: Path, language: str, input_method: str | None = None, xkb_layout: str = "") -> bool:
@@ -58,8 +84,18 @@ def configure_keyboard(target: Path, language: str, input_method: str | None = N
         detail = result.stderr.strip() or "systemd-firstboot returned an error"
         raise RuntimeError(f"Unable to configure keyboard layout {language}: {detail}")
 
+    lines = vconsole_path.read_text().splitlines()
     if font:
-        vconsole_path.write_text(vconsole_path.read_text() + font + "\n")
+        lines.append(font)
+    # firstboot wrote XKBLAYOUT= only if kbd-model-map has the keymap; the
+    # desktop reads it and falls back to us without it.
+    if not any(line.startswith("XKBLAYOUT=") for line in lines) and language in XKB_ALIASES:
+        layout, variant = XKB_ALIASES[language]
+        lines.append(f"XKBLAYOUT={layout}")
+        if variant:
+            lines.append(f"XKBVARIANT={variant}")
+        lines.append("XKBMODEL=pc105")
+    vconsole_path.write_text("\n".join(lines) + "\n")
 
     preference = target / "etc/omarchy/input-method"
     preference.parent.mkdir(parents=True, exist_ok=True)

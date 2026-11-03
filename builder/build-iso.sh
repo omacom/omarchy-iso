@@ -7,7 +7,7 @@ OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
 OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
 OMARCHY_KERNEL="${OMARCHY_KERNEL:-linux-omarchy}"
 # profiledef.sh reads both in the mkarchiso environment.
-export OMARCHY_ARCH OMARCHY_KERNEL
+export OMARCHY_ARCH OMARCHY_KERNEL OMARCHY_OEM_INSTALL
 
 source /builder/node-release.sh
 source /builder/arm64-kernel-image.sh
@@ -223,6 +223,10 @@ mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
 echo "$OMARCHY_MIRROR" > "$build_cache_dir/airootfs/root/omarchy_mirror"
 echo "$OMARCHY_ISO_REF" > "$build_cache_dir/airootfs/root/omarchy_iso_ref"
 echo "$OMARCHY_ARCH" > "$build_cache_dir/airootfs/root/omarchy_arch"
+if [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]]; then
+  touch "$build_cache_dir/airootfs/usr/share/omarchy-iso/oem-install"
+  sed -i 's/^TIMEOUT .*/TIMEOUT 1/' "$build_cache_dir/syslinux/archiso_sys.cfg"
+fi
 # The kernel the installer puts on the target: the image's own on aarch64,
 # empty on x86_64, where the installer picks per machine.
 if [[ $OMARCHY_ARCH == aarch64 ]]; then

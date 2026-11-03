@@ -110,6 +110,13 @@ jobs:
       # No package cache, on purpose: every package the ISO is made of is
       # fetched from the mirrors again each night, so one that has gone
       # missing there fails this build instead of being served from a cache.
+      - name: Install the Podman ISO builder
+        run: |
+          if ! command -v podman >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq podman
+          fi
+
       - name: Build the edge ISO
         if: matrix.channel == 'edge'
         run: NO_BOOT_OFFER=1 ./bin/omarchy-iso-make --edge

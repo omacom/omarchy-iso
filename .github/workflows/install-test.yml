@@ -115,6 +115,13 @@ jobs:
       # linux-omarchy, the one kernel for every aarch64 board. A run by hand
       # builds both from the channel it names. Every package comes from the
       # package repositories, none is built here.
+      - name: Install the Podman ISO builder
+        run: |
+          if ! command -v podman >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq podman
+          fi
+
       - name: Build the ISO
         env:
           CHANNEL: ${{ inputs.channel || 'edge' }}

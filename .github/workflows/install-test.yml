@@ -121,6 +121,15 @@ jobs:
             sudo apt-get update -qq
             sudo apt-get install -y -qq podman
           fi
+          # These disposable runners have nested overlay storage, a read-only
+          # cgroup tree and no permission to create kernel keyrings. Keep the
+          # builder's state in this job instead of the runner's image cache.
+          sudo install -d /etc/containers/containers.conf.d
+          printf '%s\n' '[containers]' 'keyring=false' 'cgroups="disabled"' '[engine]' 'cgroup_manager="cgroupfs"' | \
+            sudo tee /etc/containers/containers.conf.d/omarchy-iso-ci.conf >/dev/null
+          printf '[storage]\ndriver="vfs"\ngraphroot="%s"\nrunroot="%s"\n' \
+            "$RUNNER_TEMP/omarchy-iso-podman/storage" "$RUNNER_TEMP/omarchy-iso-podman/run" | \
+            sudo tee /etc/containers/storage.conf >/dev/null
 
       - name: Build the ISO
         env:

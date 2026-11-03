@@ -89,3 +89,39 @@ for arch in x86_64 aarch64; do
   ((fetchers > 0)) || fail "no install job fetches the $arch ISO"
 done
 echo "install test artifact names passed"
+
+# The CI wrapper keeps argument boundaries and reports build failures after
+# restoring artifact ownership, without operating the test machine's engine.
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT
+mkdir -p "$fixture/repo with spaces/builder" "$fixture/repo with spaces/release" "$fixture/bin"
+cp "$ROOT/builder/run-ci.sh" "$fixture/repo with spaces/builder/run-ci.sh"
+cat >"$fixture/bin/docker" <<'SH'
+#!/bin/bash
+printf '%s\0' "$@" >"$CI_ARGUMENTS"
+exit "$CI_BUILD_RESULT"
+SH
+cat >"$fixture/bin/sudo" <<'SH'
+#!/bin/bash
+printf '%s\0' "$@" >"$CI_OWNERSHIP"
+SH
+chmod +x "$fixture/bin/docker" "$fixture/bin/sudo"
+for expected in 0 23; do
+  actual=0
+  CI_ARGUMENTS="$fixture/arguments" CI_OWNERSHIP="$fixture/ownership" CI_BUILD_RESULT="$expected" PATH="$fixture/bin:$PATH" \
+    bash "$fixture/repo with spaces/builder/run-ci.sh" --arch aarch64 --package-dir 'package path with spaces' --no-boot-offer || actual=$?
+  ((actual == expected)) || fail "CI wrapper lost build status $expected: got $actual"
+  python3 - "$fixture" <<'PY'
+from pathlib import Path
+import sys
+fixture = Path(sys.argv[1])
+args = (fixture / 'arguments').read_bytes().decode().rstrip('\0').split('\0')
+assert args[-5:] == ['--arch', 'aarch64', '--package-dir', 'package path with spaces', '--no-boot-offer']
+assert '--privileged' in args and '--cgroupns=host' in args
+assert args[args.index('-w') + 1] == str(fixture / 'repo with spaces')
+ownership = (fixture / 'ownership').read_bytes().decode().rstrip('\0').split('\0')
+assert ownership[:2] == ['chown', '-R']
+assert ownership[-1] == str(fixture / 'repo with spaces/release')
+PY
+done
+echo "CI builder argument, failure and artifact routing passed"

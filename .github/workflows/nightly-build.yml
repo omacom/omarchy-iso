@@ -110,30 +110,14 @@ jobs:
       # No package cache, on purpose: every package the ISO is made of is
       # fetched from the mirrors again each night, so one that has gone
       # missing there fails this build instead of being served from a cache.
-      - name: Install the Podman ISO builder
-        if: startsWith(matrix.channel, 'edge')
-        run: |
-          if ! command -v podman >/dev/null; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq podman
-          fi
-          # These disposable runners restrict nested storage, cgroups,
-          # network sysctls, keyrings and pivot_root. Keep the builder's
-          # state in this job instead of the runner's image cache.
-          sudo install -d /etc/containers/containers.conf.d
-          printf '%s\n' '[containers]' 'keyring=false' 'cgroups="disabled"' 'netns="host"' 'default_sysctls=[]' '[engine]' 'cgroup_manager="cgroupfs"' 'no_pivot_root=true' | \
-            sudo tee /etc/containers/containers.conf.d/omarchy-iso-ci.conf >/dev/null
-          printf '[storage]\ndriver="vfs"\ngraphroot="%s"\nrunroot="%s"\n' \
-            "$RUNNER_TEMP/omarchy-iso-podman/storage" "$RUNNER_TEMP/omarchy-iso-podman/run" | \
-            sudo tee /etc/containers/storage.conf >/dev/null
 
       - name: Build the edge ISO
         if: matrix.channel == 'edge'
-        run: NO_BOOT_OFFER=1 ./bin/omarchy-iso-make --edge
+        run: NO_BOOT_OFFER=1 ./builder/run-ci.sh --edge
 
       - name: Build the edge ISO (aarch64)
         if: matrix.channel == 'edge-aarch64'
-        run: ./bin/omarchy-iso-make --arch aarch64 --edge --no-boot-offer
+        run: ./builder/run-ci.sh --arch aarch64 --edge --no-boot-offer
 
       # Good only if the signature is the release key's, the one in this repo.
       - name: Download the released ISO and check its signature

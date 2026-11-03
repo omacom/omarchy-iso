@@ -227,6 +227,8 @@ To add a string, put it in `en.json` and print it with `t <key> [args]`, where `
 
 Run `./bin/omarchy-iso-make`; output goes into `./release`. By default the ISO uses the Omarchy packages and tracks the `quattro` branch, from the stable mirror. Pass `--edge` to use `omarchy-dev` and `omarchy-settings-dev` from the edge mirror.
 
+Local builds require Podman and sudo for the rootful image builder. CI uses `builder/run-ci.sh`: the runner's existing privileged Docker facility exposes the loop devices needed to create the btrfs image, and a disposable bootstrap installs Podman to run the same ISO entrypoint. Container configuration and VFS storage belong to that disposable build environment, and output ownership returns to the runner user.
+
 For local development, build the ISO from sibling checkouts:
 
 ```bash

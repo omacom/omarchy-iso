@@ -115,21 +115,6 @@ jobs:
       # linux-omarchy, the one kernel for every aarch64 board. A run by hand
       # builds both from the channel it names. Every package comes from the
       # package repositories, none is built here.
-      - name: Install the Podman ISO builder
-        run: |
-          if ! command -v podman >/dev/null; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq podman
-          fi
-          # These disposable runners restrict nested storage, cgroups,
-          # network sysctls, keyrings and pivot_root. Keep the builder's
-          # state in this job instead of the runner's image cache.
-          sudo install -d /etc/containers/containers.conf.d
-          printf '%s\n' '[containers]' 'keyring=false' 'cgroups="disabled"' 'netns="host"' 'default_sysctls=[]' '[engine]' 'cgroup_manager="cgroupfs"' 'no_pivot_root=true' | \
-            sudo tee /etc/containers/containers.conf.d/omarchy-iso-ci.conf >/dev/null
-          printf '[storage]\ndriver="vfs"\ngraphroot="%s"\nrunroot="%s"\n' \
-            "$RUNNER_TEMP/omarchy-iso-podman/storage" "$RUNNER_TEMP/omarchy-iso-podman/run" | \
-            sudo tee /etc/containers/storage.conf >/dev/null
 
       - name: Build the ISO
         env:
@@ -142,9 +127,9 @@ jobs:
             *) flag= ;;
           esac
           if [[ $ARCH == aarch64 ]]; then
-            ./bin/omarchy-iso-make --arch aarch64 $flag --no-boot-offer
+            ./builder/run-ci.sh --arch aarch64 $flag --no-boot-offer
           else
-            NO_BOOT_OFFER=1 ./bin/omarchy-iso-make $flag
+            NO_BOOT_OFFER=1 ./builder/run-ci.sh $flag
           fi
           mkdir -p test-runs && echo $(( $(date +%s) - start )) >test-runs/build-seconds
 

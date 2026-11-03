@@ -99,6 +99,15 @@ os.link(f,p/'hardlink-proof');(p/'symlink-proof').symlink_to('metadata-proof')
 os.utime(f,ns=(1720000000123456789,1720000000123456789))
 PY
 sudo setfacl -m u:1234:r "$volume/metadata-proof"
+sudo python3 - "$volume/metadata-proof" <<'PY'
+import json, os, stat, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+Path('/tmp/source-volume-metadata.json').write_text(json.dumps({
+    'mode': stat.S_IMODE(path.stat().st_mode),
+    'acl': os.getxattr(path, 'system.posix_acl_access').hex(),
+}))
+PY
 
 # A custom image/name, private named volume, non-root application user and
 # explicit resource/confinement settings should migrate without gaining access.
@@ -111,6 +120,7 @@ sudo docker run -d --name project-worker --restart unless-stopped \
   -e WORKER_MESSAGE=retained -v project-state:/data docker.io/library/alpine:3 \
   sh -c 'echo preserved >/data/proof; trap "exit 0" TERM; while :; do sleep 1 & wait $!; done'
 sudo docker exec project-worker sh -c 'grep -Eq "^CapEff:[[:space:]]+0+$" /proc/1/status'
+sudo docker inspect project-worker --format '{{json .HostConfig}}' >/tmp/source-worker-limits.json
 
 # Review-required records are never started, even in this disposable fixture.
 # Both must be reported while all ordinary source workloads stay running.
@@ -189,8 +199,20 @@ done
 [[ $(podman exec project-worker id -u) == "1000" ]]
 podman exec project-worker sh -ec 'grep -Eq "^NoNewPrivs:[[:space:]]+1$" /proc/1/status; grep -Eq "^Seccomp:[[:space:]]+2$" /proc/1/status; for field in CapBnd CapEff CapAmb; do grep -Eq "^$field:[[:space:]]+0+$" /proc/1/status; done'
 [[ $(podman inspect project-worker --format '{{.HostConfig.Privileged}}') == "false" ]]
-[[ $(podman inspect project-worker --format '{{.HostConfig.Memory}}') == "134217728" ]]
-[[ $(podman inspect project-worker --format '{{.HostConfig.PidsLimit}}') == "64" ]]
+podman inspect project-worker >/tmp/target-worker-inspect.json
+python3 - <<'PY'
+import json, math
+from pathlib import Path
+source = json.loads(Path('/tmp/source-worker-limits.json').read_text())
+target = json.loads(Path('/tmp/target-worker-inspect.json').read_text())[0]['HostConfig']
+for key in ('Memory', 'MemorySwap', 'PidsLimit', 'ShmSize'):
+    assert target[key] == source[key], (key, source[key], target[key])
+def cpus(config):
+    if config.get('NanoCpus', 0):
+        return config['NanoCpus'] / 1_000_000_000
+    return config['CpuQuota'] / config['CpuPeriod']
+assert math.isclose(cpus(target), cpus(source)), (source, target)
+PY
 [[ $(podman volume inspect project-state --format '{{index .Labels "fixture"}}') == "secure-migration" ]]
 worker_volume=$(podman volume inspect project-state --format '{{.Mountpoint}}')
 [[ $(podman unshare stat -c '%u:%g:%a' "$worker_volume") == "1000:1000:750" ]]
@@ -198,14 +220,16 @@ worker_volume=$(podman volume inspect project-state --format '{{.Mountpoint}}')
 printf 'CUSTOM ROOTLESS CONFINEMENT VERIFIED\n'
 target=$(podman volume inspect "omarchy-migrated-$volume_name" --format '{{.Mountpoint}}')
 podman unshare python3 - "$target" <<'PY'
-import os,sys
+import json, os, stat, sys
 from pathlib import Path
 p=Path(sys.argv[1]);f=p/'metadata-proof';s=f.stat()
+source = json.loads(Path('/tmp/source-volume-metadata.json').read_text())
+assert stat.S_IMODE(s.st_mode) == source['mode'] == 0o640
+assert os.getxattr(f, 'system.posix_acl_access').hex() == source['acl']
 assert p.stat().st_mode & 0o777==0o775
 assert s.st_uid==1000 and s.st_gid==1000
 assert s.st_mtime_ns==1720000000123456789
 assert os.getxattr(f,'user.migration')==b'preserved'
-assert os.getxattr(f,'system.posix_acl_access')
 assert s.st_ino==(p/'hardlink-proof').stat().st_ino
 assert (p/'symlink-proof').readlink()==Path('metadata-proof')
 PY

@@ -1,0 +1,27 @@
+[Unit]
+Description=Verify the offline package mirror on the install medium
+# The per-machine packages an install pacstraps (kernel, microcode, GPU and
+# firmware packages) come from this mirror, read off the medium like the root
+# image. Hashing them here, before the wait helper lets anything format a disk,
+# turns a corrupt one into a refused install instead of a pacman error on a
+# wiped disk. Before the root image hash, never beside it: two readers on one
+# USB stick seek against each other, and the image must be the last thing read
+# before the install writes it, or on a machine whose RAM cannot hold both this
+# hash evicts the image pages the write would reuse (30 MiB/s, 4 GB: 8190 MiB
+# read off the medium with the mirror second, against 5598 without it).
+Before=omarchy-root-image-verify.service
+ConditionPathExists=/usr/share/omarchy-iso/offline-mirror.sha256
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# TimeoutStartSec comes from a build-time drop-in sized to the mirror, as for
+# the root image (build-iso.sh writes 50-size-timeout.conf next to this unit).
+WorkingDirectory=/var/cache/omarchy/mirror/offline
+ExecStart=/usr/bin/sha256sum --check --strict --quiet /usr/share/omarchy-iso/offline-mirror.sha256
+# Background work: never compete with the console or anything interactive.
+Nice=19
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

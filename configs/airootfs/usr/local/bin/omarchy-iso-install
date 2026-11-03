@@ -13,8 +13,6 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     --config)               export OMARCHY_INSTALL_CONFIG="$2"; shift 2 ;;
     --creds)                export OMARCHY_INSTALL_CREDS="$2"; shift 2 ;;
-    --full-name-file)       export OMARCHY_INSTALL_FULL_NAME_FILE="$2"; shift 2 ;;
-    --email-file)           export OMARCHY_INSTALL_EMAIL_FILE="$2"; shift 2 ;;
     --encrypt-file)         export OMARCHY_INSTALL_ENCRYPT_FILE="$2"; shift 2 ;;
     --authorized-keys-file) export OMARCHY_INSTALL_AUTHORIZED_KEYS_FILE="$2"; shift 2 ;;
     --tailscale-authkey-file) export OMARCHY_INSTALL_TAILSCALE_AUTHKEY_FILE="$2"; shift 2 ;;

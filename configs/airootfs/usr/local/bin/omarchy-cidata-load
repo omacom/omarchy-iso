@@ -43,7 +43,7 @@ mount -o ro "$device" "$mnt" || exit 1
 # otherwise force a fresh drive back into deferred provisioning or hand it an old
 # LUKS passphrase. The interactive wizard writes these same names, but a
 # cidata load always precedes it, so nothing of the user's is discarded here.
-optional_inputs=(user_credentials.json defer-provisioning user_full_name.txt user_email_address.txt user_encrypt_installation.txt authorized_keys tailscale_authkey)
+optional_inputs=(user_credentials.json defer-provisioning user_encrypt_installation.txt authorized_keys tailscale_authkey)
 for file in user_configuration.json "${optional_inputs[@]}"; do
   rm -f "$dest/$file"
 done

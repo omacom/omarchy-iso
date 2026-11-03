@@ -1,0 +1,93 @@
+#!/bin/bash
+#
+# Writes the install test's comment for a pull request: one table, a row per
+# measurement, the same rows for every architecture, next to quattro's numbers.
+#
+#   test/install-test-comment <pr_artifacts> <quattro_artifacts> <conclusion> <run_url> <head_sha>
+#
+# Each directory holds one folder per artifact of an "Install test" run, named
+# install-test-<run>-<attempt>-<arch>. The artifacts are read as data only.
+set -euo pipefail
+pr=$1 base=$2 conclusion=$3 run_url=$4 head_sha=$5
+
+# An artifact from before the test ran on two architectures has no suffix.
+arch_of() { case $1 in *-aarch64) echo aarch64 ;; *) echo x86_64 ;; esac; }
+# architecture, artifacts -> that architecture's folder, or nothing
+folder() {
+  local d
+  for d in "$2"/*/; do
+    [[ -d $d && $(arch_of "$(basename "$d")") == "$1" ]] && { echo "${d%/}"; return; }
+  done
+  true
+}
+
+# Every lookup prints nothing rather than failing, so a missing number (no
+# baseline yet, or a test that stopped early) shows as "–".
+first() { [[ -n $1 ]] || return 0; { find "$1" -path "$2" 2>/dev/null || true; } | sort | head -1; }
+build_s() { local f; f=$(first "$1" '*/build-seconds'); [[ -z $f ]] || tr -dc 0-9. <"$f"; }
+install_s() { local f; f=$(first "$1" '*/omarchy-install-timing.json'); [[ -z $f ]] || jq -r '.finished_at - .started_at' "$f" 2>/dev/null || true; }
+# "Startup finished in 2s (firmware) + 9s (loader) + 1min 3.2s (userspace) = …"
+# -> seconds, without the firmware's share: it is the VM's, and in the aarch64
+# VM it reads as the runner's uptime, minutes long.
+boot_s() {
+  local f; f=$(first "$1" "$2"); [[ -n $f ]] || return 0
+  head -1 "$f" | sed -e 's/.*finished in //' -e 's/ *=.*//' | tr '+' '\n' | grep -v firmware |
+    awk '{for (i = 1; i <= NF; i++) { if ($i ~ /^\(/) continue; n++
+           if ($i ~ /min$/) t += 60 * $i; else if ($i ~ /ms$/) t += $i / 1000; else t += $i }}
+         END {if (n) printf "%.3f", t}'
+}
+first_boot_s() { boot_s "$1" '*/first-boot-systemd-analyze.txt'; }
+everyday_boot_s() { boot_s "$1" '*-boot/systemd-analyze.txt'; }
+cell() { [[ -n $1 ]] && awk -v x="$1" 'BEGIN{printf "%.1f s", x}' || echo "–"; }
+change() {
+  [[ -n $1 && -n $2 ]] || { echo "–"; return; }
+  awk -v a="$1" -v b="$2" 'BEGIN{d=a-b; printf "%s%.1f s", (d>=0?"+":"−"), (d<0?-d:d)}'
+}
+result() {
+  case $(cat "$1/status" 2>/dev/null || true) in
+  success) echo "✅ passed" ;; "") echo "–" ;; *) echo "❌ $(cat "$1/status")" ;;
+  esac
+}
+
+arches=()
+for arch in x86_64 aarch64; do [[ -z $(folder "$arch" "$pr") ]] || arches+=("$arch"); done
+
+status="passed"; [[ $conclusion == success ]] || status="**$conclusion**"
+echo '<!-- omarchy-install-test -->'
+echo "### Install test $status"
+echo
+head="| |" rule="| --- |" results="| Result |"
+for arch in "${arches[@]}"; do
+  head+=" \`$arch\` | vs quattro |" rule+=" ---: | ---: |" results+=" $(result "$(folder "$arch" "$pr")") | |"
+done
+printf '%s\n' "$head" "$rule" "$results"
+for row in "Build the ISO|build_s" "Install|install_s" "First boot|first_boot_s" "Everyday boot|everyday_boot_s"; do
+  line="| ${row%|*} |"
+  for arch in "${arches[@]}"; do
+    this=$("${row#*|}" "$(folder "$arch" "$pr")") was=$("${row#*|}" "$(folder "$arch" "$base")")
+    line+=" $(cell "$this") | $(change "$this" "$was") |"
+  done
+  echo "$line"
+done
+echo
+echo "Boots are loader, kernel and userspace, without the VM's firmware."
+for arch in "${arches[@]}"; do
+  pt=$(first "$(folder "$arch" "$pr")" '*/omarchy-install-timing.json')
+  bt=$(first "$(folder "$arch" "$base")" '*/omarchy-install-timing.json')
+  [[ -n $pt ]] || continue
+  echo
+  echo "<details><summary>Install phases, $arch</summary>"
+  echo
+  echo "| Phase | This PR | quattro |"
+  echo "| --- | ---: | ---: |"
+  # Phase names come from the pull request's installer: keep them to plain text.
+  jq -r --slurpfile b <([[ -n $bt ]] && cat "$bt" || echo '{"phases":[]}') '
+    ($b[0].phases | map({key: .name, value: .elapsed}) | from_entries) as $base
+    | .phases[]
+    | "| \(.name | gsub("[^A-Za-z0-9 +&/().-]"; "") | .[0:60]) | \(.elapsed * 10 | round / 10) s | \(($base[.name] // null) | if . == null then "–" else "\(. * 10 | round / 10) s" end) |"
+  ' "$pt"
+  echo
+  echo "</details>"
+done
+echo
+echo "[Run]($run_url) · ${head_sha:0:8}"

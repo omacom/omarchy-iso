@@ -1,0 +1,75 @@
+#!/bin/bash
+# Start the DSP only after archiso has detached the live root from USB.
+set -euo pipefail
+
+check_only=false
+case "${1:-}" in
+  --check) check_only=true ;;
+  '') ;;
+  *) echo "Usage: omarchy-live-dsp [--check]" >&2; exit 2 ;;
+esac
+
+skip() {
+  echo "omarchy-live-dsp: skipping DSP startup: $*"
+  if $check_only; then exit 1; else exit 0; fi
+}
+
+[[ $(uname -m) == aarch64 ]] || skip "not ARM64"
+grep -Fqw 'omarchy.live_dsp=0' /proc/cmdline && skip "disabled on the kernel command line"
+
+# Keep automatic startup limited to hardware tested with this live sequence.
+[[ -r /proc/device-tree/compatible ]] || skip "no device tree"
+tr '\0' '\n' < /proc/device-tree/compatible | grep -Fxq 'lenovo,yoga-slim7x' ||
+  skip "hardware has not been validated"
+
+[[ $(findmnt -rn -M / -o SOURCE,FSTYPE) == 'airootfs overlay' ]] ||
+  skip "not an archiso overlay root"
+[[ $(findmnt -rn -M /run/archiso/copytoram -o FSTYPE) == tmpfs ]] ||
+  skip "no RAM copy of the live image"
+[[ $(findmnt -rn -M /run/archiso/cowspace -o FSTYPE) == tmpfs ]] ||
+  skip "the writable layer is not in RAM"
+
+lowerdir='' upperdir='' workdir=''
+IFS=',' read -ra options <<< "$(findmnt -rn -M / -o FS-OPTIONS)"
+for option in "${options[@]}"; do
+  case "$option" in
+    lowerdir=*) lowerdir=${option#*=} ;;
+    upperdir=*) upperdir=${option#*=} ;;
+    workdir=*) workdir=${option#*=} ;;
+  esac
+done
+[[ $lowerdir == /run/archiso/airootfs ]] || skip "unexpected overlay lower layer"
+for directory in "$upperdir" "$workdir"; do
+  directory=$(realpath -e -- "$directory") || skip "missing overlay writable directory"
+  [[ $directory == /run/archiso/cowspace/* &&
+     $(findmnt -rn -T "$directory" -o TARGET,FSTYPE) == '/run/archiso/cowspace tmpfs' ]] ||
+    skip "overlay writable directory is not in RAM"
+done
+
+[[ $(findmnt -rn -M "$lowerdir" -o FSTYPE) == squashfs ]] ||
+  skip "unexpected live image filesystem"
+loop_device=$(findmnt -rn -M "$lowerdir" -o SOURCE) || skip "missing live image mount"
+[[ $loop_device =~ ^/dev/loop[0-9]+$ ]] || skip "live image is not a loop device"
+backing=$(cat "/sys/class/block/${loop_device##*/}/loop/backing_file") || skip "missing loop backing file"
+backing=$(realpath -e -- "$backing") || skip "unavailable loop backing file"
+[[ $backing == /run/archiso/copytoram/* &&
+   $(findmnt -rn -T "$backing" -o TARGET,FSTYPE) == '/run/archiso/copytoram tmpfs' ]] ||
+  skip "live image is still backed by storage"
+
+for directory in /run/archiso/bootmnt /run/archiso/img_dev; do
+  if mountpoint -q "$directory"; then
+    skip "installation media is still mounted at $directory"
+  fi
+done
+
+# Also refuse a manual retry after other disks or swap have been mounted.
+sources=$(findmnt -ern -o SOURCE) || skip "cannot inspect mounted devices"
+while IFS= read -r source; do
+  [[ $source != /dev/* || $source == "$loop_device" ]] || skip "another block device is mounted"
+done <<< "$sources"
+[[ $(wc -l < /proc/swaps) -eq 1 ]] || skip "swap is active"
+
+echo "omarchy-live-dsp: live root and writable layer verified in RAM"
+$check_only && exit 0
+[[ ! -d /sys/module/qcom_q6v5_pas ]] || skip "driver already loaded"
+exec modprobe -v qcom_q6v5_pas

@@ -1,0 +1,5 @@
+# systemd's rule restarts systemd-vconsole-setup whenever a console binds,
+# which on the live ISO is fbcon taking over tty1 as the installer's getty
+# starts; its loadkeys then races agetty's hangup and fails with EIO. The unit
+# is masked on the live ISO (the configurator runs loadkeys for the layout the
+# user picks), so this empty file stands in for the rule.

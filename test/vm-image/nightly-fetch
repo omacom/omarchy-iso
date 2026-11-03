@@ -1,0 +1,56 @@
+#!/bin/bash
+# Fetches a run's artifact for the publish job, and fast.
+#
+#   nightly-fetch <owner/repo> <run_id> <artifact_name> <out_dir>
+#
+# The download action takes a multi-gigabyte artifact over a few connections,
+# and GitHub's storage limits each one to a few megabytes a second: an 11 GB
+# release would outlast the job. An artifact is one zip at a signed address,
+# so this asks the API for that address and takes it over 16 connections.
+#
+# The zip goes to TMPDIR and is deleted once unpacked, so there has to be room
+# for the artifact twice: point TMPDIR at a disk, not at a /tmp held in memory.
+#
+# Needs gh (with GH_TOKEN allowed to read the run's artifacts), curl, aria2c
+# and unzip. A run started again keeps the artifacts of its earlier attempts
+# under the same name: the newest is the one fetched.
+set -euo pipefail
+[[ $# -eq 4 ]] || { sed -n '2,16p' "$0" >&2; exit 2; }
+repo=$1 run=$2 name=$3 out=$4
+fail() { echo "nightly-fetch: $*" >&2; exit 1; }
+
+id=$(gh api "repos/$repo/actions/runs/$run/artifacts" --paginate \
+  --jq ".artifacts[] | select(.name == \"$name\" and .expired == false) | .id" | sort -n | tail -n 1)
+[[ -n $id ]] || fail "run $run has no artifact named $name"
+size=$(gh api "repos/$repo/actions/artifacts/$id" --jq .size_in_bytes)
+echo "nightly-fetch: artifact $id, $((size / 1048576)) MiB"
+
+zip=$(mktemp -u "${TMPDIR:-/tmp}/nightly-fetch.XXXXXX.zip")
+mkdir -p "$out"
+for place in "$(dirname "$zip")" "$out"; do
+  free=$(( $(df --output=avail -B1 "$place" | tail -n 1) ))
+  (( free > size )) || fail "$place has $((free / 1048576)) MiB free, the artifact is $((size / 1048576)) MiB"
+done
+trap 'rm -f "$zip" "$zip.aria2"' EXIT
+started=$(date +%s)
+# The address is signed for a few minutes. A try that fails asks for a new one
+# and carries on from what is already there.
+for attempt in 1 2 3; do
+  url=$(curl -fsS -o /dev/null -w '%{redirect_url}' \
+    -H "Authorization: Bearer $(gh auth token)" -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/$repo/actions/artifacts/$id/zip")
+  [[ $url == https://* ]] || fail "the API gave no download address for artifact $id"
+  if aria2c --quiet --continue --max-connection-per-server=16 --split=16 --min-split-size=16M \
+    --file-allocation=none --dir="$(dirname "$zip")" --out="$(basename "$zip")" "$url"; then
+    break
+  fi
+  (( attempt < 3 )) || fail "the download failed three times"
+  echo "nightly-fetch: attempt $attempt failed, trying again" >&2
+  sleep 10
+done
+[[ $(stat -c %s "$zip") == "$size" ]] || fail "downloaded $(stat -c %s "$zip") bytes, the artifact is $size"
+seconds=$(( $(date +%s) - started ))
+echo "nightly-fetch: downloaded in $seconds s, $(( size / 1048576 / (seconds > 0 ? seconds : 1) )) MiB/s"
+
+unzip -q "$zip" -d "$out"
+echo "nightly-fetch: $(find "$out" -type f | wc -l) files in $out"

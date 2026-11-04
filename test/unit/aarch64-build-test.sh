@@ -97,7 +97,7 @@ done
 for cfg in grub.cfg loopback.cfg; do
   src="$ROOT/configs/grub/$cfg"
   grep -Fqx 'set live_kernel=%KERNEL%' "$src" || fail "$cfg does not template the kernel"
-  grep -Fq 'vmlinuz-${live_kernel}' "$src" || fail "$cfg entries do not boot the selected kernel"
+  grep -Fq 'vmlinuz-%LIVE_KERNEL%' "$src" || fail "$cfg entries do not boot the selected kernel"
   grep -Fq "if [ \"\${sys_vendor}\" == 'Apple Inc.' ]; then" "$src" || fail "$cfg boots linux-t2 on a machine Apple did not make"
   grep -Fq '%BOOT_SPLASH_KERNEL_OPTIONS%%KERNEL_OPTIONS%' "$src" || fail "$cfg does not template boot options"
   grep -Fq -- "--id 'n1x-recovery'" "$src" || fail "$cfg lacks the N1x recovery entry"
@@ -113,10 +113,19 @@ for cfg in grub.cfg loopback.cfg; do
     fi
     if [[ $platform == aarch64 ]]; then
       grep -Fq 'n1x-recovery' "$fixture/$platform-$cfg" || fail "the aarch64 menu lost the N1x recovery entry in $cfg"
+      # No T2 Mac is arm64. Ventoy hooks the initramfs it finds by literal
+      # path here; without the hook an arm64 boot from its stick can't find
+      # the ISO and drops to a shell.
+      grep -Eq 'live_kernel|linux-t2|sys_vendor' "$fixture/$platform-$cfg" && fail "the aarch64 $cfg still chooses a Mac kernel"
+      grep -Eq '^\s*initrd\s' "$fixture/$platform-$cfg" || fail "the aarch64 $cfg loads no initramfs"
+      grep -E '^\s*initrd\s' "$fixture/$platform-$cfg" | grep -Fv 'initrd /arch/boot/aarch64/initramfs-linux-omarchy.img' \
+        && fail "an aarch64 $cfg entry loads an initramfs Ventoy can't find by name"
     else
       grep -Fq 'n1x-recovery' "$fixture/$platform-$cfg" && fail "recovery entry leaked into the $platform $cfg"
+      grep -Fq "if [ \"\${sys_vendor}\" == 'Apple Inc.' ]; then" "$fixture/$platform-$cfg" || fail "the x86_64 $cfg no longer boots linux-t2 on a Mac"
+      grep -Fq 'initrd /arch/boot/x86_64/initramfs-${live_kernel}.img' "$fixture/$platform-$cfg" || fail "the x86_64 $cfg does not boot the kernel it chose"
     fi
-    grep -Eq '^%N1X_ONLY' "$fixture/$platform-$cfg" && fail "template markers remain in $cfg"
+    grep -Eq '^%(N1X|X86)_ONLY|%LIVE_KERNEL%' "$fixture/$platform-$cfg" && fail "template markers remain in $cfg"
     grep -Fqx 'timeout_style=hidden' "$fixture/$platform-$cfg" || fail "$cfg ($platform) shows the boot menu"
     grep -Fqx 'timeout=0' "$fixture/$platform-$cfg" || fail "$cfg ($platform) waits at the boot menu"
   done

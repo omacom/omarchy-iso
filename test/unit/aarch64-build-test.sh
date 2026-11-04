@@ -125,8 +125,12 @@ for cfg in grub.cfg loopback.cfg; do
       grep -Fq "if [ \"\${sys_vendor}\" == 'Apple Inc.' ]; then" "$fixture/$platform-$cfg" || fail "the x86_64 $cfg no longer boots linux-t2 on a Mac"
       # Ventoy skips an initrd path with a variable in it, as on aarch64.
       grep -E '^\s*initrd\s' "$fixture/$platform-$cfg" | grep -F '$' && fail "an x86_64 $cfg entry loads an initramfs Ventoy can't find by name"
+      # Each kernel loads its own initramfs. live_initrd is plain enough for
+      # bash to run, with initrd printing the path GRUB would load.
       for kernel in linux-omarchy linux-t2; do
-        grep -Fq "initrd /arch/boot/x86_64/initramfs-$kernel.img" "$fixture/$platform-$cfg" || fail "the x86_64 $cfg never loads initramfs-$kernel.img"
+        # shellcheck disable=SC2034,SC2329 # used by the live_initrd under test
+        chosen=$(initrd() { echo "$1"; }; eval "$(sed -n '/^function live_initrd {$/,/^}$/p' "$fixture/$platform-$cfg")"; live_kernel=$kernel; live_initrd)
+        [[ $chosen == "/arch/boot/x86_64/initramfs-$kernel.img" ]] || fail "the x86_64 $cfg loads '$chosen' for $kernel"
       done
     fi
     grep -Eq '^%(N1X|X86)_ONLY|%LIVE_(KERNEL|INITRD)%' "$fixture/$platform-$cfg" && fail "template markers remain in $cfg"

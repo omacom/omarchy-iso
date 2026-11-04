@@ -70,6 +70,7 @@ boot_from_ventoy() {
     ssh_live_root "cat /proc/cmdline" >"$cmdline" 2>/dev/null || true
     started_us=$(ssh_live_root "systemctl show -p UserspaceTimestampMonotonic --value" 2>/dev/null | tr -d '\r')
     log "Live root's PID 1 started ${started_us:-?} µs after the kernel ($mode mode)"
+    log "Live medium ($mode mode): $(ssh_live_root "findmnt -no SOURCE /run/archiso/bootmnt" 2>/dev/null)"
     check "the live system found the ISO at /dev/mapper/ventoy ($mode mode)" \
       ssh_live_root '[ "$(findmnt -no SOURCE /run/archiso/bootmnt)" = /dev/mapper/ventoy ]'
     # Ventoy's own GRUB adds rdinit=/vtoy/vtoy to the kernel's command line;

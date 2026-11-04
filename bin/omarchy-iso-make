@@ -113,10 +113,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --stable-from-rc names the build channel and the install channel together, so
-# a later flag that moves the build to another channel would leave an ISO that
-# installs stable from packages stable will never serve.
-if [[ -n $OMARCHY_INSTALL_CHANNEL && ($OMARCHY_ISO_REF != release || $OMARCHY_MIRROR != rc) ]]; then
-  echo "Error: --stable-from-rc builds from rc, so it can't be combined with --edge, --dev, --rc, --quattro or --local-source" >&2
+# a flag that moves the build to another channel, or puts anything but rc's
+# published packages into it, would leave an ISO that installs stable from
+# packages stable will never serve. A local source keeps its mounts whichever
+# order the flags come in, so it is checked on its own.
+if [[ -n $OMARCHY_INSTALL_CHANNEL ]] &&
+  [[ $OMARCHY_ISO_REF != release || $OMARCHY_MIRROR != rc || -n $LOCAL_OMARCHY_PATH || -n $PACKAGE_DIR || -n $N1X_DEV_SSH_KEY ]]; then
+  echo "Error: --stable-from-rc builds a release from rc's packages, so it can't be combined with --edge, --dev, --rc, --quattro, --local-source, --package-dir or --dev-ssh" >&2
   exit 1
 fi
 

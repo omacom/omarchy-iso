@@ -76,6 +76,9 @@ STUB
 
 chmod +x "$stubs"/*
 
+# omarchy-iso-make keeps its package cache under $HOME, which CI's test user
+# can't write (it runs with root's HOME).
+export HOME="$work/home"
 export SANDBOX="$sandbox" DOCKER_ENV="$work/docker-env" UPLOADS="$work/uploads"
 export PATH="$sandbox/bin:$stubs:$PATH"
 

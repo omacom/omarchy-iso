@@ -153,7 +153,7 @@ TYPE_LAYOUT=us
 echo "ok - type_text types @ and ~ on the keys of the layout being typed into"
 
 # The live ISO is us whatever the install was given.
-take bootstrap_live_root_ssh
+take bootstrap_live_root_ssh grub_menus_waiting
 FIRMWARE=uefi KB_LAYOUT=uk TYPE_LAYOUT=uk
 ocr_screen() { echo "archiso login:"; }
 ssh_live_root() { true; }
@@ -185,7 +185,7 @@ echo "ok - the live root bootstrap types only at a root prompt, retrying on the 
 # The root prompt is matched in what OCR makes of it: the red "root@" comes
 # out as noise, so the pattern rests on the rest, and the login banner alone
 # ("archiso login: root") must not pass for a shell.
-take bootstrap_live_root_ssh
+take bootstrap_live_root_ssh grub_menus_waiting
 ocr_screen() { echo "archiso login:"; }
 wait_for_screen() { grep -qi "$1" <<<"$screen"; }
 ssh_live_root() { grep -q curl "$work/typed"; }
@@ -214,6 +214,97 @@ slept=$(<"$work/slept")
 grep -q '^ctrl-alt-f5 curl' "$work/typed" || fail "the last attempt did not use tty5: $(cat "$work/typed")"
 ((slept <= 300)) || fail "three failed live root logins took ${slept}s"
 echo "ok - live root SSH that never comes up fails after three VTs"
+
+# A press that lands while GRUB shows its menu stops the countdown: on a
+# luks-calibration run the VM sat at the menu until the 300 s ran out. The
+# menu stays until something boots its entry.
+ocr_screen() {
+  if grep -qx ret "$work/pressed"; then
+    echo "archiso login:"
+  else
+    printf '%s\n' "GNU GRUB version 2:2. 18-1" "Try Qmarchy (xe 64, xf4 UEFTI"
+  fi
+}
+wait_for_screen() { true; }
+ssh_live_root() { true; }
+echo 0 >"$work/slept"
+: >"$work/pressed"
+: >"$work/typed"
+run bootstrap_live_root_ssh
+((status == 0)) || fail "a stopped GRUB countdown ended the scenario: $(cat "$work/out")"
+[[ $(sed -n 2p "$work/pressed") == ret ]] || fail "the menu was not booted at the first sight of it: $(paste -sd' ' "$work/pressed")"
+echo "ok - the live root bootstrap boots GRUB's entry when its countdown stopped"
+
+# OCR is no signal for that menu: on a live-misc run it read the header as
+# "GHU GRUE", and the VM sat at the menu for the 300 s. GRUB draws the menu
+# on the serial console too, and says there when it boots an entry.
+SERIAL_LOG="$work/serial.log"
+grub_serial() {
+  printf '%s\r\n' 'BdsDxe: starting Boot0002 "UEFI QEMU DVD-ROM QM00011 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x5,0xFFFF,0x0)' \
+    'GNU GRUB  version 2:2.16-1' '*Install Omarchy (x86_64, x64 UEFI)' ' Try Omarchy (x86_64, x64 UEFI)' \
+    '   The highlighted entry will be executed automatically in 3s.' '   The highlighted entry will be executed automatically in 2s.' \
+    '   The highlighted entry will be executed automatically in 1s.' "$@" >"$SERIAL_LOG"
+}
+grub_serial
+# The menu, as OCR misread it, until Return boots its entry; then the boot,
+# which takes a while and leaves the serial console as it was, then the
+# login prompt.
+count="$work/ocr-count"
+ocr_screen() {
+  if ! grep -qx ret "$work/pressed"; then
+    printf '%s\n' "GHU GRUE wersion 2:2016-1" "Try Omarchy (286 64, =64 UEFL"
+    return
+  fi
+  local n=$(($(cat "$count" 2>/dev/null || echo 0) + 1))
+  echo "$n" >"$count"
+  if ((n > 3)); then
+    [[ -f $work/login-shown ]] || { touch "$work/login-shown"; echo "(login prompt)" >>"$work/pressed"; }
+    echo "archiso login:"
+  else
+    echo "OMARCHY"
+  fi
+}
+rm -f "$count" "$work/login-shown"
+echo 0 >"$work/slept"
+: >"$work/pressed"
+: >"$work/typed"
+run bootstrap_live_root_ssh
+((status == 0)) || fail "a stopped GRUB countdown OCR misread ended the scenario: $(cat "$work/out")"
+[[ $(sed -n 2p "$work/pressed") == ret ]] || fail "the menu on the serial console was not booted: $(paste -sd' ' "$work/pressed")"
+[[ $(sed '/^(login prompt)$/q' "$work/pressed" | grep -cx ret) == 1 ]] ||
+  fail "Return was pressed again while the entry booted: $(paste -sd' ' "$work/pressed")"
+echo "ok - the live root bootstrap boots GRUB's entry by what the serial console shows, once"
+
+# Once GRUB has booted its entry, or never drew a menu there (a hidden one),
+# Return would go to the live system instead: none is pressed, whatever OCR
+# makes of the boot.
+ocr_screen() {
+  local n=$(($(cat "$count" 2>/dev/null || echo 0) + 1))
+  echo "$n" >"$count"
+  if ((n > 3)); then
+    [[ -f $work/login-shown ]] || { touch "$work/login-shown"; echo "(login prompt)" >>"$work/pressed"; }
+    echo "archiso login:"
+  else
+    echo "OMARCHY"
+  fi
+}
+for case in booted hidden; do
+  if [[ $case == booted ]]; then
+    grub_serial "Booting \`Install Omarchy (x86_64, x64 UEFI)'"
+  else
+    printf '%s\r\n' 'BdsDxe: starting Boot0002 "UEFI QEMU DVD-ROM QM00011 "' >"$SERIAL_LOG"
+  fi
+  rm -f "$count" "$work/login-shown"
+  echo 0 >"$work/slept"
+  : >"$work/pressed"
+  : >"$work/typed"
+  run bootstrap_live_root_ssh
+  ((status == 0)) || fail "the live root login failed after a $case menu: $(cat "$work/out")"
+  sed '/^(login prompt)$/q' "$work/pressed" | grep -qx ret &&
+    fail "Return was pressed before the login prompt after a $case menu: $(paste -sd' ' "$work/pressed")"
+done
+echo "ok - no Return is pressed once GRUB has booted, or when its menu is hidden"
+unset SERIAL_LOG
 
 # pxe's NBD wait keeps to its 900 s when a load has failed and the return to
 # the menu takes the menu wait's whole time. (The first wait for the menu,
@@ -354,7 +445,7 @@ run wait_for_live_root_ssh 120
 slept=$(<"$work/slept")
 ((status == 1)) || fail "live root SSH that never came up did not time out (status $status)"
 ((slept <= 120 + 10)) || fail "a 120 s live-SSH wait took ${slept}s"
-take bootstrap_live_root_ssh
+take bootstrap_live_root_ssh grub_menus_waiting
 wait_for_screen() { true; }
 echo 0 >"$work/slept"
 : >"$work/typed"

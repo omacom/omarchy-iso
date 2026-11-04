@@ -37,8 +37,12 @@ class InstallRootImageDdTest(unittest.TestCase):
         self.tmp = Path(tmp.name)
         self.target = self.tmp / "mnt"
         self.target.mkdir()
-        self.image = self.tmp / "omarchy-root.img.zst"
+        self.image = self.tmp / "omarchy-root.sfs"
         self.image.write_bytes(b"\0" * 4096)
+        # The raw image inside it, as _mount_root_image returns it for dd.
+        self.raw = self.tmp / "root-image" / "omarchy-root.img"
+        self.raw.parent.mkdir()
+        self.raw.write_bytes(b"\0" * 4096)
         self.ctx = types.SimpleNamespace(target=self.target, state_dir=self.tmp / "state")
         self.mounts = [
             {"target": str(self.target), "source": f"{DEVICE}[/@]", "fstype": "btrfs",
@@ -75,16 +79,25 @@ class InstallRootImageDdTest(unittest.TestCase):
             raise subprocess.CalledProcessError(1, argv)
         return subprocess.CompletedProcess(argv, 0, "", "")
 
-    def install(self, frames_written=True, fail_on=None):
+    def fake_dd(self, image, device):
+        self.calls.append(["pipe", str(image), device])
+        if self.dd_fails:
+            raise subprocess.CalledProcessError(1, ["dd"])
+
+    def install(self, frames_written=True, fail_on=None, dd_fails=False):
         self.fail_on = fail_on
+        self.dd_fails = dd_fails
         with mock.patch.object(phases_impl, "ROOT_IMAGE", self.image), \
              mock.patch.object(phases_impl, "_root_image_target_mounts", return_value=(self.mounts, DEVICE)), \
              mock.patch.object(phases_impl, "_umount_tree",
                                side_effect=lambda t: self.calls.append(["umount-tree", str(t)])), \
-             mock.patch.object(phases_impl, "_write_root_image_frames",
+             mock.patch.object(phases_impl, "_mount_root_image",
+                               side_effect=lambda c: self.calls.append(["mount-image", str(c)]) or self.raw), \
+             mock.patch.object(phases_impl, "_umount_root_image",
+                               side_effect=lambda: self.calls.append(["umount-image"])), \
+             mock.patch.object(phases_impl, "_write_root_image_parallel",
                                side_effect=lambda i, d: self.calls.append(["frames", str(i), d]) or frames_written), \
-             mock.patch.object(phases_impl, "_write_root_image_pipe",
-                               side_effect=lambda i, d: self.calls.append(["pipe", str(i), d])), \
+             mock.patch.object(phases_impl, "_write_root_image_dd", side_effect=self.fake_dd), \
              mock.patch.object(phases_impl, "_wait_for_blkid_uuid",
                                side_effect=lambda d: self.calls.append(["blkid-wait", d])), \
              mock.patch.object(phases_impl, "_medium_bytes_read", return_value=None), \
@@ -101,11 +114,14 @@ class InstallRootImageDdTest(unittest.TestCase):
 
     def test_order_the_tools_see(self):
         self.install()
-        steps = [["umount-tree"], ["frames"], ["btrfstune", "-f", "-m", DEVICE], ["blkid-wait", DEVICE],
+        steps = [["umount-tree"], ["frames"],
+                 ["btrfstune", "-f", "-m", DEVICE], ["blkid-wait", DEVICE],
                  ["mount", "-o", "subvolid=5", DEVICE], ["btrfs", "filesystem", "resize", "max"]]
         indices = [self.index(step) for step in steps]
         self.assertEqual(indices, sorted(indices), self.calls)
+        # Straight from the squashfs: nothing mounts it.
         self.assertEqual(self.calls[self.index(["frames"])][1:], [str(self.image), DEVICE])
+        self.assertFalse(any(c[0] in ("mount-image", "umount-image") for c in self.calls), self.calls)
 
     def test_layout_left_behind(self):
         self.install()
@@ -346,9 +362,18 @@ class InstallRootImageDdTest(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in (top / "@/srv").iterdir()), ["data"])
 
     def test_a_refused_image_goes_through_the_pipe(self):
+        # dd reads the file inside the mounted squashfs, and the mount goes
+        # away before the image is touched again.
         self.install(frames_written=False)
-        self.assertLess(self.index(["frames"]), self.index(["pipe"]))
-        self.assertLess(self.index(["pipe"]), self.index(["btrfstune"]))
+        steps = [["frames"], ["mount-image", str(self.image)], ["pipe", str(self.raw), DEVICE],
+                 ["umount-image"], ["btrfstune"]]
+        indices = [self.index(step) for step in steps]
+        self.assertEqual(indices, sorted(indices), self.calls)
+
+    def test_a_failed_pipe_still_unmounts_the_image(self):
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.install(frames_written=False, dd_fails=True)
+        self.assertLess(self.index(["pipe"]), self.index(["umount-image"]))
 
     def test_a_failed_reshape_still_unmounts_the_top_level(self):
         with self.assertRaises(subprocess.CalledProcessError):

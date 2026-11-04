@@ -91,6 +91,8 @@
   "finish.title": "Omarchy установлен",
   "finish.titleWithTime": "Omarchy установлен за %1",
   "finish.reboot": "Перезагрузить",
+  "finish.removeMedium": "Теперь можно извлечь установочный носитель",
+  "finish.keepMedium": "Не извлекайте установочный носитель до завершения перезагрузки",
   "finish.fallback": "Установка завершена",
   "failure.title": "Установка Omarchy остановлена",
   "failure.status": "Установщик завершился с кодом %1",

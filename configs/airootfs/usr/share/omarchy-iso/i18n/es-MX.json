@@ -91,6 +91,8 @@
   "finish.title": "Omarchy instalado",
   "finish.titleWithTime": "Omarchy instalado en %1",
   "finish.reboot": "Reiniciar ahora",
+  "finish.removeMedium": "Ya puedes retirar el medio de instalación",
+  "finish.keepMedium": "Deja el medio de instalación conectado hasta que termine el reinicio",
   "finish.fallback": "Instalación terminada",
   "failure.title": "La instalación de Omarchy se detuvo",
   "failure.status": "El instalador terminó con el código %1",

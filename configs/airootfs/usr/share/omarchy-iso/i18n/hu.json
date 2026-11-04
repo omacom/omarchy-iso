@@ -91,6 +91,8 @@
   "finish.title": "Az Omarchy telepítve",
   "finish.titleWithTime": "Az Omarchy telepítve, időtartam: %1",
   "finish.reboot": "Újraindítás most",
+  "finish.removeMedium": "Most már eltávolíthatod a telepítőmédiát",
+  "finish.keepMedium": "Hagyd bent a telepítőmédiát, amíg az újraindítás be nem fejeződik",
   "finish.fallback": "A telepítés kész",
   "failure.title": "Az Omarchy telepítése leállt",
   "failure.status": "A telepítő ezzel az állapottal lépett ki: %1",

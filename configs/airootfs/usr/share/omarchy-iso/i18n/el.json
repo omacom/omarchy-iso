@@ -91,6 +91,8 @@
   "finish.title": "Το Omarchy εγκαταστάθηκε",
   "finish.titleWithTime": "Το Omarchy εγκαταστάθηκε σε %1",
   "finish.reboot": "Επανεκκίνηση",
+  "finish.removeMedium": "Μπορείτε τώρα να αφαιρέσετε το μέσο εγκατάστασης",
+  "finish.keepMedium": "Αφήστε το μέσο εγκατάστασης μέχρι να ολοκληρωθεί η επανεκκίνηση",
   "finish.fallback": "Η εγκατάσταση ολοκληρώθηκε",
   "failure.title": "Η εγκατάσταση του Omarchy σταμάτησε",
   "failure.status": "Το πρόγραμμα εγκατάστασης τερμάτισε με κωδικό %1",

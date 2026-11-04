@@ -91,6 +91,8 @@
   "finish.title": "Zainstalowano Omarchy",
   "finish.titleWithTime": "Zainstalowano Omarchy w %1",
   "finish.reboot": "Uruchom ponownie",
+  "finish.removeMedium": "Możesz teraz wyjąć nośnik instalacyjny",
+  "finish.keepMedium": "Nie wyjmuj nośnika instalacyjnego, dopóki ponowne uruchomienie się nie zakończy",
   "finish.fallback": "Instalacja zakończona",
   "failure.title": "Instalacja Omarchy została przerwana",
   "failure.status": "Instalator zakończył się ze statusem %1",

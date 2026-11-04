@@ -91,6 +91,8 @@
   "finish.title": "Omarchy uppsett",
   "finish.titleWithTime": "Omarchy uppsett á %1",
   "finish.reboot": "Endurræsa núna",
+  "finish.removeMedium": "Nú geturðu fjarlægt uppsetningarmiðilinn",
+  "finish.keepMedium": "Hafðu uppsetningarmiðilinn í þar til endurræsingu er lokið",
   "finish.fallback": "Uppsetningu lokið",
   "failure.title": "Uppsetning Omarchy stöðvaðist",
   "failure.status": "Uppsetningarforritið hætti með stöðu %1",

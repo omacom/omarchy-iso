@@ -91,6 +91,8 @@
   "finish.title": "Omarchy asennettu",
   "finish.titleWithTime": "Omarchy asennettu ajassa %1",
   "finish.reboot": "Käynnistä uudelleen",
+  "finish.removeMedium": "Voit nyt poistaa asennusmedian",
+  "finish.keepMedium": "Jätä asennusmedia paikalleen, kunnes uudelleenkäynnistys on valmis",
   "finish.fallback": "Asennus valmis",
   "failure.title": "Omarchyn asennus pysähtyi",
   "failure.status": "Asennusohjelma päättyi tilakoodiin %1",

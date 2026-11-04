@@ -91,6 +91,8 @@
   "finish.title": "Omarchy встановлено",
   "finish.titleWithTime": "Omarchy встановлено за %1",
   "finish.reboot": "Перезавантажити",
+  "finish.removeMedium": "Тепер можна вийняти інсталяційний носій",
+  "finish.keepMedium": "Не виймайте інсталяційний носій до завершення перезавантаження",
   "finish.fallback": "Встановлення завершено",
   "failure.title": "Встановлення Omarchy зупинено",
   "failure.status": "Інсталятор завершився з кодом %1",

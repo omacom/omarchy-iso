@@ -91,6 +91,8 @@
   "finish.title": "Omarchy installato",
   "finish.titleWithTime": "Omarchy installato in %1",
   "finish.reboot": "Riavvia ora",
+  "finish.removeMedium": "Ora puoi rimuovere il supporto di installazione",
+  "finish.keepMedium": "Lascia inserito il supporto di installazione finché il riavvio non è completato",
   "finish.fallback": "Installazione completata",
   "failure.title": "L'installazione di Omarchy si è interrotta",
   "failure.status": "Il programma di installazione è uscito con codice %1",

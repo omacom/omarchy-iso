@@ -91,6 +91,8 @@
   "finish.title": "Omarchy imesakinishwa",
   "finish.titleWithTime": "Omarchy imesakinishwa kwa %1",
   "finish.reboot": "Washa upya sasa",
+  "finish.removeMedium": "Sasa unaweza kuondoa kifaa cha usakinishaji",
+  "finish.keepMedium": "Acha kifaa cha usakinishaji hadi kuwasha upya kukamilike",
   "finish.fallback": "Usakinishaji umekamilika",
   "failure.title": "Usakinishaji wa Omarchy umesimama",
   "failure.status": "Kisakinishi kimetoka na hali %1",

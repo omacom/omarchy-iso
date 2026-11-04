@@ -91,6 +91,8 @@
   "finish.title": "Omarchy oʻrnatildi",
   "finish.titleWithTime": "Omarchy %1 da oʻrnatildi",
   "finish.reboot": "Qayta ishga tushirish",
+  "finish.removeMedium": "Endi oʻrnatish vositasini chiqarib olishingiz mumkin",
+  "finish.keepMedium": "Qayta ishga tushirish tugaguncha oʻrnatish vositasini chiqarmang",
   "finish.fallback": "Oʻrnatish tugadi",
   "failure.title": "Omarchy oʻrnatilishi toʻxtadi",
   "failure.status": "Oʻrnatuvchi %1 holati bilan yakunlandi",

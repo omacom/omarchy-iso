@@ -91,6 +91,8 @@
   "finish.title": "Omarchy suiteáilte",
   "finish.titleWithTime": "Omarchy suiteáilte i %1",
   "finish.reboot": "Atosaigh anois",
+  "finish.removeMedium": "Is féidir leat an meán suiteála a bhaint anois",
+  "finish.keepMedium": "Fág an meán suiteála isteach go dtí go mbeidh an t-atosú críochnaithe",
   "finish.fallback": "Suiteáil críochnaithe",
   "failure.title": "Stad suiteáil Omarchy",
   "failure.status": "Scoir an suiteálaí le stádas %1",

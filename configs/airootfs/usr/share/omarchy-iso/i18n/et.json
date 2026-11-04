@@ -91,6 +91,8 @@
   "finish.title": "Omarchy on paigaldatud",
   "finish.titleWithTime": "Omarchy paigaldatud ajaga %1",
   "finish.reboot": "Taaskäivita kohe",
+  "finish.removeMedium": "Nüüd võid paigalduskandja eemaldada",
+  "finish.keepMedium": "Jäta paigalduskandja sisse, kuni taaskäivitus on lõppenud",
   "finish.fallback": "Paigaldus on lõpetatud",
   "failure.title": "Omarchy paigaldus peatus",
   "failure.status": "Paigaldaja lõpetas olekuga %1",

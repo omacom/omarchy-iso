@@ -91,6 +91,8 @@
   "finish.title": "Omarchy je nameščen",
   "finish.titleWithTime": "Omarchy je nameščen v %1",
   "finish.reboot": "Znova zaženi",
+  "finish.removeMedium": "Zdaj lahko odstranite namestitveni medij",
+  "finish.keepMedium": "Pustite namestitveni medij priključen, dokler se ponovni zagon ne konča",
   "finish.fallback": "Namestitev končana",
   "failure.title": "Namestitev Omarchy se je ustavila",
   "failure.status": "Namestitveni program je končal s stanjem %1",

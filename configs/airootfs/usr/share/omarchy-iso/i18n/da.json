@@ -91,6 +91,8 @@
   "finish.title": "Omarchy er installeret",
   "finish.titleWithTime": "Omarchy installeret på %1",
   "finish.reboot": "Genstart nu",
+  "finish.removeMedium": "Du kan nu fjerne installationsmediet",
+  "finish.keepMedium": "Lad installationsmediet sidde, indtil genstarten er færdig",
   "finish.fallback": "Installationen er færdig",
   "failure.title": "Omarchy-installationen stoppede",
   "failure.status": "Installationsprogrammet sluttede med status %1",

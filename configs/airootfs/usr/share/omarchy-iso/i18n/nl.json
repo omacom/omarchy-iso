@@ -91,6 +91,8 @@
   "finish.title": "Omarchy geïnstalleerd",
   "finish.titleWithTime": "Omarchy geïnstalleerd in %1",
   "finish.reboot": "Nu herstarten",
+  "finish.removeMedium": "Je kunt het installatiemedium nu verwijderen",
+  "finish.keepMedium": "Laat het installatiemedium zitten tot het herstarten klaar is",
   "finish.fallback": "Installatie voltooid",
   "failure.title": "Installatie van Omarchy gestopt",
   "failure.status": "Installatieprogramma gestopt met status %1",

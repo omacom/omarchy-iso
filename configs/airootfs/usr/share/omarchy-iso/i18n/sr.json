@@ -91,6 +91,8 @@
   "finish.title": "Omarchy је инсталиран",
   "finish.titleWithTime": "Omarchy је инсталиран за %1",
   "finish.reboot": "Поново покрени",
+  "finish.removeMedium": "Сада можете уклонити инсталациони медијум",
+  "finish.keepMedium": "Оставите инсталациони медијум док се поновно покретање не заврши",
   "finish.fallback": "Инсталација је завршена",
   "failure.title": "Инсталација Omarchy-а је заустављена",
   "failure.status": "Инсталатер је завршио са кодом %1",

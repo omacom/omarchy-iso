@@ -91,6 +91,8 @@
   "finish.title": "Omarchy instalēta",
   "finish.titleWithTime": "Omarchy instalēta %1",
   "finish.reboot": "Restartēt tagad",
+  "finish.removeMedium": "Tagad varat izņemt instalācijas datu nesēju",
+  "finish.keepMedium": "Atstājiet instalācijas datu nesēju, līdz restartēšana ir pabeigta",
   "finish.fallback": "Instalēšana pabeigta",
   "failure.title": "Omarchy instalēšana apturēta",
   "failure.status": "Instalētājs beidza darbu ar statusu %1",

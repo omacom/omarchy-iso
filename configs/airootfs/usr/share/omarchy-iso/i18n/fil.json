@@ -91,6 +91,8 @@
   "finish.title": "Na-install ang Omarchy",
   "finish.titleWithTime": "Na-install ang Omarchy sa loob ng %1",
   "finish.reboot": "I-reboot Ngayon",
+  "finish.removeMedium": "Maaari mo nang alisin ang install medium",
+  "finish.keepMedium": "Huwag munang alisin ang install medium hanggang matapos ang reboot",
   "finish.fallback": "Tapos na ang installation",
   "failure.title": "Huminto ang installation ng Omarchy",
   "failure.status": "Lumabas ang installer na may status %1",

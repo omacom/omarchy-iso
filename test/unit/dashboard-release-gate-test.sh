@@ -137,13 +137,13 @@ check_has "the helper's holder diagnosis is forwarded to the log" "holders: init
 
 # ── What the finish screen promises ──────────────────────────────────────────
 scenario render_finish 0
-check_has "a released target invites the medium out" "You can now remove the install medium" "$TTY_OUT"
+check_has "a released target invites the medium out" "finish.removeMedium" "$TTY_OUT"
 
 scenario render_finish 1
 check_has "a held target asks for the medium to stay" \
-  "Leave the install medium in until the reboot completes" "$TTY_OUT"
+  "finish.keepMedium" "$TTY_OUT"
 check_absent "and never promises the opposite in the same breath" \
-  "You can now remove" "$TTY_OUT"
+  "finish.removeMedium" "$TTY_OUT"
 
 # ── What the button does ─────────────────────────────────────────────────────
 scenario reboot_now 0

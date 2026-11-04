@@ -91,6 +91,8 @@
   "finish.title": "Omarchy kuruldu",
   "finish.titleWithTime": "Omarchy %1 içinde kuruldu",
   "finish.reboot": "Yeniden başlat",
+  "finish.removeMedium": "Artık kurulum medyasını çıkarabilirsiniz",
+  "finish.keepMedium": "Yeniden başlatma tamamlanana kadar kurulum medyasını çıkarmayın",
   "finish.fallback": "Kurulum tamamlandı",
   "failure.title": "Omarchy kurulumu durdu",
   "failure.status": "Kurulum programı %1 durumuyla çıktı",

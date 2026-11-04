@@ -91,6 +91,8 @@
   "finish.title": "Omarchy nainstalováno",
   "finish.titleWithTime": "Omarchy nainstalováno za %1",
   "finish.reboot": "Restartovat",
+  "finish.removeMedium": "Nyní můžete vyjmout instalační médium",
+  "finish.keepMedium": "Ponechte instalační médium připojené, dokud se restart nedokončí",
   "finish.fallback": "Instalace dokončena",
   "failure.title": "Instalace Omarchy se zastavila",
   "failure.status": "Instalátor skončil se stavem %1",

@@ -91,6 +91,8 @@
   "finish.title": "Omarchy a fost instalat",
   "finish.titleWithTime": "Omarchy a fost instalat în %1",
   "finish.reboot": "Repornește acum",
+  "finish.removeMedium": "Acum poți scoate mediul de instalare",
+  "finish.keepMedium": "Lasă mediul de instalare conectat până la finalizarea repornirii",
   "finish.fallback": "Instalare terminată",
   "failure.title": "Instalarea Omarchy s-a oprit",
   "failure.status": "Programul de instalare s-a încheiat cu starea %1",

@@ -91,6 +91,8 @@
   "finish.title": "Omarchy е инсталиран",
   "finish.titleWithTime": "Omarchy е инсталиран за %1",
   "finish.reboot": "Рестартирай",
+  "finish.removeMedium": "Вече можете да извадите инсталационния носител",
+  "finish.keepMedium": "Оставете инсталационния носител, докато рестартирането приключи",
   "finish.fallback": "Инсталацията завърши",
   "failure.title": "Инсталацията на Omarchy спря",
   "failure.status": "Инсталаторът завърши с код %1",

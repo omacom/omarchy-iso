@@ -91,6 +91,8 @@
   "finish.title": "Omarchy dipasang",
   "finish.titleWithTime": "Omarchy dipasang dalam %1",
   "finish.reboot": "But semula sekarang",
+  "finish.removeMedium": "Anda kini boleh mengeluarkan media pemasangan",
+  "finish.keepMedium": "Biarkan media pemasangan sehingga but semula selesai",
   "finish.fallback": "Pemasangan selesai",
   "failure.title": "Pemasangan Omarchy terhenti",
   "failure.status": "Pemasang keluar dengan status %1",

@@ -91,6 +91,8 @@
   "finish.title": "Omarchy įdiegta",
   "finish.titleWithTime": "Omarchy įdiegta per %1",
   "finish.reboot": "Paleisti iš naujo",
+  "finish.removeMedium": "Dabar galite ištraukti diegimo laikmeną",
+  "finish.keepMedium": "Palikite diegimo laikmeną, kol bus baigtas paleidimas iš naujo",
   "finish.fallback": "Diegimas baigtas",
   "failure.title": "Omarchy diegimas sustojo",
   "failure.status": "Diegimo programa baigė darbą su būsena %1",

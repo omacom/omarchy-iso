@@ -91,6 +91,8 @@
   "finish.title": "Omarchy instal·lat",
   "finish.titleWithTime": "Omarchy instal·lat en %1",
   "finish.reboot": "Reinicia ara",
+  "finish.removeMedium": "Ja podeu treure el mitjà d'instal·lació",
+  "finish.keepMedium": "Deixeu el mitjà d'instal·lació connectat fins que acabi el reinici",
   "finish.fallback": "Instal·lació acabada",
   "failure.title": "La instal·lació d'Omarchy s'ha aturat",
   "failure.status": "L'instal·lador ha acabat amb el codi %1",

@@ -110,13 +110,30 @@ env=$(OMARCHY_INSTALL_CHANNEL=stable make_env --edge) || fail "an install channe
 [[ $env == *"OMARCHY_INSTALL_CHANNEL=edge" ]] || fail "an install channel in the environment is ignored" "$env"
 pass "only --stable-from-rc sets the install channel"
 
+mkdir -p "$work/omarchy" "$work/pkgs" "$work/bundle"
+: >"$work/bundle/SHA256SUMS"
+printf 'ssh-ed25519 AAAA test\n' >"$work/key.pub"
+# A channel flag after --stable-from-rc moves the build off rc. One before it is
+# overridden, as any later channel flag overrides an earlier one.
 for flag in --edge --dev --rc --quattro; do
   if make_env --stable-from-rc "$flag" >/dev/null; then
     fail "--stable-from-rc refuses $flag after it"
   fi
   grep -Fq "can't be combined" "$work/make-err" || fail "--stable-from-rc says why it refuses $flag" "$(cat "$work/make-err")"
 done
-pass "--stable-from-rc refuses a flag that moves the build off rc"
+# These put other packages, or a dev key, into the build and stay set whatever
+# comes after them, so they're refused on either side.
+for flags in "--local-source $work/omarchy $work/pkgs" \
+  "--arch aarch64 --package-dir $work/bundle" "--arch aarch64 --dev-ssh $work/key.pub"; do
+  for order in "--stable-from-rc $flags" "$flags --stable-from-rc"; do
+    # shellcheck disable=SC2086 # each case is several arguments
+    if make_env $order >/dev/null; then
+      fail "--stable-from-rc refuses: $order"
+    fi
+    grep -Fq "can't be combined" "$work/make-err" || fail "--stable-from-rc says why it refuses: $order" "$(cat "$work/make-err")"
+  done
+done
+pass "--stable-from-rc refuses a flag that changes what goes into the build, in either order"
 
 # --- build-iso.sh ---------------------------------------------------------------
 # The builder holds the line too, for anything that runs it without the make

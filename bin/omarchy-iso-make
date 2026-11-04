@@ -9,6 +9,8 @@ LOCAL_PKGS_PATH=""
 OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
 N1X_DEV_SSH_KEY=""
 PACKAGE_DIR=""
+# Set only by --stable-from-rc; every other build installs its own channel.
+OMARCHY_INSTALL_CHANNEL=""
 while [[ $# -gt 0 ]]; do
   case $1 in
   --arch)
@@ -90,14 +92,33 @@ while [[ $# -gt 0 ]]; do
     OMARCHY_MIRROR=rc
     shift
     ;;
+  --stable-from-rc)
+    # A final release's ISO, built before rc is promoted to stable: rc's
+    # packages and Arch mirror, installed onto the stable channel. Ship holds
+    # the promotion until stable's Arch mirror serves rc's snapshot, and the
+    # promotion copies rc's packages to stable as they are, so once it has run
+    # stable serves what this ISO carries.
+    OMARCHY_ISO_REF=release
+    OMARCHY_MIRROR=rc
+    OMARCHY_INSTALL_CHANNEL=stable
+    shift
+    ;;
   *)
     echo "Unknown option: $1"
-    echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
-    echo "       $0 --arch aarch64 [--edge|--rc] [--package-dir DIR] [--dev-ssh <pubkey>] [--local-source <omarchy-checkout> <pkgs-checkout>] [...]"
+    echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc|--stable-from-rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
+    echo "       $0 --arch aarch64 [--edge|--rc|--stable-from-rc] [--package-dir DIR] [--dev-ssh <pubkey>] [--local-source <omarchy-checkout> <pkgs-checkout>] [...]"
     exit 1
     ;;
   esac
 done
+
+# --stable-from-rc names the build channel and the install channel together, so
+# a later flag that moves the build to another channel would leave an ISO that
+# installs stable from packages stable will never serve.
+if [[ -n $OMARCHY_INSTALL_CHANNEL && ($OMARCHY_ISO_REF != release || $OMARCHY_MIRROR != rc) ]]; then
+  echo "Error: --stable-from-rc builds from rc, so it can't be combined with --edge, --dev, --rc, --quattro or --local-source" >&2
+  exit 1
+fi
 
 if [[ -n $LOCAL_OMARCHY_PATH ]]; then
   [[ -d $LOCAL_OMARCHY_PATH ]] || { echo "Error: Omarchy checkout not found at $LOCAL_OMARCHY_PATH" >&2; exit 1; }
@@ -196,12 +217,16 @@ mkdir -p "$BUILD_RELEASE_PATH"
 
 OMARCHY_ISO_REF="${OMARCHY_ISO_REF:-quattro}"
 OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
+# The channel the installed machine follows. It is the build channel unless
+# --stable-from-rc says otherwise.
+OMARCHY_INSTALL_CHANNEL="${OMARCHY_INSTALL_CHANNEL:-$OMARCHY_MIRROR}"
 
 DOCKER_ARGS=(
   --rm
   --privileged
   -e "OMARCHY_ISO_REF=$OMARCHY_ISO_REF"
   -e "OMARCHY_MIRROR=$OMARCHY_MIRROR"
+  -e "OMARCHY_INSTALL_CHANNEL=$OMARCHY_INSTALL_CHANNEL"
   -e "OMARCHY_INSTALL_DEBUG=${OMARCHY_INSTALL_DEBUG:-}"
   -e "OMARCHY_ARCH=$OMARCHY_ARCH"
   -e "OMARCHY_KERNEL=$OMARCHY_KERNEL"

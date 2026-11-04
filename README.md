@@ -237,6 +237,8 @@ Despite the local folder name, the first argument is the Omarchy source checkout
 
 Use `--dev` or `--rc` to build against those package channels. Both `--dev` and `--edge` select the dev packages from the edge mirror.
 
+An ISO installs onto the channel it was built from, except with `--stable-from-rc`. That flag builds a final release's ISO from rc, before rc is promoted to stable: rc's packages and Arch mirror, with stable's `pacman.conf` on the installed machine. Ship promotes rc to stable unchanged, once stable's Arch mirror serves rc's snapshot, so after the promotion stable serves what the ISO carries. A machine installed from it before the promotion is on a stable channel that doesn't serve the release yet.
+
 ### aarch64
 
 ```bash
@@ -329,6 +331,8 @@ Run `./bin/omarchy-iso-upload [release/omarchy.iso]`. This requires rclone confi
 ## Full release of the ISO
 
 Run `./bin/omarchy-iso-release VERSION` to create, test, sign, and upload the ISO in one flow. Add `--rc` to release an RC build instead.
+
+Add `--stable-from-rc` to build a final release's ISO before rc is promoted to stable. It builds from rc and installs onto stable, and it keeps the final release's name (`omarchy-VERSION.iso`). It refuses to build until rc serves `omarchy` and `omarchy-settings` at `VERSION`.
 
 ## LUKS calibration during live boot
 

@@ -76,22 +76,29 @@ tips=(
   progress.tip.menu
   progress.tip.keybindings
   progress.tip.superKey
-  progress.tip.signPdfs
   progress.tip.localSend
   progress.tip.webApps
   progress.tip.terminal
-  progress.tip.media
+  progress.tip.presentations
+  progress.tip.webcam
   progress.tip.ocr
   progress.tip.screenshots
   progress.tip.reminders
   progress.tip.themes
-  progress.tip.transparentBar
-  progress.tip.windows
+  progress.tip.barBackground
+  progress.tip.desktop
   progress.tip.clipboard
   progress.tip.workspaces
   progress.tip.colorPicker
   progress.tip.update
 )
+
+# Omarchy offers Install > Windows on x86 only.
+if [[ $(uname -m) == x86_64 ]]; then
+  tips+=(
+    progress.tip.windows
+  )
+fi
 
 cleanup() {
   printf '%s%s' "$RESET" "$SHOW_CURSOR" >"$TTY_PATH" 2>/dev/null || true

@@ -125,6 +125,11 @@ for cfg in grub.cfg loopback.cfg; do
       grep -Fq "if [ \"\${sys_vendor}\" == 'Apple Inc.' ]; then" "$fixture/$platform-$cfg" || fail "the x86_64 $cfg no longer boots linux-t2 on a Mac"
       # Ventoy skips an initrd path with a variable in it, as on aarch64.
       grep -E '^\s*initrd\s' "$fixture/$platform-$cfg" | grep -F '$' && fail "an x86_64 $cfg entry loads an initramfs Ventoy can't find by name"
+      # Every entry that boots the live kernel loads its initramfs through
+      # live_initrd.
+      entries=$(grep -c 'vmlinuz-${live_kernel} ' "$fixture/$platform-$cfg")
+      ((entries > 0)) && [[ $(grep -cx '\s*live_initrd' "$fixture/$platform-$cfg") == "$entries" ]] \
+        || fail "an x86_64 $cfg entry boots the live kernel without live_initrd"
       # Each kernel loads its own initramfs. live_initrd is plain enough for
       # bash to run, with initrd printing the path GRUB would load.
       for kernel in linux-omarchy linux-t2; do

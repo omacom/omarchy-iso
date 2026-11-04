@@ -275,8 +275,8 @@ def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
             info(f"[step] FS.udevadm settle ({settle['calls']} calls): {settle['seconds']:.6f}s")
 
 
-def _write_locale_conf_for_prebuilt(installer, locale_config) -> None:
-    """Write /etc/locale.conf when archinstall's set_locale declined to.
+def _write_locale_conf_for_prebuilt(installer, locale_config) -> bool:
+    """Write /etc/locale.conf when the image already compiled the locale.
 
     set_locale finds the chosen locale by matching a *commented* line in
     /etc/locale.gen (`re.compile(rf'#{lang}(\\.{encoding})?{modifier} {encoding}')`),
@@ -288,13 +288,14 @@ def _write_locale_conf_for_prebuilt(installer, locale_config) -> None:
     systemd's LANG=C.UTF-8 instead of the locale it just generated.
 
     So: if the locale is present and *enabled* in locale.gen, the image already
-    did set_locale's work and only the last line is missing. Anything else is a
-    genuine failure and is left alone for the caller's error to stand.
+    did set_locale's work and only the last line is missing; write it and
+    return True, without calling set_locale to log a misleading error. Anything
+    else returns False and goes through set_locale.
     """
     target = Path(installer.target)
     locale_gen = target / "etc" / "locale.gen"
     if not locale_gen.is_file():
-        return
+        return False
     lang, encoding = locale_config.sys_lang, locale_config.sys_enc
     # sys_lang may or may not already carry the encoding ("en_US" vs
     # "en_US.UTF-8"); accept the entry either way, as set_locale's regex does.
@@ -305,9 +306,10 @@ def _write_locale_conf_for_prebuilt(installer, locale_config) -> None:
         None,
     )
     if not enabled:
-        return
+        return False
     (target / "etc" / "locale.conf").write_text(f"LANG={enabled}\n")
     info(f"› locale {enabled} is already compiled into the image; wrote locale.conf directly")
+    return True
 
 
 def perform_filesystem_operations(arch_config: ArchConfig, throwaway_root_fs: bool = False) -> None:
@@ -547,11 +549,11 @@ def install_base_delta(
         if hostname:
             installer.set_hostname(hostname)
 
-    with _time_step("DELTA.locale_and_keyboard"):
-        if locale_config:
-            if not installer.set_locale(locale_config):
-                _write_locale_conf_for_prebuilt(installer, locale_config)
-            installer.set_keyboard_language(locale_config.kb_layout)
+    # The keyboard is not set here: the caller blanks kb_layout and writes the
+    # keymap itself with configure_keyboard, which needs no booted container.
+    with _time_step("DELTA.locale"):
+        if locale_config and not _write_locale_conf_for_prebuilt(installer, locale_config):
+            installer.set_locale(locale_config)
 
     installer._helper_flags["base"] = True
 

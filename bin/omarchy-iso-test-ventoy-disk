@@ -1,0 +1,77 @@
+#!/bin/bash
+#
+# Make a Ventoy stick as a disk image, with the ISO on its exFAT partition,
+# for test/integration.d/ventoy-test.sh. Ventoy boots the ISO as a file and
+# injects its own initramfs scripts, a path neither an optical drive nor a
+# dd'ed stick takes; 4.5.0rc2 and rc3 stopped behind the splash there.
+#
+# Ventoy2Disk.sh needs a block device, so this attaches the image to a loop
+# device and mounts the data partition: it runs as root (through sudo when
+# not root already), with GNU parted and dosfstools, which Ventoy2Disk.sh
+# calls.
+
+set -euo pipefail
+
+VENTOY_VERSION=1.1.18
+VENTOY_SHA256=d86ff9de63d94c8b8f1f6b14d23c55af4b88e8207bf2893890892a6a97b1ad54
+
+if (($# != 2)); then
+  echo "Usage: omarchy-iso-test-ventoy-disk <omarchy.iso> <ventoy.img>" >&2
+  exit 1
+fi
+iso=$(realpath "$1")
+out=$(realpath -m "$2")
+[[ -f $iso ]] || { echo "No such ISO: $iso" >&2; exit 1; }
+
+sudo=()
+((EUID == 0)) || sudo=(sudo -n)
+
+work=$(mktemp -d)
+loop=""
+cleanup() {
+  [[ -d $work/mnt ]] && "${sudo[@]}" umount "$work/mnt" 2>/dev/null || true
+  [[ -n $loop ]] && "${sudo[@]}" losetup -d "$loop" || true
+  rm -rf "$work"
+}
+trap cleanup EXIT
+
+tarball="$work/ventoy-$VENTOY_VERSION-linux.tar.gz"
+curl -fsSL --retry 3 -o "$tarball" \
+  "https://github.com/ventoy/Ventoy/releases/download/v$VENTOY_VERSION/ventoy-$VENTOY_VERSION-linux.tar.gz"
+echo "$VENTOY_SHA256  $tarball" | sha256sum -c --quiet -
+tar -xzf "$tarball" -C "$work"
+
+# The ISO, 1 GiB for exFAT and Ventoy's own 32 MiB partition, sparse.
+rm -f "$out"
+truncate -s $(($(stat -c %s "$iso") + (1 << 30))) "$out"
+loop=$("${sudo[@]}" losetup --show -f "$out")
+# GPT (-g), as UEFI machines are set up; Ventoy asks twice before it writes.
+(cd "$work/ventoy-$VENTOY_VERSION" && printf 'y\ny\n' | "${sudo[@]}" sh ./Ventoy2Disk.sh -I -g "$loop" >/dev/null)
+"${sudo[@]}" losetup -d "$loop"
+loop=$("${sudo[@]}" losetup --show -fP "$out")
+
+# Ventoy2Disk.sh writes Ventoy's own partition with `xzcat | dd bs=512
+# count=...` and no iflag=fullblock (tool/VentoyWorker.sh). A short read from
+# the pipe uses up the count early, so the end of the partition stays zero,
+# ventoy_x64.efi among it. Ventoy's GRUB then cannot chainload that file
+# ("cannot load image") and boots the ISO's grub.cfg itself, adding its hook
+# to whatever initrd that loads. A machine with a whole stick never takes that
+# path, so the partition is written again from the image and compared.
+xzcat "$work/ventoy-$VENTOY_VERSION/ventoy/ventoy.disk.img.xz" >"$work/ventoy.disk.img"
+"${sudo[@]}" dd if="$work/ventoy.disk.img" of="${loop}p2" bs=1M conv=fsync status=none
+image_sum=$(sha256sum <"$work/ventoy.disk.img")
+partition_sum=$("${sudo[@]}" head -c "$(stat -c %s "$work/ventoy.disk.img")" "${loop}p2" | sha256sum)
+if [[ $partition_sum != "$image_sum" ]]; then
+  echo "Ventoy's partition on $out does not match its image" >&2
+  exit 1
+fi
+
+mkdir "$work/mnt"
+"${sudo[@]}" mount -o "uid=$(id -u)" "${loop}p1" "$work/mnt"
+cp "$iso" "$work/mnt/"
+# No second menu: Enter on the ISO boots it in normal mode, and r before it
+# switches to GRUB2 mode, so a test drives Ventoy by keys alone.
+mkdir -p "$work/mnt/ventoy"
+echo '{ "control": [ { "VTOY_SECONDARY_BOOT_MENU": "0" } ] }' >"$work/mnt/ventoy/ventoy.json"
+sync
+echo "Ventoy $VENTOY_VERSION stick with ${iso##*/}: $out"

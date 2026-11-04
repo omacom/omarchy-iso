@@ -217,7 +217,6 @@ PKG_FLOOR_TAU=900      # with a work signal, time is only a backstop until the
 
 POS=10                 # position, per-mille, monotonic
 PROGRESS_PM=10
-VERIFY_PCT=-1          # honest percent of the pre-flight verify, -1 when idle
 NOW=0                  # monotonic seconds, refreshed once per frame
 DASH_T0=0
 PHASE_NAME=""          # last phase this process observed
@@ -310,7 +309,6 @@ install_progress() {
   local -a state
 
   PROGRESS_PM=$POS
-  VERIFY_PCT=-1
   [[ -f $STATE_FILE ]] || return 0
 
   mapfile -t state < <(jq -r '
@@ -413,12 +411,6 @@ install_progress() {
   fi
   if (( progress_pm >= 0 )); then
     (( progress_pm > 1000 )) && progress_pm=1000
-    # The pre-flight band is 15 per-mille wide (the phase is subsecond once
-    # the boot-time hash has finished), so real progress mapped into it moves
-    # the bar about one cell over minutes and reads as a hang. Surface the
-    # honest percent as a status line instead (render_dynamic); the unpack's
-    # band is wide enough that its progress shows in the bar itself.
-    [[ $phase == "Preparing install target" ]] && VERIFY_PCT=$(( progress_pm / 10 ))
     work=$(( lo + (span - 1 - PKG_TAIL_PM) * progress_pm / 1000 ))
     (( work > pos )) && pos=$work
   fi
@@ -465,15 +457,8 @@ update_progress() {
   LAST_PM=$pm
 }
 
-# The status row shows the verify's honest percent while the pre-flight gate
-# waits on the hash, and stays blank otherwise.
-progress_status() {
-  (( VERIFY_PCT >= 0 )) && printf 'verifying the install medium: %d%%' "$VERIFY_PCT"
-  return 0
-}
-
 render_dynamic() {
-  progress_icon_frame "$LAST_PM" "$(progress_status)" "$(t progress.tipLine "$(current_tip)")"
+  progress_icon_frame "$LAST_PM" "" "$(t progress.tipLine "$(current_tip)")"
 }
 
 install_duration() {

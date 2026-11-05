@@ -64,16 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          # 4.5.0 is published as omarchy-4.5.0-x86.iso, the releases before
-          # it without the architecture. Only a 404 means the older name: any
-          # other answer stops here instead of fetching the wrong file.
-          iso=omarchy-$VERSION-x86.iso
-          status=$(curl -sSIL --retry 3 --retry-all-errors -o /dev/null -w '%{http_code}' "https://iso.omarchy.org/$iso")
-          case $status in
-          200) ;;
-          404) iso=omarchy-$VERSION.iso ;;
-          *) echo "::error::iso.omarchy.org answered $status for $iso"; exit 1 ;;
-          esac
+          iso=$(./test/vm-image/release-iso-name "$VERSION")
           curl -fSL --retry 3 -o "release/$iso" "https://iso.omarchy.org/$iso"
           curl -fsSL --retry 3 -o "release/$iso.sig" "https://iso.omarchy.org/$iso.sig"
           home=$(mktemp -d)

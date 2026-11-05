@@ -228,6 +228,30 @@ else
   echo "nightly-fetch tests skipped: no zip or unzip here"
 fi
 
+# ------------------------------------------------------------ release-iso-name
+# curl is a stand-in that answers with ISO_STATUS, or fails as a network error
+# does when it is "down".
+named="$ROOT/test/vm-image/release-iso-name"
+bash -n "$named"
+mkdir -p "$tmp/iso-curl"
+cat >"$tmp/iso-curl/curl" <<'STUB'
+#!/bin/bash
+echo "${@: -1}" >>"$ISO_LOG"
+[[ $ISO_STATUS == down ]] && { printf 000; echo "curl: (6) Could not resolve host" >&2; exit 6; }
+printf '%s' "$ISO_STATUS"
+STUB
+chmod +x "$tmp/iso-curl/curl"
+iso_name() { env PATH="$tmp/iso-curl:$PATH" ISO_LOG="$tmp/iso.log" ISO_STATUS="$1" "$named" "$2"; }
+
+: >"$tmp/iso.log"
+equal "iso name: a release published with its architecture" "$(iso_name 200 4.5.0)" "omarchy-4.5.0-x86.iso"
+equal "iso name: the -x86 name is the one asked for" "$(cat "$tmp/iso.log")" "https://iso.example/omarchy-4.5.0-x86.iso"
+equal "iso name: a release from before 4.5.0" "$(iso_name 404 4.0.6)" "omarchy-4.0.6.iso"
+refused "iso name: another answer than 200 or 404" iso_name 503 4.5.0
+grep -q 'answered 503' "$tmp/refused.err" || fail "iso name: the answer was not named"
+refused "iso name: a network error" iso_name down 4.5.0
+grep -q 'could not reach' "$tmp/refused.err" || fail "iso name: a network error was not reported as one"
+
 # -------------------------------------------------------------- nightly-rclone
 wrapped="$ROOT/test/vm-image/nightly-rclone"
 bash -n "$wrapped"

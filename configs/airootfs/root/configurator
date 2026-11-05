@@ -457,16 +457,32 @@ get_root_disk() {
 # partition_path lives in disk-partitioning.sh alongside the creation helpers.
 
 # BitLocker writes the "-FVE-FS-" signature at offset 3 of the partition.
+# Prints every encrypted partition on the disk, one per line.
 detect_bitlocker() {
   local p sig
   for p in $(lsblk -lnpo NAME,TYPE "$disk" | awk '$2=="part"{print $1}'); do
     sig=$(dd if="$p" bs=1 skip=3 count=8 status=none 2>/dev/null)
     if [[ "$sig" == "-FVE-FS-" ]]; then
       echo "$p"
-      return 0
     fi
   done
-  return 1
+}
+
+# BitLocker encrypts a partition, not the disk, and the free-space install only
+# writes to free space and its own ESP, so an encrypted Windows stays out of its
+# way. The risk left is a recovery-key prompt the next time Windows boots: say so
+# and let the user choose. Returns 1 to go back to the mode picker.
+confirm_bitlocker_alongside() {
+  local parts part
+  parts=$(detect_bitlocker)
+  [[ -n "$parts" ]] || return 0
+  for part in $parts; do
+    say --foreground 1 "$(t bitlocker.found "$part")"
+  done
+  say "$(t bitlocker.untouched)"
+  say "$(t bitlocker.recovery)"
+  echo
+  gum confirm --affirmative "$(t common.yes)" --negative "$(t common.back)" "$(t bitlocker.prompt)"
 }
 
 # Save vendor-signed Qualcomm firmware before a full-disk install removes Windows.
@@ -651,19 +667,7 @@ not_enough_space() {
 # to fall back to the install-mode picker.
 run_partition_decide() {
   step "$(t bitlocker.checking "$disk")"
-  local bl_part
-  bl_part=$(detect_bitlocker || true)
-  if [[ -n "$bl_part" ]]; then
-    say --foreground 1 "$(t bitlocker.found "$bl_part")"
-    say "$(t bitlocker.hint)"
-    say "$(t bitlocker.suspend)"
-    echo
-    # Back to the mode picker rather than out of the installer: the free-space
-    # install is the default on a disk with partitions, so Enter lands here.
-    gum confirm --affirmative "$(t common.back)" --negative "$(t bitlocker.quit)" "$(t space.prompt)" ||
-      abort "$(t bitlocker.abort)"
-    return 1
-  fi
+  confirm_bitlocker_alongside || return 1
 
   # Omarchy always creates its own dedicated ESP in free space and never
   # adopts an existing (Windows) ESP. Sharing the Windows ESP is fragile:

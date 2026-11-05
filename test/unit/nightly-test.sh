@@ -130,6 +130,19 @@ equal "stable: unpacked folder" "$(field .vm.unpacked)" "https://nightly.example
 (cd "$tmp/out/stable/4.0.4/431" && sha256sum -c --quiet omarchy-4.0.4.qcow2.sha256) || fail "stable: the image's checksum file does not match it"
 (cd "$tmp/out/stable/4.0.4/431/unpacked" && sha256sum -c --quiet SHA256SUMS) || fail "stable: SHA256SUMS does not match the unpacked files"
 
+# 4.5.0 is published with its architecture in the ISO's name. latest.json
+# points at that name, and the image keeps the version's.
+rm -rf "$tmp/out"
+echo "a released x86 iso" >"$tmp/release/omarchy-4.5.0-x86.iso"
+sealed "$tmp/sealed-x86"
+"$layout" stable 4.5.0 stable/4.5.0/478 "$tmp/release/omarchy-4.5.0-x86.iso" "$tmp/sealed-x86" "$tmp/stable-packages" "$tmp/out" >/dev/null
+equal "stable: url is the x86 release's" "$(field .url)" "https://iso.example/omarchy-4.5.0-x86.iso"
+equal "stable: the image keeps the version's name" "$(field .vm.url)" "https://nightly.example/stable/4.5.0/478/omarchy-4.5.0.qcow2"
+echo "a released aarch64 iso" >"$tmp/release/omarchy-4.5.0-aarch64.iso"
+sealed "$tmp/sealed-arch"
+refused "a released ISO of another architecture" "$layout" stable 4.5.0 stable/4.5.0/9 "$tmp/release/omarchy-4.5.0-aarch64.iso" "$tmp/sealed-arch" "$tmp/stable-packages" "$tmp/out7"
+grep -q 'omarchy-4.5.0-aarch64.iso' "$tmp/refused.err" || fail "a released ISO of another architecture was refused for another reason"
+
 # edge-aarch64: the ISO and latest.json, no image yet. The ARM install test
 # answers with the Omarchy package (twice, as pacman does) and the kernel.
 rm -rf "$tmp/out"

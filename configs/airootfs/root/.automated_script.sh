@@ -137,6 +137,19 @@ cd /root
 if /usr/local/bin/omarchy-cidata-load; then
   echo "Autoinstall configuration found on cidata drive; skipping the configurator."
   export OMARCHY_UI_INTERACTIVE=no
+
+  # Run pre-install scripts if they exist
+  if [[ -d /root/scripts-pre ]]; then
+    export OMARCHY_SCRIPTS_PRE=/root/scripts-pre
+    for script in $OMARCHY_SCRIPTS_PRE/*; do
+      echo "Running pre-install scripts: $script"
+      . "$script"
+    done
+  fi
+  if [[ -d /root/scripts-post ]]; then
+    echo "Registering post-install scripts..."
+    export OMARCHY_SCRIPTS_POST=/root/scripts-post
+  fi
 else
   ./configurator
 fi

@@ -97,8 +97,8 @@ if [[ $channel == edge ]]; then
   iso_sha256=$(cut -d' ' -f1 "$dir/$iso.sha256") iso_size=$(stat -c %s "$dir/$iso")
 else
   name=omarchy-$version
-  iso=$name.iso
-  [[ ${iso_file##*/} == "$iso" ]] || fail "the released ISO is $iso, not ${iso_file##*/}"
+  iso=${iso_file##*/}
+  [[ $iso == "$name.iso" || $iso == "$name-x86.iso" ]] || fail "the released ISO is $name.iso or $name-x86.iso, not $iso"
   iso_url=$iso_site/$iso
   iso_sha256=$(sha256sum "$iso_file" | cut -d' ' -f1) iso_size=$(stat -c %s "$iso_file")
 fi

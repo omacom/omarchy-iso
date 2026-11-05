@@ -23,17 +23,18 @@ Every release ISO has a `.sha256` file and a `.sig` file next to it. Run these c
 ```bash
 version=$(curl -fsSL https://api.github.com/repos/omacom/omarchy/releases/latest | jq -r .tag_name)
 version=${version#v}
-curl -fLO "https://iso.omarchy.org/omarchy-$version.iso"
-curl -fsSLO "https://iso.omarchy.org/omarchy-$version.iso.sha256"
-sha256sum -c "omarchy-$version.iso.sha256"
+iso=omarchy-$version-x86.iso
+curl -fLO "https://iso.omarchy.org/$iso"
+curl -fsSLO "https://iso.omarchy.org/$iso.sha256"
+sha256sum -c "$iso.sha256"
 ```
 
 The checksum only catches a corrupted download. The `.sig` file proves that Omarchy built the ISO. Fetch the Omarchy signing key by its full fingerprint, then verify the ISO with GnuPG:
 
 ```bash
 gpg --keyserver hkps://keys.openpgp.org --recv-keys 40DFB630FF42BCFFB047046CF0134EE680CAC571
-curl -fsSLO "https://iso.omarchy.org/omarchy-$version.iso.sig"
-gpg --verify "omarchy-$version.iso.sig" "omarchy-$version.iso"
+curl -fsSLO "https://iso.omarchy.org/$iso.sig"
+gpg --verify "$iso.sig" "$iso"
 ```
 
 The output must say `Good signature from "Omarchy <pkgs@omarchy.org>"` and show the key `40DFB630FF42BCFFB047046CF0134EE680CAC571`. A warning that the key is not certified with a trusted signature is expected. It means only that you have not signed the key yourself.
@@ -52,7 +53,7 @@ The rest of this file covers building, testing and publishing the ISO.
 
 | What | Where | When |
 | --- | --- | --- |
-| Release ISO | `https://iso.omarchy.org/omarchy-<version>.iso` | Each release |
+| Release ISO | `https://iso.omarchy.org/omarchy-<version>-x86.iso` and `-aarch64.iso` (before 4.5.0: `omarchy-<version>.iso`) | Each release |
 | Edge ISO | `https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.iso` | Every night |
 | VM image of edge | `https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.qcow2` | Every night |
 | VM image of the latest release | `https://nightly.omarchy.org/stable/<version>/<run>/omarchy-<version>.qcow2` | Once per release |

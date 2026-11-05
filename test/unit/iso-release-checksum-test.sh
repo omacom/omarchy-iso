@@ -64,7 +64,7 @@ run_upload() {
 
 PATH="$work/stubs:$PATH" "$sandbox/bin/omarchy-iso-release" --no-make 9.9.9 >/dev/null
 
-release_iso="$sandbox/release/omarchy-9.9.9.iso"
+release_iso="$sandbox/release/omarchy-9.9.9-x86.iso"
 checksum_file="$release_iso.sha256"
 
 [[ -f $checksum_file ]] ||
@@ -73,42 +73,42 @@ pass "release writes a checksum beside the ISO"
 
 # The name in the file has to be the ISO alone. A build path in there verifies
 # only on the release machine, which is the one machine that never needs it.
-expected="$(sha256sum "$release_iso" | cut -d " " -f 1)  omarchy-9.9.9.iso"
+expected="$(sha256sum "$release_iso" | cut -d " " -f 1)  omarchy-9.9.9-x86.iso"
 actual="$(cat "$checksum_file")"
 [[ $actual == "$expected" ]] ||
   fail "the checksum names the ISO alone" "expected: $expected"$'\n'"actual:   $actual"
 pass "the checksum names the ISO alone"
 
-(cd "$sandbox/release" && sha256sum -c --status omarchy-9.9.9.iso.sha256) ||
+(cd "$sandbox/release" && sha256sum -c --status omarchy-9.9.9-x86.iso.sha256) ||
   fail "sha256sum -c verifies the ISO from its own directory"
 pass "sha256sum -c verifies the ISO from its own directory"
 
 # The whole point of the sidecar is catching bytes that changed after release,
 # so prove it fails on bytes that changed after release.
 printf 'corrupted\n' >>"$release_iso"
-if (cd "$sandbox/release" && sha256sum -c --status omarchy-9.9.9.iso.sha256 2>/dev/null); then
+if (cd "$sandbox/release" && sha256sum -c --status omarchy-9.9.9-x86.iso.sha256 2>/dev/null); then
   fail "sha256sum -c rejects a corrupted ISO"
 fi
 pass "sha256sum -c rejects a corrupted ISO"
 
 # An unreadable ISO must stop the release rather than publish an empty digest
 # beside a stale sidecar from the previous one.
-stale="$sandbox/release/omarchy-8.8.8.iso.sha256"
-printf 'deadbeef  omarchy-8.8.8.iso\n' >"$stale"
+stale="$sandbox/release/omarchy-8.8.8-x86.iso.sha256"
+printf 'deadbeef  omarchy-8.8.8-x86.iso\n' >"$stale"
 rm "$sandbox/release/omarchy-2099.01.01-x86_64-quattro.iso"
 printf 'not really an iso\n' >"$sandbox/release/omarchy-2099.01.02-x86_64-quattro.iso"
-cp "$sandbox/release/omarchy-2099.01.02-x86_64-quattro.iso" "$sandbox/release/omarchy-8.8.8.iso"
-chmod 000 "$sandbox/release/omarchy-8.8.8.iso"
+cp "$sandbox/release/omarchy-2099.01.02-x86_64-quattro.iso" "$sandbox/release/omarchy-8.8.8-x86.iso"
+chmod 000 "$sandbox/release/omarchy-8.8.8-x86.iso"
 
 set +e
 PATH="$work/stubs:$PATH" "$sandbox/bin/omarchy-iso-release" --no-make 8.8.8 >/dev/null 2>&1
 release_status=$?
 set -e
-chmod 644 "$sandbox/release/omarchy-8.8.8.iso"
+chmod 644 "$sandbox/release/omarchy-8.8.8-x86.iso"
 
 (( release_status != 0 )) ||
   fail "release stops when the ISO cannot be checksummed" "exit status was 0"
-[[ "$(cat "$stale")" == "deadbeef  omarchy-8.8.8.iso" ]] ||
+[[ "$(cat "$stale")" == "deadbeef  omarchy-8.8.8-x86.iso" ]] ||
   fail "a failed checksum leaves no half-written sidecar" "$(cat "$stale")"
 pass "release stops when the ISO cannot be checksummed"
 

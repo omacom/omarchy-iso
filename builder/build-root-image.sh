@@ -26,6 +26,8 @@
 #                               delta against what the image already holds.
 #   OMARCHY_IMAGE_SIZE          Sparse backing file size (default 24G). Only the
 #                               written extents cost anything.
+#   OMARCHY_IMAGE_SYNC_DBS      The build's online sync directory, whose indexes
+#                               the image ships (ship-sync-databases.sh).
 #
 # Needs a privileged environment: loop devices and a btrfs mount.
 
@@ -226,6 +228,12 @@ fi
 # image's install scripts, refuse to ship one that still asks for a dropped name.
 bash "$(dirname -- "${BASH_SOURCE[0]}")/follow-renamed-packages.sh" "$root/usr/share/omarchy/install" \
   "${OMARCHY_RENAMED_PACKAGES:-}" "${OMARCHY_UNRESOLVED_PACKAGES:-}"
+
+# The online repositories' indexes, so the installed system can install
+# software before its first update (see ship-sync-databases.sh).
+if [[ -n ${OMARCHY_IMAGE_SYNC_DBS:-} ]]; then
+  bash "$(dirname -- "${BASH_SOURCE[0]}")/ship-sync-databases.sh" "$root" "$OMARCHY_IMAGE_SYNC_DBS"
+fi
 
 sync
 

@@ -917,7 +917,7 @@ rm -f "$build_cache_dir/airootfs/var/cache/omarchy/rootfs/omarchy-root.btrfs"*
 
 image_localdb=/tmp/omarchy-root-image-localdb
 echo "[timing] root image start $(date +%s)"
-OMARCHY_IMAGE_LOCALDB_COPY="$image_localdb" \
+OMARCHY_IMAGE_LOCALDB_COPY="$image_localdb" OMARCHY_IMAGE_SYNC_DBS=/tmp/offlinedb/sync \
   OMARCHY_RENAMED_PACKAGES="$renamed_list" OMARCHY_UNRESOLVED_PACKAGES="$unresolved_list" \
   bash /builder/build-root-image.sh "$image_pacman_conf" "$root_image" "${image_packages[@]}"
 echo "[timing] root image end $(date +%s)"

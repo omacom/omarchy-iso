@@ -90,6 +90,8 @@
   "progress.tip.update": "Κράτα το σύστημα φρέσκο με Ενημέρωση στο μενού Omarchy",
   "finish.title": "Το Omarchy εγκαταστάθηκε",
   "finish.titleWithTime": "Το Omarchy εγκαταστάθηκε σε %1",
+  "finish.mediumRemovable": "Μπορείς τώρα να αφαιρέσεις το μέσο εγκατάστασης",
+  "finish.mediumKeep": "Άφησε το μέσο εγκατάστασης συνδεδεμένο μέχρι να ολοκληρωθεί η επανεκκίνηση",
   "finish.reboot": "Επανεκκίνηση",
   "finish.fallback": "Η εγκατάσταση ολοκληρώθηκε",
   "failure.title": "Η εγκατάσταση του Omarchy σταμάτησε",

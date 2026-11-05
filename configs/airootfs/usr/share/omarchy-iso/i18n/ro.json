@@ -90,6 +90,8 @@
   "progress.tip.update": "Ține sistemul la zi cu Actualizează din meniul Omarchy",
   "finish.title": "Omarchy a fost instalat",
   "finish.titleWithTime": "Omarchy a fost instalat în %1",
+  "finish.mediumRemovable": "Acum poți scoate mediul de instalare",
+  "finish.mediumKeep": "Lasă mediul de instalare conectat până la finalizarea repornirii",
   "finish.reboot": "Repornește acum",
   "finish.fallback": "Instalare terminată",
   "failure.title": "Instalarea Omarchy s-a oprit",

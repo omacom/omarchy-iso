@@ -90,6 +90,8 @@
   "progress.tip.update": "Dbaj o aktualność systemu: Aktualizuj w menu Omarchy",
   "finish.title": "Zainstalowano Omarchy",
   "finish.titleWithTime": "Zainstalowano Omarchy w %1",
+  "finish.mediumRemovable": "Możesz teraz wyjąć nośnik instalacyjny",
+  "finish.mediumKeep": "Pozostaw nośnik instalacyjny do zakończenia ponownego uruchamiania",
   "finish.reboot": "Uruchom ponownie",
   "finish.fallback": "Instalacja zakończona",
   "failure.title": "Instalacja Omarchy została przerwana",

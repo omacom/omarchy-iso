@@ -90,6 +90,8 @@
   "progress.tip.update": "Pidä järjestelmä ajan tasalla Omarchy-valikon kohdasta Päivitä",
   "finish.title": "Omarchy asennettu",
   "finish.titleWithTime": "Omarchy asennettu ajassa %1",
+  "finish.mediumRemovable": "Voit nyt poistaa asennusmedian",
+  "finish.mediumKeep": "Jätä asennusmedia paikalleen, kunnes uudelleenkäynnistys on valmis",
   "finish.reboot": "Käynnistä uudelleen",
   "finish.fallback": "Asennus valmis",
   "failure.title": "Omarchyn asennus pysähtyi",

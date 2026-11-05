@@ -90,6 +90,8 @@
   "progress.tip.update": "Mantén el sistema al dia amb Actualitza al menú d'Omarchy",
   "finish.title": "Omarchy instal·lat",
   "finish.titleWithTime": "Omarchy instal·lat en %1",
+  "finish.mediumRemovable": "Ja pots retirar el mitjà d'instal·lació",
+  "finish.mediumKeep": "Deixa el mitjà d'instal·lació connectat fins que acabi el reinici",
   "finish.reboot": "Reinicia ara",
   "finish.fallback": "Instal·lació acabada",
   "failure.title": "La instal·lació d'Omarchy s'ha aturat",

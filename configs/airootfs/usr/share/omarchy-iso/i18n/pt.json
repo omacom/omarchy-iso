@@ -90,6 +90,8 @@
   "progress.tip.update": "Mantém o sistema atualizado com Atualizar no menu do Omarchy",
   "finish.title": "Omarchy instalado",
   "finish.titleWithTime": "Omarchy instalado em %1",
+  "finish.mediumRemovable": "Já podes remover o suporte de instalação",
+  "finish.mediumKeep": "Deixa o suporte de instalação ligado até o reinício terminar",
   "finish.reboot": "Reiniciar agora",
   "finish.fallback": "Instalação concluída",
   "failure.title": "A instalação do Omarchy parou",

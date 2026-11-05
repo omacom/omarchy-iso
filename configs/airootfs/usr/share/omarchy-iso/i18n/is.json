@@ -90,6 +90,8 @@
   "progress.tip.update": "Haltu kerfinu fersku með Uppfæra í Omarchy-valmyndinni",
   "finish.title": "Omarchy uppsett",
   "finish.titleWithTime": "Omarchy uppsett á %1",
+  "finish.mediumRemovable": "Nú má fjarlægja uppsetningarmiðilinn",
+  "finish.mediumKeep": "Hafðu uppsetningarmiðilinn tengdan þar til endurræsingu lýkur",
   "finish.reboot": "Endurræsa núna",
   "finish.fallback": "Uppsetningu lokið",
   "failure.title": "Uppsetning Omarchy stöðvaðist",

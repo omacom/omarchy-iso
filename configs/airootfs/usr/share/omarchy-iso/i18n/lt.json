@@ -90,6 +90,8 @@
   "progress.tip.update": "Sistemą atnaujinkite per Omarchy meniu Atnaujinti",
   "finish.title": "Omarchy įdiegta",
   "finish.titleWithTime": "Omarchy įdiegta per %1",
+  "finish.mediumRemovable": "Dabar galite išimti diegimo laikmeną",
+  "finish.mediumKeep": "Palikite diegimo laikmeną, kol baigsis paleidimas iš naujo",
   "finish.reboot": "Paleisti iš naujo",
   "finish.fallback": "Diegimas baigtas",
   "failure.title": "Omarchy diegimas sustojo",

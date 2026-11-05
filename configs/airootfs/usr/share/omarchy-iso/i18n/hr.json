@@ -90,6 +90,8 @@
   "progress.tip.update": "Održavajte sustav svježim uz Ažuriraj u Omarchy izborniku",
   "finish.title": "Omarchy je instaliran",
   "finish.titleWithTime": "Omarchy je instaliran za %1",
+  "finish.mediumRemovable": "Sada možete ukloniti instalacijski medij",
+  "finish.mediumKeep": "Ostavite instalacijski medij dok se ponovno pokretanje ne završi",
   "finish.reboot": "Ponovno pokreni",
   "finish.fallback": "Instalacija završena",
   "failure.title": "Instalacija Omarchyja je zaustavljena",

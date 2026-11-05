@@ -90,6 +90,8 @@
   "progress.tip.update": "Weka mfumo ukiwa mpya kwa Sasisha kwenye menyu ya Omarchy",
   "finish.title": "Omarchy imesakinishwa",
   "finish.titleWithTime": "Omarchy imesakinishwa kwa %1",
+  "finish.mediumRemovable": "Sasa unaweza kuondoa kifaa cha usakinishaji",
+  "finish.mediumKeep": "Acha kifaa cha usakinishaji hadi kuwasha upya kukamilike",
   "finish.reboot": "Washa upya sasa",
   "finish.fallback": "Usakinishaji umekamilika",
   "failure.title": "Usakinishaji wa Omarchy umesimama",

@@ -90,6 +90,8 @@
   "progress.tip.update": "Omarchy menyusidagi Yangilash bilan tizimni yangi saqlang",
   "finish.title": "Omarchy oʻrnatildi",
   "finish.titleWithTime": "Omarchy %1 da oʻrnatildi",
+  "finish.mediumRemovable": "Endi oʻrnatish vositasini chiqarib olishingiz mumkin",
+  "finish.mediumKeep": "Qayta ishga tushirish tugaguncha oʻrnatish vositasini qoldiring",
   "finish.reboot": "Qayta ishga tushirish",
   "finish.fallback": "Oʻrnatish tugadi",
   "failure.title": "Omarchy oʻrnatilishi toʻxtadi",

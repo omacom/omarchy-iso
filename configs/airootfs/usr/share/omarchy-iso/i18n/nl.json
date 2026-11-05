@@ -90,6 +90,8 @@
   "progress.tip.update": "Houd het systeem vers met Bijwerken in het Omarchy-menu",
   "finish.title": "Omarchy geïnstalleerd",
   "finish.titleWithTime": "Omarchy geïnstalleerd in %1",
+  "finish.mediumRemovable": "Je kunt het installatiemedium nu verwijderen",
+  "finish.mediumKeep": "Laat het installatiemedium zitten tot de herstart voltooid is",
   "finish.reboot": "Nu herstarten",
   "finish.fallback": "Installatie voltooid",
   "failure.title": "Installatie van Omarchy gestopt",

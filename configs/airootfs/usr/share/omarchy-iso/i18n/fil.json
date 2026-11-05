@@ -90,6 +90,8 @@
   "progress.tip.update": "Panatilihing bago ang system gamit ang I-update sa Omarchy menu",
   "finish.title": "Na-install ang Omarchy",
   "finish.titleWithTime": "Na-install ang Omarchy sa loob ng %1",
+  "finish.mediumRemovable": "Maaari mo nang alisin ang install medium",
+  "finish.mediumKeep": "Iwanan ang install medium hanggang matapos ang pag-reboot",
   "finish.reboot": "I-reboot Ngayon",
   "finish.fallback": "Tapos na ang installation",
   "failure.title": "Huminto ang installation ng Omarchy",

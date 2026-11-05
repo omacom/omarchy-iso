@@ -90,6 +90,8 @@
   "progress.tip.update": "Uzturi sistēmu svaigu ar Atjaunināt Omarchy izvēlnē",
   "finish.title": "Omarchy instalēta",
   "finish.titleWithTime": "Omarchy instalēta %1",
+  "finish.mediumRemovable": "Tagad vari izņemt instalācijas datu nesēju",
+  "finish.mediumKeep": "Atstāj instalācijas datu nesēju pievienotu, līdz restartēšana ir pabeigta",
   "finish.reboot": "Restartēt tagad",
   "finish.fallback": "Instalēšana pabeigta",
   "failure.title": "Omarchy instalēšana apturēta",

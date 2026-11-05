@@ -90,6 +90,8 @@
   "progress.tip.update": "Udržujte systém aktuální pomocí Aktualizovat v menu Omarchy",
   "finish.title": "Omarchy nainstalováno",
   "finish.titleWithTime": "Omarchy nainstalováno za %1",
+  "finish.mediumRemovable": "Nyní můžete vyjmout instalační médium",
+  "finish.mediumKeep": "Ponechte instalační médium vložené až do dokončení restartu",
   "finish.reboot": "Restartovat",
   "finish.fallback": "Instalace dokončena",
   "failure.title": "Instalace Omarchy se zastavila",

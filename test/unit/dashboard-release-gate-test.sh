@@ -69,15 +69,18 @@ cat >"$BOX/bin/ttfx" <<'EOF'
 exit 0
 EOF
 # Just enough jq that the test does not hinge on the host having the real
-# one: the target query answers from the state file, anything else answers
-# empty (install_duration then falls through to its log parsing).
+# one: the target query answers from the state file, the catalog query from
+# the catalog's one-pair-a-line layout so the screen speaks English, anything
+# else answers empty (install_duration then falls through to its log parsing).
 cat >"$BOX/bin/jq" <<'EOF'
 #!/bin/bash
 prog=
 for arg in "$@"; do
   case $arg in -*) ;; *) prog=$arg; break ;; esac
 done
-if [[ $prog == *.target* ]]; then
+if [[ $prog == to_entries* ]]; then
+  sed -n 's/^ *"\([^"]*\)": *"\(.*\)",\{0,1\}$/\1\t\2/p' "${@: -1}"
+elif [[ $prog == *.target* ]]; then
   target=$(sed -n 's/.*"target": *"\([^"]*\)".*/\1/p' "${@: -1}")
   echo "${target:-/mnt}"
 fi
@@ -109,7 +112,7 @@ scenario() { # function-to-call, release_rc  ->  sets TTY_OUT, LOG_OUT, CALLS
     PATH="$BOX/bin:$PATH"
     exec 9>"$BOX/tty.fifo"
     # The definitions run from $BOX, so the catalog is not next to them.
-    INSTALLER_I18N="$ROOT/configs/airootfs/usr/share/omarchy-iso/i18n.sh" \
+    INSTALLER_I18N="$ROOT/configs/airootfs/usr/share/omarchy-iso/i18n.sh" OMARCHY_ISO_LANGUAGE=en \
       OMARCHY_DASHBOARD_TTY="$BOX/tty.fifo" OMARCHY_PATH="$BOX/omarchy" \
       PROGRESS_ICON="$ROOT/test/unit/fixtures/progress-icon.sh" \
       source "$BOX/dashboard-defs.sh" "$BOX/install.log" "$BOX/state.json" -- true

@@ -90,6 +90,8 @@
   "progress.tip.update": "Coinnigh an córas úr le Nuashonraigh i roghchlár Omarchy",
   "finish.title": "Omarchy suiteáilte",
   "finish.titleWithTime": "Omarchy suiteáilte i %1",
+  "finish.mediumRemovable": "Is féidir leat an meán suiteála a bhaint anois",
+  "finish.mediumKeep": "Fág an meán suiteála istigh go dtí go mbeidh an t-atosú críochnaithe",
   "finish.reboot": "Atosaigh anois",
   "finish.fallback": "Suiteáil críochnaithe",
   "failure.title": "Stad suiteáil Omarchy",

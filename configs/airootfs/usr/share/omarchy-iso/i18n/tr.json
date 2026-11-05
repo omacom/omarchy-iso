@@ -90,6 +90,8 @@
   "progress.tip.update": "Omarchy menüsündeki Güncelle ile sistemi taze tutun",
   "finish.title": "Omarchy kuruldu",
   "finish.titleWithTime": "Omarchy %1 içinde kuruldu",
+  "finish.mediumRemovable": "Artık kurulum ortamını çıkarabilirsiniz",
+  "finish.mediumKeep": "Yeniden başlatma tamamlanana kadar kurulum ortamını çıkarmayın",
   "finish.reboot": "Yeniden başlat",
   "finish.fallback": "Kurulum tamamlandı",
   "failure.title": "Omarchy kurulumu durdu",

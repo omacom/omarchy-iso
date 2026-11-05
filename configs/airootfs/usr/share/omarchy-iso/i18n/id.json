@@ -90,6 +90,8 @@
   "progress.tip.update": "Jaga sistem tetap segar dengan Perbarui di menu Omarchy",
   "finish.title": "Omarchy terpasang",
   "finish.titleWithTime": "Omarchy terpasang dalam %1",
+  "finish.mediumRemovable": "Sekarang Anda dapat melepas media instalasi",
+  "finish.mediumKeep": "Biarkan media instalasi terpasang sampai mulai ulang selesai",
   "finish.reboot": "Mulai ulang sekarang",
   "finish.fallback": "Pemasangan selesai",
   "failure.title": "Pemasangan Omarchy terhenti",

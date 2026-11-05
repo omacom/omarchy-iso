@@ -90,6 +90,8 @@
   "progress.tip.update": "Tartsd frissen a rendszert: Frissítés az Omarchy menüben",
   "finish.title": "Az Omarchy telepítve",
   "finish.titleWithTime": "Az Omarchy telepítve, időtartam: %1",
+  "finish.mediumRemovable": "Most már eltávolíthatod a telepítő adathordozót",
+  "finish.mediumKeep": "Hagyd bent a telepítő adathordozót az újraindítás végéig",
   "finish.reboot": "Újraindítás most",
   "finish.fallback": "A telepítés kész",
   "failure.title": "Az Omarchy telepítése leállt",

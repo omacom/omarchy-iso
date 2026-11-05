@@ -90,6 +90,8 @@
   "progress.tip.update": "Hold systemet frisk med Opdater i Omarchy-menuen",
   "finish.title": "Omarchy er installeret",
   "finish.titleWithTime": "Omarchy installeret på %1",
+  "finish.mediumRemovable": "Du kan nu fjerne installationsmediet",
+  "finish.mediumKeep": "Lad installationsmediet sidde, indtil genstarten er færdig",
   "finish.reboot": "Genstart nu",
   "finish.fallback": "Installationen er færdig",
   "failure.title": "Omarchy-installationen stoppede",

@@ -90,6 +90,8 @@
   "progress.tip.update": "Hoia süsteem värske Omarchy menüü kaudu: Uuenda",
   "finish.title": "Omarchy on paigaldatud",
   "finish.titleWithTime": "Omarchy paigaldatud ajaga %1",
+  "finish.mediumRemovable": "Nüüd võid paigalduskandja eemaldada",
+  "finish.mediumKeep": "Jäta paigalduskandja sisse, kuni taaskäivitus on lõppenud",
   "finish.reboot": "Taaskäivita kohe",
   "finish.fallback": "Paigaldus on lõpetatud",
   "failure.title": "Omarchy paigaldus peatus",

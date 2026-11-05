@@ -90,6 +90,8 @@
   "progress.tip.update": "Поддържай системата свежа с Обнови в менюто на Omarchy",
   "finish.title": "Omarchy е инсталиран",
   "finish.titleWithTime": "Omarchy е инсталиран за %1",
+  "finish.mediumRemovable": "Вече можеш да извадиш инсталационния носител",
+  "finish.mediumKeep": "Остави инсталационния носител включен до края на рестартирането",
   "finish.reboot": "Рестартирай",
   "finish.fallback": "Инсталацията завърши",
   "failure.title": "Инсталацията на Omarchy спря",

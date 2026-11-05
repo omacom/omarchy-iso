@@ -520,9 +520,9 @@ render_finish() {
     # actually happened, so a failed one withdraws the offer instead of
     # printing a promise the machine is not keeping.
     if [[ $TARGET_RELEASED == yes ]]; then
-      center "${DIM}You can now remove the install medium${RESET}" "$CONTENT_WIDTH"
+      center "${DIM}$(t finish.mediumRemovable)${RESET}" "$CONTENT_WIDTH"
     else
-      center "${DIM}Leave the install medium in until the reboot completes${RESET}" "$CONTENT_WIDTH"
+      center "${DIM}$(t finish.mediumKeep)${RESET}" "$CONTENT_WIDTH"
     fi
   } >"$TTY_PATH"
 

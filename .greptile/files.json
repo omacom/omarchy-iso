@@ -1,0 +1,51 @@
+{
+  "files": [
+    {
+      "path": "README.md",
+      "description": "What the ISO publishes and where, the nightly build, VM images, autoinstall from cidata, building with omarchy-iso-make, the unit, acceptance, integration and upgrade tests, and signing and releasing"
+    },
+    {
+      "path": "N1X.md",
+      "description": "The NVIDIA N1x aarch64 platform: what differs from stock Omarchy, boot menus, the dev image's SSH access and building its images",
+      "scope": [
+        "builder/**",
+        "configs/grub/**",
+        "configs/pacman-online-aarch64-*.conf",
+        "configs/airootfs/usr/share/omarchy-iso/orchestrator/**",
+        "test/arm64-*",
+        "test/unit/test_n1x_platform.py"
+      ]
+    },
+    {
+      "path": "builder/qualcomm/README.md",
+      "description": "The Qualcomm live UKI, its own initramfs and the early firmware startup",
+      "scope": [
+        "builder/qualcomm/**",
+        "configs/grub/**",
+        "test/unit/test_qcom_*.py",
+        "test/unit/test_live_dsp.py"
+      ]
+    },
+    {
+      "path": "plans/aarch64-support.md",
+      "description": "Design of the aarch64 build across the build entrypoint, profile, build script, bootloaders, pacman configs and CI",
+      "scope": [
+        "bin/omarchy-iso-make",
+        "builder/**",
+        "configs/profiledef.sh",
+        "configs/pacman-online-aarch64-*.conf",
+        ".github/workflows/nightly-build.yml"
+      ]
+    },
+    {
+      "path": "plans/consumer-secure-boot.md",
+      "description": "Planned Secure Boot design: Microsoft shim, MOK enrollment and UKIs, its security model and validation",
+      "scope": [
+        "builder/build-iso.sh",
+        "configs/efiboot/**",
+        "configs/grub/**",
+        "configs/airootfs/usr/share/omarchy-iso/orchestrator/**"
+      ]
+    }
+  ]
+}

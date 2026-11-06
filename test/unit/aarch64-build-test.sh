@@ -432,5 +432,9 @@ for module in gcc-x1e80100 pinctrl-x1e80100 qnoc-x1e80100 gcc-glymur tcsrcc-glym
   [[ " $live_modules " == *" $module? "* ]] || fail "the live initramfs lacks the Snapdragon platform driver $module"
 done
 [[ " $live_modules " != *" qcom_q6v5_pas"* ]] || fail "the live initramfs loads the DSP driver"
+# The aarch64 kernel mounts FAT with iso8859-1 unless told otherwise, and
+# mkinitcpio only adds nls_ascii for FAT: a stick with the ISO copied onto FAT32
+# could not be mounted.
+[[ " $live_modules " == *" nls_iso8859-1? "* ]] || fail "the live initramfs cannot mount a FAT32 stick: nls_iso8859-1 is missing"
 
 echo "aarch64 build overlay tests passed"

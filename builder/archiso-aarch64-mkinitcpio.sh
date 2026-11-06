@@ -32,6 +32,13 @@ configure_archiso_aarch64_mkinitcpio() {
     phy-snps-eusb2? phy-qcom-edp? dwc3-qcom? xhci-plat-hcd? ps883x? pmic_glink?
     pmic_glink_altmode? pci-pwrctrl-pwrseq? pwrseq-qcom-wcn?
   )
+  # A stick made by copying the ISO's files onto FAT32, as Rufus does in its
+  # default ISO image mode, keeps the medium on a FAT partition. The archiso
+  # hook mounts it with the kernel's default iocharset, which is iso8859-1 in
+  # linux-omarchy's aarch64 config (ascii on x86_64), and mkinitcpio adds only
+  # nls_ascii and nls_cp437 for FAT. Without this module the mount fails with
+  # "IO charset iso8859-1 not found" and the live boot stops in a shell.
+  local -a fat_charset_modules=(nls_iso8859-1?)
   local -i memdisk_count=0 microcode_count=0 plymouth_count=0
 
   mapfile -t hook_lines < <(grep -E '^HOOKS=\([^)]*\)$' "$config")
@@ -82,7 +89,7 @@ configure_archiso_aarch64_mkinitcpio() {
   # other NVIDIA boards) and the I2C-HID transport before the live root is
   # mounted. The generic keyboard hook does not include drivers under
   # hid/i2c-hid.
-  modules+=("${early_input_modules[@]}" "${snapdragon_platform_modules[@]}")
+  modules+=("${early_input_modules[@]}" "${snapdragon_platform_modules[@]}" "${fat_charset_modules[@]}")
   printf -v modules_line 'MODULES=(%s)' "${modules[*]}"
   printf '%s\n' "$modules_line" >>"$config"
 

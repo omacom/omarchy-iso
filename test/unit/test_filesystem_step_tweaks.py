@@ -113,6 +113,7 @@ class StepTest(unittest.TestCase):
             "parted": types.SimpleNamespace(Disk=Disk),
         }))
         self.enterContext(mock.patch.object(arch, "info", steps.append))
+        self.arch = arch
         return (arch._filesystem_step_tweaks, handler,
                 sys.modules["archinstall.lib.disk.device_handler"], sys.modules["archinstall.lib.disk.filesystem"])
 
@@ -219,6 +220,62 @@ class PartitionNodesAfterCommit(StepTest):
         commit = Disk.__dict__["commit"]
         self.partition(Disk(str(self.dev), self.nodes, reread=0.05))
         self.assertIs(Disk.__dict__["commit"], commit)
+
+
+class Part:
+    """archinstall's PartitionModification, as far as the discard reads it."""
+
+    def __init__(self, status, dev_path, root=False, efi=False):
+        self.status = types.SimpleNamespace(value=status)
+        self.dev_path = Path(dev_path) if dev_path else None
+        self._root, self._efi = root, efi
+
+    def is_root(self): return self._root
+    def is_efi(self): return self._efi
+
+
+class RootPartitionDiscard(StepTest):
+    """Once archinstall has created and wiped the partitions, the new root
+    partition is discarded before format() can write to it, and nothing
+    else is."""
+
+    def partition(self, partitions):
+        steps, events = [], []
+        tweaks, handler, _, _ = self.load(steps)
+        original = handler.partition
+        handler.partition = lambda mod: (original(mod), events.append("partitioned"))
+        self.enterContext(mock.patch.object(self.arch, "discard_partition",
+                                            lambda path: events.append(("discard", str(path)))))
+        with tweaks(True):
+            handler.partition(types.SimpleNamespace(partitions=partitions))
+            handler.format(FilesystemType.BTRFS, Path("/dev/mapper/root"))
+            events.append("formatted")
+        return steps, events
+
+    def test_the_new_root_is_discarded_after_partitioning_and_before_format(self):
+        steps, events = self.partition([
+            Part("create", "/dev/vda1", efi=True),
+            Part("create", "/dev/vda2", root=True),
+        ])
+        self.assertEqual(events, ["partitioned", ("discard", "/dev/vda2"), "formatted"])
+        self.assertIn("FS.discard_root", steps)
+
+    def test_the_esp_and_partitions_that_existed_are_never_discarded(self):
+        _, events = self.partition([
+            Part("create", "/dev/vda1", root=True, efi=True),
+            Part("existing", "/dev/vda3", root=True),
+            Part("modify", "/dev/vda4", root=True),
+            Part("create", None, root=True),
+            Part("create", "/dev/vda5"),
+        ])
+        self.assertEqual(events, ["partitioned", "formatted"])
+
+    def test_a_missing_helper_is_logged_and_never_raises(self):
+        steps = []
+        self.load(steps)
+        with mock.patch.dict(os.environ, {"PATH": str(self.enterContext(tempfile.TemporaryDirectory()))}):
+            self.arch.discard_partition(Path("/dev/vda2"))
+        self.assertTrue(any("could not run for /dev/vda2" in s for s in steps), steps)
 
 
 if __name__ == "__main__":

@@ -865,6 +865,10 @@ run_partition_execute() {
     # carry signatures from whatever was deleted to free it.
     disk_step "clearing stale signatures on $efi_dev" wipefs -af "$efi_dev"
     disk_step "clearing stale signatures on $root_partition_device" wipefs -af "$root_partition_device"
+    # Tell the drive the whole new root partition is free before LUKS, mkfs or
+    # the image write touch it (omarchy-discard-partition says why). Best
+    # effort; it never fails the install.
+    disk_step "discarding $root_partition_device" omarchy-discard-partition "$root_partition_device"
 
     if [[ "$encrypt_installation" == "true" ]]; then
       step "$(t partitions.luks "$root_partition_device")"
@@ -887,12 +891,11 @@ run_partition_execute() {
     fi
 
     step "$(t partitions.btrfs)"
-    # -K: no whole-device TRIM first. mkfs.btrfs discards the entire
+    # -K: no whole-device TRIM here. mkfs.btrfs discards the entire
     # partition by default, which through dm-crypt takes seconds on a 1 TB
-    # SSD (and much longer on a DRAM-less one), before the install timer even
-    # starts. The root image is written over this filesystem anyway, and the
-    # installed system's fstrim.timer discards free space on its own; the
-    # full-disk path does the same through archinstall (archinstall_adapter).
+    # SSD (and much longer on a DRAM-less one). The raw partition was already
+    # discarded above, before LUKS, in a fraction of that; the full-disk path
+    # does the same through archinstall (archinstall_adapter).
     disk_step "creating the Btrfs filesystem on $root_mapper" \
       mkfs.btrfs -K -f -L OMARCHY "$root_mapper"
     wait_for_device "$root_mapper" || disk_abort_hook "Root device $root_mapper never appeared"

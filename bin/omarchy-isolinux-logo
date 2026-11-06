@@ -1,0 +1,21 @@
+#!/bin/bash
+# Write the BIOS boot's logo for ISOLINUX: configs/syslinux/omarchy-logo.psf
+# (its font) and omarchy-logo.txt (its screen), from Omarchy's logo.txt and
+# the kernel's 8x16 font by the live initramfs's own generator
+# (vga-logo-font.py), so ISOLINUX shows the very logo the initramfs draws
+# after it. Run again when Omarchy's logo changes; test/boot-render's BIOS run
+# fails on an ISO whose two differ.
+#
+# Usage: bin/omarchy-isolinux-logo [LOGO.txt [BASE-FONT]]
+set -euo pipefail
+
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+logo=${1:-/usr/share/omarchy/logo.txt}
+font=${2:-/usr/share/kbd/consolefonts/default8x16.psfu.gz}
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+python3 "$root/configs/airootfs/usr/share/omarchy-iso/vga-logo-font.py" "$logo" "$font" "$work"
+install -m 0644 "$work/isolinux.psf" "$root/configs/syslinux/omarchy-logo.psf"
+install -m 0644 "$work/isolinux.txt" "$root/configs/syslinux/omarchy-logo.txt"
+echo "configs/syslinux/omarchy-logo.psf and omarchy-logo.txt written"

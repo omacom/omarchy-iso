@@ -32,7 +32,7 @@ configure_archiso_aarch64_mkinitcpio() {
     phy-snps-eusb2? phy-qcom-edp? dwc3-qcom? xhci-plat-hcd? ps883x? pmic_glink?
     pmic_glink_altmode? pci-pwrctrl-pwrseq? pwrseq-qcom-wcn?
   )
-  local -i memdisk_count=0 microcode_count=0 plymouth_count=0
+  local -i memdisk_count=0 microcode_count=0 block_count=0
 
   mapfile -t hook_lines < <(grep -E '^HOOKS=\([^)]*\)$' "$config")
   if (( ${#hook_lines[@]} != 1 )); then
@@ -61,19 +61,22 @@ configure_archiso_aarch64_mkinitcpio() {
     case "$hook" in
       microcode) ((microcode_count += 1)) ;;
       memdisk) ((memdisk_count += 1)) ;;
-      plymouth) ((plymouth_count += 1)); filtered_hooks+=("$hook") ;;
+      plymouth) ;;
+      block) ((block_count += 1)); filtered_hooks+=(plymouth "$hook") ;;
       *) filtered_hooks+=("$hook") ;;
     esac
   done
-  if (( microcode_count != 1 || memdisk_count != 1 || plymouth_count != 1 )); then
-    echo "ERROR: expected exactly one microcode, memdisk, and plymouth hook: $config" >&2
+  if (( microcode_count != 1 || memdisk_count != 1 || block_count != 1 )); then
+    echo "ERROR: expected exactly one microcode, memdisk, and block hook: $config" >&2
     return 1
   fi
 
   # CPU microcode packages and memdiskfind are x86-only. Keeping memdisk after
   # excluding memtest86+ makes mkinitcpio report an incomplete ARM64 image.
-  # Plymouth stays: 26.134.222-2 aborted in the GB10 initramfs, but -3 runs
-  # there.
+  # Plymouth goes back in ahead of block: the x86_64 live initramfs leaves it
+  # out (the logo hook covers both firmware paths there), but the GB10 and the
+  # Snapdragon laptops keep the splash; 26.134.222-2 aborted in the GB10
+  # initramfs, -3 runs there.
   printf -v replacement 'HOOKS=(%s)' "${filtered_hooks[*]}"
   sed -i "s|^HOOKS=.*$|$replacement|" "$config"
 

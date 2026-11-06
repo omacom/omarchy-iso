@@ -52,8 +52,30 @@ run_hook() {
     udevadm settle
 }
 
+# udev_gone: no udevd and no worker of its left (their names in /proc).
+udev_gone() {
+    local comm name
+    for comm in "${OMARCHY_PROC:-/proc}"/[0-9]*/comm; do
+        read -r name 2>/dev/null <"$comm" || continue
+        case $name in systemd-udevd | '(udev-worker)') return 1 ;; esac
+    done
+    return 0
+}
+
 run_cleanuphook() {
+    local twentieths=0
     udevadm control --exit
+    # udevadm returns as udevd starts to exit (a few ms), its workers maybe
+    # still adding an event's /dev and /run/udev links: the medium came
+    # without settling the queue (run_hook). One still at it once
+    # switch_root has moved /dev and /run to the new root writes into the
+    # initramfs's own directories while switch_root deletes them, and
+    # switch_root printed "failed to unlink ..." under the boot logo (QEMU,
+    # about 1 boot in 50 under load). Two seconds for them to go, at most.
+    while [ "$twentieths" -lt 40 ] && ! udev_gone; do
+        sleep 0.05
+        twentieths=$((twentieths + 1))
+    done
     udevadm info --cleanup-db
 }
 

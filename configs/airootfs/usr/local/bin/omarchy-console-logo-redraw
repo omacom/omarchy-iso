@@ -1,0 +1,180 @@
+#!/bin/bash
+#
+# Lay the boot logo out again when a GPU driver replaces the framebuffer it
+# was drawn on. The live initramfs loads no GPU driver on most machines
+# (only i915 on the Intel generations that need no firmware), so in the live
+# root the real driver takes the framebuffer from simpledrm, or the VGA text
+# console from vgacon, and fbcon rebuilds the console with the kernel's
+# default font: the logo is left at a corner, at the wrong size. Run by udev
+# when a framebuffer appears (etc/udev/rules.d/72-omarchy-console-logo.rules),
+# this redraws it where the greeter will draw (console-logo.sh), but only
+# while the logo is what tty1 shows: not once .automated_script.sh has tty1,
+# and not for udev's replay of the framebuffer the logo is already on.
+#
+# --wait: started by the i915 initramfs hook (etc/initcpio/hooks/omarchy-i915)
+# inside the new root, just before switch_root, while i915 is still bringing
+# the panel up. /dev, /sys and /run are not there yet, so it reads what it
+# needs from the root first, then waits without touching them (no
+# redirections) until a framebuffer other than the one the logo was laid out
+# on appears, ten seconds at most. From the VGA text console it also waits
+# for fbcon to have the panel: i915 registers its framebuffer before the
+# takeover's modeset is done, 0.6 s before on the X200, and the console is
+# 80x25 until then. While the half-size VGA logo is up it clears the console
+# as soon as the VGA console is gone, before fbcon shows that logo's glyphs
+# in a font that has none of them (console-logo.sh).
+
+run=${OMARCHY_RUN_DIR:-/run/omarchy-iso}
+fb=${OMARCHY_FB:-/sys/class/graphics/fb0}
+share=${OMARCHY_ISO_SHARE:-/usr/share/omarchy-iso}
+
+# shellcheck source=/dev/null
+source "$share/console-logo.sh" || exit 0
+
+# clear_vga_logo: clear tty1 while the VGA logo is up and the console is
+# still 80x25, the VGA one or the dummy one a driver leaves in its place,
+# and the installer has not claimed tty1, under the layout lock (below), so
+# it never lands on a layout or on the installer's first screen.
+clear_vga_logo() {
+  (
+    flock 9
+    [[ -e $run/console-logo-vga && ! -e $run/tty1-taken && $(omarchy_console_size) == "25 80 " ]] || exit 0
+    printf '\033[2J' >>"${OMARCHY_TTY:-/dev/tty1}"
+  ) 9>>"$run/console-logo.lock" 2>/dev/null
+}
+
+# freeze_fb_logo: while the logo is up on the firmware's framebuffer, which
+# a GPU driver replaces, put tty1 in graphics mode, where the console draws
+# nothing and the screen keeps the logo. A GPU driver replacing the framebuffer hands the console to the dummy
+# console's 80x25 and back, and fbcon draws the text it kept on the driver's
+# framebuffer, cut and scrolled: in QEMU a frame or three of the logo's lower
+# rows at the top left before the redraw. The redraw for the driver's
+# framebuffer erases that text while nothing is drawn yet and gives tty1 its
+# text mode back (below); the installer's claim on tty1 gives it back if no
+# framebuffer comes, the logo still there (console-logo.sh). Under the layout
+# lock, not once the installer has tty1, and marked before the mode changes:
+# a claim that ran out of waiting for the lock finds the mark, or is found
+# here after.
+freeze_fb_logo() {
+  (
+    flock -w 5 9 || exit 0
+    [[ ! -e $run/tty1-taken && ! -e $run/console-frozen ]] || exit 0
+    read -r laid_out <"$run/console-logo" || exit 0
+    case $laid_out in
+      simpledrm* | "EFI VGA" | "VESA VGA" | simple) ;;
+      *) exit 0 ;;
+    esac
+    echo "$laid_out" >"$run/console-frozen" || exit 0
+    if ! omarchy_console_kd_mode 1; then
+      rm -f "$run/console-frozen"
+      exit 0
+    fi
+    [[ -e $run/tty1-taken ]] && omarchy_console_thaw
+  ) 9>>"$run/console-logo.lock" 2>/dev/null
+}
+
+# --before-driver: udev, for a display controller (or a virtio GPU), ahead of
+# the rule that loads its driver (72-omarchy-console-logo.rules), if a driver
+# is about to load. While the VGA logo is up in its font and this is the boot
+# VGA device, whose driver takes the VGA console over, clear the console: a
+# GPU driver takes the console over within milliseconds of unregistering the
+# VGA one on some machines (QEMU's bochs-drm), faster than the --wait watcher
+# polls, and fbcon would show the logo's cells in a font without its glyphs.
+# While it is up on a framebuffer, freeze the console (freeze_fb_logo; the
+# firmware's framebuffer can sit on a display controller that is no VGA one,
+# QEMU's bochs-display). A device without a driver for it keeps the logo up,
+# and so does nomodeset, where the GPU drivers load and take nothing over.
+# Another GPU's driver waits while the boot VGA device's comes, so that fb0,
+# and fbcon's console from the VGA text console, is the boot device's.
+if [[ ${1:-} == --before-driver ]]; then
+  [[ -e $run/console-logo && ! -e $run/tty1-taken ]] || exit 0
+  [[ -e ${OMARCHY_SYSFS:-/sys}${DEVPATH:-/none}/driver ]] && exit 0
+  read -r cmdline <"${OMARCHY_CMDLINE:-/proc/cmdline}" 2>/dev/null
+  [[ " ${cmdline:-} " == *" nomodeset "* ]] && exit 0
+  [[ -n ${MODALIAS:-} ]] && modprobe -n -b -v "$MODALIAS" 2>/dev/null | grep -q '^insmod ' || exit 0
+  dev=${OMARCHY_SYSFS:-/sys}${DEVPATH:-/none}
+  # The PCI device's, or the PCI device's under a virtio GPU.
+  boot_vga=$(cat "$dev/boot_vga" 2>/dev/null || cat "$dev/../boot_vga" 2>/dev/null)
+  # fb0 is the framebuffer of the first GPU driver to register one, and so
+  # is the console from the VGA text console: the kernel's rule that moves it
+  # to the boot device's finds none in a text mode (video_is_primary_device:
+  # the mode's only memory is the legacy VGA window, in no device's BARs). A
+  # second GPU whose driver registers first has the console, the logo and the
+  # installer on its own screen, and the boot screen stays black after
+  # ISOLINUX's logo (QEMU's std VGA beside a virtio-gpu-pci: 7 boots in 8). On
+  # UEFI the rule finds the device of the firmware's framebuffer and moves the
+  # console to it, but a second GPU can still take fb0, freed by simpledrm,
+  # and the layout here and the greeter, which read fb0, then measure the
+  # wrong screen: two seconds of waiting for a console that never fits it
+  # (QEMU's std VGA beside a qxl). Another display controller's driver waits
+  # here while fb0 is missing or the firmware's and the boot VGA device has a
+  # driver bound or one to load, four seconds at most (amdgpu or nouveau can
+  # take two): fb0 is then the boot device's, unless its driver registers none
+  # in that time or one module drives both devices (it probes them in PCI
+  # order). With fb0 a GPU driver's, this device's driver replaces nothing the
+  # logo is on: nothing to clear or freeze for it.
+  if [[ $boot_vga != 1 ]]; then
+    for vga in "${OMARCHY_SYSFS:-/sys}"/bus/pci/devices/*/boot_vga; do
+      [[ $(cat "$vga" 2>/dev/null) == 1 ]] || continue
+      boot=${vga%/boot_vga}
+      if [[ -e $boot/driver ]] || modprobe -n -b -v "$(cat "$boot/modalias" 2>/dev/null)" 2>/dev/null | grep -q '^insmod '; then
+        for ((i = 0; i < ${OMARCHY_REDRAW_HOLD_STEPS:-80}; i++)); do
+          name=$(cat "$fb/name" 2>/dev/null) || name=
+          case $name in "" | simpledrm* | "EFI VGA" | "VESA VGA" | simple) ;; *) exit 0 ;; esac
+          sleep 0.05
+        done
+      fi
+      break
+    done
+  fi
+  if [[ -e $run/console-logo-vga ]]; then
+    [[ $boot_vga == 1 ]] && clear_vga_logo
+  else
+    freeze_fb_logo
+  fi
+  exit 0
+fi
+
+if [[ ${1:-} == --wait ]]; then
+  cleared=
+  for ((i = 0; ; i++)); do
+    (( i < ${OMARCHY_REDRAW_WAIT_STEPS:-200} )) || exit 0
+    [[ -e $run/tty1-taken ]] && exit 0
+    if [[ -z $cleared && -e $run/console-logo-vga && -d ${OMARCHY_VTCONSOLE:-/sys/class/vtconsole} ]] && ! omarchy_console_vga_bound; then
+      clear_vga_logo
+      cleared=1
+    fi
+    if [[ -r $fb/name && -r $run/console-logo ]]; then
+      read -r name <"$fb/name"
+      read -r laid_out <"$run/console-logo"
+      if [[ $name != "$laid_out" ]]; then
+        [[ $laid_out != none || $(omarchy_console_size) != "25 80 " ]] && break
+      fi
+    fi
+    sleep 0.05
+  done
+  rm -f "$run/i915-loading"
+fi
+
+# One layout at a time: udev's and the --wait helper's can come at the same
+# moment, and their escapes would interleave on tty1. The second finds the
+# logo laid out on this framebuffer already.
+if exec 9>>"$run/console-logo.lock"; then
+  flock 9
+fi 2>/dev/null
+# A framebuffer other than the frozen one: the text kept for the old one
+# erased while the console still draws nothing, so fbcon shows black, then
+# tty1 gets its text mode back before anything draws (a font loads only in
+# text mode). The installer's screen, should it have tty1, is not erased.
+if [[ -e $run/console-frozen ]]; then
+  name=$(cat "$fb/name" 2>/dev/null)
+  if [[ -n $name && $name != "$(cat "$run/console-frozen" 2>/dev/null)" ]]; then
+    [[ -e $run/tty1-taken ]] || printf '\033[2J' >>"${OMARCHY_TTY:-/dev/tty1}" 2>/dev/null
+    omarchy_console_thaw
+  fi
+fi
+[[ -e $run/tty1-taken ]] && exit 0
+[[ -r $run/console-logo ]] || exit 0
+name=$(cat "$fb/name" 2>/dev/null) || exit 0
+[[ $name != "$(cat "$run/console-logo" 2>/dev/null)" ]] || exit 0
+omarchy_console_logo
+exit 0

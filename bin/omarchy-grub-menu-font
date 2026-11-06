@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Write the GRUB menu's font for the live ISO's EFI images.
+
+grub-mkstandalone puts GRUB's unicode.pf2 (GNU Unifont, 2.4 MB) into every
+EFI image, and the firmware reads it all off the stick before GRUB starts,
+for a menu that stays hidden unless a key is held. This keeps the glyphs a
+menu can show: ASCII and Latin-1 for the entries, the arrows and the box
+drawing GRUB draws its frame and scroll marks with. The result goes into
+the images as fonts/menu.pf2 (builder/grub/grub-mkstandalone), and
+configs/grub/grub.cfg loads it before unicode.pf2.
+
+Usage: bin/omarchy-grub-menu-font [UNICODE.pf2 [OUTPUT]]
+  (default /usr/share/grub/unicode.pf2 into builder/grub/menu.pf2)
+"""
+
+from __future__ import annotations
+
+import struct
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+RANGES = ((0x20, 0x7E), (0xA0, 0xFF), (0x2190, 0x2193), (0x2500, 0x257F))
+
+
+def sections(data: bytes) -> list[tuple[bytes, bytes]]:
+    """A PF2 font's sections in order; DATA runs to the end of the file."""
+    out, pos = [], 0
+    while pos < len(data):
+        name = data[pos:pos + 4]
+        (length,) = struct.unpack(">I", data[pos + 4:pos + 8])
+        if name == b"DATA":
+            out.append((name, data[pos + 8:]))
+            break
+        out.append((name, data[pos + 8:pos + 8 + length]))
+        pos += 8 + length
+    if not out or out[0] != (b"FILE", b"PFF2"):
+        raise SystemExit("not a PF2 font")
+    return out
+
+
+def glyphs(data: bytes) -> dict[int, tuple[int, bytes]]:
+    """Code point -> (storage flags, glyph entry: its 10-byte header and bitmap)."""
+    index = dict(sections(data))[b"CHIX"]
+    out = {}
+    for i in range(0, len(index), 9):
+        code, flags, offset = struct.unpack(">IBI", index[i:i + 9])
+        width, height = struct.unpack(">HH", data[offset:offset + 4])
+        out[code] = (flags, data[offset:offset + 10 + (width * height + 7) // 8])
+    return out
+
+
+def subset(data: bytes, keep) -> bytes:
+    found = glyphs(data)
+    codes = sorted(code for code in found if keep(code))
+    head = b"".join(name + struct.pack(">I", len(body)) + body for name, body in sections(data)
+                    if name not in (b"CHIX", b"DATA"))
+    offset = len(head) + 8 + 9 * len(codes) + 8  # glyph data starts after CHIX and DATA's header
+    index, entries = b"", b""
+    for code in codes:
+        flags, entry = found[code]
+        index += struct.pack(">IBI", code, flags, offset + len(entries))
+        entries += entry
+    return head + b"CHIX" + struct.pack(">I", len(index)) + index + b"DATA" + b"\xff\xff\xff\xff" + entries
+
+
+def in_ranges(code: int) -> bool:
+    return any(low <= code <= high for low, high in RANGES)
+
+
+def main() -> None:
+    source = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/usr/share/grub/unicode.pf2")
+    output = Path(sys.argv[2]) if len(sys.argv) > 2 else ROOT / "builder/grub/menu.pf2"
+    font = subset(source.read_bytes(), in_ranges)
+    output.write_bytes(font)
+    print(f"{output}: {len(glyphs(font))} glyphs, {len(font)} bytes")
+
+
+if __name__ == "__main__":
+    main()

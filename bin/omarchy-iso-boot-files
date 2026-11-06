@@ -1,0 +1,121 @@
+#!/bin/bash
+# omarchy-iso-boot-files ISO [SORT-FILE]
+#
+# Boots the ISO in QEMU the way a UEFI machine boots it from a USB 3 stick and
+# writes, as a mksquashfs sort file, the files the live system had read out of
+# the squashfs by the time the installer's first screen was up: first what the
+# boot itself read (sampled when sshd answered, which the live image starts
+# right before the login), then what the login and the installer's greeter
+# added. builder/build-iso.sh hands the file to mksquashfs, which lays those
+# files out first and together, in this order, so a boot reads the blocks it
+# needs and little else: a small file otherwise costs the whole 1 MiB fragment
+# block it was packed into with whatever mksquashfs met next in the tree. The
+# default output is that file in this checkout,
+# configs/airootfs/usr/share/omarchy-iso/boot-files.sort; regenerate it when
+# the boot's path changes, or when customize_airootfs.sh warns that many of
+# its files are gone.
+#
+# The hashes of the install medium and the LUKS calibration, which the
+# installer starts once its first screen is up, are held off for this boot
+# (unit drop-ins passed as systemd credentials) so the sample holds only what
+# every boot reads. A few of the sampler's own tools (find, xargs, fincore)
+# come along. Needs qemu-system-x86_64 with KVM, the edk2 OVMF firmware,
+# ssh and ssh-keygen; takes about a minute.
+set -euo pipefail
+
+iso=${1:?usage: omarchy-iso-boot-files ISO [SORT-FILE]}
+root=$(cd "$(dirname "$0")/.." && pwd)
+out=${2:-$root/configs/airootfs/usr/share/omarchy-iso/boot-files.sort}
+iso=$(realpath -- "$iso")
+
+ovmf_code=""
+for dir in /usr/share/edk2/x64 /usr/share/edk2/ovmf /usr/share/OVMF /usr/share/edk2-ovmf/x64; do
+  for code in OVMF_CODE.4m.fd OVMF_CODE_4M.fd OVMF_CODE.fd; do
+    if [[ -f $dir/$code ]]; then
+      ovmf_code=$dir/$code
+      ovmf_vars=$dir/${code/CODE/VARS}
+      break 2
+    fi
+  done
+done
+[[ -n $ovmf_code && -f $ovmf_vars ]] || { echo "ERROR: no OVMF firmware found under /usr/share" >&2; exit 1; }
+
+work=$(mktemp -d)
+cleanup() {
+  [[ -f $work/qemu.pid ]] && kill "$(cat "$work/qemu.pid")" 2>/dev/null
+  rm -rf "$work"
+}
+trap cleanup EXIT
+
+port=2400
+while (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; do port=$((port + 1)); done
+
+ssh-keygen -q -t ed25519 -N '' -f "$work/key"
+cp "$ovmf_vars" "$work/vars.fd"
+qemu-img create -q -f qcow2 "$work/disk.qcow2" 40G
+
+credential() { printf -- '-smbios\ntype=11,value=io.systemd.credential.binary:%s=%s\n' "$1" "$2"; }
+off=$(printf '[Unit]\nConditionPathExists=/nonexistent\n' | base64 -w0)
+mapfile -t credentials < <(
+  credential ssh.authorized_keys.root "$(base64 -w0 "$work/key.pub")"
+  for unit in omarchy-mirror-verify omarchy-root-image-verify omarchy-luks-calibrate; do
+    credential "systemd.unit-dropin.$unit.service~boot-files" "$off"
+  done
+)
+
+qemu-system-x86_64 -cpu host -enable-kvm -machine q35,accel=kvm -smp 4 -m 4096 \
+  -drive "if=pflash,format=raw,readonly=on,file=$ovmf_code" \
+  -drive "if=pflash,format=raw,file=$work/vars.fd" \
+  -drive "file=$work/disk.qcow2,format=qcow2,if=none,id=disk0" -device virtio-blk-pci,drive=disk0 \
+  -device qemu-xhci,id=usb \
+  -drive "file=$iso,format=raw,if=none,id=stick,readonly=on,cache.direct=on" \
+  -device usb-storage,bus=usb.0,drive=stick,removable=on,bootindex=1 \
+  -device virtio-vga -display none \
+  -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:$port-:22" -device virtio-net-pci,netdev=net0 \
+  "${credentials[@]}" \
+  -serial "file:$work/serial.log" -pidfile "$work/qemu.pid" -daemonize
+
+guest() {
+  ssh -i "$work/key" -p "$port" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 -o LogLevel=ERROR root@127.0.0.1 "$@"
+}
+# Regular files of the live root with pages in the page cache: what the boot
+# has read, before the overlay (fincore sees nothing through it).
+resident='find /run/archiso/airootfs -xdev -type f -print0 2>/dev/null |
+  xargs -0 fincore -b --noheadings --raw --output RES,FILE 2>/dev/null |
+  awk "\$1 > 0 { sub(/^[0-9]+ \/run\/archiso\/airootfs\//, \"\"); print }"'
+
+echo "Booting $(basename "$iso") in QEMU (UEFI, USB 3 stick, ssh on port $port)..."
+deadline=$((SECONDS + 300))
+while :; do
+  if (( SECONDS > deadline )); then
+    echo "ERROR: no greeter after 300 s; serial log in $work/serial.log" >&2
+    trap - EXIT
+    exit 1
+  fi
+  if [[ ! -s $work/boot.txt ]] && guest "$resident" >"$work/boot.txt" 2>/dev/null && [[ -s $work/boot.txt ]]; then
+    echo "sshd answered after $SECONDS s: $(wc -l <"$work/boot.txt") files read so far"
+  fi
+  if [[ -s $work/boot.txt ]] && guest 'pgrep -x ttfx >/dev/null' 2>/dev/null; then
+    guest "$resident" >"$work/greeter.txt"
+    guest 'awk "{ printf \"%.0f MB read off the stick since the kernel started\n\", \$3 * 512 / 1e6 }" /sys/block/sda/stat' || true
+    break
+  fi
+  sleep 0.2
+done
+
+# The mirror has its own layout (configs/profiledef.sh); the sort file is for
+# the rest. Highest priority first, one step per file, so mksquashfs writes
+# them in exactly this order. fincore's raw output escapes a backslash or a
+# space in a name as \x5c or \x20 (systemd's unit names carry \x2d); the sort
+# file wants them as \\ and "\ ".
+{
+  echo "# Files the live boot reads on its way to the installer's first screen, in"
+  echo "# the order the squashfs lays them out; see bin/omarchy-iso-boot-files."
+  echo "# From $(basename "$iso") on $(date -u +%Y-%m-%d)."
+  grep -v '^var/cache/' "$work/boot.txt" | LC_ALL=C sort -u >"$work/tier1.txt"
+  grep -v '^var/cache/' "$work/greeter.txt" | LC_ALL=C sort -u | LC_ALL=C comm -13 "$work/tier1.txt" - >"$work/tier2.txt"
+  cat "$work/tier1.txt" "$work/tier2.txt" | while IFS= read -r name; do printf '%b\n' "$name"; done |
+    sed 's/\\/\\\\/g; s/ /\\ /g' | awk '{ printf "%s %d\n", $0, 32767 - NR + 1 }'
+} >"$out"
+echo "$(wc -l <"$work/tier1.txt") files by the time sshd answered, $(wc -l <"$work/tier2.txt") more by the greeter: $out"

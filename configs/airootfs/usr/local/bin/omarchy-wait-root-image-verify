@@ -6,10 +6,11 @@
 # The root image is streamed from the boot medium (copytoram is off), so a bad
 # medium must be caught before the full-disk orchestrator hands off to
 # archinstall *and* before the free-space configurator partitions the target.
-# omarchy-root-image-verify.service hashes the image in the background from boot
-# (idle-class, so it yields to the live system under the boot-medium BFQ rule);
-# this collects that verdict, waiting for the hash if it is still running and
-# starting it if it never did.
+# omarchy-root-image-verify.service hashes the image in the background from the
+# installer's first screen on (omarchy-medium-verify.target; idle-class, so it
+# yields to the live system under the boot-medium BFQ rule); this collects that
+# verdict, waiting for the hash if it is still running and starting it if it
+# never did.
 #
 # Also logs the boot device and its I/O scheduler to stdout (the idle class only
 # takes effect under bfq) -- this folds in what used to be omarchy-iso-boot-medium.

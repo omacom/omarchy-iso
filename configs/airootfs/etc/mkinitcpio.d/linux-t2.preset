@@ -16,3 +16,6 @@ ALL_kver='/boot/vmlinuz-linux-t2'
 archiso_config='/etc/mkinitcpio.conf.d/archiso.conf'
 
 archiso_image="/boot/initramfs-linux-t2.img"
+# A Mac boots this from its own medium: no PXE hooks, as for linux-omarchy
+# (builder/linux-omarchy.preset).
+archiso_options=('--skiphooks' 'archiso_pxe_common,archiso_pxe_nbd,archiso_pxe_http,archiso_pxe_nfs')

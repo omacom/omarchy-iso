@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# grub-mkstandalone as mkarchiso runs it for the x86_64 and IA32 EFI images,
+# smaller: build-iso.sh puts this directory first on mkarchiso's PATH.
+#
+# mkarchiso builds each EFI image with the modules it names built in and every
+# other GRUB module and the 2.4 MB Unicode font in its memdisk: 8 MB that the
+# firmware reads off the stick before GRUB starts, at the firmware's USB speed
+# (0.5 s of a QEMU boot on the usb2 profile, test/boot-render). The memdisk
+# gets the named modules here, what they depend on, and what the boot configs
+# use besides (test, the [ of every condition; probe, the embedded config's
+# volume UUID; smbios, configs/grub's Mac and Snapdragon detection), and the
+# menu's font (menu.pf2, bin/omarchy-grub-menu-font) for the Unicode one: 2.9
+# MB. test/unit/test_grub_image.py checks that every command the configs run
+# is in that set. Other targets pass through as they are.
+
+set -euo pipefail
+
+real=${OMARCHY_GRUB_MKSTANDALONE:-/usr/bin/grub-mkstandalone}
+font=${OMARCHY_GRUB_MENU_FONT:-$(dirname -- "${BASH_SOURCE[0]}")/menu.pf2}
+extra_modules="test probe smbios"
+
+args=("$@")
+target="" modules=""
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case ${args[i]} in
+    -O | --format) target=${args[i + 1]:-} ;;
+    --format=*) target=${args[i]#--format=} ;;
+    -O?*) target=${args[i]#-O} ;;
+    --modules=*) modules=${args[i]#--modules=} ;;
+  esac
+done
+
+case $target in
+  x86_64-efi | i386-efi) ;;
+  *) exec "$real" "$@" ;;
+esac
+[[ -n $modules && -r $font ]] || exec "$real" "$@"
+
+exec "$real" "$@" --install-modules="$modules $extra_modules" --fonts= "boot/grub/fonts/menu.pf2=$font"

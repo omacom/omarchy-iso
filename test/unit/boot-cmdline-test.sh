@@ -73,5 +73,15 @@ if grep -rq 'accessibility=on' configs/syslinux configs/grub \
   fail=1
 fi
 
+# speakup reads every line the console prints. Without quiet the kernel's audit
+# records scroll over the installer and are read out without a pause, and a
+# splash would hide the text it reads.
+while IFS= read -r line; do
+  if ! grep -qE '(^|[[:space:]])quiet([[:space:]]|$)' <<<"$line" || grep -qE '(^|[[:space:]])splash([[:space:]]|$)|%BOOT_SPLASH' <<<"$line"; then
+    echo "screen reader entry that is not quiet, or shows a splash: $line"
+    fail=1
+  fi
+done < <(grep -rhE '^\s*(APPEND|linux|chainloader)\s.*accessibility=on' configs/syslinux configs/grub)
+
 [ "$fail" -eq 0 ] && echo "ok: $count boot entries pin copytoram=n and initramfs_options=size=90%"
 exit "$fail"

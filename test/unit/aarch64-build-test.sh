@@ -157,6 +157,12 @@ grub="$ROOT/configs/grub/grub.cfg"
 grep -Fq 'smbios --type 4 --get-string 7 --set cpu_maker' "$grub" || fail "GRUB does not ask the firmware who made the processor"
 [[ $(grep -c 'default=archlinux-uki' "$grub") == $(grep -B1 'default=archlinux-uki' "$grub" | grep -c "regexp '") ]] \
   || fail "the device tree entry is the default on a machine that is not a Snapdragon"
+# A Snapdragon can't start the kernel without a device tree, so its screen
+# reader entry boots the UKI, and the s hotkey reaches that entry first.
+sed -n "/id 'archlinux-uki-accessibility'/,/}/p" "$grub" | grep -Eq '^\s*chainloader /%INSTALL_DIR%/boot/%ARCH%/omarchy-live\.efi .*accessibility=on' \
+  || fail "a Snapdragon has no screen reader entry that boots the device tree"
+[[ $(grep -m1 -- '--hotkey s ' "$grub") == *"--id 'archlinux-uki-accessibility'"* ]] \
+  || fail "on a Snapdragon the s hotkey boots the screen reader without a device tree"
 
 # --- manifest filter -----------------------------------------------------------
 source "$ROOT/builder/aarch64-package-filter.sh"

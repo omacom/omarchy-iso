@@ -716,6 +716,16 @@ mkdir -p /tmp/offlinedb
 # names nothing offers, and warn. A builder cache that still holds the old
 # file hides the failure.
 pacman --config "$online_pacman_conf" --noconfirm -Sy --dbpath /tmp/offlinedb >/dev/null
+# aarch64: every Snapdragon OEM firmware package, found by the
+# qcom-firmware-<folder> name it provides. Omarchy installs a machine's
+# package by that name during the install, so the mirror carries all of them.
+if [[ $OMARCHY_ARCH == aarch64 ]]; then
+  source /builder/qcom-oem-firmware.sh
+  mapfile -t qcom_oem_firmware < <(qcom_oem_firmware_packages /tmp/offlinedb/sync/*.db)
+  echo "aarch64: adding ${#qcom_oem_firmware[@]} Snapdragon OEM firmware packages: ${qcom_oem_firmware[*]}" >&2
+  mapfile -t all_packages < <(printf '%s\n' "${all_packages[@]}" "${qcom_oem_firmware[@]}" | sort -u)
+  mapfile -t target_packages < <(printf '%s\n' "${target_packages[@]}" "${qcom_oem_firmware[@]}" | sort -u)
+fi
 mapfile -t offered < <(pacman --config "$online_pacman_conf" --dbpath /tmp/offlinedb -Slq | sort -u)
 mapfile -t unresolved < <(comm -23 <(printf '%s\n' "${all_packages[@]}" | sort -u) <(printf '%s\n' "${offered[@]}"))
 if (( ${#unresolved[@]} )); then

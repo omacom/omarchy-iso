@@ -3,47 +3,10 @@
 # out of its offline mirror and out of its install set. Every one of these is
 # installed by the hardware setup of the model that needs it, not by a default
 # install set.
-acer-aspire-14-ai-firmware
-acer-aspire-16-ai-firmware
-acer-swift-14-ai-firmware
-acer-swift-14-go-pro-ai-firmware
-acer-swift-go-14-firmware
 asus-proart-p14-speaker-firmware
-asus-proart-pz13-firmware
-asus-vivobook-16-firmware
-asus-vivobook-s14-firmware
-asus-vivobook-s15-firmware
-asus-vivobook-s16-firmware
-asus-zenbook-14-ux3480qa-firmware
-asus-zenbook-a14-firmware
-asus-zenbook-a14-x2-firmware
 asus-zenbook-a16-audio
 asus-zenbook-a16-firmware
-dell-inspiron-14-5441-firmware
-dell-inspiron-14-plus-7441-firmware
-dell-latitude-5455-firmware
-dell-latitude-7455-firmware
-dell-xps-13-9345-firmware
-honor-magicbook-art-14-firmware
-hp-elitebook-6-g1q-firmware
-hp-elitebook-ultra-g1q-firmware
-hp-elitebook-x-g2q-firmware
-hp-omnibook-5-16-bf1-firmware
-hp-omnibook-5-firmware
-hp-omnibook-ultra-14-firmware
-hp-omnibook-x14-firmware
-hp-omnibook-x16-firmware
-huawei-matebook-e-go-firmware
 iptsd
-lenovo-ideacentre-mini-x-firmware
-lenovo-thinkpad-t14s-gen7-firmware
-medion-sprchrgd-14-s1-firmware
-microsoft-surface-laptop-7-firmware
-microsoft-surface-laptop-8-firmware
-microsoft-surface-pro-11-firmware
-microsoft-surface-pro-12in-firmware
-microsoft-surface-pro-9-5g-firmware
-samsung-galaxy-book4-edge-firmware
 surface-laptop-8-support
 surface-pro-11-sensors
 surface-pro-11-support

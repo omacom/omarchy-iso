@@ -25,7 +25,7 @@ have_archiso() {
 
 # --- entrypoint argument contract -------------------------------------------
 bash -n "$ROOT/bin/omarchy-iso-make" "$ROOT/builder/build-iso.sh" \
-  "$ROOT/builder/aarch64-package-filter.sh" "$ROOT/builder/grub-platform.sh" \
+  "$ROOT/builder/aarch64-package-filter.sh" "$ROOT/builder/qcom-oem-firmware.sh" "$ROOT/builder/grub-platform.sh" \
   "$ROOT/builder/archiso-aarch64-mkinitcpio.sh" "$ROOT/builder/archiso-aarch64-grub-modules.sh" \
   "$ROOT/builder/node-release.sh" "$ROOT/builder/arm64-kernel-image.sh" \
   "$ROOT/builder/n1x-dev-ssh/omarchy-n1x-dev-ssh" "$ROOT/configs/airootfs/root/.automated_script.sh"

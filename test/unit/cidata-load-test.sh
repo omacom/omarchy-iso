@@ -1,9 +1,10 @@
 #!/bin/bash
 #
 # Unit tests for omarchy-cidata-load. The script takes a path prefix, so every
-# case runs against a throwaway sandbox with mount/umount/udevadm stubbed out:
-# "mounting" copies the fake drive's contents into the mountpoint, and every
-# stub logs its invocation so the cases can assert what was (not) called.
+# case runs against a throwaway sandbox with mount/umount/mountpoint/udevadm
+# stubbed out: "mounting" copies the fake drive's contents into the mountpoint,
+# "unmounting" empties it, and every stub logs its invocation so the cases can
+# assert what was (not) called.
 
 set -euo pipefail
 
@@ -40,11 +41,18 @@ printf 'mount %s\n' "$*" >>"$TEST_LOG"
 [[ ${MOUNT_FAIL:-} == 1 ]] && exit 32
 device=$3 mountpoint=$4
 cp -a "$(readlink -f "$device")"/. "$mountpoint"/
+: >"$mountpoint/.stub-mounted"
 STUB
 
 cat >"$stub_dir/umount" <<'STUB'
 #!/bin/bash
 printf 'umount %s\n' "$*" >>"$TEST_LOG"
+find "$1" -mindepth 1 -delete
+STUB
+
+cat >"$stub_dir/mountpoint" <<'STUB'
+#!/bin/bash
+[[ -e ${!#}/.stub-mounted ]]
 STUB
 
 chmod +x "$stub_dir"/*
@@ -92,8 +100,31 @@ run_load || fail "full file set loads"
 for file in user_configuration.json user_credentials.json user_encrypt_installation.txt authorized_keys tailscale_authkey; do
   [[ -f $sandbox/root/$file ]] || fail "full file set copies $file"
 done
-grep -q '^umount ' "$TEST_LOG" || fail "full file set unmounts the drive"
-pass "full file set loads, copies everything, and unmounts"
+! grep -q '^umount ' "$TEST_LOG" || fail "full file set leaves the drive mounted"
+pass "full file set loads, copies everything, and leaves the drive mounted"
+
+# A loaded drive stays mounted at /run/cidata, subfolders included, for
+# custom_commands to use what it brought. It is not copied into /root.
+new_sandbox
+attach_drive cidata
+write_required_pair
+mkdir -p "$sandbox/media/kiosk"
+echo 'echo kiosk' >"$sandbox/media/kiosk/setup"
+run_load || fail "drive with extra files loads"
+[[ -f $sandbox/run/cidata/kiosk/setup ]] || fail "extra files stay available at /run/cidata"
+[[ ! -e $sandbox/root/kiosk ]] || fail "extra files are not copied into /root"
+pass "a loaded drive stays mounted at /run/cidata"
+
+# A drive a previous load left mounted is unmounted before the next mount.
+new_sandbox
+attach_drive cidata
+write_required_pair
+run_load || fail "first load loads"
+: >"$TEST_LOG"
+run_load || fail "second load loads"
+[[ $(grep -E '^u?mount ' "$TEST_LOG" | head -1) == umount* ]] ||
+  fail "a second load unmounts the previous drive first" "$(cat "$TEST_LOG")"
+pass "a second load unmounts the previous drive first"
 
 # The uppercase label variant some tools produce works too.
 new_sandbox

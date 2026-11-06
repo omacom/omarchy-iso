@@ -3,7 +3,10 @@
 # Autoinstall: a drive labeled cidata (the cloud-init NoCloud label, so Proxmox,
 # libvirt and Packer all know how to attach one) carrying the configurator's own
 # output files stands in for the wizard. Copy those files into /root and
-# everything downstream runs the ordinary path against ordinary inputs.
+# everything downstream runs the ordinary path against ordinary inputs. The
+# drive then stays mounted read-only at /run/cidata, so the configuration's
+# custom_commands can use the other files on it. It is not copied: the live
+# system keeps its writes in RAM, and a drive can carry large files.
 #
 # Exits 0 when an autoinstall drive was loaded and the configurator can be
 # skipped. The required pair is the same one the orchestrator treats as
@@ -36,6 +39,8 @@ done
 [[ -n $device ]] || exit 1
 
 mkdir -p "$mnt"
+# A previous load in this live session left its drive mounted here.
+mountpoint -q "$mnt" && umount "$mnt"
 mount -o ro "$device" "$mnt" || exit 1
 
 # Clear any inputs a previous load in this live session left in /root before
@@ -66,5 +71,6 @@ if [[ -f $mnt/user_configuration.json ]] && [[ -f $mnt/user_credentials.json || 
   fi
 fi
 
-umount "$mnt"
+# Only a loaded drive stays mounted, for custom_commands.
+((loaded == 0)) || umount "$mnt"
 exit $loaded

@@ -186,6 +186,20 @@ When `authorized_keys` is present, autoinstall installs it as the user's `~/.ssh
 
 When `tailscale_authkey` is present (one key, blank lines and `#` comments ignored), the install adds the `tailscale` package from the ISO's bundled mirror — nothing is fetched from the network at install or boot — and stages the join for first boot: the key lands at `/etc/tailscale/authkey` (root-only), `tailscaled` is enabled, ufw allows traffic in on `tailscale0`, and a background unit runs `tailscale up` once the network is actually up, retrying until it succeeds without holding up the boot. After a successful join the key is deleted and the unit disables itself; until then both survive reboots, so a machine installed offline joins whenever it first gets connectivity. The node appears on the tailnet under the configured hostname. Use a reusable, pre-authorized (tagged) key so one drive image serves many machines — or an ephemeral key for disposable VMs.
 
+#### Custom commands
+
+`custom_commands` in `user_configuration.json` is archinstall's field for commands to run in the installed system. Use it to finish setting up a machine during the install. The configurator always leaves it empty.
+
+The commands run in order, as root, inside the new system (under `arch-chroot`). They run after everything else is installed, before the boot checks and the factory snapshot, so a factory reset keeps their changes. If a command fails, the install fails.
+
+Commands can use other files from the drive: `$CIDATA` is the path to the drive, including subfolders. It is read-only, and it is not copied: the drive is mounted while the commands run and unmounted after, so its files, including `user_credentials.json`, do not stay in the new system. To keep a file, copy it out of `$CIDATA`.
+
+```json
+"custom_commands": [ "$CIDATA/kiosk/setup" ]
+```
+
+The commands run before the first boot, so no services are running. Write files and enable units instead of calling `systemctl start`, `nmcli` or `hostnamectl`. The network may not be available, because an autoinstall can run without one.
+
 ### Building the drive
 
 ```bash

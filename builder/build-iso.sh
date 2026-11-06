@@ -140,7 +140,7 @@ else
   core_server=$(channel_core_server "$online_pacman_conf") || exit 1
   sed -i "1i $core_server" /etc/pacman.d/mirrorlist
   pacman --noconfirm -Sy archlinux-keyring
-  # Full upgrade, not just -Sy: docker never re-pulls :latest once it's cached,
+  # Full upgrade, not just -Sy: Podman never re-pulls :latest once it's cached,
   # so this container can be months behind the mirror it installs from. A plain
   # -Sy install is then a partial upgrade — new packages linked against a glibc
   # the container doesn't have yet.

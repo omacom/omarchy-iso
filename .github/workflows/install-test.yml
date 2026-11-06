@@ -115,6 +115,7 @@ jobs:
       # linux-omarchy, the one kernel for every aarch64 board. A run by hand
       # builds both from the channel it names. Every package comes from the
       # package repositories, none is built here.
+
       - name: Build the ISO
         env:
           CHANNEL: ${{ inputs.channel || 'edge' }}
@@ -126,9 +127,9 @@ jobs:
             *) flag= ;;
           esac
           if [[ $ARCH == aarch64 ]]; then
-            ./bin/omarchy-iso-make --arch aarch64 $flag --no-boot-offer
+            ./builder/run-ci.sh --arch aarch64 $flag --no-boot-offer
           else
-            NO_BOOT_OFFER=1 ./bin/omarchy-iso-make $flag
+            NO_BOOT_OFFER=1 ./builder/run-ci.sh $flag
           fi
           mkdir -p test-runs && echo $(( $(date +%s) - start )) >test-runs/build-seconds
 

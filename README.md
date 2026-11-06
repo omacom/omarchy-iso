@@ -228,6 +228,8 @@ To add a string, put it in `en.json` and print it with `t <key> [args]`, where `
 
 Run `./bin/omarchy-iso-make`; output goes into `./release`. By default the ISO uses the Omarchy packages and tracks the `quattro` branch, from the stable mirror. Pass `--edge` to use `omarchy-dev` and `omarchy-settings-dev` from the edge mirror.
 
+Local builds require Podman and sudo for the rootful image builder. CI uses `builder/run-ci.sh`: the runner's existing privileged Docker facility exposes the loop devices needed to create the btrfs image, and a disposable bootstrap installs Podman to run the same ISO entrypoint. Container configuration and VFS storage belong to that disposable build environment, and output ownership returns to the runner user.
+
 For local development, build the ISO from sibling checkouts:
 
 ```bash
@@ -297,6 +299,12 @@ The first scenario is `factory-reset`: it proves `omarchy-system-factory-reset` 
 `corrupt-image` proves a bad install medium is refused before the disk is touched. It copies the ISO and flips one byte a megabyte into the root image stream itself — addressed from the extent xorriso reports out of the ISO9660 directory records, so the damage lands in the shipped bytes and nowhere else — then autoinstalls from that copy: `omarchy-root-image-verify.service` (which hashes the image at boot, while a user would be in the configurator) must fail, the install must halt in its pre-flight phase with the "re-flash" advice on screen, and the target disk must still have no partition table. It boots the ISO itself rather than the base image, so it also works standalone with `OMARCHY_INTEGRATION_ISO` set.
 
 Artifacts — screenshots, the fixtured/staged/final `limine.conf`, the reset typescript, and the factory-reset log — land under `test-runs/<iso>-integration/runs/<timestamp>-<scenario>/`, and `--no-preview` skips the `imv` review just like the acceptance harness.
+
+The `podman-migration` scenario installs Docker only inside its disposable guest and creates legacy Redis/PostgreSQL data plus a custom UID-1000 worker with a private named volume, resource limits, capability restrictions and no-new-privileges. Privileged/device container definitions must stop preflight before any ordinary workload changes. The scenario checks volume metadata, writable layers, health checks, rootless confinement, migration retries and running/stopped state after reboot:
+
+```bash
+./test/integration release/omarchy.iso podman-migration --no-preview
+```
 
 ## Upgrade testing
 

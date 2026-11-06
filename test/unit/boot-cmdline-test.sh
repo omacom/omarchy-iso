@@ -63,5 +63,15 @@ while IFS= read -r line; do
   fi
 done <<<"$entries"
 
+# An accessibility=on entry speaks through releng's livecd-talk service, which
+# runs releng's livecd-sound before it starts espeakup. profiledef.sh replaces
+# releng's file_permissions, so unless it names livecd-sound the script ships
+# without its execute bit and the screen reader never starts.
+if grep -rq 'accessibility=on' configs/syslinux configs/grub \
+  && ! grep -Fq '["/usr/local/bin/livecd-sound"]="0:0:755"' configs/profiledef.sh; then
+  echo "profiledef.sh drops livecd-sound's execute bit: the screen reader entries boot silent"
+  fail=1
+fi
+
 [ "$fail" -eq 0 ] && echo "ok: $count boot entries pin copytoram=n and initramfs_options=size=90%"
 exit "$fail"

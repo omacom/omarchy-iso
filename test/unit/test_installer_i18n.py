@@ -117,7 +117,7 @@ class LanguageDefaultsTest(unittest.TestCase):
                               for name in ("language_default", "set_form_language"))
         steps = "".join(f'language={code}; set_form_language; env | grep "^OMARCHY_FORM_" | sort; echo --;' for code in languages)
         output = subprocess.run(
-            ["bash", "-c", f"{functions}\n{steps}"],
+            ["bash", "-c", f'source "{SHARE}/i18n.sh"\n{functions}\n{steps}'],
             env={"PATH": os.environ["PATH"], "LANGUAGE_DEFAULTS": str(SHARE / "language-defaults.json")},
             capture_output=True, text=True, check=True,
         ).stdout
@@ -130,11 +130,19 @@ class LanguageDefaultsTest(unittest.TestCase):
         # Picking again replaces the fallback. A language with no home country
         # falls back to UTC: with no fallback at all, an offline form opens
         # its timezone search, where Enter takes the first zone, Africa/Abidjan.
-        self.assertEqual(arabic, {"OMARCHY_FORM_LANGUAGE": "ar", "OMARCHY_FORM_KEYBOARD_DEFAULT": "English (US)",
+        self.assertEqual(arabic, {"OMARCHY_FORM_LANGUAGE": "en", "OMARCHY_FORM_KEYBOARD_DEFAULT": "English (US)",
                                   "OMARCHY_FORM_TIMEZONE_FALLBACK": "UTC"})
         self.assertEqual(english["OMARCHY_FORM_TIMEZONE_FALLBACK"], "UTC")
         self.assertEqual(unknown["OMARCHY_FORM_KEYBOARD_DEFAULT"], "English (US)")
         self.assertEqual(unknown["OMARCHY_FORM_TIMEZONE_FALLBACK"], "UTC")
+
+    def test_cjk_forms_fall_back_without_losing_language_defaults(self):
+        languages = ("zh-CN", "zh-TW", "ja", "ko")
+        for code, environment in zip(languages, self.form_environment(*languages)):
+            with self.subTest(code=code):
+                self.assertEqual(environment["OMARCHY_FORM_LANGUAGE"], "en")
+                self.assertEqual(environment["OMARCHY_FORM_KEYBOARD_DEFAULT"], self.defaults[code]["keyboard"])
+                self.assertEqual(environment["OMARCHY_FORM_TIMEZONE_FALLBACK"], self.defaults[code]["timezone"])
 
     def test_every_language_in_the_picker_has_defaults(self):
         self.assertLessEqual(set(catalogs()), set(self.defaults))

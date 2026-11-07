@@ -233,7 +233,13 @@ language_default() {
 }
 
 set_form_language() {
-  OMARCHY_FORM_LANGUAGE=$language
+  # The shared form has desktop translations for scripts the VT cannot draw.
+  # Use the same console-safe catalog gate as the rest of the installer, while
+  # keeping the chosen language for defaults and the installed system.
+  OMARCHY_FORM_LANGUAGE=en
+  if i18n_translated "$language"; then
+    OMARCHY_FORM_LANGUAGE=$language
+  fi
   OMARCHY_FORM_KEYBOARD_DEFAULT=$(language_default keyboard)
   OMARCHY_FORM_KEYBOARD_DEFAULT=${OMARCHY_FORM_KEYBOARD_DEFAULT:-English (US)}
   OMARCHY_FORM_TIMEZONE_FALLBACK=$(language_default timezone)

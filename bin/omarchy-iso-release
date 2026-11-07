@@ -20,6 +20,15 @@ while [[ $# -gt 0 ]]; do
     MAKE_ARGS+=("$1")
     ISO_REF=rc
     RELEASE_SUFFIX="-rc"
+    RC=1
+    shift
+    ;;
+  --stable-from-rc)
+    # The final release's ISO, built from rc before rc is promoted to stable,
+    # and installed onto stable (omarchy-iso-make --stable-from-rc).
+    MAKE_ARGS+=("$1")
+    ISO_REF=release
+    STABLE_FROM_RC=1
     shift
     ;;
   --arch)
@@ -35,12 +44,12 @@ while [[ $# -gt 0 ]]; do
     ;;
   -*)
     echo "Unknown option: $1"
-    echo "Usage: omarchy-iso-release [--no-make] [--rc] [--arch x86_64|aarch64] [version]"
+    echo "Usage: omarchy-iso-release [--no-make] [--rc|--stable-from-rc] [--arch x86_64|aarch64] [version]"
     exit 1
     ;;
   *)
     if [[ -n "${BUILD_VERSION-}" ]]; then
-      echo "Usage: omarchy-iso-release [--no-make] [--rc] [--arch x86_64|aarch64] [version]"
+      echo "Usage: omarchy-iso-release [--no-make] [--rc|--stable-from-rc] [--arch x86_64|aarch64] [version]"
       exit 1
     fi
     BUILD_VERSION="$1"
@@ -50,9 +59,44 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${BUILD_VERSION-}" ]]; then
-  echo "Usage: omarchy-iso-release [--no-make] [--rc] [--arch x86_64|aarch64] [version]"
+  echo "Usage: omarchy-iso-release [--no-make] [--rc|--stable-from-rc] [--arch x86_64|aarch64] [version]"
   exit 1
 fi
+
+if [[ -n ${STABLE_FROM_RC:-} ]]; then
+  if [[ -n ${RC:-} ]]; then
+    echo "Error: --stable-from-rc builds a final release; it can't be combined with --rc" >&2
+    exit 1
+  fi
+  if [[ $BUILD_VERSION == *rc* ]]; then
+    echo "Error: --stable-from-rc builds a final release, not a candidate ($BUILD_VERSION)" >&2
+    exit 1
+  fi
+fi
+
+# The release's own packages have to be on rc before an ISO that installs them
+# onto stable is built from it. Otherwise the ISO carries the last candidate,
+# and the machines it installs move to whatever stable serves on their first
+# update.
+rc_serves_release() {
+  local db_dir db listing package missing=()
+  db_dir=$(mktemp -d)
+  db="$db_dir/omarchy.db.tar.zst"
+  if ! curl -fsSL "https://pkgs.omarchy.org/rc/$ARCH/omarchy.db.tar.zst" -o "$db" ||
+    ! listing=$(tar -t --zstd -f "$db"); then
+    rm -rf "$db_dir"
+    echo "Error: could not read rc's $ARCH package database" >&2
+    return 1
+  fi
+  rm -rf "$db_dir"
+  for package in omarchy omarchy-settings; do
+    grep -Eq "^$package-${BUILD_VERSION//./\\.}-[0-9]+/\$" <<<"$listing" || missing+=("$package")
+  done
+  if ((${#missing[@]})); then
+    echo "Error: rc's $ARCH repository doesn't serve ${missing[*]} $BUILD_VERSION yet. Publish the release to rc first (release-rc.yml)." >&2
+    return 1
+  fi
+}
 
 # A version that already numbers its candidate (4.0.2rc2) is the complete
 # artifact name; the bare -rc suffix exists only for an unnumbered candidate.
@@ -74,6 +118,7 @@ BUILD_RELEASE_PATH="$BUILD_ROOT/release"
 
 # Make ISOs
 if [[ ! " ${MAKE_ARGS[*]} " =~ " --no-make " ]]; then
+  [[ -z ${STABLE_FROM_RC:-} ]] || rc_serves_release
   echo -e "\e[32mMaking $ISO_REF ISO\e[0m"
   omarchy-iso-make --arch "$ARCH" --no-cache --no-boot-offer "${MAKE_ARGS[@]}"
 else

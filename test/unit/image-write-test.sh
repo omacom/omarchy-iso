@@ -171,6 +171,29 @@ for state in none half all; do
   pass "with $state of the image cached, the $((11 - cached)) uncached frames are read in one stream"
 done
 
+# The reader stays a bounded window ahead of the workers, so that on a small
+# machine it does not push out the frames the verify left cached. This image is
+# far smaller than the 16 MiB the window is at least, so a second build fixes
+# the window at zero bytes: the reader may then read a frame only once a worker
+# has reached it, and with one worker it has to wait at every frame. Its lead,
+# rounded up to whole MiB, must stay 0: any byte read early would show as 1.
+paced="$work/omarchy-image-write-paced"
+${CC:-cc} -std=gnu11 -O1 -g -Wall -Wextra -Werror -pthread \
+  -fsanitize=address,undefined -fno-sanitize-recover=all -DREADER_WINDOW=0 \
+  -o "$paced" "$ROOT/builder/omarchy-image-write.c" -lzstd ||
+  fail "compiles with the reader window fixed at zero"
+cache none
+target "$work/target" 0
+status=0
+"$paced" write "$disk/image.zst" "$work/target" 1 2>"$work/stderr" || status=$?
+[[ $status == 0 ]] || fail "write with the reader window at zero succeeds" "$(cat "$work/stderr")"
+cmp -s "$work/target" "$raw" || fail "write with the reader window at zero reproduces the raw image"
+stream=$(sed -n 's/.*the reader read \([0-9]*\) of the [0-9]* uncached frames in one stream.*/\1/p' "$work/stderr")
+read -r lead waits < <(sed -n 's/.*in one stream, at most \([0-9]*\) MiB ahead of the workers (window 0 MiB, \([0-9]*\) waits).*/\1 \2/p' "$work/stderr") || true
+[[ ${stream:-0} == 11 && ${lead:-x} == 0 ]] && ((${waits:-0} > 0)) ||
+  fail "with the reader window at zero, the reader never gets ahead of the worker, waits for it and reads all 11 frames" "$(cat "$work/stderr")"
+pass "with the reader window at zero, the reader never gets ahead of the worker, waits for it and reads all 11 frames"
+
 # Frames 4-5 decode to zeros and are never written, like dd conv=sparse:
 # whatever the target held there survives. Everything else must match.
 target "$work/target" 255

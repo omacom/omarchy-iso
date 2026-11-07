@@ -427,7 +427,7 @@ out:
  * machine whose RAM cannot hold the image it pushes out little of what the
  * verify left cached.
  */
-static size_t reader_ahead;
+static size_t reader_ahead, reader_lead, reader_waits;
 
 static void *reader(void *arg)
 {
@@ -440,12 +440,18 @@ static void *reader(void *arg)
 		size_t reached = atomic_load(&next_frame);
 		size_t cur = reached < cached_frames ? cached_frames : reached;
 		const struct frame *f = &frames[order[i]];
+		size_t lead = 0;	/* bytes beyond the frame the workers have reached */
 
-		if (cur < nframes && f->src + f->csize > frames[order[cur]].src + reader_ahead) {
+		end = f->src + f->csize;
+		if (cur < nframes && end > frames[order[cur]].src)
+			lead = end - frames[order[cur]].src;
+		if (lead > reader_ahead) {
+			reader_waits++;
 			nanosleep(&pause, NULL);
 			continue;
 		}
-		end = f->src + f->csize;
+		if (lead > reader_lead)
+			reader_lead = lead;
 		for (off = f->src - f->src % page; off < end; off += page)
 			sink = image[off];
 		atomic_fetch_add(&reader_frames, 1);
@@ -459,10 +465,15 @@ static void *reader(void *arg)
 
 /*
  * How far the reader may get ahead of the workers: half the free memory, not
- * counting the page cache, at least 16 MiB and at most 256 MiB.
+ * counting the page cache, at least 16 MiB and at most 256 MiB. The unit test
+ * builds the tool with -DREADER_WINDOW=0, so that the reader has to wait for
+ * the workers at every frame of its small image.
  */
 static size_t reader_window(void)
 {
+#ifdef READER_WINDOW
+	return READER_WINDOW;
+#else
 	long pages = sysconf(_SC_AVPHYS_PAGES), size = sysconf(_SC_PAGESIZE);
 	size_t w = pages > 0 && size > 0 ? (size_t)pages * size / 2 : 0;
 
@@ -471,6 +482,7 @@ static size_t reader_window(void)
 	if (w > (256u << 20))
 		w = 256u << 20;
 	return w;
+#endif
 }
 
 static uint64_t target_size(int fd, const char *path)
@@ -612,8 +624,10 @@ static int write_image(const char *path, const char *target, int threads)
 		(t3 - t2) / 1e9, atomic_load(&decode_ns) / 1e9, atomic_load(&write_ns) / 1e9,
 		atomic_load(&skip_ns) / 1e9, started * (t2 - t1) / 1e9);
 	if (have_reader)
-		fprintf(stderr, "omarchy-image-write: the reader read %zu of the %zu uncached frames in one stream; workers waited for it %.2f thread-seconds\n",
-			atomic_load(&reader_frames), nframes - cached_frames, atomic_load(&wait_ns) / 1e9);
+		fprintf(stderr, "omarchy-image-write: the reader read %zu of the %zu uncached frames in one stream, "
+			"at most %zu MiB ahead of the workers (window %zu MiB, %zu waits); workers waited for it %.2f thread-seconds\n",
+			atomic_load(&reader_frames), nframes - cached_frames, (reader_lead + (1u << 20) - 1) >> 20,
+			reader_ahead >> 20, reader_waits, atomic_load(&wait_ns) / 1e9);
 	return 0;
 }
 

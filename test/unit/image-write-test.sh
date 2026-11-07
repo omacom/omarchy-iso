@@ -162,6 +162,13 @@ for state in none half all; do
   esac
   ((ok)) || fail "with $state of the image cached, write counts $cached frames as cached" "$(cat "$work/stderr")"
   pass "with $state of the image cached, write reproduces the image and counts $cached cached"
+  # The frames the cache lacks are read by one reader, in file order: the count
+  # is the reader's own, of the frames it touched. With everything cached there
+  # is nothing for it to read and it does not start.
+  stream=$(sed -n 's/.*the reader read \([0-9]*\) of the [0-9]* uncached frames in one stream.*/\1/p' "$work/stderr")
+  [[ ${stream:-0} == $((11 - cached)) ]] ||
+    fail "with $state of the image cached, the $((11 - cached)) uncached frames are read in one stream" "$(cat "$work/stderr")"
+  pass "with $state of the image cached, the $((11 - cached)) uncached frames are read in one stream"
 done
 
 # Frames 4-5 decode to zeros and are never written, like dd conv=sparse:

@@ -1,0 +1,74 @@
+#!/usr/bin/ash
+# i915 from the initramfs, on the Intel GPUs that need no firmware.
+#
+# This initramfs has no kms hook (etc/mkinitcpio.conf.d/archiso.conf), so a
+# BIOS machine stays on the VGA text console until i915 loads from the live
+# root: on a ThinkPad X200 that is 1.8 s after the login, the panel is dark
+# for 3.7 s while the driver brings it up, and the greeter waits for the
+# wider console the whole time. Loaded here instead, the modeset overlaps
+# the wait for the install medium and the console is a framebuffer at the
+# login. Only the generations before Skylake qualify (i915-early.ids): later
+# ones want firmware the initramfs does not carry, so they keep loading from
+# the live root. A blacklist in the initramfs keeps udev from loading i915 by
+# alias for those; loading it by name here is not subject to it.
+omarchy_i915_wanted() {
+    # The paths are variables for the unit test (test/unit/i915-early-hook-test.sh).
+    local ids=${OMARCHY_I915_IDS:-/usr/share/omarchy-iso/i915-early.ids} pci=${OMARCHY_PCI_DEVICES:-/sys/bus/pci/devices}
+    local dev vendor class device
+    [ -r "$ids" ] || return 1
+    for dev in "$pci"/*; do
+        [ -r "$dev/vendor" ] && [ -r "$dev/class" ] && [ -r "$dev/device" ] || continue
+        read -r vendor <"$dev/vendor"
+        [ "$vendor" = 0x8086 ] || continue
+        read -r class <"$dev/class"
+        case $class in 0x0300*) ;; *) continue ;; esac
+        read -r device <"$dev/device"
+        device=${device#0x}
+        grep -qx "$device" "$ids" && return 0
+    done
+    return 1
+}
+
+run_hook() {
+    local run=${OMARCHY_RUN_DIR:-/run/omarchy-iso} init=${OMARCHY_INIT:-/init}
+    omarchy_i915_wanted || return 0
+    # In the background: the probe takes seconds on an old panel, and udev's
+    # hook waits for the install medium meanwhile. Then lay the logo out
+    # again for the panel's console (console-logo.sh), unless the live root
+    # has taken over by then: run_latehook hands that case to the live root,
+    # whose helper also clears the marker. switch_root deletes the
+    # initramfs's programs, so after it this runs builtins only, and its
+    # errors go nowhere: they would land on the console.
+    mkdir -p "$run" && : >"$run/i915-loading"
+    (
+        modprobe i915
+        status=$?
+        [ -e "$init" ] || exit 0
+        rm -f "$run/i915-loading"
+        [ "$status" = 0 ] && [ -r /usr/share/omarchy-iso/console-logo.sh ] || exit 0
+        # shellcheck source=/dev/null
+        . /usr/share/omarchy-iso/console-logo.sh
+        omarchy_console_logo
+    ) 2>/dev/null &
+}
+
+# The initramfs can be done before i915 is: on a ThinkPad X200 switch_root
+# comes 3.1 s after the kernel starts and the panel's console 4.1 s, and the
+# background job above finds the initramfs gone. fbcon then shows the VGA
+# console's lines at the top left of the panel, and udev's redraw in the live
+# root (omarchy-console-logo-redraw) runs only at its coldplug, 7.8 s here.
+# So when i915 is still loading at this point, the live root's redraw helper
+# starts now, inside the new root: switch_root moves /dev, /sys and /run in
+# under it, and it lays the logo out as soon as the panel's framebuffer is
+# there. It is done within seconds and needs nothing from the initramfs.
+# It also starts while the half-size VGA logo is up (console-logo.sh): a GPU
+# driver loading from the live root takes the VGA console away, and the
+# helper clears the console before fbcon shows that logo's glyphs.
+run_latehook() {
+    local run=${OMARCHY_RUN_DIR:-/run/omarchy-iso} root=${OMARCHY_SYSROOT:-/sysroot}
+    local helper=/usr/local/bin/omarchy-console-logo-redraw
+    [ -e "$run/i915-loading" ] || [ -e "$run/console-logo-vga" ] || return 0
+    [ -x "$root$helper" ] || return 0
+    chroot "$root" /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/bin "$helper" --wait \
+        </dev/null >/dev/null 2>&1 &
+}

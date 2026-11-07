@@ -71,6 +71,35 @@ run_case "a PXE medium appears after the hooks: settle" "settle" yes \
   archisosearchuuid=2026-10-27-12-53-28-00 archiso_nbd_srv=10.0.2.2
 run_case "no UUID to wait for: settle" "settle" yes
 
+# The cleanup waits for udevd and its workers to be gone before the database
+# goes and switch_root moves /dev and /run: udevadm control --exit returns
+# while they still run. A fake /proc with a worker that exits 0.3 s in.
+mkdir -p "$work/proc/1" "$work/proc/489" "$work/proc/512"
+echo init >"$work/proc/1/comm"; echo systemd-udevd >"$work/proc/489/comm"; echo "(udev-worker)" >"$work/proc/512/comm"
+( sleep 0.15; rm -rf "$work/proc/489"; sleep 0.15; rm -rf "$work/proc/512" ) &
+cleanup=$(OMARCHY_PROC="$work/proc" HOOK="$HOOK" bash -c '
+  udevadm() { echo "udevadm $* $(date +%s%N)"; }
+  . "$HOOK"
+  run_cleanuphook
+')
+wait
+exit_at=$(sed -n 's/^udevadm control --exit \([0-9]*\)$/\1/p' <<<"$cleanup")
+db_at=$(sed -n 's/^udevadm info --cleanup-db \([0-9]*\)$/\1/p' <<<"$cleanup")
+if [[ -n $exit_at && -n $db_at ]] && (( (db_at - exit_at) / 1000000 >= 250 )); then
+  echo "ok: the cleanup waits for udevd and its workers ($(( (db_at - exit_at) / 1000000 )) ms)"
+else
+  echo "FAIL: the cleanup did not wait for udevd's workers: $cleanup"
+  failures=$((failures + 1))
+fi
+start=$(date +%s%N)
+OMARCHY_PROC="$work/proc" HOOK="$HOOK" bash -c 'udevadm() { :; }; . "$HOOK"; run_cleanuphook'
+if (( ($(date +%s%N) - start) / 1000000 < 150 )); then
+  echo "ok: no wait once they are gone"
+else
+  echo "FAIL: the cleanup waited with no udev process left"
+  failures=$((failures + 1))
+fi
+
 modules=$(bash -c '. "$1"; echo " ${MODULES[*]} "' _ "$CONF")
 if [[ $modules == *" loop "* ]]; then
   echo "ok: the live initramfs loads loop"

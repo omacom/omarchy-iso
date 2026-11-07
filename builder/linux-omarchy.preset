@@ -1,8 +1,21 @@
-# mkinitcpio preset for the live linux-omarchy kernel.
+# mkinitcpio preset for the live linux-omarchy kernel: two images from one
+# configuration (etc/mkinitcpio.conf.d/archiso.conf).
+#
+# The ISO's own entries, BIOS and UEFI, boot initramfs-linux-omarchy.img,
+# built without the PXE hooks: those add every wired network driver with
+# its firmware, curl with its TLS stack, nbd-client and nfsmount, about
+# 28 MB of a 92 MB image that a USB boot never runs and that the firmware
+# reads off the stick before anything else, 1.4 s at a BIOS's 20 MB/s. The
+# PXE entries (configs/syslinux/archiso_pxe-linux.cfg) boot
+# initramfs-linux-omarchy-pxe.img, the same image with them. The aarch64
+# build has no PXE entries and keeps the first preset only (build-iso.sh).
 
-PRESETS=('archiso')
+PRESETS=('archiso' 'pxe')
 
 ALL_kver='/boot/vmlinuz-linux-omarchy'
-archiso_config='/etc/mkinitcpio.conf.d/archiso.conf'
+ALL_config='/etc/mkinitcpio.conf.d/archiso.conf'
 
 archiso_image='/boot/initramfs-linux-omarchy.img'
+archiso_options=('--skiphooks' 'archiso_pxe_common,archiso_pxe_nbd,archiso_pxe_http,archiso_pxe_nfs')
+
+pxe_image='/boot/initramfs-linux-omarchy-pxe.img'

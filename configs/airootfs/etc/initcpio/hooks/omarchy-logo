@@ -1,0 +1,21 @@
+#!/usr/bin/ash
+# The Omarchy logo on tty1 before anything else happens in the initramfs,
+# where the installer's greeter will draw it: the layout and the reasons are
+# in /usr/share/omarchy-iso/console-logo.sh. Plymouth is not in this
+# initramfs, getty@tty1 keeps the VT (TTYVTDisallocate=no), and
+# .automated_script.sh leaves the logo up until the greeter draws over it.
+run_earlyhook() {
+    [ -r /usr/share/omarchy-iso/console-logo.sh ] || return 0
+    # shellcheck source=/dev/null
+    . /usr/share/omarchy-iso/console-logo.sh
+    omarchy_console_logo
+    # The half-size logo in its own font: clear the console when a GPU driver
+    # takes the VGA console away (console-logo.sh), in the background; it
+    # stops at switch_root, and the live root's helper takes over from there
+    # (hooks/omarchy-i915's late hook). Its errors go nowhere: switch_root
+    # deletes sleep and grep with the initramfs, and they would land on the
+    # console.
+    if [ -e /run/omarchy-iso/console-logo-vga ]; then
+        omarchy_console_vga_watch 2>/dev/null &
+    fi
+}

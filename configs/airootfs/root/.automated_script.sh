@@ -12,9 +12,16 @@ set -euo pipefail
 
 [[ $(tty) == /dev/tty1 ]] || exit 0
 
+# The boot logo stays up, and is laid out again when a GPU driver replaces the
+# framebuffer, until something here or the configurator draws on tty1: that
+# claims it first (omarchy_console_claim_tty1).
+# shellcheck source=/dev/null
+source /usr/share/omarchy-iso/console-logo.sh 2>/dev/null || omarchy_console_claim_tty1() { :; }
+
 # The N1x recovery boot entry is a diagnostic shell, never the installer: record
 # the hardware probe, show how to reach the machine, and leave tty1 at a prompt.
 if grep -qw 'omarchy.n1x_recovery=1' /proc/cmdline; then
+  omarchy_console_claim_tty1
   /usr/local/sbin/omarchy-n1x-live-probe || true
   exit 0
 fi
@@ -48,7 +55,14 @@ set_tokyo_night_colors() {
   echo -en "\e]PC7aa2f7"; echo -en "\e]PDbb9af7"; echo -en "\e]PE7dcfff"
   echo -en "\e]PFc0caf5"
   echo -en "\033[0m"
-  clear
+  # The boot logo stays up until the greeter draws over it in place
+  # (/usr/share/omarchy-iso/console-logo.sh) rather than a blank screen. The
+  # VGA console's half-size one too: a GPU driver loading later has it
+  # cleared and the logo laid out again on its framebuffer, and where none
+  # comes the configurator draws the full one over it before anything else.
+  if [[ ! -e /run/omarchy-iso/console-logo ]]; then
+    clear
+  fi
 }
 set_tokyo_night_colors
 
@@ -62,6 +76,7 @@ export CLICOLOR_FORCE=1
 export FORCE_COLOR=1
 
 if [[ ${OMARCHY_INSTALL_DEBUG:-} == "1" ]]; then
+  omarchy_console_claim_tty1
   echo "=== Omarchy ISO debug build ==="
   [[ -f /usr/share/omarchy-iso/build-info ]] && cat /usr/share/omarchy-iso/build-info
   pacman -Q omarchy-settings omarchy-keyring 2>/dev/null || true
@@ -91,12 +106,20 @@ warm_offline_mirror() {
   ((budget_kb > 262144)) || return 0
 
   # omarchy-mirror-verify.service and then omarchy-root-image-verify.service
-  # (started at boot) read the shipped mirror and the whole image as they hash
-  # them, and two readers on one USB stick seek against each other: let both
-  # finish first, whatever their verdict. Wait on their start jobs, not on
-  # is-active: while the mirror is hashed the image's job is queued behind it
-  # (Before=) and that unit still reads inactive. The image's pass is the
-  # warm-up for the image too; the read below then keeps it cached.
+  # read the shipped mirror and the whole image as they hash them, and two
+  # readers on one USB stick seek against each other: let both finish first,
+  # whatever their verdict. They start with omarchy-medium-verify.target once
+  # the installer is on screen (the configurator's greeter, or the autoinstall
+  # branch below), so first wait for them to have started: until then neither
+  # has a job and the image unit reads inactive. Then wait on their start
+  # jobs, not on is-active: while the mirror is hashed the image's job is
+  # queued behind it (Before=) and that unit still reads inactive. The image's
+  # pass is the warm-up for the image too; the read below then keeps it cached.
+  until [[ -n $(systemctl list-jobs --no-legend omarchy-mirror-verify.service \
+    omarchy-root-image-verify.service 2>/dev/null) ]] ||
+    [[ $(systemctl is-active omarchy-root-image-verify.service 2>/dev/null) != inactive ]]; do
+    sleep 1
+  done
   while [[ -n $(systemctl list-jobs --no-legend omarchy-mirror-verify.service \
     omarchy-root-image-verify.service 2>/dev/null) ]]; do
     sleep 1
@@ -135,8 +158,12 @@ cd /root
 # stands in for the wizard. omarchy-cidata-load copies them into /root and
 # everything downstream runs the ordinary path against ordinary inputs.
 if /usr/local/bin/omarchy-cidata-load; then
+  omarchy_console_claim_tty1
   echo "Autoinstall configuration found on cidata drive; skipping the configurator."
   export OMARCHY_UI_INTERACTIVE=no
+  # No greeter to wait for: hash the install medium from now on (see
+  # warm_offline_mirror above and omarchy-medium-verify.target).
+  systemctl start --no-block omarchy-medium-verify.target 2>/dev/null || true
 else
   ./configurator
 fi

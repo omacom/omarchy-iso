@@ -1,0 +1,58 @@
+#!/bin/bash
+#
+# The Omarchy logo for the Linux console, beside the greeter's own.
+# /usr/share/omarchy/logo.txt is 81 columns wide and a BIOS machine boots on
+# an 80-column VGA console, where the last glyph of every line wraps and
+# breaks the picture. This takes out as many all-blank columns as needed, the
+# leftmost first, from every line alike so the glyphs keep their alignment.
+# Into the directory it writes the greeter's logo as greeter.txt and the
+# fitted one as fitted.txt, each with its width in characters in a .cols
+# file beside it: the initramfs's busybox awk and wc count bytes, and the
+# block glyphs are three each. Read by console-logo.sh (the initramfs hook
+# and omarchy-console-logo-redraw) and by the configurator.
+#
+# Run by etc/pacman.d/hooks/60-omarchy-live-logo.hook during the pacstrap,
+# ahead of mkinitcpio's hook, so the live initramfs gets the files.
+#
+# usage: omarchy-console-logo [source [directory [columns]]]
+
+set -euo pipefail
+
+src=${1:-/usr/share/omarchy/logo.txt}
+dir=${2:-/usr/share/omarchy-iso/console-logo}
+columns=${3:-80}
+
+[[ -r $src ]] || { echo "omarchy-console-logo: $src is missing" >&2; exit 1; }
+
+# gawk counts characters rather than bytes in a UTF-8 locale; the logo is
+# block glyphs, three bytes each.
+fitted=$(LC_ALL=C.UTF-8 awk -v columns="$columns" '
+  { lines[NR] = $0; if (length($0) > max) max = length($0) }
+  END {
+    while (max > columns) {
+      cut = 0
+      for (c = 1; c <= max && !cut; c++) {
+        blank = 1
+        for (i = 1; i <= NR; i++)
+          if (length(lines[i]) >= c && substr(lines[i], c, 1) != " ") { blank = 0; break }
+        if (blank) cut = c
+      }
+      if (!cut) {
+        printf "omarchy-console-logo: %d columns and no blank column left to take out\n", max > "/dev/stderr"
+        exit 1
+      }
+      for (i = 1; i <= NR; i++)
+        if (length(lines[i]) >= cut) lines[i] = substr(lines[i], 1, cut - 1) substr(lines[i], cut + 1)
+      max--
+    }
+    for (i = 1; i <= NR; i++) print lines[i]
+    printf "omarchy-console-logo: %d columns\n", max > "/dev/stderr"
+  }' "$src")
+
+width() { LC_ALL=C.UTF-8 awk '{ if (length > max) max = length } END { print max + 0 }' "$1"; }
+
+mkdir -p "$dir"
+printf '%s\n' "$fitted" >"$dir/fitted.txt"
+width "$dir/fitted.txt" >"$dir/fitted.cols"
+cp "$src" "$dir/greeter.txt"
+width "$dir/greeter.txt" >"$dir/greeter.cols"

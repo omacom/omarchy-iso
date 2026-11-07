@@ -21,4 +21,4 @@ ProtectHome=yes
 NoNewPrivileges=yes
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=omarchy-medium-verify.target

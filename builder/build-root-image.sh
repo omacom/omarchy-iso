@@ -229,6 +229,21 @@ fi
 bash "$(dirname -- "${BASH_SOURCE[0]}")/follow-renamed-packages.sh" "$root/usr/share/omarchy/install" \
   "${OMARCHY_RENAMED_PACKAGES:-}" "${OMARCHY_UNRESOLVED_PACKAGES:-}"
 
+# These install scripts write the same files on every install, and firewall.sh
+# alone starts ufw eight times (about 0.8 s of an 8 s install). Run them once
+# here and leave the installer nothing to do. Patched here until the runtime
+# package carries the change. A script that fails here is left in place, so
+# the install runs it as before.
+for script in config/firewall.sh config/theme-system.sh; do
+  [[ -f "$root/usr/share/omarchy/install/$script" ]] || continue
+  if arch-chroot "$root" bash -e "/usr/share/omarchy/install/$script"; then
+    echo "# Applied when the root image was built." >"$root/usr/share/omarchy/install/$script"
+    echo "$script: applied in the image"
+  else
+    echo "WARNING: $script failed in the image; the install will run it"
+  fi
+done
+
 # The online repositories' indexes, so the installed system can install
 # software before its first update (see ship-sync-databases.sh).
 if [[ -n ${OMARCHY_IMAGE_SYNC_DBS:-} ]]; then

@@ -91,7 +91,10 @@ if args[0]=='build':
  initrd=next(x.split('=',1)[1] for x in args if x.startswith('--initrd='))
  assert pathlib.Path(initrd).read_bytes()==b'Qualcomm initramfs'
  (root/'ukify-call.json').write_text(json.dumps(args))
- pathlib.Path(next(x.split('=',1)[1] for x in args if x.startswith('--output='))).write_bytes(b'UKI')
+ output=pathlib.Path(next(x.split('=',1)[1] for x in args if x.startswith('--output=')))
+ output.write_bytes(b'UKI')
+ if os.environ.get('UKI_BYTES'):
+  with open(output,'r+b') as f: f.truncate(int(os.environ['UKI_BYTES']))
 else:
  args=json.loads((root/'ukify-call.json').read_text()); print('.hwids:')
  for arg in args:
@@ -118,6 +121,14 @@ else:
         result=self.builder(); self.assertNotEqual(result.returncode,0)
         self.assertFalse((self.root/'ukify-call.json').exists())
         self.assertEqual(self.initrd.read_bytes(),b'original initramfs')
+
+    def test_oversized_uki_fails_the_build(self):
+        (self.root/'boot/dtbs/test/qcom/x1-test.dtb').write_bytes(b'dtb')
+        self.env['UKI_BYTES']=str(256*1024*1024)
+        result=self.builder(); self.assertEqual(result.returncode,0,result.stderr)
+        self.env['UKI_BYTES']=str(256*1024*1024+1)
+        result=self.builder(); self.assertNotEqual(result.returncode,0)
+        self.assertIn('over the 268435456 limit',result.stderr)
 
     def test_no_qualcomm_trees_does_not_rebuild_anything(self):
         result=self.builder(); self.assertEqual(result.returncode,0,result.stderr)

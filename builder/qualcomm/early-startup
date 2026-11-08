@@ -8,6 +8,13 @@ qcom_startup_log() {
     printf 'qcom-startup: %s\n' "$*" >>/dev/kmsg 2>/dev/null || :
 }
 
+# Expected outcomes go to the kernel log alone. Keeping legacy startup is one:
+# on a laptop whose DSP firmware arrives only with its package at install time,
+# it is how the live boot works, and on the console it read like a failure.
+qcom_startup_note() {
+    printf 'qcom-startup: %s\n' "$*" >>/dev/kmsg 2>/dev/null || :
+}
+
 qcom_startup_fail() {
     qcom_startup_failed=$*
     qcom_startup_log "FAILED: $*"
@@ -61,7 +68,7 @@ qcom_startup_legacy() {
     [ ! -d /sys/module/qcom_q6v5_pas ] || {
         qcom_startup_fail 'cannot fall back after the firmware driver loaded'; return 1;
     }
-    qcom_startup_log "keeping legacy startup: $*"
+    qcom_startup_note "keeping legacy startup: $*"
     qcom_startup_active=0
 }
 

@@ -325,6 +325,22 @@ login_ready() {
 
 session_unlocked() { ! ssh_guest "pgrep -x hyprlock" >/dev/null 2>&1; }
 
+# The first login's setup, omarchy-provision-first-run, runs beside the
+# session's first seconds, and its Superwhisper step (omacom/omarchy#17286)
+# has the shell reload its plugins: the menu and every panel close, an open
+# still loading is dropped, and the wallpaper is gone until they are back.
+# Super+Space pressed then opened nothing in about a third of the runs. The
+# desktop has settled once that setup is gone and the menu answers again.
+# Hyprland starts the setup with the shell, so it is still running when the
+# menu first answers; asked together, the two cannot pass before it starts.
+# The [o] keeps pgrep from matching this check's own shell, and a renamed
+# setup command fails the wait instead of quietly letting the flake back in.
+desktop_settled() {
+  ssh_session 'command -v omarchy-provision-first-run >/dev/null &&
+    ! pgrep -f "[o]marchy-provision-first-run" >/dev/null &&
+    [[ $(omarchy-shell shell call omarchy.menu ping "") == ok ]]'
+}
+
 # Ground truth for when a wait above times out: what is actually running, who is
 # logged in, and where the Wayland/Hypr sockets live. Lands in the artifact.
 diagnose_login() {
@@ -360,6 +376,14 @@ reach_desktop() {
     return 1
   fi
   wait_for_guest_state "the session unlocks for the owner" 30 session_unlocked || return 1
+  if ! wait_for_guest_state "the desktop settles after the first login's setup" 120 desktop_settled; then
+    capture_console "failure-desktop-settle"
+    ssh_guest "cat ~/.local/state/omarchy/first-run.log" >"$RUN_DIR/first-run.txt" 2>&1 || true
+    ssh_session 'pgrep -af "[o]marchy-provision-first-run"; omarchy-shell shell call omarchy.menu ping ""' \
+      >"$RUN_DIR/desktop-settle.txt" 2>&1 || true
+    ssh_sudo 'journalctl -b -t omarchy-shell --no-pager' >>"$RUN_DIR/desktop-settle.txt" 2>&1 || true
+    return 1
+  fi
   capture_console "success-desktop-01-session"
 }
 

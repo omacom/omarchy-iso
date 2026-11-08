@@ -31,6 +31,11 @@ configure_archiso_aarch64_mkinitcpio() {
     phy-qcom-qmp-usb? phy-qcom-m31-eusb2?
     phy-snps-eusb2? phy-qcom-edp? dwc3-qcom? xhci-plat-hcd? ps883x? pmic_glink?
     pmic_glink_altmode? pci-pwrctrl-pwrseq? pwrseq-qcom-wcn?
+    # Boards without retimers (the X13s, the Zenbook 14 UX3480QA) switch their
+    # USB-C SBU lines with GPIO muxes. When the early start brings up UCSI,
+    # the Type-C ports and pmic_glink_altmode wait for them; without the
+    # driver, UCSI retries for 10 s, resetting the port controller each time.
+    gpio-sbu-mux?
   )
   local -i memdisk_count=0 microcode_count=0 plymouth_count=0
 

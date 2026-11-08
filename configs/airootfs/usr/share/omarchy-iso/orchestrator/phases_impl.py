@@ -2643,7 +2643,11 @@ def _drop_initramfs_modules_the_kernel_lacks(ctx: InstallContext) -> None:
     limine-mkinitcpio-hook then builds the unified kernel image but does not
     install it: Arch Linux ARM's linux-aarch64 has no thunderbolt module, and
     the machine was left with no kernel to boot. A drop-in that sorts last takes
-    the names this kernel lacks back out of MODULES.
+    the names some installed kernel lacks back out of MODULES, but only while
+    mkinitcpio builds for a kernel that lacks them: a T2 Mac carries linux-t2
+    and linux-omarchy, and t2bce_vhci, which the internal keyboard hangs off,
+    is only in linux-t2. Dropping it from every image left the LUKS prompt with
+    no keyboard.
     """
     conf_dir = ctx.target / "etc" / "mkinitcpio.conf.d"
     drop_in = conf_dir / INITRAMFS_MODULES_CONF
@@ -2669,14 +2673,19 @@ def _drop_initramfs_modules_the_kernel_lacks(ctx: InstallContext) -> None:
     if not missing:
         drop_in.unlink(missing_ok=True)
         return
-    info(f"› leaving out of the initramfs, not in this kernel: {' '.join(missing)}")
+    info(f"› leaving out of the initramfs of a kernel without them: {' '.join(missing)}")
     drop_in.write_text(
-        "# Written by the Omarchy installer. The installed kernel has no such\n"
-        "# modules, and mkinitcpio fails on a module it cannot find.\n"
+        "# Written by the Omarchy installer. Not every installed kernel has these\n"
+        "# modules, and mkinitcpio fails on a module it cannot find, so each is\n"
+        "# left out only of the image for a kernel that lacks it.\n"
         f"_omarchy_absent=({' '.join(missing)})\n"
         "_omarchy_kept=()\n"
         'for _omarchy_module in "${MODULES[@]}"; do\n'
-        '  [[ " ${_omarchy_absent[*]} " == *" $_omarchy_module "* ]] || _omarchy_kept+=("$_omarchy_module")\n'
+        '  if [[ " ${_omarchy_absent[*]} " == *" $_omarchy_module "* ]] &&\n'
+        '    ! modinfo -k "${KERNELVERSION:-$(uname -r)}" "$_omarchy_module" &>/dev/null; then\n'
+        "    continue\n"
+        "  fi\n"
+        '  _omarchy_kept+=("$_omarchy_module")\n'
         "done\n"
         'MODULES=("${_omarchy_kept[@]}")\n'
         "unset _omarchy_absent _omarchy_kept _omarchy_module\n"

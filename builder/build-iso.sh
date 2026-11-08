@@ -257,6 +257,7 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   install -Dm0755 /builder/qualcomm/early-startup-install "$build_cache_dir/airootfs/usr/lib/initcpio/install/qcom_early_startup"
   install -Dm0755 /builder/qualcomm/early-startup "$build_cache_dir/airootfs/usr/lib/initcpio/hooks/qcom_early_startup"
   install -Dm0644 /builder/qualcomm/early-firmware.py "$build_cache_dir/airootfs/usr/lib/initcpio/qcom-early-firmware.py"
+  install -Dm0755 /builder/qualcomm/quiet-efivars-install "$build_cache_dir/airootfs/usr/lib/initcpio/install/omarchy_quiet_efivars"
   rm -rf "$build_cache_dir/syslinux" "$build_cache_dir/efiboot"
 else
   boot_splash_kernel_options="quiet splash "

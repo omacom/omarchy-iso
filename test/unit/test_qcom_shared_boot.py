@@ -134,7 +134,7 @@ else:
         self.assertEqual((self.root/'airootfs'/old[0]).read_text(),(ROOT/'builder/qualcomm/omarchy-live-dsp').read_text())
         self.assertEqual((self.root/'airootfs'/old[1]).read_text(),(ROOT/'builder/qualcomm/omarchy-live-dsp.service').read_text())
         self.assertTrue((self.root/'airootfs'/old[2]).is_symlink())
-        for name in ('hooks/qcom_early_startup','install/qcom_early_startup','qcom-early-firmware.py'):
+        for name in ('hooks/qcom_early_startup','install/qcom_early_startup','qcom-early-firmware.py','install/omarchy_quiet_efivars'):
             self.assertTrue((self.root/'airootfs/usr/lib/initcpio'/name).is_file())
 
     def test_install_hook_dependencies_and_failures(self):

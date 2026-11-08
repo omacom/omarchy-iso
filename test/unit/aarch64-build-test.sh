@@ -432,5 +432,20 @@ for module in gcc-x1e80100 pinctrl-x1e80100 qnoc-x1e80100 gcc-glymur tcsrcc-glym
   [[ " $live_modules " == *" $module? "* ]] || fail "the live initramfs lacks the Snapdragon platform driver $module"
 done
 [[ " $live_modules " != *" qcom_q6v5_pas"* ]] || fail "the live initramfs loads the DSP driver"
+# The efivarfs mount fails on Snapdragon until the live root loads the EFI
+# variable driver; the hook that quiets it must run after base adds
+# init_functions, and must match the line mkinitcpio actually writes.
+live_hooks=$(sed -n 's/^HOOKS=(\(.*\))$/\1/p' "$fixture/archiso.conf")
+[[ " $live_hooks " == *" base "*" omarchy_quiet_efivars "* ]] || fail "the efivarfs mount is not quieted after base: $live_hooks"
+mkdir -p "$fixture/buildroot"
+if [[ -f /usr/lib/initcpio/init_functions ]]; then
+  cp /usr/lib/initcpio/init_functions "$fixture/buildroot/init_functions"
+else
+  printf '%s\n' '    if [ -e /sys/firmware/efi ]; then' \
+    '        mount -t efivarfs efivarfs /sys/firmware/efi/efivars -o nosuid,nodev,noexec' '    fi' >"$fixture/buildroot/init_functions"
+fi
+(BUILDROOT="$fixture/buildroot" && source "$ROOT/builder/qualcomm/quiet-efivars-install" && build)
+grep -Eq '^[[:space:]]*mount -t efivarfs .* 2>/dev/null$' "$fixture/buildroot/init_functions" || fail "the initramfs efivarfs mount still prints its error"
+grep -Eq '^[[:space:]]*mount -t efivarfs .*noexec$' "$fixture/buildroot/init_functions" && fail "an efivarfs mount was left unquieted"
 
 echo "aarch64 build overlay tests passed"

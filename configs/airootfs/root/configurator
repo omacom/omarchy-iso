@@ -502,8 +502,11 @@ stage_qualcomm_firmware() {
   [[ -d /sys/firmware/devicetree/base ]] || return 0
 
   local stage=/run/omarchy/firmware log=/run/omarchy/firmware-stage.log
-  local missing saved
-  missing=$(qualcomm_firmware_uncovered | grep -c . || true)
+  local missing saved=0 name
+  local -a uncovered=()
+  local -A staged=()
+  mapfile -t uncovered < <(qualcomm_firmware_uncovered)
+  missing=${#uncovered[@]}
   ((missing > 0)) || return 0
 
   step "$(t firmware.title)"
@@ -511,7 +514,20 @@ stage_qualcomm_firmware() {
   # staging and every machine read "No Windows firmware found".
   mkdir -p "${log%/*}"
   qcom-firmware-extract --stage "$stage" >"$log" 2>&1 || true
-  saved=$(grep -c . "$stage/manifest" 2>/dev/null || true)
+  # Count only the uncovered files Windows supplied. The manifest also lists
+  # files a package covers, and those would make missing firmware look saved.
+  if [[ -r $stage/manifest ]]; then
+    while read -r name _; do
+      if [[ -n $name ]]; then
+        staged[$name]=1
+      fi
+    done <"$stage/manifest"
+  fi
+  for name in "${uncovered[@]}"; do
+    if [[ -n ${staged[$name]:-} ]]; then
+      saved=$((saved + 1))
+    fi
+  done
   if ((saved >= missing)); then
     say "$(t firmware.saved "$saved")"
   elif ((saved > 0)); then

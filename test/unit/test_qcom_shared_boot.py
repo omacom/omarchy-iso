@@ -198,6 +198,7 @@ if [[ $1 == --list-missing ]]; then
   printf '%s\\n' qcom/x1p42100/ASUSTeK/zenbook-14-ux3480qa/qcadsp8380.mbn qcom/x1e80100/VENDOR/laptop/qcadsp8380.mbn
 elif [[ $1 == --stage ]]; then
   mkdir -p "$2"; echo staged >"$TEST_ROOT/stage-ran"; : >"$2/manifest"
+  for name in ${STAGED:-}; do printf '%s windows\\n' "$name" >>"$2/manifest"; done
 fi
 ''')
         desc=b'%NAME%\nasus-zenbook-14-ux3480qa-firmware\n\n%PROVIDES%\nqcom-firmware-x1p42100-asustek-zenbook-14-ux3480qa=20261106\n\n'
@@ -232,6 +233,23 @@ fi
         self.assertNotIn('No such file',result.stderr)
         self.assertTrue((self.root/'stage-ran').exists())
         self.assertTrue((self.root/'run/omarchy/firmware-stage.log').exists())
+
+    def test_only_uncovered_firmware_from_windows_counts_as_saved(self):
+        covered='qcom/x1p42100/ASUSTeK/zenbook-14-ux3480qa/qcadsp8380.mbn'
+        uncovered='qcom/x1e80100/VENDOR/laptop/qcadsp8380.mbn'
+        # Windows supplied only the file a package covers: still missing.
+        self.env['STAGED']=covered
+        result=self.run_bash('stage_qualcomm_firmware')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('firmware.none',result.stdout)
+        self.assertNotIn('firmware.saved',result.stdout)
+        # Windows supplied the uncovered file: saved.
+        (self.root/'run/omarchy/firmware/manifest').unlink()
+        self.env['STAGED']=uncovered
+        result=self.run_bash('stage_qualcomm_firmware')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('firmware.saved 1',result.stdout)
+        self.assertNotIn('firmware.none',result.stdout)
 
 
 if __name__=='__main__': unittest.main()

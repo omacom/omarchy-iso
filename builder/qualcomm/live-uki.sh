@@ -20,7 +20,7 @@ dtb_dir=/boot/dtbs/$1/qcom
 # EL2 variants share hardware IDs with their base DTBs and would be ambiguous.
 shopt -s nullglob
 dtbs=()
-for dtb in "$dtb_dir"/x1*.dtb "$dtb_dir"/hamoa*.dtb "$dtb_dir"/glymur*.dtb "$dtb_dir"/sc8280xp*.dtb; do
+for dtb in "$dtb_dir"/x1*.dtb "$dtb_dir"/hamoa*.dtb "$dtb_dir"/glymur*.dtb "$dtb_dir"/mahua*.dtb "$dtb_dir"/sc8280xp*.dtb; do
   [[ $dtb == *-el2.dtb ]] && continue
   dtbs+=("$dtb")
 done

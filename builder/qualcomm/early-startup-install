@@ -8,9 +8,9 @@ build() {
         add_module "$module" || return 1
     done
     # The medium's ADSP firmware (qcom_startup_fetch) is ISO9660 and needs
-    # cp, mount, rm, umount and sha256sum before the archiso hook runs.
+    # blkid, cp, mount, rm, sha256sum, umount and uname before the archiso hook runs.
     add_module isofs || return 1
-    for module in cat cp grep mkdir mount readlink rm sha256sum sleep tr umount; do
+    for module in blkid cat cp grep mkdir mount readlink rm sha256sum sleep tr umount uname; do
         add_binary "/usr/bin/$module" || return 1
     done
     [[ -n ${OMARCHY_QCOM_DTBS_FILE:-} && -r $OMARCHY_QCOM_DTBS_FILE ]] || {

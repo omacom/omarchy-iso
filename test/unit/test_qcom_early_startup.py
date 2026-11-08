@@ -26,7 +26,6 @@ class EarlyStartup(unittest.TestCase):
                 p.write_text(text)
             write('proc/device-tree/compatible', root_compatible+'\0')
             write('proc/sys/kernel/osrelease', 'test-kernel\n')
-            write('proc/sys/kernel/arch', 'aarch64\n')
             # medium: {firmware name on the ISO: content}. The device node
             # appears only once udev coldplug runs, as on the laptop.
             if medium is not None:
@@ -90,6 +89,10 @@ modprobe() {
  printf 'module %s\n' "$1" >>"$ROOT/events"
  [ "$MODE:$1" != fail:qcom_q6v5_pas ] && [ "$MODE" != "fail-module:$1" ]
 }
+uname() { printf 'aarch64\n'; }
+blkid() {
+ [ "$MODE" = blkid-only ] && [ -e "$ROOT/dev/dm-0" ] && printf '%s\n' "$ROOT/dev/dm-0"
+}
 mount() {
  printf 'mount %s\n' "$*" >>"$ROOT/events"
  [ -e "$2" ] || return 1
@@ -102,7 +105,11 @@ umount() {
 udevadm() {
  printf 'udev %s\n' "$*" >>"$ROOT/events"
  if [ "$1" = trigger ] && [ -d "$ROOT/medium" ] && [ -n "$UUID" ] && [ "$MODE" != no-medium ]; then
-   mkdir -p "$ROOT/dev/disk/by-uuid" && : >"$ROOT/dev/disk/by-uuid/$UUID"
+   if [ "$MODE" = blkid-only ]; then
+     mkdir -p "$ROOT/dev" && : >"$ROOT/dev/dm-0"
+   else
+     mkdir -p "$ROOT/dev/disk/by-uuid" && : >"$ROOT/dev/disk/by-uuid/$UUID"
+   fi
  fi
  if [ "$MODE:$1" = deferred:trigger ]; then
    printf 'running\n' >"$ROOT/sys/class/remoteproc/remoteproc7/state"
@@ -345,6 +352,21 @@ run_hook || :
         self.assertNotIn('mount -r', events)
         self.assertNotIn('module qcom_q6v5_pas', events)
         self.assertTrue(events.endswith('mounted /sysroot\n'), events)
+
+    def test_medium_found_by_blkid_without_a_by_uuid_link(self):
+        result, events = self.run_case(firmware_files=(), medium=self.MEDIUM, uuid='u', mode='blkid-only')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('/dev/dm-0', events)
+        self.assertIn('module qcom_q6v5_pas', events)
+
+    def test_no_coldplug_or_copy_without_the_blacklist(self):
+        for options in ({'blacklist': ''}, {'driver_loaded': True}):
+            with self.subTest(options=options):
+                result, events = self.run_case(firmware_files=(), medium=self.MEDIUM, uuid='u', **options)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn('udev', events)
+                self.assertNotIn('mount -r', events)
+                self.assertEqual(self.firmware, [])
 
 
 if __name__ == '__main__':

@@ -59,15 +59,21 @@ qcom_startup_select() {
     [ "$found" -le 1 ] || { qcom_startup_fail 'ambiguous firmware owners'; return 1; }
 }
 
-qcom_startup_legacy() {
-    # Fallback is allowed only before loading drivers or triggering coldplug.
+# Coldplug cannot start the firmware only while automatic loading of its
+# driver is blacklisted and the driver is not loaded yet.
+qcom_startup_coldplug_safe() {
     case ",$(getarg modprobe.blacklist)," in
         *,qcom_q6v5_pas,*|*,qcom-q6v5-pas,*) ;;
-        *) qcom_startup_fail 'legacy path requires the firmware-driver blacklist'; return 1 ;;
+        *) qcom_startup_unsafe='legacy path requires the firmware-driver blacklist'; return 1 ;;
     esac
     [ ! -d /sys/module/qcom_q6v5_pas ] || {
-        qcom_startup_fail 'cannot fall back after the firmware driver loaded'; return 1;
+        qcom_startup_unsafe='cannot fall back after the firmware driver loaded'; return 1;
     }
+}
+
+qcom_startup_legacy() {
+    # Fallback is allowed only before loading drivers or triggering coldplug.
+    qcom_startup_coldplug_safe || { qcom_startup_fail "$qcom_startup_unsafe"; return 1; }
     qcom_startup_note "keeping legacy startup: $*"
     qcom_startup_active=0
 }
@@ -124,15 +130,24 @@ qcom_startup_fetch() {
     uuid=$(getarg archisosearchuuid)
     [ -n "$uuid" ] || return 1
     base=$(getarg archisobasedir arch)
-    read -r arch </proc/sys/kernel/arch || return 1
-    device=/dev/disk/by-uuid/$uuid
-    # Coldplug finds the medium. The firmware driver stays blacklisted for
-    # automatic loading, so this cannot start the ADSP or fall out of the
-    # legacy path.
+    # The same source archiso's own hook uses for <archisobasedir>/<arch>.
+    arch=$(uname -m) && [ -n "$arch" ] || return 1
+    # Coldplug finds the medium. With the firmware driver blacklisted for
+    # automatic loading it cannot start the ADSP, consume a file before its
+    # checksum is checked, or close the legacy path. Without the blacklist,
+    # copy nothing.
+    qcom_startup_coldplug_safe || return 1
     udevadm trigger --action=add --type=subsystems &&
         udevadm trigger --action=add --type=devices || return 1
+    # blkid also finds a medium that has no by-uuid link, such as a Ventoy
+    # device-mapper mapping.
     deadline=$(( $(qcom_startup_now) + qcom_startup_timeout ))
-    while [ ! -e "$device" ]; do
+    while :; do
+        device=$(blkid -l -t "UUID=$uuid" -o device 2>/dev/null) || device=''
+        if [ -z "$device" ] && [ -e "/dev/disk/by-uuid/$uuid" ]; then
+            device=/dev/disk/by-uuid/$uuid
+        fi
+        [ -z "$device" ] || break
         [ "$(qcom_startup_now)" -lt "$deadline" ] || return 1
         sleep 0.1
     done

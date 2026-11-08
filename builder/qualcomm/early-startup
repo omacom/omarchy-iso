@@ -82,8 +82,78 @@ qcom_startup_firmware_present() {
     return 1
 }
 
+# The OEM packages' ADSP firmware is too big for the live UKI (GRUB has to
+# place the whole UKI in memory, omarchy-iso#128), so the ISO carries it as
+# plain files under <archisobasedir>/<arch>/qcom-firmware with a SHA256SUMS
+# list. Copy the files this board names into the initramfs before the
+# firmware driver loads. The medium is unmounted again before anything can
+# reconfigure USB. Any failure here leaves the legacy path, as before.
+qcom_startup_medium=/run/qcom-firmware-medium
+
+qcom_startup_fetch_one() {
+    local firmware=$1 source=$2 sum line_sum name suffix copy actual rest
+    for suffix in '' .xz .zst; do
+        sum=''
+        while read -r line_sum name; do
+            if [ "$name" = "$firmware$suffix" ]; then
+                sum=$line_sum
+                break
+            fi
+        done <"$source/SHA256SUMS"
+        [ -n "$sum" ] || continue
+        copy=/usr/lib/firmware/$firmware$suffix
+        if ! mkdir -p "${copy%/*}" || ! cp "$source/$firmware$suffix" "$copy"; then
+            rm -f "$copy"
+            return 1
+        fi
+        read -r actual rest <<EOF
+$(sha256sum "$copy")
+EOF
+        if [ "$actual" = "$sum" ]; then
+            return 0
+        fi
+        rm -f "$copy"
+        qcom_startup_note "$firmware$suffix on the medium does not match SHA256SUMS"
+        return 1
+    done
+    return 1
+}
+
+qcom_startup_fetch() {
+    local uuid base arch device source deadline firmware status=0
+    uuid=$(getarg archisosearchuuid)
+    [ -n "$uuid" ] || return 1
+    base=$(getarg archisobasedir arch)
+    read -r arch </proc/sys/kernel/arch || return 1
+    device=/dev/disk/by-uuid/$uuid
+    # Coldplug finds the medium. The firmware driver stays blacklisted for
+    # automatic loading, so this cannot start the ADSP or fall out of the
+    # legacy path.
+    udevadm trigger --action=add --type=subsystems &&
+        udevadm trigger --action=add --type=devices || return 1
+    deadline=$(( $(qcom_startup_now) + qcom_startup_timeout ))
+    while [ ! -e "$device" ]; do
+        [ "$(qcom_startup_now)" -lt "$deadline" ] || return 1
+        sleep 0.1
+    done
+    modprobe -q isofs || :
+    mkdir -p "$qcom_startup_medium" &&
+        mount -r "$device" "$qcom_startup_medium" || return 1
+    source=$qcom_startup_medium/$base/$arch/qcom-firmware
+    if [ -r "$source/SHA256SUMS" ]; then
+        for firmware in "$@"; do
+            qcom_startup_fetch_one "$firmware" "$source" || { status=1; break; }
+        done
+    else
+        status=1
+    fi
+    umount "$qcom_startup_medium" || status=1
+    [ "$status" = 0 ] && qcom_startup_note "copied ADSP firmware from the medium: $*"
+    return "$status"
+}
+
 qcom_startup_preflight() {
-    local names firmware count=0
+    local names firmware missing='' count=0
     # SOCCP attaches to firmware already supplied by UEFI on Glymur.
     [ "$qcom_startup_profile" = adsp ] || return 0
     read -r qcom_startup_release </proc/sys/kernel/osrelease || {
@@ -101,14 +171,27 @@ qcom_startup_preflight() {
             /*|../*|*/../*|*/..) qcom_startup_fail 'invalid ADSP firmware name'; return 1 ;;
         esac
         count=$((count + 1))
+        qcom_startup_firmware_present "$firmware" || missing="$missing $firmware"
+    done <<EOF
+$names
+EOF
+    if [ "$count" -eq 0 ]; then
+        qcom_startup_legacy 'empty ADSP firmware list'
+        return
+    fi
+    [ -n "$missing" ] || return 0
+    # Unquoted on purpose: one argument per name, and names have no spaces.
+    # shellcheck disable=SC2086
+    if ! qcom_startup_fetch $missing; then
+        qcom_startup_legacy "missing$missing"
+        return
+    fi
+    for firmware in $missing; do
         if ! qcom_startup_firmware_present "$firmware"; then
             qcom_startup_legacy "missing $firmware"
             return
         fi
-    done <<EOF
-$names
-EOF
-    [ "$count" -ne 0 ] || qcom_startup_legacy 'empty ADSP firmware list'
+    done
 }
 
 qcom_startup_state() {

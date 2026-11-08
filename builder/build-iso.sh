@@ -939,6 +939,36 @@ echo "[timing] root image end $(date +%s)"
 # image, so it ships on the ISO beside it.
 (cd "$root_image_dir" && sha256sum "${root_image##*/}" >"$root_image.sha256")
 
+# aarch64: the ADSP firmware of every Snapdragon OEM package, as plain files
+# next to the root image. The live UKI holds only linux-firmware's; the OEM
+# packages' ADSP files are over 300 MiB, and GRUB has to place the whole UKI in
+# memory (omarchy-iso#128). Without its ADSP a laptop never reports its USB-C
+# plug orientation, so a stick plugged in one way round runs at USB 2. The
+# live initramfs (qualcomm/early-startup) copies the two files its board names
+# from here, checked against SHA256SUMS, before it starts the ADSP.
+if [[ $OMARCHY_ARCH == aarch64 ]]; then
+  qcom_medium_firmware="$root_image_dir/qcom-firmware"
+  rm -rf "$qcom_medium_firmware"
+  mkdir -p "$qcom_medium_firmware"
+  while read -r name file; do
+    [[ " ${qcom_oem_firmware[*]} " == *" $name "* ]] || continue
+    # Not every package has both files (SC8280XP has no ADSP DTB), so name
+    # the members found rather than pass patterns bsdtar fails on.
+    mapfile -t adsp_files < <(bsdtar -tf "$offline_mirror_dir/$file" |
+      grep -E '^usr/lib/firmware/qcom/.+/(qcadsp[^/]*|adsp_dtbs?[^/]*)$' || true)
+    (( ${#adsp_files[@]} )) || continue
+    bsdtar -xf "$offline_mirror_dir/$file" -C "$qcom_medium_firmware" --strip-components 3 "${adsp_files[@]}"
+  done < <(pacman --config "$online_pacman_conf" --dbpath /tmp/offlinedb -Sp \
+    --print-format '%n %f' "${qcom_oem_firmware[@]}")
+  (cd "$qcom_medium_firmware" && find qcom -type f -print0 | sort -z | xargs -0r sha256sum >SHA256SUMS)
+  qcom_medium_files=$(wc -l <"$qcom_medium_firmware/SHA256SUMS")
+  if (( qcom_medium_files == 0 )); then
+    echo "ERROR: no ADSP firmware in the ${#qcom_oem_firmware[@]} Snapdragon OEM firmware packages" >&2
+    exit 1
+  fi
+  echo "aarch64: $qcom_medium_files ADSP firmware files on the medium, $(du -sm "$qcom_medium_firmware" | cut -f1) MiB" >&2
+fi
+
 # Bound the boot-time hash: Type=oneshot units are exempt from systemd's
 # default start timeout, so a stick that stalls reads instead of returning an
 # error would hang omarchy-root-image-verify.service -- and with it the

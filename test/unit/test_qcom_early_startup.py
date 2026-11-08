@@ -109,6 +109,8 @@ run_hook || :
             if Path(shell).name == 'busybox':
                 command.append('ash')
             result = subprocess.run(command+['-c', harness], env=env, capture_output=True, text=True)
+            # Expected outcomes are logged to the kernel log only.
+            self.kmsg = (root/'kmsg').read_text()
             return result, (root/'events').read_text()
 
     def test_waits_for_asynchronous_firmware(self):
@@ -185,7 +187,8 @@ run_hook || :
         result, events = self.run_case(profile=None)
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual(events, 'mounted /sysroot\n')
-        self.assertIn('keeping legacy startup', result.stdout)
+        self.assertIn('keeping legacy startup', self.kmsg)
+        self.assertNotIn('keeping legacy', result.stdout)
 
     def test_missing_early_utility_cannot_silently_skip_gate(self):
         for command in ('grep', 'tr'):
@@ -198,7 +201,7 @@ run_hook || :
         result, events = self.run_case(firmware_names=('../outside',), firmware_files=())
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn('mounted', events)
-        self.assertNotIn('keeping legacy', result.stdout)
+        self.assertNotIn('keeping legacy', self.kmsg)
 
     def test_disabled_owner_keeps_legacy_path(self):
         result, events = self.run_case(disabled=True)
@@ -211,7 +214,8 @@ run_hook || :
                 result, events = self.run_case(state='offline', firmware_files=files)
                 self.assertEqual(result.returncode, 0, result.stdout)
                 self.assertEqual(events, 'mounted /sysroot\n')
-                self.assertIn('keeping legacy startup: missing', result.stdout)
+                self.assertIn('keeping legacy startup: missing', self.kmsg)
+                self.assertNotIn('keeping legacy', result.stdout)
                 self.assertNotIn('timed out', result.stdout)
 
     def test_compressed_and_updates_firmware_select_early_path(self):
@@ -223,14 +227,15 @@ run_hook || :
                         prefix+'qcom/vendor/adsp_dtb.mbn'+suffix))
                     self.assertEqual(result.returncode, 0, result.stdout)
                     self.assertIn('module qcom_q6v5_pas', events)
-                    self.assertNotIn('keeping legacy', result.stdout)
+                    self.assertNotIn('keeping legacy', self.kmsg)
 
     def test_missing_or_empty_firmware_names_keep_legacy_path(self):
         for names in (None, ()):
             result, events = self.run_case(firmware_names=names)
             self.assertEqual(result.returncode, 0, result.stdout)
             self.assertEqual(events, 'mounted /sysroot\n')
-            self.assertIn('keeping legacy startup', result.stdout)
+            self.assertIn('keeping legacy startup', self.kmsg)
+            self.assertNotIn('keeping legacy', result.stdout)
 
     def test_legacy_requires_blacklist_and_unloaded_driver(self):
         for options in ({'blacklist': ''}, {'driver_loaded': True}):
@@ -243,7 +248,7 @@ run_hook || :
         result, events = self.run_case(profile='soccp', state='attached', firmware_files=())
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn('module qcom_q6v5_pas', events)
-        self.assertNotIn('keeping legacy', result.stdout)
+        self.assertNotIn('keeping legacy', self.kmsg)
 
     def test_non_qualcomm_is_untouched(self):
         result, events = self.run_case(profile=None, root_compatible='nvidia,gb10')

@@ -74,6 +74,9 @@ configure_archiso_aarch64_mkinitcpio() {
   # excluding memtest86+ makes mkinitcpio report an incomplete ARM64 image.
   # Plymouth stays: 26.134.222-2 aborted in the GB10 initramfs, but -3 runs
   # there.
+  # Last, so it runs after base, which adds the init_functions it quiets
+  # (builder/qualcomm/quiet-efivars-install).
+  filtered_hooks+=(omarchy_quiet_efivars)
   printf -v replacement 'HOOKS=(%s)' "${filtered_hooks[*]}"
   sed -i "s|^HOOKS=.*$|$replacement|" "$config"
 

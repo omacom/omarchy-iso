@@ -333,10 +333,11 @@ session_unlocked() { ! ssh_guest "pgrep -x hyprlock" >/dev/null 2>&1; }
 # desktop has settled once that setup is gone and the menu answers again.
 # Hyprland starts the setup with the shell, so it is still running when the
 # menu first answers; asked together, the two cannot pass before it starts.
-# The [o] keeps pgrep from matching this check's own shell, and a renamed
-# setup command fails the wait instead of quietly letting the flake back in.
+# The check's own shell must not spell the name out whole, or pgrep -f finds
+# it: hence the [o] and the split quoting. A renamed setup command fails the
+# wait instead of quietly letting the flake back in.
 desktop_settled() {
-  ssh_session 'command -v omarchy-provision-first-run >/dev/null &&
+  ssh_session 'command -v "omarchy-provision-first-"run >/dev/null &&
     ! pgrep -f "[o]marchy-provision-first-run" >/dev/null &&
     [[ $(omarchy-shell shell call omarchy.menu ping "") == ok ]]'
 }

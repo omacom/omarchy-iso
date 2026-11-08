@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Run the real UKI builder and mkinitcpio hook with isolated file fixtures."""
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
+import re
 import struct
 import subprocess
+import tarfile
 import tempfile
 import unittest
 
@@ -178,6 +181,57 @@ build
         del env['OMARCHY_QCOM_DTBS_FILE']
         failed=subprocess.run(['bash','-c',harness],env=env,capture_output=True,text=True)
         self.assertNotEqual(failed.returncode,0); self.assertNotIn('RUNSCRIPT',failed.stdout)
+
+
+class ConfiguratorFirmwareTests(unittest.TestCase):
+    """Run the configurator's real firmware functions against fixtures."""
+
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root=Path(self.tmp.name)
+        (self.root/'bin').mkdir()
+        (self.root/'mirror').mkdir()
+        self.env=os.environ | {'PATH':str(self.root/'bin')+':'+os.environ['PATH'], 'TEST_ROOT':str(self.root)}
+        # Two missing files: one in a folder a maker's package provides, one not.
+        self.executable('qcom-firmware-extract','''#!/bin/bash
+if [[ $1 == --list-missing ]]; then
+  printf '%s\\n' qcom/x1p42100/ASUSTeK/zenbook-14-ux3480qa/qcadsp8380.mbn qcom/x1e80100/VENDOR/laptop/qcadsp8380.mbn
+elif [[ $1 == --stage ]]; then
+  mkdir -p "$2"; echo staged >"$TEST_ROOT/stage-ran"; : >"$2/manifest"
+fi
+''')
+        desc=b'%NAME%\nasus-zenbook-14-ux3480qa-firmware\n\n%PROVIDES%\nqcom-firmware-x1p42100-asustek-zenbook-14-ux3480qa=20261106\n\n'
+        with tarfile.open(self.root/'mirror/offline.db.tar.gz','w:gz') as tar:
+            info=tarfile.TarInfo('asus-zenbook-14-ux3480qa-firmware-20261106-1/desc'); info.size=len(desc)
+            tar.addfile(info,io.BytesIO(desc))
+        code=(ROOT/'configs/airootfs/root/configurator').read_text()
+        functions=''.join(re.search(r'^'+name+r'\(\) \{\n.*?^\}\n', code, re.S|re.M).group(0)
+                          for name in ('qualcomm_firmware_uncovered','stage_qualcomm_firmware'))
+        for old,new in (('/var/cache/omarchy/mirror/offline',str(self.root/'mirror')),('/run/omarchy',str(self.root/'run/omarchy')),
+                        ('/sys/firmware/devicetree/base',str(self.root/'dt'))):
+            functions=functions.replace(old,new)
+        (self.root/'dt').mkdir()
+        self.functions=functions
+
+    def executable(self,name,text):
+        path=self.root/'bin'/name; path.write_text(text); path.chmod(0o755)
+
+    def run_bash(self,call):
+        stubs='step() { echo "step $*"; }\nsay() { echo "say $*"; }\nt() { echo "$*"; }\n'
+        return subprocess.run(['bash','-c',stubs+self.functions+call],env=self.env,capture_output=True,text=True)
+
+    def test_firmware_a_package_covers_is_not_missing(self):
+        result=self.run_bash('qualcomm_firmware_uncovered')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(result.stdout,'qcom/x1e80100/VENDOR/laptop/qcadsp8380.mbn\n')
+
+    def test_staging_runs_before_run_omarchy_exists(self):
+        self.assertFalse((self.root/'run/omarchy').exists())
+        result=self.run_bash('stage_qualcomm_firmware')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertNotIn('No such file',result.stderr)
+        self.assertTrue((self.root/'stage-ran').exists())
+        self.assertTrue((self.root/'run/omarchy/firmware-stage.log').exists())
 
 
 if __name__=='__main__': unittest.main()

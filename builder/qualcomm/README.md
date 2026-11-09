@@ -6,7 +6,15 @@ kernel/initramfs pair is unchanged. Only the Qualcomm GRUB entry enables the
 
 Before loading drivers, the hook checks every ADSP firmware name in the running
 device tree. It accepts the normal firmware search directories and compressed
-files. If a required file is missing, or the firmware owner is unknown, it leaves
+files. The initramfs carries only linux-firmware's blobs: the OEM packages'
+ADSP files are over 300 MiB, too big for a UKI that GRUB must place in memory.
+`build-iso.sh` puts them on the medium under `arch/<arch>/qcom-firmware` with a
+`SHA256SUMS` list. A file missing from the initramfs is copied from there: the
+hook triggers coldplug (the firmware driver stays blacklisted), mounts the
+medium read-only, copies and checks only the names its device tree requests,
+and unmounts before any driver loads. Without its ADSP a laptop reports no
+USB-C plug orientation, so a stick plugged in one way round runs at USB 2.
+If a required file is still missing, or the firmware owner is unknown, it leaves
 the original mount handler and automatic-load blacklist in place. The existing
 Yoga-only late-start service remains available under its original RAM-copy
 checks. This preserves the existing path; it does not establish board support.

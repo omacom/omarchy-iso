@@ -226,6 +226,9 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
     sed -i "\\|^${escaped_package}$|d" "$build_cache_dir/packages.aarch64"
   done
   rm -f "$build_cache_dir/packages.x86_64"
+  # The same Pi check runs before disk preparation and on the installed system.
+  # Its package also requires the kernel revision that enables BCM2711.
+  echo raspberrypi-4-support >>"$build_cache_dir/packages.aarch64"
   rm -f "$build_cache_dir/airootfs/etc/mkinitcpio.d/linux.preset" "$build_cache_dir/airootfs/etc/mkinitcpio.d/linux-t2.preset"
   # Drops the x86-only microcode/memdisk hooks and adds the Tegra/MediaTek
   # I2C-HID keyboard modules.
@@ -432,7 +435,7 @@ platform_lists=()
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   for required in bin/omarchy-hw-platform install/hardware/qualcomm/dtb-uki.sh \
     install/omarchy-aarch64-qualcomm.packages install/omarchy-aarch64-n1x.packages \
-    install/omarchy-aarch64-gb10.packages; do
+    install/omarchy-aarch64-gb10.packages install/omarchy-aarch64-raspberrypi.packages; do
     if [[ -d /omarchy-source ]]; then
       [[ -f /omarchy-source/$required ]]
     else

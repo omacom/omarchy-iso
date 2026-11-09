@@ -10,6 +10,7 @@ cleanup scripts on PATH, so the real command capture runs.
 """
 
 import os
+import subprocess
 import sys
 import tempfile
 import types
@@ -92,6 +93,33 @@ class InstallDiskReleaseTest(unittest.TestCase):
 
         phases_impl.prepare_live(self.ctx())
 
+        self.arch.load_arch_config.assert_called_once()
+
+    def test_pi_boot_failure_stops_before_disk_cleanup(self):
+        with mock.patch.object(phases_impl, "hw_platform", return_value="aarch64-raspberrypi"), \
+             mock.patch.object(phases_impl.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "omarchy-pi-check")) as check, \
+             mock.patch.object(phases_impl, "capture") as cleanup:
+            with self.assertRaises(subprocess.CalledProcessError):
+                phases_impl.prepare_live(self.ctx())
+        check.assert_called_once_with(["/bin/bash", "-p", "/usr/bin/omarchy-pi-check", "--live"], check=True)
+        cleanup.assert_not_called()
+        self.arch.load_arch_config.assert_not_called()
+
+    def test_unknown_platform_stops_before_disk_cleanup(self):
+        with mock.patch.object(phases_impl, "hw_platform", side_effect=RuntimeError("contradictory platform")) as detect, \
+             mock.patch.object(phases_impl, "capture") as cleanup:
+            with self.assertRaisesRegex(RuntimeError, "contradictory platform"):
+                phases_impl.prepare_live(self.ctx())
+        detect.assert_called_once_with(strict=True)
+        cleanup.assert_not_called()
+
+    def test_other_boards_do_not_run_pi_check(self):
+        self.cleanup_script('echo "Released $1"')
+        with mock.patch.object(phases_impl, "hw_platform", return_value="aarch64-qualcomm"), \
+             mock.patch.object(phases_impl, "capture", return_value=types.SimpleNamespace(returncode=0, stdout="", stderr="")), \
+             mock.patch.object(phases_impl.subprocess, "run") as check:
+            phases_impl.prepare_live(self.ctx())
+        check.assert_not_called()
         self.arch.load_arch_config.assert_called_once()
 
 

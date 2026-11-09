@@ -99,10 +99,24 @@ class PlatformKernelTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             detector = Path(tmp) / "omarchy-hw-platform"
             self.assertEqual(context.hw_platform(detector), "")
+            with mock.patch.object(context.platform, "machine", return_value="aarch64"):
+                with self.assertRaisesRegex(RuntimeError, "Missing hardware platform detector"):
+                    context.hw_platform(detector, strict=True)
+            with mock.patch.object(context.platform, "machine", return_value="x86_64"):
+                self.assertEqual(context.hw_platform(detector, strict=True), "")
             detector.write_text("echo aarch64-qualcomm\n")
             self.assertEqual(context.hw_platform(detector), "aarch64-qualcomm")
             detector.write_text("echo aarch64-qualcomm; exit 1\n")
             self.assertEqual(context.hw_platform(detector), "")
+            with self.assertRaisesRegex(RuntimeError, "Could not determine"):
+                context.hw_platform(detector, strict=True)
+            detector.write_text("echo aarch64-raspberrypi\n")
+            self.assertEqual(context.hw_platform(detector, strict=True), "aarch64-raspberrypi")
+            for output in ["", "unexpected-platform"]:
+                detector.write_text("printf '%s\\n' '" + output + "'\n")
+                with self.assertRaisesRegex(RuntimeError, "Could not determine"):
+                    context.hw_platform(detector, strict=True)
+
 
 
 class ConfiguratorMirrorsTest(unittest.TestCase):

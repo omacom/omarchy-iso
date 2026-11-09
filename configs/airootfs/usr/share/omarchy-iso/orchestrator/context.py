@@ -204,14 +204,23 @@ def _inject_provisioning_encryption_password(arch_configuration: dict, user_cred
 HW_PLATFORM_DETECTOR = Path("/usr/share/omarchy-iso/omarchy-hw-platform")
 
 
-def hw_platform(detector: Path = HW_PLATFORM_DETECTOR) -> str:
+def hw_platform(detector: Path = HW_PLATFORM_DETECTOR, *, strict: bool = False) -> str:
     if not detector.is_file():
+        # x86 live images intentionally omit this ARM platform detector.
+        if strict and platform.machine() == "aarch64":
+            raise RuntimeError("Missing hardware platform detector in the aarch64 image")
         return ""
     # The detector refuses a Bash that was not started in privileged mode.
     result = subprocess.run(["/bin/bash", "-p", str(detector)], capture_output=True, text=True)
     if result.returncode != 0:
+        if strict:
+            raise RuntimeError(result.stderr.strip() or "Could not determine the hardware platform")
         return ""
-    return result.stdout.strip()
+    detected = result.stdout.strip()
+    supported = {"x86", "aarch64", "aarch64-apple", "aarch64-qualcomm", "aarch64-n1x", "aarch64-gb10", "aarch64-raspberrypi"}
+    if strict and detected not in supported:
+        raise RuntimeError("Could not determine a supported hardware platform")
+    return detected
 
 
 # build-iso.sh records the kernel an aarch64 image installs; x86_64 images

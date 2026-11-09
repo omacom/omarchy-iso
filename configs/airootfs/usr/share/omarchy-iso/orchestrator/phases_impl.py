@@ -266,6 +266,10 @@ def _copy_firmware_stage_into_target(ctx: InstallContext) -> None:
 
 
 def prepare_live(ctx: InstallContext) -> None:
+    # Refuse ACPI-only or software-rendered Pi boots before disk cleanup.
+    # Other boards use the same image without invoking Pi-specific checks.
+    if hw_platform(strict=True) == "aarch64-raspberrypi":
+        subprocess.run(["/bin/bash", "-p", "/usr/bin/omarchy-pi-check", "--live"], check=True)
     _stage_qualcomm_firmware()
     if ctx.is_protected:
         info("› protected mode: skipping whole-disk cleanup")

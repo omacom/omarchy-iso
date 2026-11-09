@@ -9,7 +9,7 @@
 #
 # Runs on the default variant only: desktop behaviour does not vary by disk
 # size, encryption, or bootloader, and the smoke is expensive. The universal
-# clipboard sub-phase (opens Chromium) runs too.
+# clipboard sub-phase (opens Chrome) runs too.
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
@@ -191,9 +191,9 @@ verify_universal_clipboard_shortcuts() {
   local terminal_result="/tmp/omarchy-universal-terminal-paste"
 
   cleanup_shortcut_state
-  ssh_session "setsid -f chromium --new-window about:blank >/dev/null 2>&1"
-  if ! wait_for_guest_state "universal clipboard test opens Chromium" 45 \
-    ssh_session "hyprctl -j clients | jq -e '[.[] | select(.class | test(\"(?i)chromium\"))] | length == 1'"; then
+  ssh_session "setsid -f google-chrome-stable --new-window about:blank >/dev/null 2>&1"
+  if ! wait_for_guest_state "universal clipboard test opens Chrome" 45 \
+    ssh_session "hyprctl -j clients | jq -e '[.[] | select(.class | test(\"(?i)google-chrome\"))] | length == 1'"; then
     capture_console "failure-shortcut-universal-clipboard-browser"
     return 1
   fi
@@ -228,7 +228,7 @@ verify_universal_clipboard_shortcuts() {
   ssh_session 'while read -r address; do
     hyprctl dispatch "hl.dsp.window.close({ window = \"address:$address\" })" >/dev/null 2>&1 ||
       hyprctl dispatch closewindow "address:$address" >/dev/null 2>&1 || true
-  done < <(hyprctl -j clients | jq -r '\''.[] | select(.class | test("(?i)chromium")) | .address'\'')' || true
+  done < <(hyprctl -j clients | jq -r '\''.[] | select(.class | test("(?i)google-chrome")) | .address'\'')' || true
 
   ssh_session "rm -f '$terminal_result'; \
     setsid -f bash -c 'printf \"%s\" \"$terminal_token\" | wl-copy' >/dev/null 2>&1; \
@@ -294,19 +294,19 @@ browser_launch_phase() {
   local launches=${OMARCHY_BROWSER_LAUNCHES:-3} i out failed=0
 
   for ((i = 1; i <= launches; i++)); do
-    out=$(ssh_session "pkill -x chromium 2>/dev/null; sleep 1; rm -rf ~/.config/chromium ~/.cache/chromium; \
-      before=\$(coredumpctl list --no-legend 2>/dev/null | grep -c chromium); \
-      systemd-run --user --quiet --collect --unit=omarchy-browser-smoke-$i-\$RANDOM uwsm-app -- /usr/bin/chromium 'https://example.com/?omarchy-smoke=$i'; \
+    out=$(ssh_session "pkill -x chrome 2>/dev/null; sleep 1; rm -rf ~/.config/google-chrome ~/.cache/google-chrome; \
+      before=\$(coredumpctl list --no-legend 2>/dev/null | grep -c chrome); \
+      systemd-run --user --quiet --collect --unit=omarchy-browser-smoke-$i-\$RANDOM uwsm-app -- /usr/bin/google-chrome-stable 'https://example.com/?omarchy-smoke=$i'; \
       sleep 9; \
-      after=\$(coredumpctl list --no-legend 2>/dev/null | grep -c chromium); \
+      after=\$(coredumpctl list --no-legend 2>/dev/null | grep -c chrome); \
       windows=\$(hyprctl -j clients | jq '[.[] | select(.class | test(\"(?i)chrom\"))] | length'); \
       echo \"cores \$before->\$after windows \$windows\"" 2>/dev/null)
     echo "    fresh-profile launch $i: ${out:-no answer}"
     [[ $out =~ ^cores\ ([0-9]+)-\>([0-9]+)\ windows\ ([0-9]+)$ ]] &&
       [[ ${BASH_REMATCH[1]} == "${BASH_REMATCH[2]}" && ${BASH_REMATCH[3]} -ge 1 ]] || ((failed += 1))
   done
-  check "chromium opens a link on a fresh profile, $launches times, without a core dump (failed: $failed)" test "$failed" -eq 0
-  ssh_session "pkill -x chromium" >/dev/null 2>&1 || true
+  check "Chrome opens a link on a fresh profile, $launches times, without a core dump (failed: $failed)" test "$failed" -eq 0
+  ssh_session "pkill -x chrome" >/dev/null 2>&1 || true
 }
 
 # ------------------------------------------------------- reaching the desktop

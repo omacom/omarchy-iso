@@ -4,6 +4,15 @@ set -e
 
 OMARCHY_ISO_REF="${OMARCHY_ISO_REF:-quattro}"
 OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
+# OMARCHY_MIRROR is the channel the ISO is built from. OMARCHY_INSTALL_CHANNEL
+# is the one the installed machine follows: the same channel, except for a
+# final release built from rc before rc is promoted to stable
+# (omarchy-iso-make --stable-from-rc).
+OMARCHY_INSTALL_CHANNEL="${OMARCHY_INSTALL_CHANNEL:-$OMARCHY_MIRROR}"
+if [[ $OMARCHY_INSTALL_CHANNEL != "$OMARCHY_MIRROR" && ! ($OMARCHY_MIRROR == rc && $OMARCHY_INSTALL_CHANNEL == stable) ]]; then
+  echo "ERROR: an ISO built from $OMARCHY_MIRROR can't install onto $OMARCHY_INSTALL_CHANNEL; only rc can be installed onto stable" >&2
+  exit 1
+fi
 OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
 OMARCHY_KERNEL="${OMARCHY_KERNEL:-linux-omarchy}"
 # profiledef.sh reads both in the mkarchiso environment.
@@ -200,7 +209,10 @@ rm -rf "$build_cache_dir/airootfs/etc/xdg/reflector"
 cp -r /configs/* "$build_cache_dir/"
 install -Dm755 /usr/local/bin/omarchy-image-write "$build_cache_dir/airootfs/usr/local/bin/omarchy-image-write"
 mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
-echo "$OMARCHY_MIRROR" > "$build_cache_dir/airootfs/root/omarchy_mirror"
+# The installer hands this to the runtime as OMARCHY_MIRROR, which writes that
+# channel's pacman.conf on the installed machine
+# (omarchy: install/post-install/pacman.sh).
+echo "$OMARCHY_INSTALL_CHANNEL" > "$build_cache_dir/airootfs/root/omarchy_mirror"
 echo "$OMARCHY_ISO_REF" > "$build_cache_dir/airootfs/root/omarchy_iso_ref"
 echo "$OMARCHY_ARCH" > "$build_cache_dir/airootfs/root/omarchy_arch"
 # The kernel the installer puts on the target: the image's own on aarch64,
@@ -303,6 +315,7 @@ if [[ ${OMARCHY_INSTALL_DEBUG:-} == "1" ]]; then
     echo "built_at=$(date -Is)"
     echo "ref=$OMARCHY_ISO_REF"
     echo "mirror=$OMARCHY_MIRROR"
+    echo "install_channel=$OMARCHY_INSTALL_CHANNEL"
     echo "runtime_package=$OMARCHY_RUNTIME_PACKAGE"
     echo "settings_package=$OMARCHY_SETTINGS_PACKAGE"
     echo "nvim_package=$OMARCHY_NVIM_PACKAGE"

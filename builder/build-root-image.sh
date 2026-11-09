@@ -62,10 +62,16 @@ fi
 
 # Forced zstd at a higher level than the installer's own compress=zstd (level
 # 3): btrfs's incompressibility heuristic declines a lot of data in this tree
-# that zstd handles fine, and the level only costs build time. The image is
-# written to the target as it is, so neither choice affects install speed; the
-# installed system writes new data at its own mount option either way.
-IMAGE_COMPRESS="compress-force=zstd:15"
+# that zstd handles fine. The image is written to the target as it is, so the
+# install never compresses the image's data again: the level changes only how
+# many bytes it reads, verifies and writes. The installed system writes new
+# data at its own mount option either way.
+#
+# Level 10, not btrfs's highest, 15: the level decides how long the pacstrap
+# below takes, because pacman waits while btrfs compresses on a few of the
+# cores. Measured on 32 CPUs with the image in RAM: 393 s at 15, 105 s at 10,
+# for a packed image 161 MB (4.2%) larger.
+IMAGE_COMPRESS="compress-force=zstd:10"
 # Name of the image's one subvolume. The installer renames it to @ after the
 # write (phases_impl.ROOT_IMAGE_SUBVOLUME).
 IMAGE_SUBVOLUME="omarchy-root"

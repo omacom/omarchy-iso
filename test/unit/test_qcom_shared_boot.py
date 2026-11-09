@@ -57,6 +57,104 @@ class FirmwareTests(unittest.TestCase):
             self.assertNotEqual(result.returncode,0)
             self.assertIn('Unsafe',result.stderr)
 
+    def test_cli_required_leaves_out_optional_firmware(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name); manifest=root/'dtbs'
+            (root/'x1.dtb').write_bytes(dtb())
+            (root/'glymur.dtb').write_bytes(dtb('qcom,glymur-soccp-pas','qcom/soccp.mbn'))
+            manifest.write_text(f'{root}/x1.dtb\n{root}/glymur.dtb\n')
+            script=str(ROOT/'builder/qualcomm/early-firmware.py')
+            result=subprocess.run(['python3',script,str(manifest)],capture_output=True,text=True)
+            self.assertEqual(result.stdout,'qcom/soccp.mbn\nqcom/vendor/adsp.mbn\n',result.stderr)
+            result=subprocess.run(['python3',script,'--required',str(manifest)],capture_output=True,text=True)
+            self.assertEqual(result.stdout,'qcom/vendor/adsp.mbn\n',result.stderr)
+
+
+class StageMediumFirmwareTests(unittest.TestCase):
+    """Run the real medium-firmware staging against synthetic packages."""
+
+    SCRIPT=ROOT/'builder/qualcomm/stage-medium-firmware.sh'
+    DTBS='boot/dtbs/linux-omarchy/qcom/'
+    FW='usr/lib/firmware/qcom/'
+
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root=Path(self.tmp.name); self.out=self.root/'out'
+
+    def package(self,name,files,links=()):
+        path=self.root/name
+        with tarfile.open(path,'w') as tar:
+            for member,data in files.items():
+                info=tarfile.TarInfo(member); info.size=len(data); tar.addfile(info,io.BytesIO(data))
+            for member,target in links:
+                info=tarfile.TarInfo(member); info.type=tarfile.SYMTYPE; info.linkname=target; tar.addfile(info)
+        return str(path)
+
+    def stage(self,kernel,*packages):
+        return subprocess.run(['bash',str(self.SCRIPT),kernel,str(self.out),*packages],capture_output=True,text=True)
+
+    def staged(self):
+        return sorted(str(p.relative_to(self.out)) for p in self.out.rglob('*') if p.is_file())
+
+    def test_stages_what_the_device_trees_require_whatever_its_name(self):
+        kernel=self.package('kernel.pkg.tar',{
+            self.DTBS+'x1e80100-vendor-laptop.dtb':dtb(name='qcom/vendor/qcadsp8380.mbn'),
+            # Named nothing like qcadsp*: a name pattern would miss it.
+            self.DTBS+'x1p42100-other-laptop.dtb':dtb(name='qcom/other/audio-dsp.mbn'),
+            self.DTBS+'x1e80100-vendor-laptop-el2.dtb':dtb(name='qcom/el2/qcadsp8380.mbn'),
+            self.DTBS+'sm8550-phone.dtb':dtb(name='qcom/phone/qcadsp8550.mbn'),
+        })
+        vendor=self.package('vendor.pkg.tar',{self.FW+'vendor/qcadsp8380.mbn.xz':b'vendor adsp',
+                                              self.FW+'vendor/qccdsp8380.mbn.xz':b'cdsp'})
+        other=self.package('other.pkg.tar',{self.FW+'other/audio-dsp.mbn.zst':b'other adsp'})
+        el2=self.package('el2.pkg.tar',{self.FW+'el2/qcadsp8380.mbn':b'el2'})
+        phone=self.package('phone.pkg.tar',{self.FW+'phone/qcadsp8550.mbn':b'phone'})
+        result=self.stage(kernel,vendor,other,el2,phone)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(self.staged(),['SHA256SUMS','qcom/other/audio-dsp.mbn.zst','qcom/vendor/qcadsp8380.mbn.xz'])
+        self.assertIn('2 files',result.stdout)
+
+    def test_sha256sums_is_what_the_boot_hook_reads(self):
+        kernel=self.package('kernel.pkg.tar',{self.DTBS+'x1e80100-vendor-laptop.dtb':dtb(name='qcom/vendor/adsp.mbn')})
+        vendor=self.package('vendor.pkg.tar',{self.FW+'vendor/adsp.mbn.xz':b'adsp'})
+        result=self.stage(kernel,vendor)
+        self.assertEqual(result.returncode,0,result.stderr)
+        # early-startup reads "<sum> <name>" with the name relative to qcom-firmware/.
+        line=(self.out/'SHA256SUMS').read_text()
+        self.assertRegex(line,r'^[0-9a-f]{64}  qcom/vendor/adsp\.mbn\.xz\n$')
+        check=subprocess.run(['sha256sum','-c','SHA256SUMS'],cwd=self.out,capture_output=True,text=True)
+        self.assertEqual(check.returncode,0,check.stdout+check.stderr)
+
+    def test_a_symlinked_file_is_staged_as_the_file_it_names(self):
+        kernel=self.package('kernel.pkg.tar',{self.DTBS+'x1e80100-vendor-laptop.dtb':dtb(name='qcom/vendor/adsp.mbn')})
+        vendor=self.package('vendor.pkg.tar',{self.FW+'shared/adsp-v2.mbn.xz':b'shared adsp'},
+                            links=((self.FW+'vendor/adsp.mbn.xz','../shared/adsp-v2.mbn.xz'),))
+        result=self.stage(kernel,vendor)
+        self.assertEqual(result.returncode,0,result.stderr)
+        staged=self.out/'qcom/vendor/adsp.mbn.xz'
+        self.assertFalse(staged.is_symlink())
+        self.assertEqual(staged.read_bytes(),b'shared adsp')
+        self.assertIn('qcom/vendor/adsp.mbn.xz',(self.out/'SHA256SUMS').read_text())
+        self.assertEqual(self.staged(),['SHA256SUMS','qcom/vendor/adsp.mbn.xz'])
+
+    def test_a_dangling_symlink_fails_the_build(self):
+        kernel=self.package('kernel.pkg.tar',{self.DTBS+'x1e80100-vendor-laptop.dtb':dtb(name='qcom/vendor/adsp.mbn')})
+        vendor=self.package('vendor.pkg.tar',{},links=((self.FW+'vendor/adsp.mbn.xz','missing.mbn.xz'),))
+        result=self.stage(kernel,vendor)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('does not resolve to a file',result.stderr)
+
+    def test_nothing_to_stage_fails_the_build(self):
+        kernel=self.package('kernel.pkg.tar',{self.DTBS+'x1e80100-vendor-laptop.dtb':dtb(name='qcom/vendor/adsp.mbn')})
+        unrelated=self.package('unrelated.pkg.tar',{self.FW+'elsewhere/adsp.mbn':b'x'})
+        result=self.stage(kernel,unrelated)
+        self.assertNotEqual(result.returncode,0)
+
+    def test_a_kernel_without_snapdragon_trees_fails_the_build(self):
+        kernel=self.package('kernel.pkg.tar',{self.DTBS+'sm8550-phone.dtb':dtb()})
+        result=self.stage(kernel)
+        self.assertNotEqual(result.returncode,0)
+
 
 class BuildTests(unittest.TestCase):
     def setUp(self):

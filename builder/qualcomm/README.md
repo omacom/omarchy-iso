@@ -9,7 +9,9 @@ device tree. It accepts the normal firmware search directories and compressed
 files. The initramfs carries only linux-firmware's blobs: the OEM packages'
 ADSP files are over 300 MiB, too big for a UKI that GRUB must place in memory.
 `build-iso.sh` puts them on the medium under `arch/<arch>/qcom-firmware` with a
-`SHA256SUMS` list. A file missing from the initramfs is copied from there: the
+`SHA256SUMS` list. `stage-medium-firmware.sh` picks them from the device trees
+the UKI embeds: each ADSP owner's required names, whatever they are called,
+with a symlinked file staged as the file it names. A file missing from the initramfs is copied from there: the
 hook triggers coldplug (the firmware driver stays blacklisted), mounts the
 medium read-only, copies and checks only the names its device tree requests,
 and unmounts before any driver loads. Without its ADSP a laptop reports no

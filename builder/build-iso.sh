@@ -125,7 +125,8 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # and run the repository's pinned submodule copy, patched for arm64-efi GRUB.
   pacman --noconfirm -Syu \
     arch-install-scripts dosfstools e2fsprogs erofs-utils libarchive libisoburn \
-    mtools squashfs-tools git sudo base-devel jq grub imagemagick neovim nodejs npm tree-sitter-cli btrfs-progs
+    mtools squashfs-tools git sudo base-devel jq grub imagemagick neovim nodejs npm tree-sitter-cli btrfs-progs \
+    python
   mkarchiso_command=/tmp/mkarchiso-aarch64
   cp /archiso/archiso/mkarchiso "$mkarchiso_command"
   patch --batch --forward --fuzz=0 "$mkarchiso_command" </builder/archiso-v87-aarch64-grub.patch
@@ -939,34 +940,30 @@ echo "[timing] root image end $(date +%s)"
 # image, so it ships on the ISO beside it.
 (cd "$root_image_dir" && sha256sum "${root_image##*/}" >"$root_image.sha256")
 
-# aarch64: the ADSP firmware of every Snapdragon OEM package, as plain files
-# next to the root image. The live UKI holds only linux-firmware's; the OEM
-# packages' ADSP files are over 300 MiB, and GRUB has to place the whole UKI in
-# memory (omarchy-iso#128). Without its ADSP a laptop never reports its USB-C
-# plug orientation, so a stick plugged in one way round runs at USB 2. The
-# live initramfs (qualcomm/early-startup) copies the two files its board names
-# from here, checked against SHA256SUMS, before it starts the ADSP.
+# aarch64: each Snapdragon laptop's ADSP firmware, as plain files next to the
+# root image with a SHA256SUMS list. The live UKI holds only linux-firmware's;
+# the OEM packages' ADSP files are over 300 MiB, and GRUB has to place the
+# whole UKI in memory (omarchy-iso#128). Without its ADSP a laptop never
+# reports its USB-C plug orientation, so a stick plugged in one way round runs
+# at USB 2. The live initramfs (qualcomm/early-startup) copies the files its
+# board names from here, checked against SHA256SUMS, before it starts the ADSP.
+# Which files to stage comes from the kernel's device trees
+# (qualcomm/stage-medium-firmware.sh).
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
-  qcom_medium_firmware="$root_image_dir/qcom-firmware"
-  rm -rf "$qcom_medium_firmware"
-  mkdir -p "$qcom_medium_firmware"
+  # -Sp prints dependencies too; keep only the packages named here.
+  qcom_kernel_file=''
+  qcom_firmware_files=()
   while read -r name file; do
-    [[ " ${qcom_oem_firmware[*]} " == *" $name "* ]] || continue
-    # Not every package has both files (SC8280XP has no ADSP DTB), so name
-    # the members found rather than pass patterns bsdtar fails on.
-    mapfile -t adsp_files < <(bsdtar -tf "$offline_mirror_dir/$file" |
-      grep -E '^usr/lib/firmware/qcom/.+/(qcadsp[^/]*|adsp_dtbs?[^/]*)$' || true)
-    (( ${#adsp_files[@]} )) || continue
-    bsdtar -xf "$offline_mirror_dir/$file" -C "$qcom_medium_firmware" --strip-components 3 "${adsp_files[@]}"
+    if [[ $name == "$OMARCHY_KERNEL" ]]; then
+      qcom_kernel_file=$file
+    elif [[ " ${qcom_oem_firmware[*]} " == *" $name "* ]]; then
+      qcom_firmware_files+=("$offline_mirror_dir/$file")
+    fi
   done < <(pacman --config "$online_pacman_conf" --dbpath /tmp/offlinedb -Sp \
-    --print-format '%n %f' "${qcom_oem_firmware[@]}")
-  (cd "$qcom_medium_firmware" && find qcom -type f -print0 | sort -z | xargs -0r sha256sum >SHA256SUMS)
-  qcom_medium_files=$(wc -l <"$qcom_medium_firmware/SHA256SUMS")
-  if (( qcom_medium_files == 0 )); then
-    echo "ERROR: no ADSP firmware in the ${#qcom_oem_firmware[@]} Snapdragon OEM firmware packages" >&2
-    exit 1
-  fi
-  echo "aarch64: $qcom_medium_files ADSP firmware files on the medium, $(du -sm "$qcom_medium_firmware" | cut -f1) MiB" >&2
+    --print-format '%n %f' "$OMARCHY_KERNEL" "${qcom_oem_firmware[@]}")
+  [[ -n $qcom_kernel_file ]] || { echo "ERROR: $OMARCHY_KERNEL is not in the offline mirror" >&2; exit 1; }
+  bash /builder/qualcomm/stage-medium-firmware.sh "$offline_mirror_dir/$qcom_kernel_file" \
+    "$root_image_dir/qcom-firmware" "${qcom_firmware_files[@]}"
 fi
 
 # Bound the boot-time hash: Type=oneshot units are exempt from systemd's

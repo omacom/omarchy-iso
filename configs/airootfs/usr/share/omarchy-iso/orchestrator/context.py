@@ -223,6 +223,12 @@ def hw_platform(detector: Path = HW_PLATFORM_DETECTOR, *, strict: bool = False) 
     return detected
 
 
+def preflight_live() -> None:
+    """Refuse unsafe Pi boots before either installer path writes a disk."""
+    if hw_platform(strict=True) == "aarch64-raspberrypi":
+        subprocess.run(["/bin/bash", "-p", "/usr/bin/omarchy-pi-check", "--live"], check=True)
+
+
 # build-iso.sh records the kernel an aarch64 image installs; x86_64 images
 # carry an empty file and pick per machine.
 ISO_KERNEL_FILE = Path("/root/omarchy_kernel")

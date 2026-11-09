@@ -28,7 +28,7 @@ sys.modules.setdefault(
     types.ModuleType("orchestrator.archinstall_adapter"),
 )
 
-from orchestrator import phases_impl  # noqa: E402
+from orchestrator import context, phases_impl  # noqa: E402
 
 FULL_DISK = {"disk_config": {"device_modifications": [{"device": "/dev/vda", "wipe": True}]}}
 
@@ -96,7 +96,7 @@ class InstallDiskReleaseTest(unittest.TestCase):
         self.arch.load_arch_config.assert_called_once()
 
     def test_pi_boot_failure_stops_before_disk_cleanup(self):
-        with mock.patch.object(phases_impl, "hw_platform", return_value="aarch64-raspberrypi"), \
+        with mock.patch.object(context, "hw_platform", return_value="aarch64-raspberrypi"), \
              mock.patch.object(phases_impl.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "omarchy-pi-check")) as check, \
              mock.patch.object(phases_impl, "capture") as cleanup:
             with self.assertRaises(subprocess.CalledProcessError):
@@ -106,7 +106,7 @@ class InstallDiskReleaseTest(unittest.TestCase):
         self.arch.load_arch_config.assert_not_called()
 
     def test_unknown_platform_stops_before_disk_cleanup(self):
-        with mock.patch.object(phases_impl, "hw_platform", side_effect=RuntimeError("contradictory platform")) as detect, \
+        with mock.patch.object(context, "hw_platform", side_effect=RuntimeError("contradictory platform")) as detect, \
              mock.patch.object(phases_impl, "capture") as cleanup:
             with self.assertRaisesRegex(RuntimeError, "contradictory platform"):
                 phases_impl.prepare_live(self.ctx())
@@ -115,12 +115,29 @@ class InstallDiskReleaseTest(unittest.TestCase):
 
     def test_other_boards_do_not_run_pi_check(self):
         self.cleanup_script('echo "Released $1"')
-        with mock.patch.object(phases_impl, "hw_platform", return_value="aarch64-qualcomm"), \
+        with mock.patch.object(context, "hw_platform", return_value="aarch64-qualcomm"), \
              mock.patch.object(phases_impl, "capture", return_value=types.SimpleNamespace(returncode=0, stdout="", stderr="")), \
              mock.patch.object(phases_impl.subprocess, "run") as check:
             phases_impl.prepare_live(self.ctx())
         check.assert_not_called()
         self.arch.load_arch_config.assert_called_once()
+
+
+class InteractivePreflightTest(unittest.TestCase):
+    def test_rejected_preflight_precedes_partition_work(self):
+        source = (ROOT / "configs/airootfs/root/configurator").read_text()
+        function = source[source.index("run_partition_execute() {"):]
+        function = function[:function.index("\n}\n", function.index("_EOF_\n", function.index("cat <<"))) + 3]
+        # Execute the real function; the first UI step marks entry into disk work.
+        script = function + """
+function /usr/bin/python3() { return 37; }
+step() { echo destructive-work; exit 99; }
+run_partition_execute
+exit $?
+"""
+        result = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 37, result.stderr)
+        self.assertNotIn("destructive-work", result.stdout)
 
 
 if __name__ == "__main__":

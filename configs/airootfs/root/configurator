@@ -872,6 +872,8 @@ run_partition_execute() {
     say "[dry] partition numbers are assigned by parted at creation, then read back"
     say "[dry] encrypted=$encrypt_installation kernel=$kernel_choice"
   else
+    # Use the orchestrator's trusted detector and Pi gate before any disk writes.
+    /usr/bin/python3 -I -c 'import sys; sys.path.insert(0, "/usr/share/omarchy-iso"); from orchestrator.context import preflight_live; preflight_live()' || return $?
     step "$(t partitions.creating "$disk")"
     if $needs_mklabel; then
       disk_step "initializing GPT on $disk" parted --script "$disk" mklabel gpt
@@ -1319,7 +1321,7 @@ if [[ $install_target == "free_space" ]]; then
     fi
   fi
 
-  run_partition_execute "$@"
+  run_partition_execute "$@" || exit $?
 
   if [[ ${1:-} == "dry" ]]; then
     print_dry_run_files

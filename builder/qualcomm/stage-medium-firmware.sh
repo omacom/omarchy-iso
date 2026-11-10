@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
 #
-# Usage: stage-medium-firmware.sh KERNEL-PACKAGE OUTPUT-DIR FIRMWARE-PACKAGE...
+# Usage: stage-medium-firmware.sh [--trees PACKAGE]... KERNEL-PACKAGE OUTPUT-DIR FIRMWARE-PACKAGE...
 #
 # Stages on the medium, with a SHA256SUMS list, the firmware each Snapdragon
 # laptop needs to start its ADSP in the live initramfs (qualcomm/early-startup
 # copies its own board's files from here). What to stage comes from the device
 # trees the live UKI embeds, so the medium holds exactly the names the hook
 # will ask for, whatever they are called.
+#
+# The trees are the kernel package's, and those of each --trees package: one
+# the kernel depends on for its device trees, as linux-omarchy-dtbs.
 set -euo pipefail
 
+tree_packages=()
+while [[ ${1:-} == --trees ]]; do
+  tree_packages+=("$2")
+  shift 2
+done
 kernel_package=$1
+tree_packages=("$kernel_package" "${tree_packages[@]}")
 out=$2
 shift 2
 
@@ -18,7 +27,14 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 # boot/dtbs/<kernel>/qcom/*.dtb lands in $work/qcom.
-bsdtar -xf "$kernel_package" -C "$work" --strip-components 3 --include='boot/dtbs/*/qcom/*.dtb'
+mkdir -p "$work/qcom"
+for package in "${tree_packages[@]}"; do
+  # A package without trees is fine as long as another has them, so name the
+  # members found rather than pass a pattern bsdtar fails on.
+  mapfile -t members < <(bsdtar -tf "$package" | grep -E '^boot/dtbs/[^/]+/qcom/[^/]+\.dtb$' || true)
+  (( ${#members[@]} )) || continue
+  bsdtar -xf "$package" -C "$work" --strip-components 3 "${members[@]}"
+done
 dtb_dir=$work/qcom
 
 # The loop live-uki.sh runs; test_qcom_shared_boot.py keeps the two the same.
@@ -29,7 +45,7 @@ for dtb in "$dtb_dir"/x1*.dtb "$dtb_dir"/hamoa*.dtb "$dtb_dir"/glymur*.dtb "$dtb
   dtbs+=("$dtb")
 done
 shopt -u nullglob
-(( ${#dtbs[@]} )) || { echo "stage-medium-firmware: no Snapdragon device trees in $kernel_package" >&2; exit 1; }
+(( ${#dtbs[@]} )) || { echo "stage-medium-firmware: no Snapdragon device trees in ${tree_packages[*]##*/}" >&2; exit 1; }
 printf '%s\n' "${dtbs[@]}" >"$work/dtbs.list"
 python3 "$here/early-firmware.py" --required "$work/dtbs.list" >"$work/wanted"
 

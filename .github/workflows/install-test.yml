@@ -11,6 +11,12 @@ name: Install test
 # the install, and the install as an N1x, each in its own job. The default
 # variant's build, install and boot times are what every later change is
 # measured against in its own PR.
+#
+# Twice a day, and by hand, the rehearsal: the ISO quattro would be released
+# as now. omarchy and omarchy-settings are pinned to quattro's tip by the same
+# engine and against the same rc database as omarchy-release's next candidate
+# (test/rehearsal-pins), built into the ISO, and the ISO goes through every
+# job below. A quattro that cannot be released fails here, before an rc does.
 
 on:
   pull_request:
@@ -25,16 +31,21 @@ on:
   workflow_dispatch:
     inputs:
       channel:
-        description: "Package channel the ISO is built from (a pull request or merge: edge)"
+        description: "Package channel the ISO is built from (a pull request or merge: edge; rehearsal: quattro released now)"
         type: choice
-        options: [stable, rc, edge]
+        options: [stable, rc, edge, rehearsal]
         default: edge
+  schedule:
+    - cron: "37 5,17 * * *" # the rehearsal, at 05:37 and 17:37 UTC
 
 permissions:
   contents: read
 
+env:
+  CHANNEL: ${{ inputs.channel || (github.event_name == 'schedule' && 'rehearsal') || 'edge' }}
+
 concurrency:
-  group: install-test-${{ github.event.pull_request.number || github.ref }}-${{ inputs.channel || 'edge' }}
+  group: install-test-${{ github.event.pull_request.number || github.ref }}-${{ inputs.channel || (github.event_name == 'schedule' && 'rehearsal') || 'edge' }}
   cancel-in-progress: true
 
 jobs:
@@ -114,21 +125,25 @@ jobs:
       # built from omarchy's quattro, as the nightly does; on aarch64 that runs
       # linux-omarchy, the one kernel for every aarch64 board. A run by hand
       # builds both from the channel it names. Every package comes from the
-      # package repositories, none is built here.
+      # package repositories, none is built here, except in the rehearsal:
+      # omarchy and omarchy-settings pinned to quattro as a release candidate,
+      # everything else from edge, which a feature release promotes to rc.
       - name: Build the ISO
-        env:
-          CHANNEL: ${{ inputs.channel || 'edge' }}
         run: |
-          start=$(date +%s)
+          flag=()
           case $CHANNEL in
-            rc) flag=--rc ;;
-            edge) flag=--edge ;;
-            *) flag= ;;
+            rc) flag=(--rc) ;;
+            edge) flag=(--edge) ;;
+            rehearsal)
+              ./test/rehearsal-pins "$ARCH" "$RUNNER_TEMP/rehearsal" | tee -a "$GITHUB_STEP_SUMMARY"
+              flag=(--local-source "$RUNNER_TEMP/rehearsal/omarchy" "$RUNNER_TEMP/rehearsal/omarchy-pkgs" --rehearsal)
+              ;;
           esac
+          start=$(date +%s)
           if [[ $ARCH == aarch64 ]]; then
-            ./bin/omarchy-iso-make --arch aarch64 $flag --no-boot-offer
+            ./bin/omarchy-iso-make --arch aarch64 "${flag[@]}" --no-boot-offer
           else
-            NO_BOOT_OFFER=1 ./bin/omarchy-iso-make $flag
+            NO_BOOT_OFFER=1 ./bin/omarchy-iso-make "${flag[@]}"
           fi
           mkdir -p test-runs && echo $(( $(date +%s) - start )) >test-runs/build-seconds
 
@@ -389,7 +404,7 @@ jobs:
           {
             echo "## Install test: x86_64, ${{ matrix.variant }}"
             echo
-            echo "Channel: \`${{ inputs.channel || 'edge' }}\`"
+            echo "Channel: \`${{ env.CHANNEL }}\`"
             echo
             if [ -f "$base/omarchy-install-timing.json" ]; then
               jq -r '"**Install:** \((.finished_at - .started_at) * 10 | round / 10) s across \(.phases | length) phases"' "$base/omarchy-install-timing.json"
@@ -596,7 +611,7 @@ jobs:
           {
             echo "## Install test: aarch64"
             echo
-            echo "Channel: \`${{ inputs.channel || 'edge' }}\`"
+            echo "Channel: \`${{ env.CHANNEL }}\`"
             echo
             if [ -f "$base/omarchy-install-timing.json" ]; then
               jq -r '"**Install:** \((.finished_at - .started_at) * 10 | round / 10) s across \(.phases | length) phases"' "$base/omarchy-install-timing.json"

@@ -90,8 +90,9 @@ class StageMediumFirmwareTests(unittest.TestCase):
                 info=tarfile.TarInfo(member); info.type=tarfile.SYMTYPE; info.linkname=target; tar.addfile(info)
         return str(path)
 
-    def stage(self,kernel,*packages):
-        return subprocess.run(['bash',str(self.SCRIPT),kernel,str(self.out),*packages],capture_output=True,text=True)
+    def stage(self,kernel,*packages,trees=()):
+        flags=[arg for package in trees for arg in ('--trees',package)]
+        return subprocess.run(['bash',str(self.SCRIPT),*flags,kernel,str(self.out),*packages],capture_output=True,text=True)
 
     def staged(self):
         return sorted(str(p.relative_to(self.out)) for p in self.out.rglob('*') if p.is_file())
@@ -149,6 +150,23 @@ class StageMediumFirmwareTests(unittest.TestCase):
         kernel=self.package('kernel.pkg.tar',{self.DTBS+'sm8550-phone.dtb':dtb()})
         result=self.stage(kernel)
         self.assertNotEqual(result.returncode,0)
+
+    def test_trees_come_from_the_package_the_kernel_depends_on_for_them(self):
+        # The kernel ships no trees; linux-omarchy-dtbs has them.
+        kernel=self.package('kernel.pkg.tar',{'usr/lib/modules/7.3.0/vmlinuz':b'kernel'})
+        trees=self.package('trees.pkg.tar',{self.DTBS+'x1e80100-vendor-laptop.dtb':dtb(name='qcom/vendor/adsp.mbn')})
+        vendor=self.package('vendor.pkg.tar',{self.FW+'vendor/adsp.mbn.xz':b'adsp'})
+        result=self.stage(kernel,vendor,trees=(trees,))
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(self.staged(),['SHA256SUMS','qcom/vendor/adsp.mbn.xz'])
+
+    def test_no_trees_in_any_package_fails_the_build(self):
+        kernel=self.package('kernel.pkg.tar',{'usr/lib/modules/7.3.0/vmlinuz':b'kernel'})
+        trees=self.package('trees.pkg.tar',{'usr/share/doc/trees/README':b'none'})
+        vendor=self.package('vendor.pkg.tar',{self.FW+'vendor/adsp.mbn.xz':b'adsp'})
+        result=self.stage(kernel,vendor,trees=(trees,))
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('no Snapdragon device trees in kernel.pkg.tar trees.pkg.tar',result.stderr)
 
 
 class BuildTests(unittest.TestCase):

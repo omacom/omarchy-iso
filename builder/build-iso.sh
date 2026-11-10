@@ -963,17 +963,21 @@ echo "[timing] root image end $(date +%s)"
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # -Sp prints dependencies too; keep only the packages named here.
   qcom_kernel_file=''
+  qcom_tree_packages=()
   qcom_firmware_files=()
   while read -r name file; do
     if [[ $name == "$OMARCHY_KERNEL" ]]; then
       qcom_kernel_file=$file
+    elif [[ $name == "$OMARCHY_KERNEL-dtbs" ]]; then
+      # The kernel's device trees, when it depends on a package for them.
+      qcom_tree_packages=(--trees "$offline_mirror_dir/$file")
     elif [[ " ${qcom_oem_firmware[*]} " == *" $name "* ]]; then
       qcom_firmware_files+=("$offline_mirror_dir/$file")
     fi
   done < <(pacman --config "$online_pacman_conf" --dbpath /tmp/offlinedb -Sp \
     --print-format '%n %f' "$OMARCHY_KERNEL" "${qcom_oem_firmware[@]}")
   [[ -n $qcom_kernel_file ]] || { echo "ERROR: $OMARCHY_KERNEL is not in the offline mirror" >&2; exit 1; }
-  bash /builder/qualcomm/stage-medium-firmware.sh "$offline_mirror_dir/$qcom_kernel_file" \
+  bash /builder/qualcomm/stage-medium-firmware.sh "${qcom_tree_packages[@]}" "$offline_mirror_dir/$qcom_kernel_file" \
     "$root_image_dir/qcom-firmware" "${qcom_firmware_files[@]}"
 fi
 

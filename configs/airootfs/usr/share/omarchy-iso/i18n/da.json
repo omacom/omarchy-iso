@@ -73,7 +73,7 @@
   "progress.tip.menu": "Super + Space åbner Omarchy-menuen med apps, indstillinger og meget mere",
   "progress.tip.keybindings": "Super + K viser alle genvejstaster",
   "progress.tip.superKey": "Super er Windows- eller Command-tasten på dit tastatur",
-  "progress.tip.signPdfs": "Brug Xournal++ til at underskrive PDF'er",
+  "progress.tip.signPdfs": "Brug Signed til at underskrive PDF'er",
   "progress.tip.localSend": "Del filer med telefoner og bærbare via LocalSend",
   "progress.tip.webApps": "Gør enhver hjemmeside til en app med Installer > Webapp i menuen",
   "progress.tip.terminal": "Super + Return åbner en terminal, Super + Shift + Return browseren",

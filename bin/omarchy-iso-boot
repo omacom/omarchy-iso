@@ -125,10 +125,17 @@ if [[ $HOST_ARCH == aarch64 ]]; then
   omarchy-pkg-add qemu-desktop
   source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/aarch64-firmware.sh"
   if ! aarch64_uefi_firmware; then
-    echo "Missing aarch64 UEFI firmware." >&2
-    echo "Install Arch's edk2-aarch64 (arch=any) from https://archlinux.org/packages/extra/any/edk2-aarch64/" >&2
-    echo "after checking its signature with pacman-key --verify, then: sudo pacman -U edk2-aarch64-*.pkg.tar.zst" >&2
-    exit 1
+    # Find the current package in Arch's extra database, then let pacman fetch
+    # it with its detached signature and verify that against archlinux-keyring.
+    arch_mirror=https://mirror.omarchy.org/extra/os/x86_64
+    edk2_file=$(curl -fsSL --retry 3 "$arch_mirror/extra.db" | bsdtar -xOf - "edk2-aarch64-*/desc" |
+      awk '/%FILENAME%/{getline; print; exit}')
+    if [[ -z $edk2_file ]] || ! sudo pacman -U --noconfirm "$arch_mirror/$edk2_file" || ! aarch64_uefi_firmware; then
+      echo "Missing aarch64 UEFI firmware." >&2
+      echo "Install Arch's edk2-aarch64 (arch=any) from https://archlinux.org/packages/extra/any/edk2-aarch64/" >&2
+      echo "after checking its signature with pacman-key --verify, then: sudo pacman -U edk2-aarch64-*.pkg.tar.zst" >&2
+      exit 1
+    fi
   fi
   UEFI_CODE=$AARCH64_UEFI_CODE
   UEFI_VARS_TEMPLATE=$AARCH64_UEFI_VARS

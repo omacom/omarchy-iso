@@ -469,27 +469,72 @@ detect_bitlocker() {
   return 1
 }
 
+# The firmware files the device tree names that the live system lacks, less
+# those a maker's package in the offline mirror installs: a package providing
+# qcom-firmware-<folder>, by the folder-to-name mapping Omarchy's
+# install/hardware/qualcomm/oem-firmware.sh uses to install it.
+qualcomm_firmware_uncovered() {
+  local db=/var/cache/omarchy/mirror/offline/offline.db.tar.gz file folder name
+  local -A provided=()
+  if [[ -r $db ]]; then
+    while IFS= read -r name; do
+      provided[$name]=1
+    done < <(bsdtar -xOf "$db" '*/desc' 2>/dev/null | awk '
+      /^%PROVIDES%$/ { p = 1; next }
+      /^$/ { p = 0 }
+      p && /^qcom-firmware-/ { sub(/[<>=].*/, ""); print }')
+  fi
+  while IFS= read -r file; do
+    [[ -n $file ]] || continue
+    folder=${file%/*}
+    name=qcom-firmware-${folder#qcom/}
+    name=${name//\//-}
+    name=${name,,}
+    [[ -n ${provided[$name]:-} ]] || printf '%s\n' "$file"
+  done < <(qcom-firmware-extract --list-missing 2>/dev/null)
+}
+
 # Save vendor-signed Qualcomm firmware before a full-disk install removes Windows.
-# Missing firmware does not abort installation.
+# Missing firmware does not abort installation. Firmware a maker's package
+# covers is not missing: the install brings that package.
 stage_qualcomm_firmware() {
   command -v qcom-firmware-extract >/dev/null 2>&1 || return 0
   [[ -d /sys/firmware/devicetree/base ]] || return 0
 
-  local stage=/run/omarchy/firmware
-  local missing saved
-  missing=$(qcom-firmware-extract --list-missing 2>/dev/null | grep -c . || true)
+  local stage=/run/omarchy/firmware log=/run/omarchy/firmware-stage.log
+  local missing saved=0 name
+  local -a uncovered=()
+  local -A staged=()
+  mapfile -t uncovered < <(qualcomm_firmware_uncovered)
+  missing=${#uncovered[@]}
   ((missing > 0)) || return 0
 
   step "$(t firmware.title)"
-  qcom-firmware-extract --stage "$stage" >/run/omarchy/firmware-stage.log 2>&1 || true
-  saved=$(grep -c . "$stage/manifest" 2>/dev/null || true)
+  # The redirection needs /run/omarchy; without it the shell never ran the
+  # staging and every machine read "No Windows firmware found".
+  mkdir -p "${log%/*}"
+  qcom-firmware-extract --stage "$stage" >"$log" 2>&1 || true
+  # Count only the uncovered files Windows supplied. The manifest also lists
+  # files a package covers, and those would make missing firmware look saved.
+  if [[ -r $stage/manifest ]]; then
+    while read -r name _; do
+      if [[ -n $name ]]; then
+        staged[$name]=1
+      fi
+    done <"$stage/manifest"
+  fi
+  for name in "${uncovered[@]}"; do
+    if [[ -n ${staged[$name]:-} ]]; then
+      saved=$((saved + 1))
+    fi
+  done
   if ((saved >= missing)); then
     say "$(t firmware.saved "$saved")"
   elif ((saved > 0)); then
     say "$(t firmware.partial "$saved" "$missing")"
   else
     say --foreground 1 "$(t firmware.none)"
-    if grep -q BitLocker /run/omarchy/firmware-stage.log 2>/dev/null; then
+    if grep -q BitLocker "$log" 2>/dev/null; then
       say "$(t firmware.bitlocker)"
       say "$(t firmware.bitlockerHint)"
     fi

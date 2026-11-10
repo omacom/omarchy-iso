@@ -20,7 +20,7 @@ dtb_dir=/boot/dtbs/$1/qcom
 # EL2 variants share hardware IDs with their base DTBs and would be ambiguous.
 shopt -s nullglob
 dtbs=()
-for dtb in "$dtb_dir"/x1*.dtb "$dtb_dir"/hamoa*.dtb "$dtb_dir"/glymur*.dtb "$dtb_dir"/sc8280xp*.dtb; do
+for dtb in "$dtb_dir"/x1*.dtb "$dtb_dir"/hamoa*.dtb "$dtb_dir"/glymur*.dtb "$dtb_dir"/mahua*.dtb "$dtb_dir"/sc8280xp*.dtb; do
   [[ $dtb == *-el2.dtb ]] && continue
   dtbs+=("$dtb")
 done
@@ -84,4 +84,15 @@ if (( n_dtb != ${#dtbs[@]} )); then
   echo "live-uki: $uki has $n_dtb .dtbauto sections, expected ${#dtbs[@]}" >&2
   exit 1
 fi
-echo "live-uki: $uki: $(stat -c %s "$uki") bytes, $n_dtb .dtbauto sections, .hwids present"
+# GRUB reads the whole UKI into memory to chainload it. omarchy-iso#128 showed
+# GRUB failing to place a 241 MiB initramfs in a Lenovo Yoga's EFI memory map;
+# the UKI booting on the laptops today is about 227 MiB. Keep it near that, so
+# growth (embedded firmware, a bigger initramfs) fails the build rather than
+# reaching laptops untested.
+uki_bytes=$(stat -c %s "$uki")
+uki_limit=$((256 * 1024 * 1024))
+if (( uki_bytes > uki_limit )); then
+  echo "live-uki: $uki is $uki_bytes bytes, over the $uki_limit limit" >&2
+  exit 1
+fi
+echo "live-uki: $uki: $uki_bytes bytes, $n_dtb .dtbauto sections, .hwids present"

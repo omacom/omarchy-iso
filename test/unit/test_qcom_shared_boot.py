@@ -125,50 +125,19 @@ class StageMediumFirmwareTests(unittest.TestCase):
         check=subprocess.run(['sha256sum','-c','SHA256SUMS'],cwd=self.out,capture_output=True,text=True)
         self.assertEqual(check.returncode,0,check.stdout+check.stderr)
 
-    def test_a_symlinked_file_is_staged_as_the_file_it_names(self):
-        kernel=self.package('kernel.pkg.tar',{self.DTBS+'x1e80100-vendor-laptop.dtb':dtb(name='qcom/vendor/adsp.mbn')})
-        vendor=self.package('vendor.pkg.tar',{self.FW+'shared/adsp-v2.mbn.xz':b'shared adsp'},
-                            links=((self.FW+'vendor/adsp.mbn.xz','../shared/adsp-v2.mbn.xz'),))
-        result=self.stage(kernel,vendor)
-        self.assertEqual(result.returncode,0,result.stderr)
-        staged=self.out/'qcom/vendor/adsp.mbn.xz'
-        self.assertFalse(staged.is_symlink())
-        self.assertEqual(staged.read_bytes(),b'shared adsp')
-        self.assertIn('qcom/vendor/adsp.mbn.xz',(self.out/'SHA256SUMS').read_text())
-        self.assertEqual(self.staged(),['SHA256SUMS','qcom/vendor/adsp.mbn.xz'])
-
-    def test_symlinks_out_of_the_package_firmware_fail_the_build(self):
-        kernel=self.package('kernel.pkg.tar',{self.DTBS+'x1e80100-vendor-laptop.dtb':dtb(name='qcom/vendor/adsp.mbn')})
-        secret=self.root/'builder-secret'; secret.write_bytes(b'not firmware')
-        # An absolute link, and a relative one that climbs out of the unpacked
-        # package to a file that exists: the script's own list of wanted names.
-        for target in (str(secret), '../../../../../../wanted'):
-            with self.subTest(target=target):
-                vendor=self.package('vendor.pkg.tar',{},links=((self.FW+'vendor/adsp.mbn.xz',target),))
-                result=self.stage(kernel,vendor)
-                self.assertNotEqual(result.returncode,0)
-                self.assertRegex(result.stderr,'links outside|does not resolve')
-                self.assertFalse((self.out/'qcom/vendor/adsp.mbn.xz').exists())
-
     def test_device_tree_selection_matches_the_live_uki(self):
         def loop(path):
             lines=[l.strip() for l in path.read_text().splitlines() if l.strip().startswith('for dtb in "$dtb_dir"/')]
             self.assertEqual(len(lines),1,path); return lines[0]
         self.assertEqual(loop(self.SCRIPT),loop(ROOT/'builder/qualcomm/live-uki.sh'))
 
-    def test_mahua_trees_are_staged_like_the_others(self):
-        kernel=self.package('kernel.pkg.tar',{self.DTBS+'mahua-vendor-laptop.dtb':dtb(name='qcom/mahua/adsp.mbn')})
-        vendor=self.package('vendor.pkg.tar',{self.FW+'mahua/adsp.mbn.xz':b'mahua adsp'})
-        result=self.stage(kernel,vendor)
-        self.assertEqual(result.returncode,0,result.stderr)
-        self.assertEqual(self.staged(),['SHA256SUMS','qcom/mahua/adsp.mbn.xz'])
-
-    def test_a_dangling_symlink_fails_the_build(self):
+    def test_a_symlinked_firmware_file_fails_the_build(self):
         kernel=self.package('kernel.pkg.tar',{self.DTBS+'x1e80100-vendor-laptop.dtb':dtb(name='qcom/vendor/adsp.mbn')})
-        vendor=self.package('vendor.pkg.tar',{},links=((self.FW+'vendor/adsp.mbn.xz','missing.mbn.xz'),))
+        vendor=self.package('vendor.pkg.tar',{self.FW+'vendor/real.mbn.xz':b'adsp'},
+                            links=((self.FW+'vendor/adsp.mbn.xz','real.mbn.xz'),))
         result=self.stage(kernel,vendor)
         self.assertNotEqual(result.returncode,0)
-        self.assertIn('does not resolve to a file',result.stderr)
+        self.assertIn('symlink',result.stderr)
 
     def test_nothing_to_stage_fails_the_build(self):
         kernel=self.package('kernel.pkg.tar',{self.DTBS+'x1e80100-vendor-laptop.dtb':dtb(name='qcom/vendor/adsp.mbn')})

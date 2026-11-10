@@ -135,7 +135,10 @@ jobs:
             rc) flag=(--rc) ;;
             edge) flag=(--edge) ;;
             rehearsal)
-              ./test/rehearsal-pins "$ARCH" "$RUNNER_TEMP/rehearsal" | tee -a "$GITHUB_STEP_SUMMARY"
+              # Not piped: this step runs bash -e without pipefail, and a
+              # failed pin must stop it before the build.
+              pinned=$(./test/rehearsal-pins "$ARCH" "$RUNNER_TEMP/rehearsal")
+              echo "$pinned" | tee -a "$GITHUB_STEP_SUMMARY"
               flag=(--local-source "$RUNNER_TEMP/rehearsal/omarchy" "$RUNNER_TEMP/rehearsal/omarchy-pkgs" --rehearsal)
               ;;
           esac

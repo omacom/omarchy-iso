@@ -61,6 +61,25 @@ case "$OMARCHY_ISO_REF" in
 esac
 : "${OMARCHY_NVIM_PACKAGE:=omarchy-nvim}"
 export OMARCHY_RUNTIME_PACKAGE OMARCHY_SETTINGS_PACKAGE OMARCHY_NVIM_PACKAGE
+# The ones --local-source builds from the mounted checkouts, all three unless
+# OMARCHY_LOCAL_PACKAGES names fewer; the others come from the channel. The
+# release rehearsal (--rehearsal) builds only the pinned omarchy and
+# omarchy-settings, and takes omarchy-nvim as published, as a release does.
+read -ra local_packages <<<"${OMARCHY_LOCAL_PACKAGES:-$OMARCHY_SETTINGS_PACKAGE $OMARCHY_RUNTIME_PACKAGE $OMARCHY_NVIM_PACKAGE}"
+export OMARCHY_LOCAL_PACKAGES="${local_packages[*]}"
+# The runtime and settings packages come from one commit and are released in
+# lockstep, so a build makes both from source; omarchy-nvim may come from the
+# channel. Only these three can be built here.
+for local_package_name in "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE"; do
+  [[ " $OMARCHY_LOCAL_PACKAGES " == *" $local_package_name "* ]] ||
+    { echo "ERROR: OMARCHY_LOCAL_PACKAGES must name $OMARCHY_RUNTIME_PACKAGE and $OMARCHY_SETTINGS_PACKAGE (got '$OMARCHY_LOCAL_PACKAGES')" >&2; exit 1; }
+done
+for local_package_name in "${local_packages[@]}"; do
+  case $local_package_name in
+    "$OMARCHY_RUNTIME_PACKAGE" | "$OMARCHY_SETTINGS_PACKAGE" | "$OMARCHY_NVIM_PACKAGE") ;;
+    *) echo "ERROR: OMARCHY_LOCAL_PACKAGES names $local_package_name, which this build does not install" >&2; exit 1 ;;
+  esac
+done
 
 # pacman 7 sandboxes its downloads with Landlock and fails every sync on a
 # kernel without it (Namespace's AmpereOne arm64 machines): "restricting
@@ -329,8 +348,7 @@ if [[ -d /omarchy-source && -d /omarchy-pkgs ]]; then
   # bytes. pacman consults /var/cache/pacman/pkg (the host's cache, kept across
   # --keep-pkg-cache builds) before the mirror, and a stale copy from an
   # earlier build fails the checksum against the mirror's fresh db.
-  for local_package_name in \
-    "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"; do
+  for local_package_name in "${local_packages[@]}"; do
     rm -f /var/cache/pacman/pkg/"$local_package_name"-*.pkg.tar.zst{,.sig}
   done
 
@@ -669,7 +687,7 @@ fi
 # published provider on top of the local build.
 if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
   local_pkginfo=$(
-    for pkg in "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"; do
+    for pkg in "${local_packages[@]}"; do
       for archive in "$offline_mirror_dir/$pkg"-[0-9]*.pkg.tar.*; do
         [[ $archive == *.sig ]] || bsdtar -xOf "$archive" .PKGINFO
       done
@@ -691,19 +709,13 @@ fi
 if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
   mapfile -t all_packages < <(
     printf '%s\n' "${all_packages[@]}" |
-      grep -Fxv \
-        -e "$OMARCHY_RUNTIME_PACKAGE" \
-        -e "$OMARCHY_SETTINGS_PACKAGE" \
-        -e "$OMARCHY_NVIM_PACKAGE" || true
+      grep -Fxv -f <(printf '%s\n' "${local_packages[@]}") || true
   )
   # They are in the image, so never shipped; and the online db the closure is
   # resolved against does not know the local builds.
   mapfile -t target_packages < <(
     printf '%s\n' "${target_packages[@]}" |
-      grep -Fxv \
-        -e "$OMARCHY_RUNTIME_PACKAGE" \
-        -e "$OMARCHY_SETTINGS_PACKAGE" \
-        -e "$OMARCHY_NVIM_PACKAGE" || true
+      grep -Fxv -f <(printf '%s\n' "${local_packages[@]}") || true
   )
 fi
 
@@ -826,8 +838,7 @@ mapfile -t required_package_files <<< "$resolved_package_files"
 # are only in the image now, but keeping all three in the mirror leaves
 # omarchy-apply-system able to resolve them like any published build.
 if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
-  for local_package_name in \
-    "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"; do
+  for local_package_name in "${local_packages[@]}"; do
     local_package_file=""
     for candidate in "$offline_mirror_dir/$local_package_name-"*.pkg.tar.*; do
       [[ -f $candidate && $candidate != *.sig ]] || continue

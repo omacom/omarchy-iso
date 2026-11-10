@@ -298,6 +298,23 @@ The first scenario is `factory-reset`: it proves `omarchy-system-factory-reset` 
 
 Artifacts — screenshots, the fixtured/staged/final `limine.conf`, the reset typescript, and the factory-reset log — land under `test-runs/<iso>-integration/runs/<timestamp>-<scenario>/`, and `--no-preview` skips the `imv` review just like the acceptance harness.
 
+## Release rehearsal
+
+Twice a day, the "Install test" workflow builds the ISO quattro would be released as now, and runs every install job on it. `test/rehearsal-pins` pins `omarchy` and `omarchy-settings` to quattro's tip with omarchy-pkgs' own release engine (`bin/omarchy-pkgs release rc`), against the rc channel's database, as `omarchy-release rc` does for the next feature release. It pushes nothing. The ISO is then built from that pin with `--local-source --rehearsal`, which installs the release packages and names the ISO `*-rehearsal.iso`. Every other package comes from edge as published, `omarchy-nvim` included.
+
+A failed rehearsal means the next release candidate would fail the same way, before anyone cuts it. Run it by hand on any branch:
+
+```bash
+gh workflow run install-test.yml --ref <branch> -f channel=rehearsal
+```
+
+To build the same ISO yourself:
+
+```bash
+./test/rehearsal-pins x86_64 /path/to/rehearsal
+./bin/omarchy-iso-make --local-source /path/to/rehearsal/omarchy /path/to/rehearsal/omarchy-pkgs --rehearsal
+```
+
 ## Upgrade testing
 
 `test/upgrade-test` checks what an existing user gets. It takes an installed system, moves it to another channel with `omarchy-channel-set`, reboots it, and checks what came back: the update's exit status, skipped migrations, that the reboot comes back by itself into an installed kernel, failed units, the desktop, the user's wallpaper and the boot menu.

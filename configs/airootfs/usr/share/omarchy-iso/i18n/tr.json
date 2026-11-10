@@ -73,7 +73,7 @@
   "progress.tip.menu": "Super + Space uygulamalar, ayarlar ve fazlası için Omarchy menüsünü açar",
   "progress.tip.keybindings": "Super + K tüm kısayolları gösterir",
   "progress.tip.superKey": "Super, klavyenizdeki Windows ya da Command tuşudur",
-  "progress.tip.signPdfs": "PDF imzalamak için Xournal++ kullanın",
+  "progress.tip.signPdfs": "PDF imzalamak için Signed kullanın",
   "progress.tip.localSend": "LocalSend ile telefon ve dizüstülerle dosya paylaşın",
   "progress.tip.webApps": "Menüdeki Kur > Web Uygulaması ile her siteyi uygulamaya çevirin",
   "progress.tip.terminal": "Super + Return terminali, Super + Shift + Return tarayıcıyı açar",

@@ -384,8 +384,12 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # saves a laptop's signed firmware from Windows with qcom-firmware-extract.
   arch_packages=("$OMARCHY_KERNEL" archlinuxarm-keyring git gum jq openssl openssh pciutils plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted systemd-ukify linux-firmware-qcom qcom-firmware-extract python)
 else
-  # linux-t2 is the live kernel on a Mac (configs/grub/grub.cfg).
-  arch_packages=("$OMARCHY_KERNEL" linux-t2 git gum jq openssl plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
+  # linux-t2 is the live kernel on a Mac (configs/grub/grub.cfg). kmscon and
+  # the CJK font carry the installer in the languages the Linux console cannot
+  # draw (usr/local/bin/omarchy-iso-kmscon); customize_airootfs.sh trims the
+  # font to the one face kmscon uses. aarch64 goes without until Arch Linux ARM
+  # builds kmscon, and stays in English for those languages.
+  arch_packages=("$OMARCHY_KERNEL" linux-t2 git gum jq openssl plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted kmscon noto-fonts-cjk)
 fi
 live_packages_file="$build_cache_dir/packages.$OMARCHY_ARCH"
 printf '%s\n' "${arch_packages[@]}" >> "$live_packages_file"

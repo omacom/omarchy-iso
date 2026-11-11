@@ -233,7 +233,10 @@ language_default() {
 }
 
 set_form_language() {
+  # The form's text comes from Omarchy's catalogs, which have every language;
+  # on a console that cannot draw this one it stays English like the rest.
   OMARCHY_FORM_LANGUAGE=$language
+  i18n_translated "$language" || OMARCHY_FORM_LANGUAGE=en
   OMARCHY_FORM_KEYBOARD_DEFAULT=$(language_default keyboard)
   OMARCHY_FORM_KEYBOARD_DEFAULT=${OMARCHY_FORM_KEYBOARD_DEFAULT:-English (US)}
   OMARCHY_FORM_TIMEZONE_FALLBACK=$(language_default timezone)
@@ -249,8 +252,12 @@ language_label() {
 
 # "label<TAB>code" rows, English first and the rest alphabetical by what is shown.
 language_rows() {
-  local translated
-  translated=$(cd "$OMARCHY_ISO_I18N_DIR" && printf '%s\n' *.json | sed 's/\.json$//' | jq -R . | jq -sc .)
+  local translated code
+  # Native names only for catalogs this console can draw: a CJK name would be
+  # boxes here, so Chinese is listed by its English name until kmscon takes over.
+  translated=$(for code in $(cd "$OMARCHY_ISO_I18N_DIR" && printf '%s\n' *.json | sed 's/\.json$//'); do
+    i18n_translated "$code" && printf '%s\n' "$code"
+  done | jq -R . | jq -sc .)
   jq -r --argjson translated "$translated" '
     to_entries
     | map({code: .key, label: (if (.key | IN($translated[])) then .value.name else .value.englishName end)})
@@ -310,6 +317,7 @@ keyboard_form() {
     if ((status == OMARCHY_FORM_BACK)); then
       language_form
       $defer_provisioning && return 0
+      kmscon_for_language
       continue
     fi
 
@@ -322,6 +330,52 @@ keyboard_form() {
   if [[ $(tty 2>/dev/null) == "/dev/tty"* ]]; then
     loadkeys "$keyboard" 2>/dev/null
   fi
+
+  # kmscon reads keys through XKB, fixed at its start: relaunch it with the
+  # layout just picked so the password is typed under the layout it will be
+  # entered with at boot.
+  if [[ ${OMARCHY_ISO_KMSCON:-} == 1 && $(omarchy-iso-kmscon --xkb "$keyboard") != "${OMARCHY_ISO_KMSCON_XKB:-}" ]]; then
+    switch_to_kmscon user
+  fi
+}
+
+# ── kmscon handoff ──────────────────────────────────────────────────────────
+#
+# The configurator cannot move its own terminal, so a switch saves the answers
+# so far and exits 75; .automated_script.sh starts kmscon, which runs the
+# installer again from the saved stage. If kmscon cannot start, the same
+# answers resume on this console in English.
+
+KMSCON_RESUME=${KMSCON_RESUME:-/run/omarchy-iso/kmscon-resume}
+KMSCON_SWITCH=75
+
+kmscon_available() {
+  [[ ${OMARCHY_ISO_NO_KMSCON:-} != 1 && ${OMARCHY_ISO_KMSCON:-} != 1 ]] &&
+    [[ $(tty 2>/dev/null) == /dev/tty[0-9]* ]] && command -v kmscon >/dev/null
+}
+
+switch_to_kmscon() {
+  local resume_stage=$1
+  mkdir -p "$(dirname "$KMSCON_RESUME")"
+  (
+    umask 077
+    declare -p resume_stage language keyboard keyboard_label keyboard_input_method \
+      keyboard_xkb_layout defer_provisioning timezone username password password_hash hostname \
+      2>/dev/null >"$KMSCON_RESUME"
+  )
+  exit $KMSCON_SWITCH
+}
+
+# A language the console cannot draw: carry on in kmscon from the keyboard step.
+kmscon_for_language() {
+  if i18n_needs_kmscon "$language" && kmscon_available; then
+    switch_to_kmscon keyboard
+  fi
+}
+
+china_timezone() {
+  local zones=$OMARCHY_PATH/default/regions/cn/timezones
+  [[ -r $zones ]] && grep -qxF -- "$1" <(grep -v '^#' "$zones")
 }
 
 # Ctrl+C on the first screen offers to prepare the machine for another owner.
@@ -883,11 +937,11 @@ run_partition_execute() {
     # may assume it. It sets created_partition_number rather than printing so
     # the rollback bookkeeping survives (a $(...) would subshell it away).
     create_partition "$disk" "$EFI_START_B" "$EFI_END_B" fat32 OMARCHY_EFI ||
-      disk_abort_hook "Could not create the EFI partition on $disk"
+      disk_abort_hook "$(t partitions.efiFailed "$disk")"
     efi_part_num="$created_partition_number"
 
     create_partition "$disk" "$ROOT_START_B" "$ROOT_END_B" btrfs OMARCHY_ROOT ||
-      disk_abort_hook "Could not create the root partition on $disk"
+      disk_abort_hook "$(t partitions.rootFailed "$disk")"
     root_part_num="$created_partition_number"
 
     disk_step "flagging partition $efi_part_num as ESP" \
@@ -902,9 +956,9 @@ run_partition_execute() {
     sync
     sleep 2
 
-    wait_for_device "$efi_dev" || disk_abort_hook "EFI partition $efi_dev never appeared"
+    wait_for_device "$efi_dev" || disk_abort_hook "$(t partitions.efiMissing "$efi_dev")"
     wait_for_device "$root_partition_device" ||
-      disk_abort_hook "Root partition $root_partition_device never appeared"
+      disk_abort_hook "$(t partitions.rootMissing "$root_partition_device")"
 
     # Both partitions are ours and brand new, but the space they occupy may
     # carry signatures from whatever was deleted to free it.
@@ -940,7 +994,7 @@ run_partition_execute() {
     # full-disk path does the same through archinstall (archinstall_adapter).
     disk_step "creating the Btrfs filesystem on $root_mapper" \
       mkfs.btrfs -K -f -L OMARCHY "$root_mapper"
-    wait_for_device "$root_mapper" || disk_abort_hook "Root device $root_mapper never appeared"
+    wait_for_device "$root_mapper" || disk_abort_hook "$(t partitions.deviceMissing "$root_mapper")"
 
     mkdir -p /mnt/btrfs-root
     disk_step "mounting $root_mapper" mount "$root_mapper" /mnt/btrfs-root
@@ -969,9 +1023,9 @@ run_partition_execute() {
     # a failure names the step that broke rather than surfacing later as
     # "protected mode: /mnt is not a mountpoint".
     mountpoint -q /mnt ||
-      disk_abort_hook "Target /mnt is not mounted; not starting the installer"
+      disk_abort_hook "$(t partitions.targetUnmounted)"
     mountpoint -q "/mnt$esp_mount_in_target" ||
-      disk_abort_hook "ESP is not mounted at /mnt$esp_mount_in_target"
+      disk_abort_hook "$(t partitions.espUnmounted "/mnt$esp_mount_in_target")"
   fi
 
   local luks_uuid_json="null" luks_uuid
@@ -1254,23 +1308,58 @@ if [[ ${1:-} == "--oem" ]]; then
   defer_provisioning=true
 fi
 
-# Let the live VT reach its settled width before the first screen so the logo
-# isn't measured against the transient 80-column boot console.
-wait_for_stable_terminal
-i18n_console_font "$(tty 2>/dev/null)"
-
-if ! $oem_install; then
-  greeter
-  language_form
+# Inside kmscon, carry on from where the console run handed over.
+resume_stage=""
+if [[ -r $KMSCON_RESUME ]]; then
+  # shellcheck disable=SC1090
+  source "$KMSCON_RESUME"
+  rm -f "$KMSCON_RESUME"
+  # Tells .automated_script.sh that kmscon got this far; a resume file left
+  # without it means kmscon failed, and the answers carry on in English.
+  touch "$(dirname "$KMSCON_RESUME")/kmscon-started"
+  # Back on the console after kmscon failed: the layout picked in kmscon was
+  # never loaded here, and the password ahead must be typed under it.
+  if [[ ${OMARCHY_ISO_KMSCON:-} != 1 && -n ${keyboard:-} && $(tty 2>/dev/null) == "/dev/tty"* ]]; then
+    loadkeys "$keyboard" 2>/dev/null
+  fi
+  i18n_load "$language"
+  set_form_language
 fi
 
-$defer_provisioning || keyboard_form
+if [[ -z $resume_stage ]]; then
+  # Let the live VT reach its settled width before the first screen so the logo
+  # isn't measured against the transient 80-column boot console.
+  wait_for_stable_terminal
+  i18n_console_font "$(tty 2>/dev/null)"
+
+  if ! $oem_install; then
+    greeter
+    language_form
+  fi
+
+  $defer_provisioning || kmscon_for_language
+fi
+
+if [[ -z $resume_stage || $resume_stage == keyboard ]]; then
+  $defer_provisioning || keyboard_form
+fi
 
 # Normal install: keyboard (loaded above, so the LUKS passphrase is typed under
 # the right layout) → user → disk → install mode. The user step can unwind to
 # the language screen and arm deferral there, hence the second check.
-if ! $defer_provisioning; then
+if ! $defer_provisioning && [[ $resume_stage != disk ]]; then
   user_step
+
+  # A China timezone brings Chinese defaults, so the disk and encryption
+  # confirmations ahead are shown in Chinese too.
+  if [[ $language == "en" ]] && china_timezone "$timezone"; then
+    language="zh-CN"
+    i18n_load "$language"
+    set_form_language
+    if kmscon_available; then
+      switch_to_kmscon disk
+    fi
+  fi
 fi
 
 if $defer_provisioning; then
@@ -1327,7 +1416,7 @@ if [[ $install_target == "free_space" ]]; then
   # terminal while the hash is still running, so a wait on a slow medium
   # shows movement instead of a frozen step header.)
   if [[ ${1:-} != "dry" ]]; then
-    step "Verifying the install medium"
+    step "$(t verify.title)"
     if ! verify_error=$(OMARCHY_VERIFY_PROGRESS=/dev/tty OMARCHY_VERIFY_PROGRESS_INDENT="$PADDING_LEFT" \
       omarchy-wait-root-image-verify 2>&1 1>/dev/null); then
       abort "$(head -1 <<<"$verify_error")"

@@ -2571,6 +2571,45 @@ def _prebuilt_module_lines(target: Path) -> set[str]:
     return {line for line in recorded.read_text().splitlines() if line}
 
 
+_MODPROBE_BLOCK = re.compile(r"\s*(blacklist|install)\s")
+
+
+def _modprobe_block_lines(target: Path) -> set[str]:
+    """The blacklist and install lines in the target's modprobe.d, which the
+    modconf hook copies into the initramfs. They decide which driver udev may
+    bind there; options lines are not counted (see build-root-image.sh)."""
+    lines = set()
+    for directory in ("etc/modprobe.d", "usr/lib/modprobe.d"):
+        for conf in sorted((target / directory).glob("*.conf")):
+            for line in conf.read_text(errors="ignore").splitlines():
+                if _MODPROBE_BLOCK.match(line):
+                    lines.add(" ".join(line.split()))
+    return lines
+
+
+def _prebuilt_modprobe_block_lines(target: Path) -> set[str]:
+    """The same lines as they were when the image's UKI was built
+    (build-root-image.sh records them next to it)."""
+    recorded = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki.modprobe"
+    if not recorded.is_file():
+        return set()
+    return {line for line in recorded.read_text().splitlines() if line}
+
+
+def _prebuilt_uki_missing_blacklists(target: Path) -> list[str]:
+    """Blacklist and install lines on the target that the pre-built UKI lacks.
+
+    The pre-built UKI is built without autodetect, so its initramfs carries
+    every driver, and udev binds them before switch-root. A blacklist that
+    arrives afterwards with a hardware script's package is in the installed
+    system but not in that initramfs: on a 2011-2012 MacBook Pro the
+    broadcom-wl-dkms blacklist is missing, bcma claims the BCM4331 in the
+    initrd, and wl has no device, so Wi-Fi never comes up. An image without
+    the record is treated as having none, so any such line rebuilds.
+    """
+    return sorted(_modprobe_block_lines(target) - _prebuilt_modprobe_block_lines(target))
+
+
 def _keymap_of(vconsole: Path) -> str:
     """KEYMAP= from a vconsole.conf, or "" when unset or unreadable."""
     if not vconsole.is_file():
@@ -2779,7 +2818,15 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     if prebuilt_uki.is_file() and provisioning_key:
         info("› the first boot unlocks with the provisioning key; "
              "building the UKI on this machine so its initramfs carries it")
-    skip_prebuilt = bool(added_modules) or bool(stale_keymap) or provisioning_key
+    # And for driver blacklists: the pre-built initramfs binds every driver it
+    # has, so one a hardware script's package blocks (broadcom-wl-dkms's bcma)
+    # would still take the device there.
+    missing_blacklists = _prebuilt_uki_missing_blacklists(ctx.target)
+    if prebuilt_uki.is_file() and missing_blacklists:
+        info(f"› hardware setup added driver blacklists ({'; '.join(missing_blacklists)}); "
+             "building the UKI on this machine instead of using the pre-built one")
+    skip_prebuilt = (bool(added_modules) or bool(stale_keymap) or provisioning_key
+                     or bool(missing_blacklists))
 
     # A selected kernel other than the image's boots first, as in omarchy's own
     # kernel migration. Written before any UKI is built so the entries sort by it.

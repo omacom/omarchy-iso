@@ -37,6 +37,33 @@ run_helper() { # loadstate, active_seq, start_rc, [result]  ->  sets RC and OUT
   mkdir -p "$box/bin" "$box/medium/arch/x86_64" "$box/sys/block/sdz/queue"
   : >"$box/medium/arch/x86_64/omarchy-root.img.zst"
   : >"$box/medium/arch/x86_64/omarchy-root.img.zst.sha256"
+  # SUMS_EXPECTED: the checksum the sandbox image is "built" with.
+  [[ -n ${SUMS_EXPECTED:-} ]] && printf '%s  %s\n' "$SUMS_EXPECTED" omarchy-root.img.zst >"$box/medium/arch/x86_64/omarchy-root.img.zst.sha256"
+  # DROPCACHES=1: the live /proc/sys/vm/drop_caches exists, so the helper's
+  # cold re-reads run. Without it every cold path reports unknown, which is
+  # how the pre-existing tests below keep exercising the unit's own verdict.
+  if [[ -n ${DROPCACHES:-} ]]; then
+    mkdir -p "$box/proc/sys/vm"
+    : >"$box/proc/sys/vm/drop_caches"
+  fi
+  # SUMS_STUB=1: scripted sha256sum. SUMS_OUT1/SUMS_OUT2 are the literal
+  # stdout of the first/second call (multi-line ok), SUMS_RC1/SUMS_RC2 their
+  # exit codes (default 0). Absent SUMS_STUB the real sha256sum runs.
+  if [[ -n ${SUMS_STUB:-} ]]; then
+    echo 1 >"$box/sums_n"
+    [[ -n ${SUMS_OUT1:-} ]] && printf '%s\n' "$SUMS_OUT1" >"$box/sums_out1"
+    [[ -n ${SUMS_OUT2:-} ]] && printf '%s\n' "$SUMS_OUT2" >"$box/sums_out2"
+    printf '%s\n' "${SUMS_RC1:-0}" >"$box/sums_rc1"
+    printf '%s\n' "${SUMS_RC2:-0}" >"$box/sums_rc2"
+    cat >"$box/bin/sha256sum" <<EOF
+#!/bin/bash
+n=\$(cat "$box/sums_n")
+printf '%s' "\$(cat "$box/sums_out\$n" 2>/dev/null)"
+rc=\$(cat "$box/sums_rc\$n" 2>/dev/null || echo 0)
+echo \$((n + 1)) >"$box/sums_n"
+exit "\$rc"
+EOF
+  fi
 
   # WITH_HASHER_PROC=1: a fake hasher (pid 4242) holds the image at pos 512
   # of 1024 bytes, and the helper draws progress into $box/progress. The shim
@@ -293,6 +320,67 @@ check "a corrupt mirror fails before the image is waited for" 1 "$RC" "sha256 mi
 # Mirror verified, image corrupt: the image's verdict.
 MIRROR_SEQ=active run_helper loaded "failed" 0
 check "a verified mirror and a corrupt image is a corrupt image" 1 "$RC" "sha256 mismatch on the root image" "$OUT"
+
+# --- cold re-reads after a failed hash --------------------------------------
+# With drop_caches available and scripted sha256sum output, a cold read that
+# matches clears the gate: the unit hashed poisoned cache.
+SUMS_EXPECTED=40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d \
+SUMS_STUB=1 DROPCACHES=1 \
+SUMS_OUT1="40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d  omarchy-root.img.zst" \
+  run_helper loaded "failed" 0
+check "a cold read that matches clears the gate" 0 "$RC" "" "$OUT"
+
+# Two cold reads that disagree with each other are unstable reads, not a
+# corrupt medium -- and never the re-flash advice.
+SUMS_EXPECTED=40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d \
+SUMS_STUB=1 DROPCACHES=1 \
+SUMS_OUT1="ba79a0d0f5aadeb30be9f8490f596073c92df6e653d8c2a9a04ee8cf3cf0eb4c  omarchy-root.img.zst" \
+SUMS_OUT2="59e22734cd9a0bb52bf6c37ba18e7d5e0734418f5ef967efc721df9ba9d8f886  omarchy-root.img.zst" \
+  run_helper loaded "failed" 0
+check "two differing cold reads report unstable reads" 1 "$RC" "install medium reads are unstable" "$OUT"
+[[ $OUT == *"suspect USB stick/port, controller, or RAM"* ]] && echo "ok: unstable reads name USB first" || \
+  { echo "FAIL: unstable reads headline wrong: $OUT"; fails=1; }
+
+# Two cold reads that agree, but not with the expected sums, stay corrupt --
+# and the message carries both hashes plus the size for forensics.
+SUMS_EXPECTED=40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d \
+SUMS_STUB=1 DROPCACHES=1 \
+SUMS_OUT1="7c0664f49b6e88a87906a896ac75f534ddd30d2412247a00985d552335a1501a  omarchy-root.img.zst" \
+SUMS_OUT2="7c0664f49b6e88a87906a896ac75f534ddd30d2412247a00985d552335a1501a  omarchy-root.img.zst" \
+  run_helper loaded "failed" 0
+check "two agreeing wrong cold reads stay corrupt" 1 "$RC" "install medium is corrupt: re-flash it" "$OUT"
+[[ $OUT == *"expected 40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d"* ]] && echo "ok: forensics carry the expected hash" || \
+  { echo "FAIL: expected hash missing from message: $OUT"; fails=1; }
+[[ $OUT == *"computed 7c0664f49b6e88a87906a896ac75f534ddd30d2412247a00985d552335a1501a"* ]] && echo "ok: forensics carry the computed hash" || \
+  { echo "FAIL: computed hash missing from message: $OUT"; fails=1; }
+[[ $OUT == *"size 0 bytes"* ]] && echo "ok: forensics carry the size" || \
+  { echo "FAIL: size missing from message: $OUT"; fails=1; }
+
+# Without drop_caches there is nothing to re-read cold with: the unit's own
+# verdict stands, with no forensics grafted on.
+SUMS_EXPECTED=40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d \
+SUMS_STUB=1 \
+SUMS_OUT1="40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d  omarchy-root.img.zst" \
+  run_helper loaded "failed" 0
+check "no drop_caches falls back to the unit's verdict" 1 "$RC" "install medium is corrupt: re-flash it" "$OUT"
+[[ $OUT != *"expected 40dd"* ]] && echo "ok: no forensics without a cold read" || \
+  { echo "FAIL: forensics without a cold read: $OUT"; fails=1; }
+
+# Mirror cold path: a failing package list followed by a clean one clears the
+# gate the same way a matching image read does.
+MIRROR_SEQ=failed WITH_MIRROR_HASHER=1 SUMS_STUB=1 DROPCACHES=1 \
+SUMS_OUT1="linux-t2.pkg.tar.zst: FAILED" SUMS_RC1=1 SUMS_OUT2="" SUMS_RC2=0 \
+  run_helper loaded "active" 0
+check "a mirror cold read that matches clears the gate" 0 "$RC" "" "$OUT"
+
+# Mirror cold reads that keep failing name the mirror, persistently.
+MIRROR_SEQ=failed WITH_MIRROR_HASHER=1 SUMS_STUB=1 DROPCACHES=1 \
+SUMS_OUT1="linux-t2.pkg.tar.zst: FAILED" SUMS_RC1=1 \
+SUMS_OUT2="linux-t2.pkg.tar.zst: FAILED" SUMS_RC2=1 \
+  run_helper loaded "active" 0
+check "mirror cold reads that keep failing stay corrupt" 1 "$RC" "sha256 mismatch on the package mirror" "$OUT"
+[[ $OUT == *"linux-t2.pkg.tar.zst"* ]] && echo "ok: the failing package is named" || \
+  { echo "FAIL: failing package missing from message: $OUT"; fails=1; }
 
 [[ $fails -eq 0 ]] && echo "ok: omarchy-wait-root-image-verify gate behaves"
 exit "$fails"

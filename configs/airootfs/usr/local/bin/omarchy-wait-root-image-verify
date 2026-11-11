@@ -16,7 +16,10 @@
 #
 # Exit 0: image verified (device/scheduler line on stdout). Non-zero: corrupt,
 # missing, or unverifiable -- the message is on stderr with the first line
-# written to headline the install dashboard.
+# written to headline the install dashboard. A hash mismatch is re-read cold
+# before it is called corrupt: transient misreads pass, persistently wrong
+# bytes keep the corrupt verdict, and reads that disagree with each other are
+# reported as unstable reads rather than a corrupt medium.
 set -uo pipefail
 
 UNIT=omarchy-root-image-verify.service
@@ -115,11 +118,93 @@ finish_progress() {
   printf '\n' >>"$OMARCHY_VERIFY_PROGRESS" 2>/dev/null || true
 }
 
+# Whatever the kernel said about the medium lately, for the failure message.
+# Empty when dmesg is unavailable: the forensics then just omit it.
+cold_medium_lines() {
+  command -v dmesg >/dev/null 2>&1 || return 0
+  dmesg 2>/dev/null | grep -iE 'sda|usb|I/O error|Buffer' | tail -n 10 || true
+}
+
+# One best-effort page-cache drop. False (quietly) when there is nothing
+# usable to drop through: the caller then keeps the unit's verdict.
+drop_page_cache() {
+  [[ -w /proc/sys/vm/drop_caches ]] || return 1
+  echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+}
+
+# Sorted basenames the offline mirror's own sums reject; empty when it all
+# matches. --strict keeps unreadable files failures too, so a vanished
+# package cannot look verified.
+cold_mirror_failures() {
+  ( cd "$MIRROR_DIR" && sha256sum --check --strict --quiet "$(basename "$MIRROR_SUMS")" 2>/dev/null || true ) |
+    sed -n 's/: FAILED.*$//p' | sort
+}
+
+# Re-read one cold verdict for the image: full sha256 hex of a fresh read, or
+# nothing when it could not be read. Echoes the hex, if any.
+cold_image_hex() {
+  [[ -f $IMAGE ]] || return 1
+  sha256sum "$IMAGE" 2>/dev/null | sed -n 's/^\([0-9a-f]*\) .*/\1/p'
+}
+
+# Re-read the verdict cold, bypassing possibly poisoned page cache. Prints the
+# verdict word on the first line -- pass (a cold read matched), unstable (two
+# cold reads disagreed with each other), corrupt (two cold reads agreed, but
+# not with the expected sums), unknown (could not re-read: no permission or
+# files unreadable) -- followed by the forensics lines for the failure message
+# (none unless corrupt or unstable). Failure-path only: the happy path returns
+# from the active branch without ever coming here.
+cold_recheck() {
+  local expected first second size medium lines verdict
+  if [[ $UNIT == "$MIRROR_UNIT" ]]; then
+    [[ -f $MIRROR_SUMS && -d $MIRROR_DIR ]] || { echo unknown; return 0; }
+    drop_page_cache || { echo unknown; return 0; }
+    first=$(cold_mirror_failures) || { echo unknown; return 0; }
+    if [[ -z $first ]]; then echo pass; return 0; fi
+    drop_page_cache || { echo unknown; return 0; }
+    second=$(cold_mirror_failures) || { echo unknown; return 0; }
+    if [[ -z $second ]]; then echo pass; return 0; fi
+    if [[ $first == "$second" ]]; then
+      verdict=corrupt
+      lines="failing files (both cold reads):"$'\n'"$first"
+    else
+      verdict=unstable
+      lines="first cold read failures:"$'\n'"$first"$'\n'"second cold read failures (differ):"$'\n'"$second"
+    fi
+  else
+    [[ -f $CHECKSUM ]] || { echo unknown; return 0; }
+    # A checksum file without a trailing newline still yields its hash; only
+    # an empty or unreadable one means there is nothing to compare against.
+    read -r expected _ < "$CHECKSUM" 2>/dev/null || true
+    [[ -n $expected ]] || { echo unknown; return 0; }
+    # No cache to drop (no permission, /proc unavailable): stay with the
+    # unit's verdict rather than invent one.
+    drop_page_cache || { echo unknown; return 0; }
+    first=$(cold_image_hex) || { echo unknown; return 0; }
+    if [[ $first == "$expected" ]]; then echo pass; return 0; fi
+    drop_page_cache || { echo unknown; return 0; }
+    second=$(cold_image_hex) || { echo unknown; return 0; }
+    if [[ $second == "$expected" ]]; then echo pass; return 0; fi
+    size=$(stat -c %s "$IMAGE" 2>/dev/null || echo unknown)
+    if [[ $first == "$second" ]]; then
+      verdict=corrupt
+      lines="expected $expected"$'\n'"computed $first"$'\n'"size $size bytes"
+    else
+      verdict=unstable
+      lines="expected $expected"$'\n'"first cold read $first"$'\n'"second cold read $second (differ)"$'\n'"size $size bytes"
+    fi
+  fi
+  medium=$(cold_medium_lines)
+  [[ -n $medium ]] && lines+=$'\n'"$medium"
+  printf '%s\n' "$verdict" "$lines"
+  return 0
+}
+
 # Wait for one verify unit's verdict: return when it passed, fail() otherwise.
 # $UNIT is global because unit_prop and hash_pct read it.
 await_verdict() {
   UNIT=$1
-  local what=$2 load_state state tail msg pct
+  local what=$2 load_state state tail msg pct cold verdict COLD_EVIDENCE
   local reported=false progress_drawn=false settling=0 unanswered=0
   local where last_where="" last_move=$SECONDS starting=""
   local label="verifying the install medium"
@@ -187,7 +272,35 @@ await_verdict() {
           sleep 0.2
         done
         [[ -n $tail ]] && msg+=$'\n'"$tail"
-        fail "$msg"
+        # A first-touch read can hash wrong while the bytes on the medium are
+        # fine (transient page-cache corruption on the read path: the unit
+        # above then hashed poisoned cache). Before declaring the medium
+        # corrupt, re-read cold and let the cold verdict decide. Failure-path
+        # only: the happy path returned from the active branch, so the F1
+        # install budget is untouched.
+        # Verdict on the first line, forensics after it (command substitution
+        # cannot see the function's variables, so they travel as text).
+        cold=$(cold_recheck)
+        verdict=${cold%%$'\n'*}
+        COLD_EVIDENCE=""
+        if [[ $cold == *$'\n'* ]]; then
+          COLD_EVIDENCE=${cold#*$'\n'}
+        fi
+        case "$verdict" in
+          pass)
+            finish_progress full
+            return 0
+            ;;
+          unstable)
+            fail "install medium reads are unstable: suspect USB stick/port, controller, or RAM"$'\n'"try another USB stick or port, and run memtest; re-flashing the same stick may not help"$'\n'"$COLD_EVIDENCE"
+            ;;
+          corrupt)
+            fail "$msg"$'\n'"$COLD_EVIDENCE"
+            ;;
+          *)  # unknown: could not re-read, keep the unit's verdict
+            fail "$msg"
+            ;;
+        esac
         ;;
       activating)
         if [[ $reported == false ]]; then

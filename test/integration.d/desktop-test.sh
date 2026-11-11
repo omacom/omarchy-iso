@@ -9,7 +9,7 @@
 #
 # Runs on the default variant only: desktop behaviour does not vary by disk
 # size, encryption, or bootloader, and the smoke is expensive. The universal
-# clipboard sub-phase (opens Chrome) runs too.
+# clipboard sub-phase (opens the default browser) runs too.
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
@@ -60,6 +60,29 @@ wait_for_guest_state() {
   done
 
   printf 'ok - %s\n' "$description"
+}
+
+# The browser the installed Omarchy opens links with, read the way its own
+# launcher reads it: xdg-settings names the desktop entry, and the entry's
+# Exec= names the command. 4.5 ships Chromium and quattro Google Chrome
+# (omacom/omarchy#18240), so the test names neither. BROWSER and the
+# desktop-specific list route back to omarchy-browser.desktop, which only
+# hands links to that launcher, so xdg-settings reads neither. Both browsers
+# are Chromium builds: windows and cores still match "chrom", and the profile
+# lives under the name omarchy-launch-browser focuses by.
+read_default_browser() {
+  local answer
+
+  answer=$(ssh_session 'entry=$(env -u BROWSER XDG_CURRENT_DESKTOP= xdg-settings get default-web-browser) &&
+    for dir in ~/.local/share /usr/local/share /usr/share; do
+      [[ -f $dir/applications/$entry ]] || continue
+      printf "%s %s\n" "$entry" "$(sed -n "s/^Exec=\([^ ]*\).*/\1/p" "$dir/applications/$entry" | head -1)"
+      break
+    done' 2>/dev/null)
+  read -r BROWSER_ENTRY BROWSER_COMMAND <<<"$answer"
+  BROWSER_NAME=$(basename "${BROWSER_COMMAND:-none}" -stable)
+  log "Default browser: ${BROWSER_ENTRY:-none} runs ${BROWSER_COMMAND:-nothing}"
+  check "xdg-settings names a default browser and its command" test -n "$BROWSER_COMMAND"
 }
 
 guest_layer_present() {
@@ -191,9 +214,10 @@ verify_universal_clipboard_shortcuts() {
   local terminal_result="/tmp/omarchy-universal-terminal-paste"
 
   cleanup_shortcut_state
-  ssh_session "setsid -f google-chrome-stable --new-window about:blank >/dev/null 2>&1"
-  if ! wait_for_guest_state "universal clipboard test opens Chrome" 45 \
-    ssh_session "hyprctl -j clients | jq -e '[.[] | select(.class | test(\"(?i)google-chrome\"))] | length == 1'"; then
+  ssh_session "systemd-run --user --quiet --collect --unit=omarchy-browser-smoke-clipboard-\$RANDOM \
+    uwsm-app -- '$BROWSER_COMMAND' --new-window about:blank"
+  if ! wait_for_guest_state "universal clipboard test opens the default browser" 45 \
+    ssh_session "hyprctl -j clients | jq -e '[.[] | select(.class | test(\"(?i)chrom\"))] | length == 1'"; then
     capture_console "failure-shortcut-universal-clipboard-browser"
     return 1
   fi
@@ -228,7 +252,7 @@ verify_universal_clipboard_shortcuts() {
   ssh_session 'while read -r address; do
     hyprctl dispatch "hl.dsp.window.close({ window = \"address:$address\" })" >/dev/null 2>&1 ||
       hyprctl dispatch closewindow "address:$address" >/dev/null 2>&1 || true
-  done < <(hyprctl -j clients | jq -r '\''.[] | select(.class | test("(?i)google-chrome")) | .address'\'')' || true
+  done < <(hyprctl -j clients | jq -r '\''.[] | select(.class | test("(?i)chrom")) | .address'\'')' || true
 
   ssh_session "rm -f '$terminal_result'; \
     setsid -f bash -c 'printf \"%s\" \"$terminal_token\" | wl-copy' >/dev/null 2>&1; \
@@ -293,20 +317,25 @@ audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel"
 browser_launch_phase() {
   local launches=${OMARCHY_BROWSER_LAUNCHES:-3} i out failed=0
 
+  # Without a command there is nothing to launch, and the profile path below
+  # would be the whole of ~/.config. read_default_browser has failed already.
+  [[ -n $BROWSER_COMMAND ]] || return
+
   for ((i = 1; i <= launches; i++)); do
-    out=$(ssh_session "pkill -x chrome 2>/dev/null; sleep 1; rm -rf ~/.config/google-chrome ~/.cache/google-chrome; \
-      before=\$(coredumpctl list --no-legend 2>/dev/null | grep -c chrome); \
-      systemd-run --user --quiet --collect --unit=omarchy-browser-smoke-$i-\$RANDOM uwsm-app -- /usr/bin/google-chrome-stable 'https://example.com/?omarchy-smoke=$i'; \
+    out=$(ssh_session "systemctl --user stop 'omarchy-browser-smoke-*' 2>/dev/null; sleep 1; \
+      rm -rf ~/.config/$BROWSER_NAME ~/.cache/$BROWSER_NAME; \
+      before=\$(coredumpctl list --no-legend 2>/dev/null | grep -c chrom); \
+      systemd-run --user --quiet --collect --unit=omarchy-browser-smoke-$i-\$RANDOM uwsm-app -- '$BROWSER_COMMAND' 'https://example.com/?omarchy-smoke=$i'; \
       sleep 9; \
-      after=\$(coredumpctl list --no-legend 2>/dev/null | grep -c chrome); \
+      after=\$(coredumpctl list --no-legend 2>/dev/null | grep -c chrom); \
       windows=\$(hyprctl -j clients | jq '[.[] | select(.class | test(\"(?i)chrom\"))] | length'); \
       echo \"cores \$before->\$after windows \$windows\"" 2>/dev/null)
     echo "    fresh-profile launch $i: ${out:-no answer}"
     [[ $out =~ ^cores\ ([0-9]+)-\>([0-9]+)\ windows\ ([0-9]+)$ ]] &&
       [[ ${BASH_REMATCH[1]} == "${BASH_REMATCH[2]}" && ${BASH_REMATCH[3]} -ge 1 ]] || ((failed += 1))
   done
-  check "Chrome opens a link on a fresh profile, $launches times, without a core dump (failed: $failed)" test "$failed" -eq 0
-  ssh_session "pkill -x chrome" >/dev/null 2>&1 || true
+  check "the default browser opens a link on a fresh profile, $launches times, without a core dump (failed: $failed)" test "$failed" -eq 0
+  ssh_session "systemctl --user stop 'omarchy-browser-smoke-*'" >/dev/null 2>&1 || true
 }
 
 # ------------------------------------------------------- reaching the desktop
@@ -391,6 +420,7 @@ reach_desktop() {
 # ---------------------------------------------------------------------- main
 
 if reach_desktop; then
+  read_default_browser
   shortcut_smoke_phase
   browser_launch_phase
 fi

@@ -40,7 +40,7 @@ dtb_dir=$work/qcom
 # The loop live-uki.sh runs; test_qcom_shared_boot.py keeps the two the same.
 shopt -s nullglob
 dtbs=()
-for dtb in "$dtb_dir"/x1*.dtb "$dtb_dir"/hamoa*.dtb "$dtb_dir"/glymur*.dtb "$dtb_dir"/mahua*.dtb "$dtb_dir"/sc8280xp*.dtb; do
+for dtb in "$dtb_dir"/x1*.dtb "$dtb_dir"/hamoa*.dtb "$dtb_dir"/purwa*.dtb "$dtb_dir"/glymur*.dtb "$dtb_dir"/mahua*.dtb "$dtb_dir"/sc8280xp*.dtb; do
   [[ $dtb == *-el2.dtb ]] && continue
   dtbs+=("$dtb")
 done

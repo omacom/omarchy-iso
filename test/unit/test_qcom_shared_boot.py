@@ -215,14 +215,14 @@ else:
 
     def test_dedicated_initramfs_keeps_direct_boot_untouched(self):
         dtb_root=self.root/'boot/dtbs/test/qcom'
-        for name in ('x1-test.dtb','glymur-test.dtb','mahua-test.dtb','x1-test-el2.dtb','sm8550-test.dtb'):
+        for name in ('x1-test.dtb','purwa-test.dtb','glymur-test.dtb','mahua-test.dtb','x1-test-el2.dtb','sm8550-test.dtb'):
             (dtb_root/name).write_bytes(b'dtb')
         result=self.builder(); self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(self.initrd.read_bytes(),b'original initramfs')
         call=json.loads((self.root/'mkinitcpio-call.json').read_text())
         self.assertIn('qcom_early_startup',call['args'])
         self.assertEqual(call['args'][call['args'].index('-c')+1],str(self.config))
-        self.assertIn('x1-test.dtb',call['dtbs']); self.assertIn('glymur-test.dtb',call['dtbs']); self.assertIn('mahua-test.dtb',call['dtbs'])
+        self.assertIn('x1-test.dtb',call['dtbs']); self.assertIn('glymur-test.dtb',call['dtbs']); self.assertIn('mahua-test.dtb',call['dtbs']); self.assertIn('purwa-test.dtb',call['dtbs'])
         self.assertNotIn('el2',call['dtbs']); self.assertNotIn('sm8550',call['dtbs'])
         self.assertFalse(Path(call['args'][call['args'].index('-g')+1]).exists())
 

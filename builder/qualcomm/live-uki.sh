@@ -16,7 +16,7 @@ hwids=/usr/lib/systemd/boot/hwids/aa64
 # The kernel package keeps its Snapdragon device trees under its own name.
 dtb_dir=/boot/dtbs/$1/qcom
 
-# Include supported Snapdragon generations while staying below the UKI section limit.
+# Include supported Snapdragon generations.
 # EL2 variants share hardware IDs with their base DTBs and would be ambiguous.
 shopt -s nullglob
 dtbs=()
@@ -44,12 +44,6 @@ if [[ ! -d $hwids ]]; then
   exit 1
 fi
 
-# Reserve room for the UKI's non-DTB sections.
-if (( ${#dtbs[@]} > 90 )); then
-  echo "live-uki: ${#dtbs[@]} device trees exceed the UKI section budget; narrow the prefixes" >&2
-  exit 1
-fi
-
 # The direct-boot initramfs remains untouched. The Qualcomm UKI needs its
 # firmware drivers and DT-named blobs before it can find USB installation media.
 work=$(mktemp -d)
@@ -60,6 +54,11 @@ OMARCHY_QCOM_DTBS_FILE="$work/dtbs.list" mkinitcpio \
   -A qcom_early_startup -g "$work/initramfs.img"
 initrd="$work/initramfs.img"
 
+# Each tree is a section of its own. ukify writes every section's header into
+# the room the stub leaves before its first section and stops with "Not enough
+# header space" once it is full. With systemd 262's aa64 stub that is 120
+# trees beside .linux, .initrd, .hwids, .osrel, .uname and .sbat. At about
+# 190 KB a tree, the size limit below leaves room for more than that.
 args=()
 for dtb in "${dtbs[@]}"; do
   args+=("--devicetree-auto=$dtb")

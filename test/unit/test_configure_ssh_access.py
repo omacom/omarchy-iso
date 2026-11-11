@@ -98,10 +98,53 @@ class ConfigureSshAccessTest(unittest.TestCase):
         self.configure(authorized_keys="ssh-ed25519 AAAA jeff@host\n")
         self.assertEqual(stat.S_IMODE(self.authorized_keys().stat().st_mode), 0o600)
 
+    def test_a_symlinked_authorized_keys_is_never_written_through(self):
+        # A home adopted from another drive is the user's own: a link there
+        # must not turn a root write into one on the installed system.
+        passwd = self.target / "etc" / "passwd"
+        passwd.parent.mkdir(parents=True)
+        passwd.write_text("root:x:0:0::/root:/bin/bash\n")
+        ssh = self.target / "home" / "jeff" / ".ssh"
+        ssh.mkdir(parents=True)
+        (ssh / "authorized_keys").symlink_to("../../../etc/passwd")
+        with self.assertRaisesRegex(RuntimeError, "link"):
+            self.configure(authorized_keys="ssh-ed25519 AAAA jeff@host\n")
+        self.assertEqual(passwd.read_text(), "root:x:0:0::/root:/bin/bash\n")
+
+    def test_a_symlinked_ssh_dir_is_never_written_through(self):
+        elsewhere = self.target / "etc" / "elsewhere"
+        elsewhere.mkdir(parents=True)
+        (self.target / "home" / "jeff").mkdir(parents=True)
+        (self.target / "home" / "jeff" / ".ssh").symlink_to("../../etc/elsewhere")
+        with self.assertRaisesRegex(RuntimeError, "link"):
+            self.configure(authorized_keys="ssh-ed25519 AAAA jeff@host\n")
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
+    def test_an_existing_authorized_keys_keeps_its_keys(self):
+        # An adopted home may already authorize keys of its own.
+        ssh = self.target / "home" / "jeff" / ".ssh"
+        ssh.mkdir(parents=True)
+        (ssh / "authorized_keys").write_text("ssh-ed25519 BBBB jeff@laptop\n")
+        self.configure(authorized_keys="ssh-ed25519 AAAA jeff@host\nssh-ed25519 BBBB jeff@laptop\n")
+        self.assertEqual(self.authorized_keys().read_text(),
+                         "ssh-ed25519 BBBB jeff@laptop\nssh-ed25519 AAAA jeff@host\n")
+
+    def test_existing_keys_with_non_utf8_comments_are_kept_byte_for_byte(self):
+        # Key comments need not be UTF-8.
+        ssh = self.target / "home" / "jeff" / ".ssh"
+        ssh.mkdir(parents=True)
+        (ssh / "authorized_keys").write_bytes(b"ssh-ed25519 BBBB j\xf6rgen@laptop\n")
+        self.configure(authorized_keys="ssh-ed25519 AAAA jeff@host\n")
+        self.assertEqual(self.authorized_keys().read_bytes(),
+                         b"ssh-ed25519 BBBB j\xf6rgen@laptop\nssh-ed25519 AAAA jeff@host\n")
+
     def test_chowns_ssh_dir_to_the_user(self):
+        # "jeff:" is jeff and jeff's login group, whatever it is called: a home
+        # adopted from another drive may belong to the shared users group,
+        # with no group named jeff at all.
         self.configure(authorized_keys="ssh-ed25519 AAAA jeff@host\n")
         self.assertEqual(self.chrooted("chown"), [
-            ["arch-chroot", str(self.target), "chown", "-R", "jeff:jeff", "/home/jeff/.ssh"],
+            ["arch-chroot", str(self.target), "chown", "-R", "jeff:", "/home/jeff/.ssh"],
         ])
 
     def test_enables_sshd(self):

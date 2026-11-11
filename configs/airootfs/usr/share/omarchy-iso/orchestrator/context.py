@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .home_drive import check_not_on_install_disks, install_disks, parse_home
 from .keyboard import validate_input_selection
 
 LANGUAGES = Path("/usr/share/omarchy/default/i18n/locales.json")
@@ -81,6 +82,10 @@ class InstallContext:
         defer_provisioning_marker = _optional_path(os.environ.get("OMARCHY_INSTALL_DEFER_PROVISIONING_FILE"))
         defer_provisioning = bool(omarchy_install.get("defer_provisioning")) or defer_provisioning_marker is not None
         omarchy_install["defer_provisioning"] = defer_provisioning
+        omarchy_install["home"] = parse_home(omarchy_install.get("home"), defer_provisioning)
+        if omarchy_install["home"]:
+            # Before anything is erased: a home on a disk the install overwrites.
+            check_not_on_install_disks(omarchy_install["home"], install_disks(user_configuration))
 
         if creds_path.exists():
             user_credentials = json.loads(creds_path.read_text())
@@ -152,6 +157,16 @@ class InstallContext:
         if self.defer_provisioning:
             return ""
         raise RuntimeError("user_credentials.json contains no users")
+
+    @property
+    def home(self) -> dict | None:
+        """Where home lives when not on the install disk (home_drive.parse_home)."""
+        return self.omarchy_install.get("home")
+
+    @property
+    def home_password(self) -> str:
+        """The LUKS passphrase of an encrypted home drive, if any."""
+        return self.user_credentials.get("home_encryption_password") or ""
 
     @property
     def mode(self) -> str:

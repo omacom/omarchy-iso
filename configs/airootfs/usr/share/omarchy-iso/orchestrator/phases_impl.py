@@ -49,6 +49,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import archinstall_adapter as arch
+from . import home_drive
 from .command import capture, capture_identifier, require_text
 from .context import InstallContext, hw_platform, iso_kernel
 from .keyboard import configure_keyboard
@@ -267,25 +268,39 @@ def _copy_firmware_stage_into_target(ctx: InstallContext) -> None:
 
 def prepare_live(ctx: InstallContext) -> None:
     _stage_qualcomm_firmware()
+    # Before the cleanup below wipes the install disk's signatures: a home
+    # drive refused after that would leave the machine with no system.
+    home_drive.check_before_erase(ctx)
+    # The disk a fresh home is made on arrives with its old life switched on
+    # like the install disk does (an LVM group or RAID member udev activated),
+    # in either mode: protected installs keep their own disk, not this one.
+    home = home_drive.chosen(ctx)
+    if home and home["mode"] == "fresh":
+        info(f"› cleaning up holders on home disk: {home['disk']}")
+        _release_disk(["--home", home["disk"]], home["disk"])
     if ctx.is_protected:
         info("› protected mode: skipping whole-disk cleanup")
     else:
         disk = _install_disk(ctx)
         if disk:
             info(f"› cleaning up holders on install disk: {disk}")
-            result = capture(["omarchy-iso-cleanup-disk", disk])
-            for line in (result.stdout + result.stderr).splitlines():
-                info(f"  {line}")
-            if result.returncode != 0:
-                # Its last line says what still holds the disk, for the failure screen.
-                lines = result.stdout.strip().splitlines()
-                raise RuntimeError(lines[-1] if lines else f"Could not release {disk}")
+            _release_disk([disk], disk)
 
     info("› loading configurator output")
     ctx.state["arch_config_handler"] = arch.load_arch_config(
         ctx.arch_config_path, ctx.creds_path
     )
     ctx.state["mirror_handler"] = arch.make_mirror_handler(offline=True)
+
+
+def _release_disk(args: list[str], disk: str) -> None:
+    result = capture(["omarchy-iso-cleanup-disk", *args])
+    for line in (result.stdout + result.stderr).splitlines():
+        info(f"  {line}")
+    if result.returncode != 0:
+        # Its last line says what still holds the disk, for the failure screen.
+        lines = result.stdout.strip().splitlines()
+        raise RuntimeError(lines[-1] if lines else f"Could not release {disk}")
 
 
 def _install_disk(ctx: InstallContext) -> str | None:
@@ -641,6 +656,12 @@ def arch_install_system(ctx: InstallContext) -> None:
         if not pre_mounted and arch.is_encrypted(config):
             installer.generate_key_files()
 
+        # A home on another drive goes over /home now: writing the image
+        # unmounted the whole target, and the user is created on it below.
+        if home_drive.chosen(ctx):
+            with _time_step("STEP.home_drive"):
+                home_drive.prepare_home(ctx, encrypted=_provision_install_encrypted(ctx))
+
         if config.mirror_config:
             installer.set_mirrors(mirror_handler, config.mirror_config, on_target=False)
 
@@ -701,8 +722,10 @@ def arch_install_system(ctx: InstallContext) -> None:
 
             info("› creating user (with /etc/skel populated)")
             if config.auth_config and config.auth_config.users:
+                home_drive.register_adopted_user(ctx)
                 with _time_step("STEP.create_users"):
                     installer.create_users(config.auth_config.users)
+                home_drive.merge_home(ctx)
 
             if config.app_config:
                 # The image carries the PipeWire packages; this adds the audio
@@ -741,6 +764,10 @@ def arch_install_system(ctx: InstallContext) -> None:
             _write_pre_mounted_fstab(ctx)
         else:
             installer.genfstab()
+        # Whether the root is encrypted by what the disk config says, not only
+        # the optional flag file: an encrypted root keeps the home's key there.
+        if home_drive.chosen(ctx):
+            home_drive.home_fstab_entries(ctx, root_encrypted=_provision_install_encrypted(ctx))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2366,6 +2393,8 @@ def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str 
         # network. MISE_OFFLINE blocks every HTTP request.
         "MISE_OFFLINE=1",
     ]
+    if user:
+        env_extras += home_drive.setup_env(ctx)
     if _install_debug_enabled():
         env_extras.append("OMARCHY_INSTALL_DEBUG=1")
         _debug_log(ctx, "running target setup command: " + " ".join(cmd))
@@ -3039,6 +3068,31 @@ def configure_login(ctx: InstallContext) -> None:
 # so all three pieces -- keys, service, firewall -- have to be done here.
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _install_authorized_keys(ssh_dir: Path, keys: list[str]) -> None:
+    """Authorize keys in a home that may have been adopted from another drive,
+    and so be the user's own. Never written through a link (a root write there
+    could land anywhere on the installed system), and the keys it already
+    authorizes are kept."""
+    if ssh_dir.is_symlink():
+        raise RuntimeError(f"{ssh_dir} is a link; not writing SSH keys through it")
+    ssh_dir.mkdir(parents=True, exist_ok=True)
+    ssh_dir.chmod(0o700)
+    try:
+        fd = os.open(ssh_dir / "authorized_keys", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        raise RuntimeError(f"{ssh_dir}/authorized_keys is a link; not writing SSH keys through it") from exc
+    # As bytes: the keys already there are kept exactly, whatever encoding
+    # their comments use.
+    with os.fdopen(fd, "r+b") as handle:
+        existing = handle.read()
+        present = set(existing.splitlines())
+        added = b"".join(key.encode() + b"\n" for key in keys if key.encode() not in present)
+        if existing and not existing.endswith(b"\n"):
+            added = b"\n" + added
+        handle.write(added)
+        os.fchmod(handle.fileno(), 0o600)
+
+
 def configure_ssh_access(ctx: InstallContext) -> None:
     if ctx.authorized_keys_path is None:
         return
@@ -3058,20 +3112,16 @@ def configure_ssh_access(ctx: InstallContext) -> None:
     else:
         info(f"› installing {len(keys)} SSH key(s) for {ctx.username}")
 
-        ssh_dir = ctx.target / "home" / ctx.username / ".ssh"
-        ssh_dir.mkdir(parents=True, exist_ok=True)
-        ssh_dir.chmod(0o700)
+        _install_authorized_keys(ctx.target / "home" / ctx.username / ".ssh", keys)
 
-        authorized_keys = ssh_dir / "authorized_keys"
-        authorized_keys.write_text("".join(f"{key}\n" for key in keys))
-        authorized_keys.chmod(0o600)
-
-        # Ask the target for the uid rather than assuming the first user is 1000.
-        # Uncaptured so a failure shows up in the install log, and checked because
-        # a root-owned authorized_keys is one sshd refuses to read.
+        # Ask the target for the uid rather than assuming the first user is 1000,
+        # and for the login group ("user:"): a home adopted from another drive
+        # may belong to the shared users group, with no group named after the
+        # user. Uncaptured so a failure shows up in the install log, and checked
+        # because a root-owned authorized_keys is one sshd refuses to read.
         subprocess.run(
             ["arch-chroot", str(ctx.target), "chown", "-R",
-             f"{ctx.username}:{ctx.username}", f"/home/{ctx.username}/.ssh"],
+             f"{ctx.username}:", f"/home/{ctx.username}/.ssh"],
             check=True,
         )
 
@@ -3863,6 +3913,23 @@ def cleanup_target_hook_masks(ctx: InstallContext) -> None:
     interrupt must never leave the installed system with its UKI rebuild hook
     pointing at /dev/null."""
     _unmask_mkinitcpio_pacman_hooks(ctx, ctx.target, TARGET_DEFERRED_BOOT_HOOKS)
+
+
+def cleanup_home_drive(ctx: InstallContext) -> None:
+    """Let go of a home drive after a failed install, in either mode: unmount
+    it from the target's /home and close the home mapping, wherever else it
+    is mounted (home-top) and even with nothing mounted from it, so the next
+    attempt does not find the drive held. Idempotent."""
+    if not home_drive.chosen(ctx):
+        return
+    result = subprocess.run(
+        ["omarchy-release-install-target", str(ctx.target / "home"), home_drive.MAPPER],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    for line in (result.stderr or "").splitlines():
+        info(f"release: {line}")
 
 
 def cleanup_protected_state(ctx: InstallContext) -> None:

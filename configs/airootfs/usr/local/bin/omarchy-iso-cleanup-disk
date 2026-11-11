@@ -18,6 +18,10 @@
 # regular file in /dev. Then the kernel must agree to re-read the table, which
 # it refuses while anything holds a partition. If it will not, this exits
 # non-zero with the reason on its last line, for the failure screen.
+#
+# With --home it releases the disk a fresh home is made on the same way. The
+# target at /mnt is left mounted then: a protected install's target is already
+# there, on another disk.
 
 set -uo pipefail
 
@@ -28,13 +32,23 @@ if [[ ${1:-} == --protected ]]; then
   exit 0
 fi
 
+role="install disk"
+release_target=true
+if [[ ${1:-} == --home ]]; then
+  role="home disk"
+  release_target=false
+  shift
+fi
+
 disk="${1:-}"
 [[ -n $disk && -b $disk ]] || { echo "Need a block device argument; got '$disk'" >&2; exit 1; }
 disk=$(realpath "$disk")
 disk_name=$(basename "$disk")
 
-echo "Cleaning up existing holders on install disk: $disk"
-findmnt -R /mnt >/dev/null && umount -R /mnt || true
+echo "Cleaning up existing holders on $role: $disk"
+if $release_target; then
+  findmnt -R /mnt >/dev/null && umount -R /mnt || true
+fi
 
 # Kernel names (sda2, nvme0n1p2) of the disk's partitions.
 partitions() {

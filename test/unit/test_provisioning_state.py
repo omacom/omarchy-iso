@@ -156,6 +156,42 @@ class ContextDeferProvisioningTest(unittest.TestCase):
         ctx = self.from_env()
         self.assertNotIn("encryption_password", ctx.user_credentials)
 
+    def test_persistent_device_alias_is_canonicalized_only_for_archinstall(self):
+        target = self.dir / "vda"
+        target.touch()
+        alias = self.dir / "by-id" / "virtio-omarchy-lab"
+        alias.parent.mkdir()
+        alias.symlink_to(target)
+        config = self.base_config()
+        config["disk_config"]["device_modifications"] = [{"device": str(alias), "wipe": True}]
+        self.write_config(config)
+        self.write_creds({"users": [{"username": "jeff"}]})
+
+        with mock.patch.object(Path, "is_block_device", return_value=True):
+            ctx = self.from_env()
+
+        # Cleanup/support retains the stable identity from cidata.
+        self.assertEqual(
+            ctx.user_configuration["disk_config"]["device_modifications"][0]["device"],
+            str(alias),
+        )
+        # Archinstall receives the canonical key used by its BlockDevice map.
+        arch_config = json.loads(ctx.arch_config_path.read_text())
+        self.assertEqual(
+            arch_config["disk_config"]["device_modifications"][0]["device"],
+            str(target.resolve()),
+        )
+
+    def test_missing_install_device_fails_before_archinstall(self):
+        config = self.base_config()
+        missing = self.dir / "by-id" / "missing"
+        config["disk_config"]["device_modifications"] = [{"device": str(missing), "wipe": True}]
+        self.write_config(config)
+        self.write_creds({"users": [{"username": "jeff"}]})
+
+        with self.assertRaisesRegex(RuntimeError, "install device does not exist"):
+            self.from_env()
+
 
 def make_ctx(target, **overrides):
     defaults = dict(

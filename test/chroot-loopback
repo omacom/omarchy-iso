@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Privileged integration check using only a newly created disposable disk image.
+
+Run in a disposable privileged Arch container with arch-install-scripts,
+btrfs-progs, cryptsetup, dosfstools, python and util-linux installed. The repo
+can be mounted read-only. This is separate from the unprivileged test/all.
+"""
+
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+import time
+
+
+ROOT = Path(__file__).resolve().parents[1]
+HELPER = ROOT / "configs/airootfs/usr/local/bin/omarchy-chroot"
+MIRROR = Path("/var/cache/omarchy/mirror/offline")
+
+
+def run(*args, **kwargs):
+    return subprocess.run([str(arg) for arg in args], check=True, text=True, **kwargs)
+
+
+def output(*args):
+    return run(*args, capture_output=True).stdout.strip()
+
+
+def test():
+    if os.geteuid() != 0 or not Path("/.dockerenv").exists():
+        raise SystemExit("Run this test in a disposable privileged Docker container, not on the host.")
+    if MIRROR.exists():
+        raise SystemExit("The test requires a fresh container without an offline mirror.")
+    with tempfile.TemporaryDirectory(prefix="omarchy-chroot-test-") as tmp:
+        work = Path(tmp)
+        image, seed, target = work / "disk.img", work / "seed", work / "target"
+        image.touch()
+        os.truncate(image, 1024 * 1024 * 1024)
+        seed.mkdir()
+        mapper = f"omarchy-chroot-fixture-{os.getpid()}"
+        chroot_mapping = None
+        disk = output("losetup", "--find", "--show", "--partscan", image)
+        try:
+            run("sfdisk", disk, input="label: gpt\n,96M,U\n,,L\n", stdout=subprocess.DEVNULL)
+            # A container has no udev daemon creating the newly added nodes.
+            partitions = []
+            for number in (1, 2):
+                partition = f"{disk}p{number}"
+                sysdev = Path("/sys/class/block") / Path(partition).name / "dev"
+                for _ in range(50):
+                    if sysdev.exists():
+                        break
+                    time.sleep(0.1)
+                major, minor = map(int, sysdev.read_text().strip().split(":"))
+                if not Path(partition).exists():
+                    run("mknod", partition, "b", major, minor)
+                partitions.append(partition)
+            boot, encrypted = partitions
+            run("mkfs.vfat", boot, stdout=subprocess.DEVNULL)
+            # Public fixture password; never used for a real disk.
+            password = "omarchy-disposable-chroot-test\n"
+            run("cryptsetup", "luksFormat", "--batch-mode", "--pbkdf", "pbkdf2", encrypted, input=password)
+            run("cryptsetup", "open", encrypted, mapper, input=password)
+            device = f"/dev/mapper/{mapper}"
+            run("mkfs.btrfs", "-q", device)
+            uuid = output("blkid", "-s", "UUID", "-o", "value", device)
+            boot_uuid = output("blkid", "-s", "UUID", "-o", "value", boot)
+            run("mount", device, seed)
+            for subvol in ("@", "@pkg", "@log"):
+                run("btrfs", "subvolume", "create", seed / subvol, stdout=subprocess.DEVNULL)
+            installed = seed / "@"
+            for directory in ("etc", "boot", "bin", "proc", "sys", "dev", "run", "tmp", "var/lib/pacman/local"):
+                (installed / directory).mkdir(parents=True, exist_ok=True)
+            (installed / "etc/pacman.conf").touch()
+            (installed / "etc/resolv.conf").touch()
+            (installed / "etc/fstab").write_text(
+                f"UUID={uuid} / btrfs subvol=/@ 0 0\n"
+                f"UUID={boot_uuid} /boot vfat defaults 0 2\n"
+                f"UUID={uuid} /var/cache/pacman/pkg btrfs subvol=/@pkg 0 0\n"
+                f"UUID={uuid} /var/log btrfs subvol=/@log 0 0\n"
+            )
+            (seed / "@pkg/old-kernel.pkg.tar.zst").write_text("cached fixture")
+            shutil.copy2("/bin/bash", installed / "bin/bash")
+            for library in set(re.findall(r"/[^\s()]+", output("ldd", "/bin/bash"))):
+                destination = installed / library.lstrip("/")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(library, destination)
+            run("umount", seed)
+            run("cryptsetup", "close", mapper)
+            MIRROR.mkdir(parents=True)
+            (MIRROR / "iso-kernel.pkg.tar.zst").write_text("iso fixture")
+
+            command = """
+set -eu
+test -r /var/cache/pacman/pkg/old-kernel.pkg.tar.zst
+test -r /var/cache/omarchy/mirror/offline/iso-kernel.pkg.tar.zst
+if echo bad >/var/cache/omarchy/mirror/offline/should-not-write; then exit 1; fi
+echo mounted >/boot/chroot-check
+echo log >/var/log/chroot-check
+echo 'Chroot verified'
+"""
+            for supplied_password, expected in (("wrong-password\n", 1), (password, 0)):
+                process = subprocess.Popen(
+                    [str(HELPER), "--root", encrypted, "--mountpoint", str(target), "--", "/bin/bash", "-c", command],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                chroot_mapping = f"omarchy-chroot-{process.pid}"
+                try:
+                    stdout, stderr = process.communicate(supplied_password, timeout=60)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate()
+                    raise
+                assert process.returncode == expected, f"{stdout}\n{stderr}\n{output('lsblk', '--json', '--paths', '--output', 'NAME,TYPE,FSTYPE,MOUNTPOINTS,RO')}"
+                assert not Path(f"/dev/mapper/omarchy-chroot-{process.pid}").exists(), stderr
+                assert subprocess.run(["findmnt", "--mountpoint", str(target)], capture_output=True).returncode != 0
+                if expected == 0:
+                    assert "Chroot verified" in stdout
+            run("mount", boot, seed)
+            assert (seed / "chroot-check").read_text() == "mounted\n"
+            run("umount", seed)
+            print("PASS: real LUKS unlock, Btrfs cache/log mounts, separate boot, read-only mirror, arch-chroot and cleanup")
+        finally:
+            # Every path and device here belongs to the image created above.
+            for directory in (target, seed):
+                subprocess.run(["umount", "--recursive", str(directory)], capture_output=True)
+            if chroot_mapping:
+                subprocess.run(["cryptsetup", "close", chroot_mapping], capture_output=True)
+            subprocess.run(["cryptsetup", "close", mapper], capture_output=True)
+            run("losetup", "--detach", disk)
+
+
+if __name__ == "__main__":
+    test()

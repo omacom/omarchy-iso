@@ -18,8 +18,11 @@
 # missing, or unverifiable -- the message is on stderr with the first line
 # written to headline the install dashboard. A hash mismatch is re-read cold
 # before it is called corrupt: transient misreads pass, persistently wrong
-# bytes keep the corrupt verdict, and reads that disagree with each other are
-# reported as unstable reads rather than a corrupt medium.
+# bytes keep the corrupt verdict, reads that disagree with each other are
+# reported as unstable reads rather than a corrupt medium, and a cold read
+# that stalls past the unit's size-based timeout reports a slow medium.
+# Every added read is failure-path only and bounded, so the F1 install
+# budget on the happy path is untouched.
 set -uo pipefail
 
 UNIT=omarchy-root-image-verify.service
@@ -135,36 +138,60 @@ drop_page_cache() {
 # Sorted basenames the offline mirror's own sums reject; empty when it all
 # matches. --strict keeps unreadable files failures too, so a vanished
 # package cannot look verified.
-cold_mirror_failures() {
-  ( cd "$MIRROR_DIR" && sha256sum --check --strict --quiet "$(basename "$MIRROR_SUMS")" 2>/dev/null || true ) |
-    sed -n 's/: FAILED.*$//p' | sort
+cold_mirror_failures() { # $1: seconds
+  local out rc=0
+  out=$(cd "$MIRROR_DIR" && timeout "$1" sha256sum --check --strict --quiet "$MIRROR_SUMS" 2>/dev/null) || rc=$?
+  if (( rc == 124 )); then echo TIMEOUT; return 124; fi
+  (( rc != 0 && rc != 1 )) && return 1
+  printf '%s\n' "$out" | sed -n 's/: FAILED.*$//p' | sort
 }
 
 # Re-read one cold verdict for the image: full sha256 hex of a fresh read, or
 # nothing when it could not be read. Echoes the hex, if any.
-cold_image_hex() {
+cold_image_hex() { # $1: seconds
   [[ -f $IMAGE ]] || return 1
-  sha256sum "$IMAGE" 2>/dev/null | sed -n 's/^\([0-9a-f]*\) .*/\1/p'
+  local out rc=0
+  out=$(timeout "$1" sha256sum "$IMAGE" 2>/dev/null) || rc=$?
+  if (( rc == 124 )); then echo TIMEOUT; return 124; fi
+  (( rc != 0 )) && return 1
+  printf '%s\n' "$out" | sed -n 's/^\([0-9a-f]*\) .*/\1/p'
+}
+
+# Bound for one cold read, mirroring the unit's size-based TimeoutStartSec
+# (build-iso.sh: bytes at 2 MiB/s plus a 10-minute base): a medium that
+# stalls reads instead of erroring must report slow, not hang the installer.
+cold_timeout_for() { # $1: bytes -> seconds on stdout
+  echo $(($1 / (2 * 1024 * 1024) + 600))
 }
 
 # Re-read the verdict cold, bypassing possibly poisoned page cache. Prints the
 # verdict word on the first line -- pass (a cold read matched), unstable (two
 # cold reads disagreed with each other), corrupt (two cold reads agreed, but
-# not with the expected sums), unknown (could not re-read: no permission or
+# not with the expected sums), slow (a cold read stalled past its size-based
+# timeout), unknown (could not re-read: no timeout helper, no permission,
 # files unreadable) -- followed by the forensics lines for the failure message
-# (none unless corrupt or unstable). Failure-path only: the happy path returns
-# from the active branch without ever coming here.
+# (none unless corrupt, unstable or slow). Failure-path only: the happy path
+# returns from the active branch without ever coming here.
 cold_recheck() {
-  local expected first second size medium lines verdict
+  local expected first second size medium lines verdict secs rc1 rc2
   if [[ $UNIT == "$MIRROR_UNIT" ]]; then
     [[ -f $MIRROR_SUMS && -d $MIRROR_DIR ]] || { echo unknown; return 0; }
+    command -v timeout >/dev/null 2>&1 || { echo unknown; return 0; }
+    size=$(du -sb "$MIRROR_DIR" 2>/dev/null | cut -f1) || { echo unknown; return 0; }
+    [[ $size =~ ^[0-9]+$ ]] || { echo unknown; return 0; }
+    secs=$(cold_timeout_for "$size")
     drop_page_cache || { echo unknown; return 0; }
-    first=$(cold_mirror_failures) || { echo unknown; return 0; }
-    if [[ -z $first ]]; then echo pass; return 0; fi
+    first=$(cold_mirror_failures "$secs"); rc1=$?
+    if (( rc1 == 0 )) && [[ -z $first ]]; then echo pass; return 0; fi
     drop_page_cache || { echo unknown; return 0; }
-    second=$(cold_mirror_failures) || { echo unknown; return 0; }
-    if [[ -z $second ]]; then echo pass; return 0; fi
-    if [[ $first == "$second" ]]; then
+    second=$(cold_mirror_failures "$secs"); rc2=$?
+    if (( rc2 == 0 )) && [[ -z $second ]]; then echo pass; return 0; fi
+    if (( rc1 == 124 || rc2 == 124 )); then
+      verdict=slow
+      lines="a cold re-read timed out after ${secs}s"
+    elif (( rc1 != 0 || rc2 != 0 )); then
+      echo unknown; return 0
+    elif [[ $first == "$second" ]]; then
       verdict=corrupt
       lines="failing files (both cold reads):"$'\n'"$first"
     else
@@ -174,19 +201,29 @@ cold_recheck() {
   else
     [[ -f $CHECKSUM ]] || { echo unknown; return 0; }
     # A checksum file without a trailing newline still yields its hash; only
-    # an empty or unreadable one means there is nothing to compare against.
+    # an empty, unreadable or malformed one means nothing to compare against.
     read -r expected _ < "$CHECKSUM" 2>/dev/null || true
-    [[ -n $expected ]] || { echo unknown; return 0; }
+    [[ $expected =~ ^[0-9a-f]{64}$ ]] || { echo unknown; return 0; }
+    command -v timeout >/dev/null 2>&1 || { echo unknown; return 0; }
+    size=$(stat -c %s "$IMAGE" 2>/dev/null) || { echo unknown; return 0; }
+    [[ $size =~ ^[0-9]+$ ]] || { echo unknown; return 0; }
+    secs=$(cold_timeout_for "$size")
     # No cache to drop (no permission, /proc unavailable): stay with the
     # unit's verdict rather than invent one.
     drop_page_cache || { echo unknown; return 0; }
-    first=$(cold_image_hex) || { echo unknown; return 0; }
-    if [[ $first == "$expected" ]]; then echo pass; return 0; fi
+    first=$(cold_image_hex "$secs"); rc1=$?
+    if (( rc1 == 0 )) && [[ $first == "$expected" ]]; then echo pass; return 0; fi
     drop_page_cache || { echo unknown; return 0; }
-    second=$(cold_image_hex) || { echo unknown; return 0; }
-    if [[ $second == "$expected" ]]; then echo pass; return 0; fi
-    size=$(stat -c %s "$IMAGE" 2>/dev/null || echo unknown)
-    if [[ $first == "$second" ]]; then
+    second=$(cold_image_hex "$secs"); rc2=$?
+    if (( rc2 == 0 )) && [[ $second == "$expected" ]]; then echo pass; return 0; fi
+    if (( rc1 == 124 || rc2 == 124 )); then
+      verdict=slow
+      lines="a cold re-read timed out after ${secs}s"
+    elif (( rc1 != 0 || rc2 != 0 )); then
+      echo unknown; return 0
+    elif [[ -z $first || -z $second ]]; then
+      echo unknown; return 0
+    elif [[ $first == "$second" ]]; then
       verdict=corrupt
       lines="expected $expected"$'\n'"computed $first"$'\n'"size $size bytes"
     else
@@ -296,6 +333,9 @@ await_verdict() {
             ;;
           corrupt)
             fail "$msg"$'\n'"$COLD_EVIDENCE"
+            ;;
+          slow)
+            fail "install medium is too slow: try another USB stick or port"$'\n'"reading $what did not finish within its size-based timeout"$'\n'"$COLD_EVIDENCE"
             ;;
           *)  # unknown: could not re-read, keep the unit's verdict
             fail "$msg"

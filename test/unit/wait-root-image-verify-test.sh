@@ -12,6 +12,11 @@ set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 HELPER="$ROOT/configs/airootfs/usr/local/bin/omarchy-wait-root-image-verify"
 
+# Absolute path, resolved before any sandbox shadows $PATH: the harness's own
+# 120 s guard must stay the real timeout even when a test scripts expiry for
+# the helper's cold reads.
+REAL_TIMEOUT=$(command -v timeout 2>/dev/null || echo timeout)
+
 fails=0
 check() { # desc, expected_rc, actual_rc, [needle in output], [output]
   local desc=$1 want=$2 got=$3 needle=${4:-} out=${5:-}
@@ -48,20 +53,34 @@ run_helper() { # loadstate, active_seq, start_rc, [result]  ->  sets RC and OUT
   fi
   # SUMS_STUB=1: scripted sha256sum. SUMS_OUT1/SUMS_OUT2 are the literal
   # stdout of the first/second call (multi-line ok), SUMS_RC1/SUMS_RC2 their
-  # exit codes (default 0). Absent SUMS_STUB the real sha256sum runs.
+  # exit codes (default 0). Absent SUMS_STUB the real sha256sum runs. Every
+  # call logs its argv for assertions about which files get hashed how.
   if [[ -n ${SUMS_STUB:-} ]]; then
     echo 1 >"$box/sums_n"
+    : >"$box/sha256_argv"
     [[ -n ${SUMS_OUT1:-} ]] && printf '%s\n' "$SUMS_OUT1" >"$box/sums_out1"
     [[ -n ${SUMS_OUT2:-} ]] && printf '%s\n' "$SUMS_OUT2" >"$box/sums_out2"
     printf '%s\n' "${SUMS_RC1:-0}" >"$box/sums_rc1"
     printf '%s\n' "${SUMS_RC2:-0}" >"$box/sums_rc2"
     cat >"$box/bin/sha256sum" <<EOF
 #!/bin/bash
+printf '%s\n' "\$*" >>"$box/sha256_argv"
 n=\$(cat "$box/sums_n")
 printf '%s' "\$(cat "$box/sums_out\$n" 2>/dev/null)"
 rc=\$(cat "$box/sums_rc\$n" 2>/dev/null || echo 0)
 echo \$((n + 1)) >"$box/sums_n"
 exit "\$rc"
+EOF
+  fi
+  # TIMEOUT_STUB=1: scripted timeout. Passes the duration and command through
+  # (shift; exec), so cold reads behave normally. With TIMEOUT_EXPIRE=1 it
+  # exits 124 without running anything, like a stalled read hitting the cap.
+  if [[ -n ${TIMEOUT_STUB:-} ]]; then
+    cat >"$box/bin/timeout" <<EOF
+#!/bin/bash
+if [[ -n "\${TIMEOUT_EXPIRE:-}" ]]; then exit 124; fi
+shift
+exec "\$@"
 EOF
   fi
 
@@ -176,10 +195,11 @@ EOF
 
   set +e
   OUT=$(PATH="$box/bin:$PATH" OMARCHY_VERIFY_RETRY_SECONDS=0 OMARCHY_VERIFY_STALL_SECONDS="${STALL:-60}" \
-    env "${progress_env[@]}" timeout 120 bash "$shim" 2>&1)
+    env "${progress_env[@]}" "$REAL_TIMEOUT" 120 bash "$shim" 2>&1)
   RC=$?
   set -e
   PROGRESS_OUT=$(cat "$box/progress" 2>/dev/null || true)
+  ARGV_OUT=$(cat "$box/sha256_argv" 2>/dev/null || true)
   rm -rf "$box"
 }
 
@@ -325,7 +345,7 @@ check "a verified mirror and a corrupt image is a corrupt image" 1 "$RC" "sha256
 # With drop_caches available and scripted sha256sum output, a cold read that
 # matches clears the gate: the unit hashed poisoned cache.
 SUMS_EXPECTED=40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d \
-SUMS_STUB=1 DROPCACHES=1 \
+SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
 SUMS_OUT1="40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d  omarchy-root.img.zst" \
   run_helper loaded "failed" 0
 check "a cold read that matches clears the gate" 0 "$RC" "" "$OUT"
@@ -333,7 +353,7 @@ check "a cold read that matches clears the gate" 0 "$RC" "" "$OUT"
 # Two cold reads that disagree with each other are unstable reads, not a
 # corrupt medium -- and never the re-flash advice.
 SUMS_EXPECTED=40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d \
-SUMS_STUB=1 DROPCACHES=1 \
+SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
 SUMS_OUT1="ba79a0d0f5aadeb30be9f8490f596073c92df6e653d8c2a9a04ee8cf3cf0eb4c  omarchy-root.img.zst" \
 SUMS_OUT2="59e22734cd9a0bb52bf6c37ba18e7d5e0734418f5ef967efc721df9ba9d8f886  omarchy-root.img.zst" \
   run_helper loaded "failed" 0
@@ -344,7 +364,7 @@ check "two differing cold reads report unstable reads" 1 "$RC" "install medium r
 # Two cold reads that agree, but not with the expected sums, stay corrupt --
 # and the message carries both hashes plus the size for forensics.
 SUMS_EXPECTED=40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d \
-SUMS_STUB=1 DROPCACHES=1 \
+SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
 SUMS_OUT1="7c0664f49b6e88a87906a896ac75f534ddd30d2412247a00985d552335a1501a  omarchy-root.img.zst" \
 SUMS_OUT2="7c0664f49b6e88a87906a896ac75f534ddd30d2412247a00985d552335a1501a  omarchy-root.img.zst" \
   run_helper loaded "failed" 0
@@ -367,20 +387,33 @@ check "no drop_caches falls back to the unit's verdict" 1 "$RC" "install medium 
   { echo "FAIL: forensics without a cold read: $OUT"; fails=1; }
 
 # Mirror cold path: a failing package list followed by a clean one clears the
-# gate the same way a matching image read does.
-MIRROR_SEQ=failed WITH_MIRROR_HASHER=1 SUMS_STUB=1 DROPCACHES=1 \
+# gate the same way a matching image read does. The cold check must address
+# the sums file by its absolute path (bare basenames resolve against the
+# mirror dir, exactly like the unit): assert that from the logged argv.
+MIRROR_SEQ=failed WITH_MIRROR_HASHER=1 SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
 SUMS_OUT1="linux-t2.pkg.tar.zst: FAILED" SUMS_RC1=1 SUMS_OUT2="" SUMS_RC2=0 \
   run_helper loaded "active" 0
 check "a mirror cold read that matches clears the gate" 0 "$RC" "" "$OUT"
+[[ $ARGV_OUT == *"/sums"* ]] && echo "ok: cold mirror read uses the absolute sums path" || \
+  { echo "FAIL: cold mirror read did not use the absolute sums path: $ARGV_OUT"; fails=1; }
 
 # Mirror cold reads that keep failing name the mirror, persistently.
-MIRROR_SEQ=failed WITH_MIRROR_HASHER=1 SUMS_STUB=1 DROPCACHES=1 \
+MIRROR_SEQ=failed WITH_MIRROR_HASHER=1 SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
 SUMS_OUT1="linux-t2.pkg.tar.zst: FAILED" SUMS_RC1=1 \
 SUMS_OUT2="linux-t2.pkg.tar.zst: FAILED" SUMS_RC2=1 \
   run_helper loaded "active" 0
 check "mirror cold reads that keep failing stay corrupt" 1 "$RC" "sha256 mismatch on the package mirror" "$OUT"
 [[ $OUT == *"linux-t2.pkg.tar.zst"* ]] && echo "ok: the failing package is named" || \
   { echo "FAIL: failing package missing from message: $OUT"; fails=1; }
+
+# A cold read that stalls past its size-based timeout reports a slow medium,
+# not a corrupt one -- and never hangs the installer waiting on dead media.
+SUMS_EXPECTED=40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d \
+TIMEOUT_STUB=1 TIMEOUT_EXPIRE=1 DROPCACHES=1 \
+  run_helper loaded "failed" 0
+check "a stalled cold read reports a slow medium" 1 "$RC" "install medium is too slow" "$OUT"
+[[ $OUT == *"timed out after 600s"* ]] && echo "ok: the timeout is the size-based one" || \
+  { echo "FAIL: size-based timeout missing from message: $OUT"; fails=1; }
 
 [[ $fails -eq 0 ]] && echo "ok: omarchy-wait-root-image-verify gate behaves"
 exit "$fails"

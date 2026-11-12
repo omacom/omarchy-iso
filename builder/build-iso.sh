@@ -165,7 +165,7 @@ else
   # so this container can be months behind the mirror it installs from. A plain
   # -Sy install is then a partial upgrade — new packages linked against a glibc
   # the container doesn't have yet.
-  pacman --noconfirm -Syu archiso git sudo base-devel jq grub imagemagick neovim nodejs npm tree-sitter-cli btrfs-progs ttf-jetbrains-mono
+  pacman --noconfirm -Syu archiso git sudo base-devel jq grub imagemagick neovim nodejs npm tree-sitter-cli btrfs-progs terminus-font
   mkarchiso_command=mkarchiso
 fi
 

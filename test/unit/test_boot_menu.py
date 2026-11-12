@@ -132,8 +132,11 @@ class Theme(unittest.TestCase):
 
     def test_every_font_the_theme_names_is_built_and_loaded(self):
         theme_cfg = THEME_CFG.read_text()
-        for family, weight, size in re.findall(r'"(JetBrains Mono) (Regular|Bold) (\d+)"', self.theme):
-            font = f"jetbrains-mono-{weight.lower()}-{size}"
+        fonts = re.findall(r'"Terminus Bold (\d+)"', self.theme)
+        # Every font the theme names is Terminus Bold, the installer's face.
+        self.assertNotRegex(self.theme, r'font\s*[:=]\s*"(?!Terminus Bold)')
+        for size in fonts:
+            font = f"ter-u{size}b"
             self.assertRegex(theme_cfg, rf"for font in [\w -]*\b{font}\b", f"{font} is not loaded")
             self.assertRegex(self.builder, rf"for size in [\d ]*\b{size}\b", f"{font} is not built")
 

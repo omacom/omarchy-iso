@@ -7,7 +7,7 @@
 # on top comes first.
 title-text: ""
 desktop-color: "#1a1b26"
-terminal-font: "JetBrains Mono Regular 16"
+terminal-font: "Terminus Bold 16"
 terminal-box: "terminal_box_*.png"
 terminal-left: "10%"
 terminal-top: "10%"
@@ -17,16 +17,17 @@ terminal-border: "0"
 
 # The entries in Tokyo Night's foreground and bright foreground: both read at
 # better than 7:1 on the background, and test/integration.d's OCR finds them.
-# Exactly as tall as its three entries: 3 x item_height + 2 x item_spacing,
-# plus the selection box's 1 px top and bottom edges, which gui_list.c takes
-# off before it counts rows. All three show on every screen the logo fits.
+# The installer's console face, Terminus Bold. Exactly as tall as its three
+# entries: 3 x item_height + 2 x item_spacing, plus the selection box's 1 px
+# top and bottom edges, which gui_list.c takes off before it counts rows. All
+# three show on every screen the logo fits.
 + boot_menu {
     left = 50%-150
     top = 50%+134
     width = 300
     height = 126
-    item_font = "JetBrains Mono Regular 26"
-    selected_item_font = "JetBrains Mono Bold 26"
+    item_font = "Terminus Bold 28"
+    selected_item_font = "Terminus Bold 28"
     item_color = "#a9b1d6"
     selected_item_color = "#c0caf5"
     item_height = 40

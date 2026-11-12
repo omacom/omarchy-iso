@@ -3,14 +3,16 @@
 # Omarchy's GRUB menu (configs/grub/themes/omarchy/theme.txt) needs fonts,
 # pixmaps and the logo next to it. They are made at build time from the same
 # sources as the rest of the boot: the logo from the Plymouth theme in the
-# omarchy-settings package the live system installs, the fonts from
-# JetBrains Mono, so neither can drift from what boots after the menu.
+# omarchy-settings package the live system installs, the fonts the GRUB
+# builds of Terminus that terminus-font ships, the face the installer's
+# console draws in (configs/airootfs/usr/share/omarchy-iso/i18n.sh), so
+# neither can drift from what boots after the menu.
 #
 # Callers run these as `build_... || exit 1`, which turns off errexit inside
 # them, so every step checks itself.
 build_grub_theme() {
   local theme_dir=$1 settings_archive=$2
-  local fonts=/usr/share/fonts/TTF size weight pf2 part
+  local size pf2 part
 
   if ! bsdtar -xOf "$settings_archive" usr/share/plymouth/themes/omarchy/logo.png >"$theme_dir/logo.png" ||
     [[ ! -s $theme_dir/logo.png ]]; then
@@ -18,21 +20,16 @@ build_grub_theme() {
     return 1
   fi
 
-  # Latin, punctuation and the box and arrow glyphs GRUB's console and
-  # editor draw; the full font is 30 times larger and slower to load.
-  for size in 16 26; do
-    for weight in Regular Bold; do
-      [[ $size == 16 && $weight == "Bold" ]] && continue
-      pf2="$theme_dir/jetbrains-mono-${weight,,}-$size.pf2"
-      grub-mkfont --size "$size" --range 0x20-0x7E,0xA0-0x17F,0x2000-0x206F,0x2190-0x21FF,0x2500-0x25FF \
-        --output "$pf2" "$fonts/JetBrainsMono-$weight.ttf" || return 1
-      # grub-mkfont writes an empty "Unknown" font for an input it cannot
-      # read, and the theme names its fonts by family, weight and size.
-      if ! grep -aq "JetBrains Mono $weight $size" "$pf2"; then
-        echo "ERROR: $pf2 is not JetBrains Mono $weight $size" >&2
-        return 1
-      fi
-    done
+  # Bold, as on the console: 16 px for GRUB's own console and editor, 28 px
+  # for the entries. 57 KB each, the whole font.
+  for size in 16 28; do
+    pf2="$theme_dir/ter-u${size}b.pf2"
+    cp /usr/share/grub/ter-u${size}b.pf2 "$pf2" || return 1
+    # The theme names its fonts by family, weight and size.
+    if ! grep -aq "Terminus Bold $size" "$pf2"; then
+      echo "ERROR: $pf2 is not Terminus Bold $size" >&2
+      return 1
+    fi
   done
 
   # A styled box is nine pixmaps, scaled to fit. The selected entry: Tokyo

@@ -3,10 +3,10 @@
 # Omarchy's GRUB menu (configs/grub/themes/omarchy/theme.txt) needs fonts,
 # pixmaps and the logo next to it. They are made at build time from the same
 # sources as the rest of the boot: the logo from the Plymouth theme in the
-# omarchy-settings package the live system installs, the fonts the GRUB
-# builds of Terminus that terminus-font ships, the face the installer's
-# console draws in (configs/airootfs/usr/share/omarchy-iso/i18n.sh), so
-# neither can drift from what boots after the menu.
+# omarchy-settings package the live system installs, the fonts from the 16
+# px Terminus Bold that the installer's console draws in
+# (configs/airootfs/usr/share/omarchy-iso/i18n.sh), so neither can drift
+# from what boots after the menu.
 #
 # Callers run these as `build_... || exit 1`, which turns off errexit inside
 # them, so every step checks itself.
@@ -20,14 +20,22 @@ build_grub_theme() {
     return 1
   fi
 
-  # Bold, as on the console: 16 px for GRUB's own console and editor, 28 px
-  # for the entries. 57 KB each, the whole font.
-  for size in 16 28; do
-    pf2="$theme_dir/ter-u${size}b.pf2"
-    cp /usr/share/grub/ter-u${size}b.pf2 "$pf2" || return 1
-    # The theme names its fonts by family, weight and size.
-    if ! grep -aq "Terminus Bold $size" "$pf2"; then
-      echo "ERROR: $pf2 is not Terminus Bold $size" >&2
+  # GRUB's own console and editor take the 16 px font as terminus-font ships
+  # it for GRUB. The entries take it with every pixel doubled: Terminus keeps
+  # a 2 px stroke at every size, so its 28 and 32 px builds read thin next to
+  # the console, and GRUB cannot scale a bitmap font.
+  cp /usr/share/grub/ter-u16b.pf2 "$theme_dir/ter-u16b.pf2" || return 1
+  python3 /builder/grub-font-double.py /usr/share/grub/ter-u16b.pf2 "$theme_dir/ter-u16b-2x.pf2" "Terminus 2x" || return 1
+  # The BIOS menu's font: the same 16 px Terminus Bold, as the 256-glyph PSF
+  # version 1 build that syslinux's FONT loads (core/font.c); vesamenu draws
+  # in the font syslinux has loaded. It lives here because mkarchiso copies
+  # only *.cfg and splash.png from the syslinux directory, and this one whole
+  # (configs/syslinux/archiso_head.cfg).
+  zcat /usr/share/kbd/consolefonts/ter-116b.psf.gz >"$theme_dir/ter-116b.psf" || return 1
+  # The theme names its fonts by family, weight and size.
+  for pf2 in "ter-u16b:Terminus Bold 16" "ter-u16b-2x:Terminus 2x Bold 32"; do
+    if ! grep -aq "${pf2#*:}" "$theme_dir/${pf2%%:*}.pf2"; then
+      echo "ERROR: ${pf2%%:*}.pf2 is not ${pf2#*:}" >&2
       return 1
     fi
   done
@@ -53,7 +61,8 @@ build_grub_theme() {
 
 # The BIOS menu (configs/syslinux/archiso_head.cfg) draws on a 640x480
 # picture: the same logo at half size, on the same background, where the
-# menu's rows leave room for it. 8-bit RGB, as vesamenu reads PNG.
+# menu's rows leave room for it. 8-bit RGB, as vesamenu reads PNG. Its font
+# comes with the GRUB theme (build_grub_theme).
 build_syslinux_splash() {
   local splash=$1 settings_archive=$2 logo
 

@@ -132,13 +132,24 @@ class Theme(unittest.TestCase):
 
     def test_every_font_the_theme_names_is_built_and_loaded(self):
         theme_cfg = THEME_CFG.read_text()
-        fonts = re.findall(r'"Terminus Bold (\d+)"', self.theme)
-        # Every font the theme names is Terminus Bold, the installer's face.
-        self.assertNotRegex(self.theme, r'font\s*[:=]\s*"(?!Terminus Bold)')
-        for size in fonts:
-            font = f"ter-u{size}b"
-            self.assertRegex(theme_cfg, rf"for font in [\w -]*\b{font}\b", f"{font} is not loaded")
-            self.assertRegex(self.builder, rf"for size in [\d ]*\b{size}\b", f"{font} is not built")
+        # Every font the theme names is the console's Terminus Bold 16, as
+        # terminus-font ships it or doubled, and each is built and loaded.
+        files = {"Terminus Bold 16": "ter-u16b", "Terminus 2x Bold 32": "ter-u16b-2x"}
+        names = re.findall(r'font\s*[:=]\s*"([^"]+)"', self.theme)
+        self.assertTrue(names)
+        for name in names:
+            self.assertIn(name, files, f"{name} is not the console's face")
+            font = files[name]
+            self.assertRegex(theme_cfg, rf"for font in [\w -]*(?<![\w-]){re.escape(font)}(?![\w-])", f"{font} is not loaded")
+            self.assertIn(f'"{font}:{name}"', self.builder, f"{font} is not built as {name}")
+
+    def test_bios_menu_draws_in_the_console_font(self):
+        head = (SYSLINUX / "archiso_head.cfg").read_text()
+        # mkarchiso copies only *.cfg and splash.png from configs/syslinux, so
+        # the font ships with the GRUB theme, which it copies whole.
+        # FONT is syslinux's global keyword; vesamenu has no MENU FONT.
+        self.assertRegex(head, r"(?m)^FONT /boot/grub/themes/omarchy/ter-116b\.psf$")
+        self.assertIn('ter-116b.psf.gz >"$theme_dir/ter-116b.psf"', self.builder)
 
     def test_the_menu_holds_its_entries(self):
         menu = self.theme[self.theme.index("+ boot_menu"):]

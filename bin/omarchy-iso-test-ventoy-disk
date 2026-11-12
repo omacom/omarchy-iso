@@ -47,8 +47,22 @@ truncate -s $(($(stat -c %s "$iso") + (1 << 30))) "$out"
 loop=$("${sudo[@]}" losetup --show -f "$out")
 # GPT (-g), as UEFI machines are set up; Ventoy asks twice before it writes.
 (cd "$work/ventoy-$VENTOY_VERSION" && printf 'y\ny\n' | "${sudo[@]}" sh ./Ventoy2Disk.sh -I -g "$loop" >/dev/null)
+
+# Nothing below opens /dev/loopNp1 or p2. Ventoy2Disk.sh adds those
+# partitions with partprobe and partx, which a loop device attached without
+# -P keeps after it is detached, and it makes their nodes with mknod when
+# they are slow to appear, which devtmpfs never replaces or removes. Either
+# way a stale node can name another disk: on a CI runner, p1 opened a btrfs
+# volume. So the partitions and their nodes go with the device, and each
+# partition is found by its offset in the image.
+"${sudo[@]}" partx -d "$loop"
 "${sudo[@]}" losetup -d "$loop"
-loop=$("${sudo[@]}" losetup --show -fP "$out")
+for part in "${loop}p1" "${loop}p2"; do
+  [[ -e /sys/class/block/${part#/dev/} ]] || "${sudo[@]}" rm -f "$part"
+done
+loop=""
+read -r p1_start p1_sectors < <(partx -g -o START,SECTORS -n 1 "$out")
+read -r p2_start < <(partx -g -o START -n 2 "$out")
 
 # Ventoy2Disk.sh writes Ventoy's own partition with `xzcat | dd bs=512
 # count=...` and no iflag=fullblock (tool/VentoyWorker.sh). A short read from
@@ -58,16 +72,18 @@ loop=$("${sudo[@]}" losetup --show -fP "$out")
 # to whatever initrd that loads. A machine with a whole stick never takes that
 # path, so the partition is written again from the image and compared.
 xzcat "$work/ventoy-$VENTOY_VERSION/ventoy/ventoy.disk.img.xz" >"$work/ventoy.disk.img"
-"${sudo[@]}" dd if="$work/ventoy.disk.img" of="${loop}p2" bs=1M conv=fsync status=none
+image_sectors=$(($(stat -c %s "$work/ventoy.disk.img") / 512))
+dd if="$work/ventoy.disk.img" of="$out" bs=512 seek="$p2_start" conv=notrunc,fsync status=none
 image_sum=$(sha256sum <"$work/ventoy.disk.img")
-partition_sum=$("${sudo[@]}" head -c "$(stat -c %s "$work/ventoy.disk.img")" "${loop}p2" | sha256sum)
+partition_sum=$(dd if="$out" bs=512 skip="$p2_start" count="$image_sectors" status=none | sha256sum)
 if [[ $partition_sum != "$image_sum" ]]; then
   echo "Ventoy's partition on $out does not match its image" >&2
   exit 1
 fi
 
 mkdir "$work/mnt"
-"${sudo[@]}" mount -o "uid=$(id -u)" "${loop}p1" "$work/mnt"
+loop=$("${sudo[@]}" losetup --show -f -o $((p1_start * 512)) --sizelimit $((p1_sectors * 512)) "$out")
+"${sudo[@]}" mount -o "uid=$(id -u)" "$loop" "$work/mnt"
 cp "$iso" "$work/mnt/"
 # No second menu: Enter on the ISO boots it in normal mode, and r before it
 # switches to GRUB2 mode, so a test drives Ventoy by keys alone.

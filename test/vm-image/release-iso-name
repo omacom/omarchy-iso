@@ -1,0 +1,24 @@
+#!/bin/bash
+# Prints the name a release's x86_64 ISO is published under.
+#
+#   release-iso-name <version>
+#
+# 4.5.0 is published as omarchy-4.5.0-x86.iso, the releases before it as
+# omarchy-<version>.iso. Only a 404 for the first means the second: any other
+# answer, a network error included, fails instead of naming the wrong file.
+#
+# Env: ISO_SITE (https://iso.omarchy.org)
+set -euo pipefail
+[[ $# -eq 1 ]] || { sed -n '2,10p' "$0" >&2; exit 2; }
+version=$1
+iso_site=${ISO_SITE:-https://iso.omarchy.org}
+fail() { echo "release-iso-name: $*" >&2; exit 1; }
+
+iso=omarchy-$version-x86.iso
+status=$(curl -sSIL --retry 3 --retry-all-errors -o /dev/null -w '%{http_code}' "$iso_site/$iso") ||
+  fail "could not reach $iso_site/$iso"
+case $status in
+  200) echo "$iso" ;;
+  404) echo "omarchy-$version.iso" ;;
+  *) fail "$iso_site/$iso answered $status" ;;
+esac

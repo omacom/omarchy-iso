@@ -9,7 +9,7 @@
 #
 # Runs on the default variant only: desktop behaviour does not vary by disk
 # size, encryption, or bootloader, and the smoke is expensive. The universal
-# clipboard sub-phase (opens Chromium) runs too.
+# clipboard sub-phase (opens the default browser) runs too.
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
@@ -60,6 +60,29 @@ wait_for_guest_state() {
   done
 
   printf 'ok - %s\n' "$description"
+}
+
+# The browser the installed Omarchy opens links with, read the way its own
+# launcher reads it: xdg-settings names the desktop entry, and the entry's
+# Exec= names the command. 4.5 ships Chromium and quattro Google Chrome
+# (omacom/omarchy#18240), so the test names neither. BROWSER and the
+# desktop-specific list route back to omarchy-browser.desktop, which only
+# hands links to that launcher, so xdg-settings reads neither. Both browsers
+# are Chromium builds: windows and cores still match "chrom", and the profile
+# lives under the name omarchy-launch-browser focuses by.
+read_default_browser() {
+  local answer
+
+  answer=$(ssh_session 'entry=$(env -u BROWSER XDG_CURRENT_DESKTOP= xdg-settings get default-web-browser) &&
+    for dir in ~/.local/share /usr/local/share /usr/share; do
+      [[ -f $dir/applications/$entry ]] || continue
+      printf "%s %s\n" "$entry" "$(sed -n "s/^Exec=\([^ ]*\).*/\1/p" "$dir/applications/$entry" | head -1)"
+      break
+    done' 2>/dev/null)
+  read -r BROWSER_ENTRY BROWSER_COMMAND <<<"$answer"
+  BROWSER_NAME=$(basename "${BROWSER_COMMAND:-none}" -stable)
+  log "Default browser: ${BROWSER_ENTRY:-none} runs ${BROWSER_COMMAND:-nothing}"
+  check "xdg-settings names a default browser and its command" test -n "$BROWSER_COMMAND"
 }
 
 guest_layer_present() {
@@ -191,9 +214,10 @@ verify_universal_clipboard_shortcuts() {
   local terminal_result="/tmp/omarchy-universal-terminal-paste"
 
   cleanup_shortcut_state
-  ssh_session "setsid -f chromium --new-window about:blank >/dev/null 2>&1"
-  if ! wait_for_guest_state "universal clipboard test opens Chromium" 45 \
-    ssh_session "hyprctl -j clients | jq -e '[.[] | select(.class | test(\"(?i)chromium\"))] | length == 1'"; then
+  ssh_session "systemd-run --user --quiet --collect --unit=omarchy-browser-smoke-clipboard-\$RANDOM \
+    uwsm-app -- '$BROWSER_COMMAND' --new-window about:blank"
+  if ! wait_for_guest_state "universal clipboard test opens the default browser" 45 \
+    ssh_session "hyprctl -j clients | jq -e '[.[] | select(.class | test(\"(?i)chrom\"))] | length == 1'"; then
     capture_console "failure-shortcut-universal-clipboard-browser"
     return 1
   fi
@@ -228,7 +252,7 @@ verify_universal_clipboard_shortcuts() {
   ssh_session 'while read -r address; do
     hyprctl dispatch "hl.dsp.window.close({ window = \"address:$address\" })" >/dev/null 2>&1 ||
       hyprctl dispatch closewindow "address:$address" >/dev/null 2>&1 || true
-  done < <(hyprctl -j clients | jq -r '\''.[] | select(.class | test("(?i)chromium")) | .address'\'')' || true
+  done < <(hyprctl -j clients | jq -r '\''.[] | select(.class | test("(?i)chrom")) | .address'\'')' || true
 
   ssh_session "rm -f '$terminal_result'; \
     setsid -f bash -c 'printf \"%s\" \"$terminal_token\" | wl-copy' >/dev/null 2>&1; \
@@ -293,20 +317,25 @@ audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel"
 browser_launch_phase() {
   local launches=${OMARCHY_BROWSER_LAUNCHES:-3} i out failed=0
 
+  # Without a command there is nothing to launch, and the profile path below
+  # would be the whole of ~/.config. read_default_browser has failed already.
+  [[ -n $BROWSER_COMMAND ]] || return
+
   for ((i = 1; i <= launches; i++)); do
-    out=$(ssh_session "pkill -x chromium 2>/dev/null; sleep 1; rm -rf ~/.config/chromium ~/.cache/chromium; \
-      before=\$(coredumpctl list --no-legend 2>/dev/null | grep -c chromium); \
-      systemd-run --user --quiet --collect --unit=omarchy-browser-smoke-$i-\$RANDOM uwsm-app -- /usr/bin/chromium 'https://example.com/?omarchy-smoke=$i'; \
+    out=$(ssh_session "systemctl --user stop 'omarchy-browser-smoke-*' 2>/dev/null; sleep 1; \
+      rm -rf ~/.config/$BROWSER_NAME ~/.cache/$BROWSER_NAME; \
+      before=\$(coredumpctl list --no-legend 2>/dev/null | grep -c chrom); \
+      systemd-run --user --quiet --collect --unit=omarchy-browser-smoke-$i-\$RANDOM uwsm-app -- '$BROWSER_COMMAND' 'https://example.com/?omarchy-smoke=$i'; \
       sleep 9; \
-      after=\$(coredumpctl list --no-legend 2>/dev/null | grep -c chromium); \
+      after=\$(coredumpctl list --no-legend 2>/dev/null | grep -c chrom); \
       windows=\$(hyprctl -j clients | jq '[.[] | select(.class | test(\"(?i)chrom\"))] | length'); \
       echo \"cores \$before->\$after windows \$windows\"" 2>/dev/null)
     echo "    fresh-profile launch $i: ${out:-no answer}"
     [[ $out =~ ^cores\ ([0-9]+)-\>([0-9]+)\ windows\ ([0-9]+)$ ]] &&
       [[ ${BASH_REMATCH[1]} == "${BASH_REMATCH[2]}" && ${BASH_REMATCH[3]} -ge 1 ]] || ((failed += 1))
   done
-  check "chromium opens a link on a fresh profile, $launches times, without a core dump (failed: $failed)" test "$failed" -eq 0
-  ssh_session "pkill -x chromium" >/dev/null 2>&1 || true
+  check "the default browser opens a link on a fresh profile, $launches times, without a core dump (failed: $failed)" test "$failed" -eq 0
+  ssh_session "systemctl --user stop 'omarchy-browser-smoke-*'" >/dev/null 2>&1 || true
 }
 
 # ------------------------------------------------------- reaching the desktop
@@ -324,6 +353,23 @@ login_ready() {
 }
 
 session_unlocked() { ! ssh_guest "pgrep -x hyprlock" >/dev/null 2>&1; }
+
+# The first login's setup, omarchy-provision-first-run, runs beside the
+# session's first seconds, and its Superwhisper step (omacom/omarchy#17286)
+# has the shell reload its plugins: the menu and every panel close, an open
+# still loading is dropped, and the wallpaper is gone until they are back.
+# Super+Space pressed then opened nothing in about a third of the runs. The
+# desktop has settled once that setup is gone and the menu answers again.
+# Hyprland starts the setup with the shell, so it is still running when the
+# menu first answers; asked together, the two cannot pass before it starts.
+# The check's own shell must not spell the name out whole, or pgrep -f finds
+# it: hence the [o] and the split quoting. A renamed setup command fails the
+# wait instead of quietly letting the flake back in.
+desktop_settled() {
+  ssh_session 'command -v "omarchy-provision-first-"run >/dev/null &&
+    ! pgrep -f "[o]marchy-provision-first-run" >/dev/null &&
+    [[ $(omarchy-shell shell call omarchy.menu ping "") == ok ]]'
+}
 
 # Ground truth for when a wait above times out: what is actually running, who is
 # logged in, and where the Wayland/Hypr sockets live. Lands in the artifact.
@@ -360,12 +406,21 @@ reach_desktop() {
     return 1
   fi
   wait_for_guest_state "the session unlocks for the owner" 30 session_unlocked || return 1
+  if ! wait_for_guest_state "the desktop settles after the first login's setup" 120 desktop_settled; then
+    capture_console "failure-desktop-settle"
+    ssh_guest "cat ~/.local/state/omarchy/first-run.log" >"$RUN_DIR/first-run.txt" 2>&1 || true
+    ssh_session 'pgrep -af "[o]marchy-provision-first-run"; omarchy-shell shell call omarchy.menu ping ""' \
+      >"$RUN_DIR/desktop-settle.txt" 2>&1 || true
+    ssh_sudo 'journalctl -b -t omarchy-shell --no-pager' >>"$RUN_DIR/desktop-settle.txt" 2>&1 || true
+    return 1
+  fi
   capture_console "success-desktop-01-session"
 }
 
 # ---------------------------------------------------------------------- main
 
 if reach_desktop; then
+  read_default_browser
   shortcut_smoke_phase
   browser_launch_phase
 fi

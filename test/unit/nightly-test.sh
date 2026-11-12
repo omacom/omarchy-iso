@@ -130,6 +130,19 @@ equal "stable: unpacked folder" "$(field .vm.unpacked)" "https://nightly.example
 (cd "$tmp/out/stable/4.0.4/431" && sha256sum -c --quiet omarchy-4.0.4.qcow2.sha256) || fail "stable: the image's checksum file does not match it"
 (cd "$tmp/out/stable/4.0.4/431/unpacked" && sha256sum -c --quiet SHA256SUMS) || fail "stable: SHA256SUMS does not match the unpacked files"
 
+# 4.5.0 is published with its architecture in the ISO's name. latest.json
+# points at that name, and the image keeps the version's.
+rm -rf "$tmp/out"
+echo "a released x86 iso" >"$tmp/release/omarchy-4.5.0-x86.iso"
+sealed "$tmp/sealed-x86"
+"$layout" stable 4.5.0 stable/4.5.0/478 "$tmp/release/omarchy-4.5.0-x86.iso" "$tmp/sealed-x86" "$tmp/stable-packages" "$tmp/out" >/dev/null
+equal "stable: url is the x86 release's" "$(field .url)" "https://iso.example/omarchy-4.5.0-x86.iso"
+equal "stable: the image keeps the version's name" "$(field .vm.url)" "https://nightly.example/stable/4.5.0/478/omarchy-4.5.0.qcow2"
+echo "a released aarch64 iso" >"$tmp/release/omarchy-4.5.0-aarch64.iso"
+sealed "$tmp/sealed-arch"
+refused "a released ISO of another architecture" "$layout" stable 4.5.0 stable/4.5.0/9 "$tmp/release/omarchy-4.5.0-aarch64.iso" "$tmp/sealed-arch" "$tmp/stable-packages" "$tmp/out7"
+grep -q 'omarchy-4.5.0-aarch64.iso' "$tmp/refused.err" || fail "a released ISO of another architecture was refused for another reason"
+
 # edge-aarch64: the ISO and latest.json, no image yet. The ARM install test
 # answers with the Omarchy package (twice, as pacman does) and the kernel.
 rm -rf "$tmp/out"
@@ -214,6 +227,30 @@ STUB
 else
   echo "nightly-fetch tests skipped: no zip or unzip here"
 fi
+
+# ------------------------------------------------------------ release-iso-name
+# curl is a stand-in that answers with ISO_STATUS, or fails as a network error
+# does when it is "down".
+named="$ROOT/test/vm-image/release-iso-name"
+bash -n "$named"
+mkdir -p "$tmp/iso-curl"
+cat >"$tmp/iso-curl/curl" <<'STUB'
+#!/bin/bash
+echo "${@: -1}" >>"$ISO_LOG"
+[[ $ISO_STATUS == down ]] && { printf 000; echo "curl: (6) Could not resolve host" >&2; exit 6; }
+printf '%s' "$ISO_STATUS"
+STUB
+chmod +x "$tmp/iso-curl/curl"
+iso_name() { env PATH="$tmp/iso-curl:$PATH" ISO_LOG="$tmp/iso.log" ISO_STATUS="$1" "$named" "$2"; }
+
+: >"$tmp/iso.log"
+equal "iso name: a release published with its architecture" "$(iso_name 200 4.5.0)" "omarchy-4.5.0-x86.iso"
+equal "iso name: the -x86 name is the one asked for" "$(cat "$tmp/iso.log")" "https://iso.example/omarchy-4.5.0-x86.iso"
+equal "iso name: a release from before 4.5.0" "$(iso_name 404 4.0.6)" "omarchy-4.0.6.iso"
+refused "iso name: another answer than 200 or 404" iso_name 503 4.5.0
+grep -q 'answered 503' "$tmp/refused.err" || fail "iso name: the answer was not named"
+refused "iso name: a network error" iso_name down 4.5.0
+grep -q 'could not reach' "$tmp/refused.err" || fail "iso name: a network error was not reported as one"
 
 # -------------------------------------------------------------- nightly-rclone
 wrapped="$ROOT/test/vm-image/nightly-rclone"

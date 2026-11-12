@@ -16,11 +16,11 @@ hwids=/usr/lib/systemd/boot/hwids/aa64
 # The kernel package keeps its Snapdragon device trees under its own name.
 dtb_dir=/boot/dtbs/$1/qcom
 
-# Include supported Snapdragon generations while staying below the UKI section limit.
+# Include supported Snapdragon generations.
 # EL2 variants share hardware IDs with their base DTBs and would be ambiguous.
 shopt -s nullglob
 dtbs=()
-for dtb in "$dtb_dir"/x1*.dtb "$dtb_dir"/hamoa*.dtb "$dtb_dir"/glymur*.dtb "$dtb_dir"/sc8280xp*.dtb; do
+for dtb in "$dtb_dir"/x1*.dtb "$dtb_dir"/hamoa*.dtb "$dtb_dir"/purwa*.dtb "$dtb_dir"/glymur*.dtb "$dtb_dir"/mahua*.dtb "$dtb_dir"/sc8280xp*.dtb; do
   [[ $dtb == *-el2.dtb ]] && continue
   dtbs+=("$dtb")
 done
@@ -44,12 +44,6 @@ if [[ ! -d $hwids ]]; then
   exit 1
 fi
 
-# Reserve room for the UKI's non-DTB sections.
-if (( ${#dtbs[@]} > 90 )); then
-  echo "live-uki: ${#dtbs[@]} device trees exceed the UKI section budget; narrow the prefixes" >&2
-  exit 1
-fi
-
 # The direct-boot initramfs remains untouched. The Qualcomm UKI needs its
 # firmware drivers and DT-named blobs before it can find USB installation media.
 work=$(mktemp -d)
@@ -60,6 +54,11 @@ OMARCHY_QCOM_DTBS_FILE="$work/dtbs.list" mkinitcpio \
   -A qcom_early_startup -g "$work/initramfs.img"
 initrd="$work/initramfs.img"
 
+# Each tree is a section of its own. ukify writes every section's header into
+# the room the stub leaves before its first section and stops with "Not enough
+# header space" once it is full. With systemd 262's aa64 stub that is 120
+# trees beside .linux, .initrd, .hwids, .osrel, .uname and .sbat. At about
+# 190 KB a tree, the size limit below leaves room for more than that.
 args=()
 for dtb in "${dtbs[@]}"; do
   args+=("--devicetree-auto=$dtb")
@@ -84,4 +83,15 @@ if (( n_dtb != ${#dtbs[@]} )); then
   echo "live-uki: $uki has $n_dtb .dtbauto sections, expected ${#dtbs[@]}" >&2
   exit 1
 fi
-echo "live-uki: $uki: $(stat -c %s "$uki") bytes, $n_dtb .dtbauto sections, .hwids present"
+# GRUB reads the whole UKI into memory to chainload it. omarchy-iso#128 showed
+# GRUB failing to place a 241 MiB initramfs in a Lenovo Yoga's EFI memory map;
+# the UKI booting on the laptops today is about 227 MiB. Keep it near that, so
+# growth (embedded firmware, a bigger initramfs) fails the build rather than
+# reaching laptops untested.
+uki_bytes=$(stat -c %s "$uki")
+uki_limit=$((256 * 1024 * 1024))
+if (( uki_bytes > uki_limit )); then
+  echo "live-uki: $uki is $uki_bytes bytes, over the $uki_limit limit" >&2
+  exit 1
+fi
+echo "live-uki: $uki: $uki_bytes bytes, $n_dtb .dtbauto sections, .hwids present"

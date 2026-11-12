@@ -482,15 +482,23 @@ if [[ $output == *.sfs ]]; then
   # zstd frames below and 1.72-1.79 s read through a threads=multi mount.
   # 3,944,173,568 bytes, 20 MB under the frames, in 2 s; 128 KiB random reads
   # 1.1 ms p50 mounted (EROFS zstd: 1.6 ms, and 2.4 s for the full read
-  # file-backed; EROFS LZ4HC: 29 s). zstd at level 19 in 1 MiB blocks: the
-  # files inside are btrfs-compressed already, so 19 saves only 20 MB over 3,
-  # but costs nothing where it counts (the write took 1.00 s against 1.08 s;
-  # 50 s more to build). No fragments, so the image's tail is a block
-  # write-squashfs can place; no xattrs: the file inside has none.
+  # file-backed; EROFS LZ4HC: 29 s). zstd at level 19: the files inside are
+  # btrfs-compressed already, so 19 saves only 20 MB over 3, but costs
+  # nothing where it counts (the write took 1.00 s against 1.08 s; 50 s more
+  # to build). No fragments, so the image's tail is a block write-squashfs
+  # can place; no xattrs: the file inside has none.
+  #
+  # 256 KiB blocks, because Try reads the image as btrfs asks for it, about
+  # 66 KB at a time, and squashfs decompresses a whole block for each read.
+  # To reach Try's desktop in QEMU, 1 MiB blocks read 723 MB off the medium
+  # for 388 MB that btrfs wanted (1.86x); 256 KiB blocks read 576 MB (1.42x),
+  # three runs each. That costs 17 MB of squashfs and 0.33 s more decoding
+  # for the install on 4 CPUs (3.30 s against 2.97 s, the same image
+  # written); 128 KiB saves only 12 MB more of the read.
   echo "Packing the root image into a squashfs"
   mkdir -p "$work/sfs"
   ln "$backing" "$work/sfs/omarchy-root.img"
-  mksquashfs "$work/sfs" "$output" -comp zstd -Xcompression-level 19 -b 1M -no-fragments -noappend -no-xattrs -quiet
+  mksquashfs "$work/sfs" "$output" -comp zstd -Xcompression-level 19 -b 256K -no-fragments -noappend -no-xattrs -quiet
   rm -f "$work/sfs/omarchy-root.img"
 else
   echo "Packing the root image as 256 KiB zstd frames"

@@ -3,6 +3,7 @@
 # out of its offline mirror and out of its install set. Every one of these is
 # installed by the hardware setup of the model that needs it, not by a default
 # install set.
+acer-aspire-16-ai-audio
 asus-proart-p14-audio
 asus-proart-pz13-audio
 asus-zenbook-a16-audio

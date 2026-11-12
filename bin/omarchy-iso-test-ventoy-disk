@@ -8,7 +8,7 @@
 # Ventoy2Disk.sh needs a block device, so this attaches the image to a loop
 # device and mounts the data partition: it runs as root (through sudo when
 # not root already), with GNU parted and dosfstools, which Ventoy2Disk.sh
-# calls.
+# calls, FUSE in the kernel and fuser from psmisc.
 
 set -euo pipefail
 
@@ -81,13 +81,33 @@ if [[ $partition_sum != "$image_sum" ]]; then
   exit 1
 fi
 
+# Ventoy's own FUSE exFAT driver mounts the data partition: a kernel built
+# without CONFIG_EXFAT_FS, as Namespace's runners are, cannot, and every
+# kernel this runs on has FUSE. It comes from the tarball, because
+# Ventoy2Disk.sh unpacks and deletes its own copy.
+tar -xOzf "$tarball" "./ventoy-$VENTOY_VERSION/tool/x86_64/mount.exfat-fuse.xz" | xzcat >"$work/mount.exfat-fuse"
+chmod 0755 "$work/mount.exfat-fuse"
 mkdir "$work/mnt"
 loop=$("${sudo[@]}" losetup --show -f -o $((p1_start * 512)) --sizelimit $((p1_sectors * 512)) "$out")
-"${sudo[@]}" mount -o "uid=$(id -u)" "$loop" "$work/mnt"
+"${sudo[@]}" "$work/mount.exfat-fuse" -o "uid=$(id -u),gid=$(id -g)" "$loop" "$work/mnt"
 cp "$iso" "$work/mnt/"
 # No second menu: Enter on the ISO boots it in normal mode, and r before it
 # switches to GRUB2 mode, so a test drives Ventoy by keys alone.
 mkdir -p "$work/mnt/ventoy"
 echo '{ "control": [ { "VTOY_SECONDARY_BOOT_MENU": "0" } ] }' >"$work/mnt/ventoy/ventoy.json"
+"${sudo[@]}" umount "$work/mnt"
+rmdir "$work/mnt"
+# The FUSE driver writes what it still holds and exits after the unmount
+# returns, so the image is whole only once nothing holds the loop device.
+for _ in {1..300}; do
+  "${sudo[@]}" fuser -s "$loop" || break
+  sleep 0.2
+done
+if "${sudo[@]}" fuser -s "$loop"; then
+  echo "The exFAT driver still holds $loop after 60 s" >&2
+  exit 1
+fi
+"${sudo[@]}" losetup -d "$loop"
+loop=""
 sync
 echo "Ventoy $VENTOY_VERSION stick with ${iso##*/}: $out"

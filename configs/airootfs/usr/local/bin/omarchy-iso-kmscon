@@ -77,7 +77,9 @@ unset COLUMNS LINES
 # The script exits 75 to ask for a relaunch (new layout); anything else that is
 # not success leaves a shell here, so an abort's message stays readable and the
 # installer can be rerun in Chinese.
-inner='"$@"; status=$?; ((status == 0 || status == 75)) && exit $status; exec bash -l'
+# The shell keeps this PID, so a retry from it that asks for a relaunch can
+# hang it up, which ends kmscon and lets tty1 relaunch it.
+inner='"$@"; status=$?; ((status == 0 || status == 75)) && exit $status; export OMARCHY_ISO_KMSCON_SHELL=$$; exec bash -l'
 
 mkdir -p "$STATE"
 exec kmscon \

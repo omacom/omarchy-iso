@@ -144,7 +144,13 @@ if [[ -f /usr/share/omarchy-iso/oem-install ]]; then
   ./configurator --oem
 elif [[ ${OMARCHY_ISO_KMSCON:-} == 1 ]]; then
   # The tty1 run already looked for cidata.
-  ./configurator
+  ./configurator && status=0 || status=$?
+  # A retry from the shell left after an abort: that shell, not the kmscon
+  # wrapper, gets the relaunch request, so end it to end kmscon.
+  if ((status == 75)) && [[ -n ${OMARCHY_ISO_KMSCON_SHELL:-} ]]; then
+    kill -HUP "$OMARCHY_ISO_KMSCON_SHELL" 2>/dev/null || true
+  fi
+  ((status == 0)) || exit "$status"
 elif /usr/local/bin/omarchy-cidata-load; then
   echo "Autoinstall configuration found on cidata drive; skipping the configurator."
   export OMARCHY_UI_INTERACTIVE=no

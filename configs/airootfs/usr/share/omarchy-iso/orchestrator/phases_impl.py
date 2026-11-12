@@ -48,6 +48,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
+from . import apple_t2_firmware
 from . import archinstall_adapter as arch
 from .command import capture, capture_identifier, require_text
 from .context import InstallContext, hw_platform, iso_kernel
@@ -258,6 +259,21 @@ def _stage_qualcomm_firmware() -> None:
     subprocess.run([tool, "--stage", str(LIVE_FIRMWARE_STAGE)], check=False)
 
 
+def _stage_apple_t2_firmware() -> None:
+    if not apple_t2_firmware.is_apple_t2():
+        return
+    info("› saving Apple T2 Wi-Fi/Bluetooth firmware from macOS before the disk is written")
+    try:
+        count = apple_t2_firmware.stage_from_macos()
+    except Exception as exc:  # noqa: BLE001 - firmware preservation is best effort
+        info(f"› WARNING: Apple T2 firmware could not be staged: {exc}")
+        return
+    if count:
+        info(f"› saved {count} Apple T2 firmware files for the installed system")
+    else:
+        info("› WARNING: no Apple T2 firmware was saved; Wi-Fi may require manual firmware recovery")
+
+
 def _copy_firmware_stage_into_target(ctx: InstallContext) -> None:
     if not (LIVE_FIRMWARE_STAGE / "manifest").is_file():
         return
@@ -265,7 +281,14 @@ def _copy_firmware_stage_into_target(ctx: InstallContext) -> None:
     shutil.copytree(LIVE_FIRMWARE_STAGE, dst, dirs_exist_ok=True)
 
 
+def _copy_apple_t2_firmware_into_target(ctx: InstallContext) -> None:
+    count = apple_t2_firmware.install_into_target(ctx.target)
+    if count:
+        info(f"› installed {count} preserved Apple T2 firmware files")
+
+
 def prepare_live(ctx: InstallContext) -> None:
+    _stage_apple_t2_firmware()
     _stage_qualcomm_firmware()
     if ctx.is_protected:
         info("› protected mode: skipping whole-disk cleanup")
@@ -2235,6 +2258,7 @@ def _prepare_target_setup(ctx: InstallContext) -> None:
             mounted.add(str(target_dst))
 
     _copy_firmware_stage_into_target(ctx)
+    _copy_apple_t2_firmware_into_target(ctx)
 
     ctx.state["target_setup_prepared"] = True
 

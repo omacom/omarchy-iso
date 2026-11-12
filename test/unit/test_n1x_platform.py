@@ -239,8 +239,8 @@ class PlatformPackageListTest(unittest.TestCase):
             (share / "omarchy-base.packages").write_text("hyprland\n")
             (share / "omarchy-base.aarch64-n1x.packages").write_text(platform_set)
             with mock.patch.object(phases_impl, "hw_platform", return_value=detected), \
-                    mock.patch.object(phases_impl.arch, "target_has_package",
-                                      side_effect=lambda _target, name: name in in_image, create=True):
+                    mock.patch.object(phases_impl.arch, "target_missing_packages", create=True,
+                                      side_effect=lambda _target, names: [n for n in names if n not in in_image]):
                 return phases_impl._platform_delta_packages(Path("/mnt"), share)
 
     def test_a_platform_gets_what_its_set_adds_to_the_image(self):

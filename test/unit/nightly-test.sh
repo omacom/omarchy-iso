@@ -2,9 +2,10 @@
 #
 # The nightly's decisions, tried without a runner: which channels a run makes
 # and where they go (test/vm-image/nightly-plan), what it lays out and what
-# latest.json then says (test/vm-image/nightly-layout), and two things the
-# install test decides from what it is given: which Omarchy packages an ISO
-# installs, and when an install is over.
+# latest.json then says (test/vm-image/nightly-layout), how it checks what the
+# CDN serves (test/vm-image/nightly-check-cdn), and two things the install test
+# decides from what it is given: which Omarchy packages an ISO installs, and
+# when an install is over.
 
 set -euo pipefail
 
@@ -129,6 +130,19 @@ equal "stable: unpacked folder" "$(field .vm.unpacked)" "https://nightly.example
 (cd "$tmp/out/stable/4.0.4/431" && sha256sum -c --quiet omarchy-4.0.4.qcow2.sha256) || fail "stable: the image's checksum file does not match it"
 (cd "$tmp/out/stable/4.0.4/431/unpacked" && sha256sum -c --quiet SHA256SUMS) || fail "stable: SHA256SUMS does not match the unpacked files"
 
+# 4.5.0 is published with its architecture in the ISO's name. latest.json
+# points at that name, and the image keeps the version's.
+rm -rf "$tmp/out"
+echo "a released x86 iso" >"$tmp/release/omarchy-4.5.0-x86.iso"
+sealed "$tmp/sealed-x86"
+"$layout" stable 4.5.0 stable/4.5.0/478 "$tmp/release/omarchy-4.5.0-x86.iso" "$tmp/sealed-x86" "$tmp/stable-packages" "$tmp/out" >/dev/null
+equal "stable: url is the x86 release's" "$(field .url)" "https://iso.example/omarchy-4.5.0-x86.iso"
+equal "stable: the image keeps the version's name" "$(field .vm.url)" "https://nightly.example/stable/4.5.0/478/omarchy-4.5.0.qcow2"
+echo "a released aarch64 iso" >"$tmp/release/omarchy-4.5.0-aarch64.iso"
+sealed "$tmp/sealed-arch"
+refused "a released ISO of another architecture" "$layout" stable 4.5.0 stable/4.5.0/9 "$tmp/release/omarchy-4.5.0-aarch64.iso" "$tmp/sealed-arch" "$tmp/stable-packages" "$tmp/out7"
+grep -q 'omarchy-4.5.0-aarch64.iso' "$tmp/refused.err" || fail "a released ISO of another architecture was refused for another reason"
+
 # edge-aarch64: the ISO and latest.json, no image yet. The ARM install test
 # answers with the Omarchy package (twice, as pacman does) and the kernel.
 rm -rf "$tmp/out"
@@ -214,6 +228,30 @@ else
   echo "nightly-fetch tests skipped: no zip or unzip here"
 fi
 
+# ------------------------------------------------------------ release-iso-name
+# curl is a stand-in that answers with ISO_STATUS, or fails as a network error
+# does when it is "down".
+named="$ROOT/test/vm-image/release-iso-name"
+bash -n "$named"
+mkdir -p "$tmp/iso-curl"
+cat >"$tmp/iso-curl/curl" <<'STUB'
+#!/bin/bash
+echo "${@: -1}" >>"$ISO_LOG"
+[[ $ISO_STATUS == down ]] && { printf 000; echo "curl: (6) Could not resolve host" >&2; exit 6; }
+printf '%s' "$ISO_STATUS"
+STUB
+chmod +x "$tmp/iso-curl/curl"
+iso_name() { env PATH="$tmp/iso-curl:$PATH" ISO_LOG="$tmp/iso.log" ISO_STATUS="$1" "$named" "$2"; }
+
+: >"$tmp/iso.log"
+equal "iso name: a release published with its architecture" "$(iso_name 200 4.5.0)" "omarchy-4.5.0-x86.iso"
+equal "iso name: the -x86 name is the one asked for" "$(cat "$tmp/iso.log")" "https://iso.example/omarchy-4.5.0-x86.iso"
+equal "iso name: a release from before 4.5.0" "$(iso_name 404 4.0.6)" "omarchy-4.0.6.iso"
+refused "iso name: another answer than 200 or 404" iso_name 503 4.5.0
+grep -q 'answered 503' "$tmp/refused.err" || fail "iso name: the answer was not named"
+refused "iso name: a network error" iso_name down 4.5.0
+grep -q 'could not reach' "$tmp/refused.err" || fail "iso name: a network error was not reported as one"
+
 # -------------------------------------------------------------- nightly-rclone
 wrapped="$ROOT/test/vm-image/nightly-rclone"
 bash -n "$wrapped"
@@ -246,6 +284,55 @@ if grep -q '::warning::' "$tmp/rc/out"; then fail "rclone: a failed upload was r
 # Only its remote's settings, RCLONE_CONFIG_*, belong in a workflow's environment.
 flags=$(sed -nE 's/^[[:space:]]+(RCLONE_[A-Z0-9_]+):.*/\1/p' "$ROOT"/.github/workflows/*.yml | grep -v '^RCLONE_CONFIG_' | sort -u | paste -sd' ' || true)
 [[ -z $flags ]] || fail "rclone: a workflow sets $flags, which rclone would read as flags"
+
+# ----------------------------------------------------------- nightly-check-cdn
+# curl is played by a stand-in that serves a directory, counts each file's
+# fetches, and breaks the first CDN_BREAKS fetches of the files in CDN_BROKEN
+# after 100 bytes, as the reset HTTP/2 stream did (exit 92).
+checker="$ROOT/test/vm-image/nightly-check-cdn"
+bash -n "$checker"
+cdn=$tmp/cdn
+mkdir -p "$cdn/bin" "$cdn/built/unpacked" "$cdn/count"
+head -c 300000 /dev/urandom >"$cdn/built/a.iso"
+head -c 300000 /dev/urandom >"$cdn/built/unpacked/vmlinuz"
+cp -r "$cdn/built" "$cdn/served"
+cat >"$cdn/bin/curl" <<'STUB'
+#!/bin/bash
+file=${*: -1}
+file=${file#https://cdn.test/1/}
+count=$CDN/count/${file//\//_}
+fetches=$(( $(cat "$count" 2>/dev/null || echo 0) + 1 ))
+echo "$fetches" >"$count"
+if [[ " ${CDN_BROKEN:-} " == *" $file "* ]] && (( fetches <= ${CDN_BREAKS:-1} )); then
+  head -c 100 "$CDN/served/$file"
+  exit 92
+fi
+cat "$CDN/served/$file"
+STUB
+chmod +x "$cdn/bin/curl"
+checked() { rm -f "$cdn/count"/*; env PATH="$cdn/bin:$PATH" CDN="$cdn" NIGHTLY_CHECK_DELAY=0 "$@" "$checker" "$cdn/built" https://cdn.test/1; }
+fetches() { cat "$cdn/count/${1//\//_}"; }
+
+out=$(checked)
+[[ $out == *"2 files published and checked"* ]] || fail "cdn: a clean publish did not pass: $out"
+[[ $out != *::warning::* ]] || fail "cdn: a clean publish was reported as a retry"
+
+out=$(checked CDN_BROKEN=unpacked/vmlinuz) || fail "cdn: a transfer that broke once failed the check"
+[[ $out == *"::warning::the CDN check needed a retry for 1 file(s): unpacked/vmlinuz"* ]] ||
+  fail "cdn: a retried file was not named: $(grep warning <<<"$out")"
+equal "cdn: a broken transfer is fetched again whole" "$(fetches unpacked/vmlinuz)" "2"
+
+refused "cdn: a transfer that keeps breaking" checked CDN_BROKEN=a.iso CDN_BREAKS=9
+equal "cdn: a transfer that keeps breaking is tried three times" "$(fetches a.iso)" "3"
+grep -q 'could not be fetched in 3 attempts' "$tmp/refused.err" || fail "cdn: a file that never arrived was not named"
+
+head -c 300000 /dev/urandom >"$cdn/served/a.iso"
+refused "cdn: other bytes than were built" checked
+equal "cdn: other bytes are not fetched again" "$(fetches a.iso)" "1"
+grep -q 'a.iso serves' "$tmp/refused.err" || fail "cdn: a file with other bytes was not named"
+cp "$cdn/built/a.iso" "$cdn/served/a.iso"
+
+refused "cdn: nothing to check" env PATH="$cdn/bin:$PATH" CDN="$cdn" "$checker" "$tmp/no-such-dir" https://cdn.test/1
 
 # ------------------------------------------------------------ the install test
 # The harness is a script that starts a VM when it is read; take the two

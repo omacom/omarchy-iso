@@ -9,6 +9,7 @@ LOCAL_PKGS_PATH=""
 OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
 N1X_DEV_SSH_KEY=""
 PACKAGE_DIR=""
+REHEARSAL=""
 while [[ $# -gt 0 ]]; do
   case $1 in
   --arch)
@@ -90,14 +91,31 @@ while [[ $# -gt 0 ]]; do
     OMARCHY_MIRROR=rc
     shift
     ;;
+  # The release rehearsal: --local-source holds omarchy-pkgs with omarchy and
+  # omarchy-settings pinned the way a release is (test/rehearsal-pins). Those
+  # two are built from it, under their release names; omarchy-nvim and every
+  # other package come from edge as published. The ISO ends in -rehearsal.
+  --rehearsal)
+    REHEARSAL=1
+    shift
+    ;;
   *)
     echo "Unknown option: $1"
-    echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
+    echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout> [--rehearsal]]"
     echo "       $0 --arch aarch64 [--edge|--rc] [--package-dir DIR] [--dev-ssh <pubkey>] [--local-source <omarchy-checkout> <pkgs-checkout>] [...]"
     exit 1
     ;;
   esac
 done
+
+if [[ -n $REHEARSAL ]]; then
+  [[ -n $LOCAL_OMARCHY_PATH ]] || { echo "Error: --rehearsal builds from --local-source, which is missing" >&2; exit 1; }
+  # Whatever other channel option came before or after: a feature release
+  # promotes edge, so the rehearsal takes everything else from edge.
+  OMARCHY_ISO_REF=rehearsal
+  OMARCHY_MIRROR=edge
+  : "${OMARCHY_LOCAL_PACKAGES:=omarchy-settings omarchy}"
+fi
 
 if [[ -n $LOCAL_OMARCHY_PATH ]]; then
   [[ -d $LOCAL_OMARCHY_PATH ]] || { echo "Error: Omarchy checkout not found at $LOCAL_OMARCHY_PATH" >&2; exit 1; }
@@ -211,6 +229,8 @@ DOCKER_ARGS=(
   # instead of the -dev ones that track quattro.
   -e "OMARCHY_RUNTIME_PACKAGE=${OMARCHY_RUNTIME_PACKAGE:-}"
   -e "OMARCHY_SETTINGS_PACKAGE=${OMARCHY_SETTINGS_PACKAGE:-}"
+  # Which of them --local-source builds; all of them unless this names fewer.
+  -e "OMARCHY_LOCAL_PACKAGES=${OMARCHY_LOCAL_PACKAGES:-}"
   -e "HOST_UID=$(id -u)"
   -e "HOST_GID=$(id -g)"
   -v "$BUILD_RELEASE_PATH/:/out/"

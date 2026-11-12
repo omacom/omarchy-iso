@@ -1,0 +1,23 @@
+# Names in the runtime's install/omarchy-other.packages that only an aarch64
+# machine has, so no x86_64 build carries them: the x86_64 build leaves each one
+# out of its offline mirror and out of its install set. Every one of these is
+# installed by the hardware setup of the model that needs it, not by a default
+# install set.
+acer-aspire-16-ai-audio
+asus-proart-p14-audio
+asus-proart-pz13-audio
+asus-zenbook-a16-audio
+asus-zenbook-a16-firmware
+asus-zenbook-14-ux3480qa-audio
+iptsd
+microsoft-surface-laptop-8-support
+microsoft-surface-pro-11-sensors
+microsoft-surface-pro-11-support
+
+# The same packages under the names omarchy-pkgs used before it renamed them.
+# A stable image reads these lists from the stable omarchy package, which names
+# them this way until it is released with the new names.
+asus-proart-p14-speaker-firmware
+surface-laptop-8-support
+surface-pro-11-sensors
+surface-pro-11-support

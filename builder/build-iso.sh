@@ -61,6 +61,25 @@ case "$OMARCHY_ISO_REF" in
 esac
 : "${OMARCHY_NVIM_PACKAGE:=omarchy-nvim}"
 export OMARCHY_RUNTIME_PACKAGE OMARCHY_SETTINGS_PACKAGE OMARCHY_NVIM_PACKAGE
+# The ones --local-source builds from the mounted checkouts, all three unless
+# OMARCHY_LOCAL_PACKAGES names fewer; the others come from the channel. The
+# release rehearsal (--rehearsal) builds only the pinned omarchy and
+# omarchy-settings, and takes omarchy-nvim as published, as a release does.
+read -ra local_packages <<<"${OMARCHY_LOCAL_PACKAGES:-$OMARCHY_SETTINGS_PACKAGE $OMARCHY_RUNTIME_PACKAGE $OMARCHY_NVIM_PACKAGE}"
+export OMARCHY_LOCAL_PACKAGES="${local_packages[*]}"
+# The runtime and settings packages come from one commit and are released in
+# lockstep, so a build makes both from source; omarchy-nvim may come from the
+# channel. Only these three can be built here.
+for local_package_name in "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE"; do
+  [[ " $OMARCHY_LOCAL_PACKAGES " == *" $local_package_name "* ]] ||
+    { echo "ERROR: OMARCHY_LOCAL_PACKAGES must name $OMARCHY_RUNTIME_PACKAGE and $OMARCHY_SETTINGS_PACKAGE (got '$OMARCHY_LOCAL_PACKAGES')" >&2; exit 1; }
+done
+for local_package_name in "${local_packages[@]}"; do
+  case $local_package_name in
+    "$OMARCHY_RUNTIME_PACKAGE" | "$OMARCHY_SETTINGS_PACKAGE" | "$OMARCHY_NVIM_PACKAGE") ;;
+    *) echo "ERROR: OMARCHY_LOCAL_PACKAGES names $local_package_name, which this build does not install" >&2; exit 1 ;;
+  esac
+done
 
 # pacman 7 sandboxes its downloads with Landlock and fails every sync on a
 # kernel without it (Namespace's AmpereOne arm64 machines): "restricting
@@ -125,7 +144,8 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # and run the repository's pinned submodule copy, patched for arm64-efi GRUB.
   pacman --noconfirm -Syu \
     arch-install-scripts dosfstools e2fsprogs erofs-utils libarchive libisoburn \
-    mtools squashfs-tools git sudo base-devel jq grub imagemagick neovim nodejs npm tree-sitter-cli btrfs-progs
+    mtools squashfs-tools git sudo base-devel jq grub imagemagick neovim nodejs npm tree-sitter-cli btrfs-progs \
+    python
   mkarchiso_command=/tmp/mkarchiso-aarch64
   cp /archiso/archiso/mkarchiso "$mkarchiso_command"
   patch --batch --forward --fuzz=0 "$mkarchiso_command" </builder/archiso-v87-aarch64-grub.patch
@@ -257,6 +277,7 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   install -Dm0755 /builder/qualcomm/early-startup-install "$build_cache_dir/airootfs/usr/lib/initcpio/install/qcom_early_startup"
   install -Dm0755 /builder/qualcomm/early-startup "$build_cache_dir/airootfs/usr/lib/initcpio/hooks/qcom_early_startup"
   install -Dm0644 /builder/qualcomm/early-firmware.py "$build_cache_dir/airootfs/usr/lib/initcpio/qcom-early-firmware.py"
+  install -Dm0755 /builder/qualcomm/quiet-efivars-install "$build_cache_dir/airootfs/usr/lib/initcpio/install/omarchy_quiet_efivars"
   rm -rf "$build_cache_dir/syslinux" "$build_cache_dir/efiboot"
 else
   # The live initramfs carries no GPU driver, so Plymouth draws on the
@@ -332,8 +353,7 @@ if [[ -d /omarchy-source && -d /omarchy-pkgs ]]; then
   # bytes. pacman consults /var/cache/pacman/pkg (the host's cache, kept across
   # --keep-pkg-cache builds) before the mirror, and a stale copy from an
   # earlier build fails the checksum against the mirror's fresh db.
-  for local_package_name in \
-    "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"; do
+  for local_package_name in "${local_packages[@]}"; do
     rm -f /var/cache/pacman/pkg/"$local_package_name"-*.pkg.tar.zst{,.sig}
   done
 
@@ -389,6 +409,7 @@ sed -i -E '/^(linux|broadcom-wl)$/d' "$live_packages_file"
 if [[ -d /omarchy-source ]]; then
   base_pkg_lists=(/omarchy-source/install/omarchy-base.packages /omarchy-source/install/omarchy-other.packages)
   setup_form=/omarchy-source/install/provisioning/setup-form.sh
+  progress_icon=/omarchy-source/install/provisioning/progress-icon.sh
   mise_work=/omarchy-source/install/user/mise-work.sh
 else
   # Pull the same package lists out of the freshly-downloaded Omarchy runtime
@@ -411,6 +432,8 @@ else
   # actionable error below.
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/setup-form.sh 2>/dev/null || true
   setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
+  bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/progress-icon.sh 2>/dev/null || true
+  progress_icon=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/progress-icon.sh
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/user/mise-work.sh 2>/dev/null || true
   mise_work=/tmp/omarchy-pkglists/usr/share/omarchy/install/user/mise-work.sh
   # The aarch64 list, each platform's own and the x86_64-only one. Runtimes
@@ -456,7 +479,7 @@ fi
 # aarch64 takes the runtime's own default sets, as omarchy-pkg-defaults composes
 # them: the base list, then the aarch64 additions (zram-generator, rtkit) and a
 # platform's own (the N1x kernel and NVIDIA stack, say), minus the base packages
-# with no aarch64 build anywhere (superwhisper-bin, say). The installer asks the
+# with no aarch64 build anywhere (its x86_64-only list). The installer asks the
 # machine which platform it is on and installs that platform's set, so the image
 # carries one list per platform and the plain aarch64 one for every other
 # machine. Apple Silicon is installed from macOS, never from this image.
@@ -536,6 +559,25 @@ if [[ ! -f $setup_form ]]; then
 fi
 cp "$setup_form" "$build_cache_dir/airootfs/usr/share/omarchy-iso/setup-form.sh"
 
+# The install progress screen comes from the same runtime, so the install and
+# the first-boot setup that finishes a deferred install draw the same screen. A
+# runtime predating the split ships no such file, which would leave the install
+# dashboard with nothing to draw.
+if [[ ! -f $progress_icon ]]; then
+  if [[ -d /omarchy-source ]]; then
+    echo "ERROR: the --local-source checkout ships no install/provisioning/progress-icon.sh" >&2
+    remedy="Update the checkout to a revision carrying the shared progress screen."
+  else
+    echo "ERROR: $OMARCHY_RUNTIME_PACKAGE does not ship install/provisioning/progress-icon.sh" >&2
+    remedy="Publish a runtime carrying the shared progress screen, or build with --local-source against a checkout that has it."
+  fi
+  echo "       The install dashboard draws its progress with that file, so this ISO" >&2
+  echo "       would boot into an installer that cannot show the install." >&2
+  echo "       $remedy" >&2
+  exit 1
+fi
+cp "$progress_icon" "$build_cache_dir/airootfs/usr/share/omarchy-iso/progress-icon.sh"
+
 # Omarchy installs Node lazily through mise since omacom/omarchy#15876. A
 # runtime from before it unpacks a bundled Node tarball during setup and stops
 # the install without one, so it still gets the build for its architecture.
@@ -607,9 +649,10 @@ mapfile -t target_packages < <(
 )
 
 # x86_64: Omarchy's optional list also names packages for aarch64 boards,
-# which have no x86_64 build. Each exclusion is explicit and printed.
+# which have no x86_64 build. Each exclusion is explicit and printed, and the
+# list is a file of its own so it can be read without parsing this script.
 if [[ $OMARCHY_ARCH == x86_64 ]]; then
-  aarch64_only=(asus-proart-p14-speaker-firmware iptsd surface-pro-11-sensors surface-pro-11-support)
+  mapfile -t aarch64_only < <(grep -hv '^#\|^$' /builder/aarch64-only.packages)
   printf 'x86_64: excluding aarch64-only package %s\n' "${aarch64_only[@]}" >&2
   mapfile -t all_packages < <(printf '%s\n' "${all_packages[@]}" | grep -Fxv -f <(printf '%s\n' "${aarch64_only[@]}"))
   mapfile -t target_packages < <(printf '%s\n' "${target_packages[@]}" | grep -Fxv -f <(printf '%s\n' "${aarch64_only[@]}"))
@@ -649,7 +692,7 @@ fi
 # published provider on top of the local build.
 if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
   local_pkginfo=$(
-    for pkg in "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"; do
+    for pkg in "${local_packages[@]}"; do
       for archive in "$offline_mirror_dir/$pkg"-[0-9]*.pkg.tar.*; do
         [[ $archive == *.sig ]] || bsdtar -xOf "$archive" .PKGINFO
       done
@@ -671,19 +714,13 @@ fi
 if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
   mapfile -t all_packages < <(
     printf '%s\n' "${all_packages[@]}" |
-      grep -Fxv \
-        -e "$OMARCHY_RUNTIME_PACKAGE" \
-        -e "$OMARCHY_SETTINGS_PACKAGE" \
-        -e "$OMARCHY_NVIM_PACKAGE" || true
+      grep -Fxv -f <(printf '%s\n' "${local_packages[@]}") || true
   )
   # They are in the image, so never shipped; and the online db the closure is
   # resolved against does not know the local builds.
   mapfile -t target_packages < <(
     printf '%s\n' "${target_packages[@]}" |
-      grep -Fxv \
-        -e "$OMARCHY_RUNTIME_PACKAGE" \
-        -e "$OMARCHY_SETTINGS_PACKAGE" \
-        -e "$OMARCHY_NVIM_PACKAGE" || true
+      grep -Fxv -f <(printf '%s\n' "${local_packages[@]}") || true
   )
 fi
 
@@ -697,6 +734,16 @@ mkdir -p /tmp/offlinedb
 # names nothing offers, and warn. A builder cache that still holds the old
 # file hides the failure.
 pacman --config "$online_pacman_conf" --noconfirm -Sy --dbpath /tmp/offlinedb >/dev/null
+# aarch64: every Snapdragon OEM firmware package, found by the
+# qcom-firmware-<folder> name it provides. Omarchy installs a machine's
+# package by that name during the install, so the mirror carries all of them.
+if [[ $OMARCHY_ARCH == aarch64 ]]; then
+  source /builder/qcom-oem-firmware.sh
+  mapfile -t qcom_oem_firmware < <(qcom_oem_firmware_packages /tmp/offlinedb/sync/*.db)
+  echo "aarch64: adding ${#qcom_oem_firmware[@]} Snapdragon OEM firmware packages: ${qcom_oem_firmware[*]}" >&2
+  mapfile -t all_packages < <(printf '%s\n' "${all_packages[@]}" "${qcom_oem_firmware[@]}" | sort -u)
+  mapfile -t target_packages < <(printf '%s\n' "${target_packages[@]}" "${qcom_oem_firmware[@]}" | sort -u)
+fi
 mapfile -t offered < <(pacman --config "$online_pacman_conf" --dbpath /tmp/offlinedb -Slq | sort -u)
 mapfile -t unresolved < <(comm -23 <(printf '%s\n' "${all_packages[@]}" | sort -u) <(printf '%s\n' "${offered[@]}"))
 if (( ${#unresolved[@]} )); then
@@ -796,8 +843,7 @@ mapfile -t required_package_files <<< "$resolved_package_files"
 # are only in the image now, but keeping all three in the mirror leaves
 # omarchy-apply-system able to resolve them like any published build.
 if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
-  for local_package_name in \
-    "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"; do
+  for local_package_name in "${local_packages[@]}"; do
     local_package_file=""
     for candidate in "$offline_mirror_dir/$local_package_name-"*.pkg.tar.*; do
       [[ -f $candidate && $candidate != *.sig ]] || continue
@@ -903,7 +949,8 @@ rm -f "$build_cache_dir/airootfs/var/cache/omarchy/rootfs/omarchy-root.btrfs"*
 
 image_localdb=/tmp/omarchy-root-image-localdb
 echo "[timing] root image start $(date +%s)"
-OMARCHY_IMAGE_LOCALDB_COPY="$image_localdb" OMARCHY_TRY_LAYER="$try_layer" OMARCHY_TRY_CHANNEL="$OMARCHY_MIRROR" \
+OMARCHY_IMAGE_LOCALDB_COPY="$image_localdb" OMARCHY_IMAGE_SYNC_DBS=/tmp/offlinedb/sync \
+  OMARCHY_TRY_LAYER="$try_layer" OMARCHY_TRY_CHANNEL="$OMARCHY_MIRROR" \
   OMARCHY_TRY_NODE_DIR="$build_cache_dir/airootfs/opt/packages" \
   OMARCHY_RENAMED_PACKAGES="$renamed_list" OMARCHY_UNRESOLVED_PACKAGES="$unresolved_list" \
   bash /builder/build-root-image.sh "$image_pacman_conf" "$root_image" "${image_packages[@]}"
@@ -914,6 +961,36 @@ echo "[timing] root image end $(date +%s)"
 # flashed USB fails the install while it is still free to fail. Next to the
 # image, so it ships on the ISO beside it.
 (cd "$root_image_dir" && sha256sum "${root_image##*/}" >"$root_image.sha256")
+
+# aarch64: each Snapdragon laptop's ADSP firmware, as plain files next to the
+# root image with a SHA256SUMS list. The live UKI holds only linux-firmware's;
+# the OEM packages' ADSP files are over 300 MiB, and GRUB has to place the
+# whole UKI in memory (omarchy-iso#128). Without its ADSP a laptop never
+# reports its USB-C plug orientation, so a stick plugged in one way round runs
+# at USB 2. The live initramfs (qualcomm/early-startup) copies the files its
+# board names from here, checked against SHA256SUMS, before it starts the ADSP.
+# Which files to stage comes from the kernel's device trees
+# (qualcomm/stage-medium-firmware.sh).
+if [[ $OMARCHY_ARCH == aarch64 ]]; then
+  # -Sp prints dependencies too; keep only the packages named here.
+  qcom_kernel_file=''
+  qcom_tree_packages=()
+  qcom_firmware_files=()
+  while read -r name file; do
+    if [[ $name == "$OMARCHY_KERNEL" ]]; then
+      qcom_kernel_file=$file
+    elif [[ $name == "$OMARCHY_KERNEL-dtbs" ]]; then
+      # The kernel's device trees, when it depends on a package for them.
+      qcom_tree_packages=(--trees "$offline_mirror_dir/$file")
+    elif [[ " ${qcom_oem_firmware[*]} " == *" $name "* ]]; then
+      qcom_firmware_files+=("$offline_mirror_dir/$file")
+    fi
+  done < <(pacman --config "$online_pacman_conf" --dbpath /tmp/offlinedb -Sp \
+    --print-format '%n %f' "$OMARCHY_KERNEL" "${qcom_oem_firmware[@]}")
+  [[ -n $qcom_kernel_file ]] || { echo "ERROR: $OMARCHY_KERNEL is not in the offline mirror" >&2; exit 1; }
+  bash /builder/qualcomm/stage-medium-firmware.sh "${qcom_tree_packages[@]}" "$offline_mirror_dir/$qcom_kernel_file" \
+    "$root_image_dir/qcom-firmware" "${qcom_firmware_files[@]}"
+fi
 
 # Bound the boot-time hash: Type=oneshot units are exempt from systemd's
 # default start timeout, so a stick that stalls reads instead of returning an

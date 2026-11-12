@@ -62,11 +62,11 @@ if [[ $BUILD_VERSION == *rc* ]]; then
   RELEASE_SUFFIX=""
 fi
 
-# The x86_64 ISO keeps the plain name every download link already uses. Any
-# other architecture says so, as the nightly's do, or it would upload over it.
-ARCH_SUFFIX=""
-if [[ $ARCH != x86_64 ]]; then
-  ARCH_SUFFIX="-$ARCH"
+# From 4.5.0 on, every release ISO names its architecture, so the two never
+# upload over each other: omarchy-X.Y.Z-x86.iso and omarchy-X.Y.Z-aarch64.iso.
+ARCH_SUFFIX="-$ARCH"
+if [[ $ARCH == x86_64 ]]; then
+  ARCH_SUFFIX="-x86"
 fi
 
 BUILD_ROOT=$(realpath "${BASH_SOURCE[0]%/*}/..")

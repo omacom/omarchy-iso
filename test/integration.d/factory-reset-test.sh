@@ -115,7 +115,11 @@ wait_for_reset_output() {
 reset_phase() {
   log "Booting reset VM from base image overlay"
 
-  start_vm_from_base
+  # The reset removes the harness's SSH access with everything else, so the
+  # guest is told now how to give it back after its first boot.
+  local -a authorize_ssh
+  mapfile -t authorize_ssh < <(ssh_authorize_smbios)
+  start_vm_from_base "${authorize_ssh[@]}"
   wait_for_ssh "$BOOT_TIMEOUT"
 
   # The encrypted variant only reaches here because the boot passphrase was
@@ -268,10 +272,25 @@ drive_first_boot() {
 first_boot_phase() {
   drive_first_boot
 
-  # Finalization can still be running when the console appears; the pending
-  # flag clearing is the definitive end of provisioning. The reset scrubbed
-  # users, host keys, and sshd state, so SSH has to be re-authorized first.
-  bootstrap_ssh
+  # The reset scrubbed users, host keys, and sshd state. The guest authorizes
+  # the harness again once its setup is done (ssh_authorize_smbios), so SSH
+  # answering is the end of provisioning as seen from here. The pending flag
+  # clearing, checked next, is the definitive one.
+  log "Waiting for the first boot to finish and authorize SSH"
+  local started=$SECONDS
+  until ssh_guest true 2>/dev/null; do
+    if ! vm_running; then
+      echo "VM exited during first-boot provisioning" >&2
+      return 1
+    fi
+    if ((SECONDS - started >= 900)); then
+      capture_console "failure-provisioning-timeout"
+      echo "Timed out waiting for the first boot to authorize SSH" >&2
+      return 1
+    fi
+    sleep 2
+  done
+  capture_console "success-firstboot-05-ssh"
 
   log "Waiting for provisioning to finish"
   local waited=0 rc

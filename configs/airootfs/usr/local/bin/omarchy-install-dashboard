@@ -32,6 +32,19 @@ source "$INSTALLER_I18N"
 i18n_load "${OMARCHY_ISO_LANGUAGE:-en}"
 i18n_console_font "$TTY_PATH"
 
+# The traced-icon progress screen is vendored from the runtime package this ISO
+# bundles, as setup-form.sh is, because first-boot setup (omarchy-provision-owner)
+# draws the same screen and the two must never drift apart. On the ISO that
+# vendored copy is what loads; a dry run outside the ISO falls back to the
+# omarchy checkout OMARCHY_PATH points at.
+PROGRESS_ICON="${PROGRESS_ICON:-/usr/share/omarchy-iso/progress-icon.sh}"
+[[ -r $PROGRESS_ICON ]] || PROGRESS_ICON="${OMARCHY_PATH:-/usr/share/omarchy}/install/provisioning/progress-icon.sh"
+if [[ ! -r $PROGRESS_ICON ]]; then
+  echo "ERROR: shared progress screen not found at $PROGRESS_ICON" >&2
+  exit 1
+fi
+source "$PROGRESS_ICON"
+
 # Autoinstall has no one at the keyboard, and every prompt this dashboard owns
 # reads from the TTY, so each would hang forever. Suppress them here rather than
 # in the scripts they live in: this process is the only owner of the visible UI.
@@ -121,60 +134,6 @@ trap 'interrupt 143' TERM
 term_size() { stty size 2>/dev/null <"$TTY_PATH" || printf '24 80\n'; }
 term_cols() { local size; size="$(term_size)"; printf '%s\n' "${size#* }"; }
 
-# Read the actual character dimensions instead of assuming an 8 x 16 font.
-# Linux VTs expose the font through KDFONTOP; desktop terminals may expose
-# pixels in their window size or answer the standard cell-size query.
-term_cell_size() {
-  python3 - "$TTY_PATH" <<'PY'
-import fcntl
-import os
-import re
-import select
-import struct
-import sys
-import termios
-import time
-import tty
-
-with open(sys.argv[1], "r+b", buffering=0) as terminal:
-    fd = terminal.fileno()
-    rows, cols, width, height = struct.unpack(
-        "HHHH", fcntl.ioctl(fd, termios.TIOCGWINSZ, bytes(8)))
-    if rows and cols and width and height:
-        print(round(width / cols), round(height / rows))
-        sys.exit()
-    try:
-        font = bytearray(struct.pack("@5IP", 1, 0, 0, 0, 0, 0))
-        fcntl.ioctl(fd, 0x4B72, font)  # KDFONTOP / KD_FONT_OP_GET, no glyph data
-        _, _, width, height, _ = struct.unpack_from("@5I", font)
-        if width and height:
-            print(width, height)
-            sys.exit()
-    except OSError:
-        pass
-
-    settings = termios.tcgetattr(fd)
-    try:
-        tty.setcbreak(fd, termios.TCSANOW)
-        os.write(fd, b"\x1b[16t")
-        response = b""
-        deadline = time.monotonic() + 0.15
-        while select.select([fd], [], [], max(0, deadline - time.monotonic()))[0]:
-            response += os.read(fd, 64)
-            match = re.search(rb"\x1b\[6;(\d+);(\d+)t", response)
-            if match:
-                height, width = map(int, match.groups())
-                if width and height:
-                    print(width, height)
-                    sys.exit()
-            if time.monotonic() >= deadline:
-                break
-    finally:
-        termios.tcsetattr(fd, termios.TCSANOW, settings)
-    print(8, 16)  # Conventional console font when dimensions aren't available.
-PY
-}
-
 logo_width() {
   if [[ -f $LOGO_PATH ]]; then
     # The logo is drawn in box-drawing glyphs, three bytes each in UTF-8, so
@@ -205,8 +164,6 @@ LOGO_HEIGHT="$(logo_height)"
 (( LOGO_WIDTH > 0 )) || LOGO_WIDTH=81
 (( LOGO_HEIGHT > 0 )) || LOGO_HEIGHT=1
 CONTENT_WIDTH="$LOGO_WIDTH"
-TOP_ROW=1
-LAST_SIZE=""
 LAST_PM=10
 # Wordmark, blank, title, and the three rows gum confirm uses (upstream's +5),
 # plus two rows between title and button: a blank and the medium-removal note
@@ -260,7 +217,6 @@ PKG_FLOOR_TAU=900      # with a work signal, time is only a backstop until the
 
 POS=10                 # position, per-mille, monotonic
 PROGRESS_PM=10
-VERIFY_PCT=-1          # honest percent of the pre-flight verify, -1 when idle
 NOW=0                  # monotonic seconds, refreshed once per frame
 DASH_T0=0
 PHASE_NAME=""          # last phase this process observed
@@ -328,163 +284,6 @@ render_logo() {
   fi
 }
 
-# The icon uses half-block glyphs, scaled to the terminal's actual cell aspect
-# ratio so its square silhouette stays square. No graphics protocol is needed.
-# Coordinates follow the 15 x 15 grid of Omarchy's icon.svg. Each segment
-# paints the full stroke width, starting at the bottom middle of the outer ring.
-ICON_WIDTH=30
-ICON_HEIGHT=15
-CELL_WIDTH=8
-CELL_HEIGHT=16
-ICON_LEFT=1
-ICON_STEPS=0
-ICON_DRAWN=0
-DISPLAY_PM=0
-ICON_FRAME=""
-declare -a ICON_ORDER=() ICON_TRACE=() ICON_FILL=()
-
-icon_segment() {
-  local scale="$1" x1="$2" y1="$3" x2="$4" y2="$5"
-  local x y from to
-  if (( y1 == y2 )); then
-    from=$(( (x1 * ICON_WIDTH + 14) / 15 ))
-    to=$(( ((x2 + 1) * ICON_WIDTH + 14) / 15 ))
-    if (( x2 < x1 )); then
-      from=$(( ((x1 + 1) * ICON_WIDTH + 14) / 15 - 1 ))
-      to=$(( (x2 * ICON_WIDTH + 14) / 15 - 1 ))
-    fi
-    for ((x=from; x!=to; x+=(x2 >= x1 ? 1 : -1))); do
-      for ((y=y1 * scale; y<(y1 + 1) * scale; y++)); do
-        icon_pixel "$((y * ICON_WIDTH + x))"
-      done
-    done
-  else
-    from=$(( y1 * scale ))
-    to=$(( (y2 + 1) * scale ))
-    if (( y2 < y1 )); then
-      from=$(( (y1 + 1) * scale - 1 ))
-      to=$(( y2 * scale - 1 ))
-    fi
-    for ((y=from; y!=to; y+=(y2 >= y1 ? 1 : -1))); do
-      for ((x=(x1 * ICON_WIDTH + 14) / 15; x<((x1 + 1) * ICON_WIDTH + 14) / 15; x++)); do
-        icon_pixel "$((y * ICON_WIDTH + x))"
-      done
-    done
-  fi
-}
-
-icon_pixel() {
-  local pixel="$1"
-  if [[ ! -v ICON_TRACE[pixel] ]]; then
-    ICON_ORDER+=("$pixel")
-    ICON_TRACE[pixel]=${#ICON_ORDER[@]}
-  fi
-}
-
-build_icon() {
-  local scale="$1" x y row
-  local -a mask=(
-    111111111111111
-    100000010000001
-    101111110001101
-    101000000000101
-    101000000000101
-    101000000000101
-    101000000000101
-    111000000000101
-    101000000000101
-    101000000000101
-    101000000000101
-    101000000000101
-    101111111111101
-    100000010000001
-    111111110111111
-  )
-  ICON_WIDTH=$(( (15 * scale * CELL_HEIGHT + CELL_WIDTH) / (2 * CELL_WIDTH) ))
-  ICON_HEIGHT=$(((15 * scale + 1) / 2))
-  ICON_ORDER=() ICON_TRACE=() ICON_FILL=()
-  ICON_DRAWN=0
-  # Start at the bottom middle, follow the outer left edge to the top cross,
-  # then descend into the inner shape. Fill its two bridges as we reach them.
-  icon_segment "$scale" 7 14 0 14
-  icon_segment "$scale" 0 14 0 0
-  icon_segment "$scale" 0 0 7 0
-  icon_segment "$scale" 7 0 7 2
-  icon_segment "$scale" 7 2 2 2
-  icon_segment "$scale" 2 2 2 7
-  icon_segment "$scale" 2 7 0 7
-  icon_segment "$scale" 2 7 2 12
-  icon_segment "$scale" 2 12 7 12
-  icon_segment "$scale" 7 12 7 14
-  icon_segment "$scale" 7 12 12 12
-  icon_segment "$scale" 12 12 12 2
-  icon_segment "$scale" 12 2 11 2
-  # Finish from the top cross: right along the outside, down, then left.
-  icon_segment "$scale" 7 0 14 0
-  icon_segment "$scale" 14 0 14 14
-  icon_segment "$scale" 14 14 9 14
-  ICON_STEPS=${#ICON_ORDER[@]}
-  for ((y=0; y<15 * scale; y++)); do
-    row=${mask[y / scale]}
-    for ((x=0; x<ICON_WIDTH; x++)); do
-      ICON_FILL[y * ICON_WIDTH + x]=${row:x * 15 / ICON_WIDTH:1}
-    done
-  done
-}
-
-# Append one cell with independently colored upper/lower pixels. This also
-# handles a green tracing tip sharing a cell with the still-dark outline.
-icon_cell() {
-  local pixel="$1" drawn="$2" solid="$3" upper=0 lower=0 step
-  if (( solid )); then
-    (( ICON_FILL[pixel] )) && upper=32
-    (( ${ICON_FILL[pixel + ICON_WIDTH]:-0} )) && lower=32
-  else
-    step=${ICON_TRACE[pixel]:-0}
-    (( step > 0 )) && upper=90
-    (( step > 0 && step <= drawn )) && upper=32
-    step=${ICON_TRACE[pixel + ICON_WIDTH]:-0}
-    (( step > 0 )) && lower=90
-    (( step > 0 && step <= drawn )) && lower=32
-  fi
-  if (( upper == 0 && lower == 0 )); then
-    ICON_FRAME+="${RESET} "
-  elif (( upper == lower )); then
-    ICON_FRAME+="${CSI}${upper};49m█"
-  elif (( lower == 0 )); then
-    ICON_FRAME+="${CSI}${upper};49m▀"
-  elif (( upper == 0 )); then
-    ICON_FRAME+="${CSI}${lower};49m▄"
-  else
-    ICON_FRAME+="${CSI}${upper};$((lower + 10))m▀"
-  fi
-}
-
-render_icon() {
-  local pm="$1" full="${2:-0}" drawn i pixel row col
-  drawn=$((pm * ICON_STEPS / 1000))
-  ICON_FRAME=""
-  if (( full || pm == 1000 )); then
-    for ((row=0; row<ICON_HEIGHT; row++)); do
-      ICON_FRAME+="${CSI}$((TOP_ROW + row));${ICON_LEFT}H"
-      for ((col=0; col<ICON_WIDTH; col++)); do
-        icon_cell "$((row * 2 * ICON_WIDTH + col))" "$drawn" "$((pm == 1000))"
-      done
-    done
-  else
-    # Between layout changes, repaint only newly traced pixels. This keeps the
-    # animation cheap even while pacstrap saturates the disk.
-    for ((i=ICON_DRAWN; i<drawn; i++)); do
-      pixel=${ICON_ORDER[i]}
-      row=$((pixel / ICON_WIDTH / 2)) col=$((pixel % ICON_WIDTH))
-      ICON_FRAME+="${CSI}$((TOP_ROW + row));$((ICON_LEFT + col))H"
-      icon_cell "$((row * 2 * ICON_WIDTH + col))" "$drawn" 0
-    done
-  fi
-  printf '%s%s' "$ICON_FRAME" "$RESET"
-  ICON_DRAWN=$drawn
-}
-
 # Packages libalpm has finished installing. local/ holds one directory per
 # package and nothing else in it is a directory, so */ is exact. One glob, no
 # forks: this runs twice a second while the disk is saturated.
@@ -510,7 +309,6 @@ install_progress() {
   local -a state
 
   PROGRESS_PM=$POS
-  VERIFY_PCT=-1
   [[ -f $STATE_FILE ]] || return 0
 
   mapfile -t state < <(jq -r '
@@ -613,12 +411,6 @@ install_progress() {
   fi
   if (( progress_pm >= 0 )); then
     (( progress_pm > 1000 )) && progress_pm=1000
-    # The pre-flight band is 15 per-mille wide (the phase is subsecond once
-    # the boot-time hash has finished), so real progress mapped into it moves
-    # the bar about one cell over minutes and reads as a hang. Surface the
-    # honest percent as a status line instead (render_dynamic); the unpack's
-    # band is wide enough that its progress shows in the bar itself.
-    [[ $phase == "Preparing install target" ]] && VERIFY_PCT=$(( progress_pm / 10 ))
     work=$(( lo + (span - 1 - PKG_TAIL_PM) * progress_pm / 1000 ))
     (( work > pos )) && pos=$work
   fi
@@ -637,7 +429,7 @@ current_tip() {
 }
 
 # Vertically center a block of the given height, echoing the row it starts on.
-# Center both the progress icon and the final wordmark on the console.
+# Center the final wordmark on the console.
 centered_top_row() {
   local height="$1" rows top
   rows="$(term_size)"
@@ -648,29 +440,9 @@ centered_top_row() {
   printf '%d' "$(( top + 1 ))"
 }
 
-measure_progress_layout() {
-  local rows cols scale=1
-  LAST_SIZE="$(term_size)"
-  read -r rows cols <<<"$LAST_SIZE"
-  read -r CELL_WIDTH CELL_HEIGHT < <(term_cell_size 2>/dev/null || printf '8 16\n')
-  (( rows >= 34 && cols >= 49 )) && scale=2
-  (( rows >= 50 && cols >= 64 )) && scale=3
-  while (( scale > 1 && (15 * scale * CELL_HEIGHT + CELL_WIDTH) / (2 * CELL_WIDTH) > cols - 4 )); do
-    scale=$((scale - 1))
-  done
-  build_icon "$scale"
-  TOP_ROW="$(centered_top_row "$((ICON_HEIGHT + 5))")"
-  ICON_LEFT=$(( (cols - ICON_WIDTH) / 2 + 1 ))
-  (( ICON_LEFT < 1 )) && ICON_LEFT=1
-  PROGRESS_TEXT_WIDTH=$((cols - 2))
-  (( PROGRESS_TEXT_WIDTH > CONTENT_WIDTH )) && PROGRESS_TEXT_WIDTH=$CONTENT_WIDTH
-  return 0
-}
-
 render_static() {
-  measure_progress_layout
-  printf '%s' "$CLEAR"
-  render_icon "$DISPLAY_PM" 1
+  progress_icon_layout "$TTY_PATH" "$CONTENT_WIDTH"
+  progress_icon_static
 }
 
 update_progress() {
@@ -686,30 +458,7 @@ update_progress() {
 }
 
 render_dynamic() {
-  local step tip
-  # The framebuffer can settle late in VMs. Rebuild at the new size, preserving
-  # progress, instead of leaving the drawing at the old screen coordinates.
-  [[ "$(term_size)" == "$LAST_SIZE" ]] || render_static
-  # Ease phase jumps over several frames, with the percentage following the
-  # same position as the trace. The measured progress still never goes back.
-  step=$(( (LAST_PM - DISPLAY_PM + 3) / 4 ))
-  DISPLAY_PM=$((DISPLAY_PM + step))
-  render_icon "$DISPLAY_PM"
-
-  tip="$(truncate_for_width "$(t progress.tipLine "$(current_tip)")" "$PROGRESS_TEXT_WIDTH")"
-  printf '%s%d;1H' "$CSI" "$((TOP_ROW + ICON_HEIGHT + 1))"
-  center "${GREEN}$((DISPLAY_PM / 10))%${RESET}" "$PROGRESS_TEXT_WIDTH"
-  blank_line
-  # Same row either way, so the layout (icon + 6 rows) never changes height:
-  # blank normally, the verify's honest percent while the pre-flight gate
-  # waits on the hash.
-  if (( VERIFY_PCT >= 0 )); then
-    center "${DIM}verifying the install medium: ${VERIFY_PCT}%${RESET}" "$PROGRESS_TEXT_WIDTH"
-  else
-    blank_line
-  fi
-  center "${DIM}${tip}${RESET}" "$PROGRESS_TEXT_WIDTH"
-  printf '%s' "$CLEAR_TO_END"
+  progress_icon_frame "$LAST_PM" "" "$(t progress.tipLine "$(current_tip)")"
 }
 
 install_duration() {
@@ -1175,12 +924,7 @@ if (( status == 0 )); then
   # Finish the trace even when a short-lived child exits between state polls.
   LAST_PM=1000
   PHASE_NAME="Installation complete"
-  while (( DISPLAY_PM < 999 )); do
-    render_dynamic >"$TTY_PATH" 2>/dev/null || true
-    sleep 0.05
-  done
-  DISPLAY_PM=1000
-  render_dynamic >"$TTY_PATH" 2>/dev/null || true
+  progress_icon_finish "" "$(t progress.tipLine "$(current_tip)")" >"$TTY_PATH" 2>/dev/null || true
   sleep 0.4
 fi
 

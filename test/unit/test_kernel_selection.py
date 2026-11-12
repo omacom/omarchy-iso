@@ -137,8 +137,8 @@ class KernelSelectionTest(unittest.TestCase):
                         phases_impl.arch, "install_base_delta", create=True,
                         side_effect=lambda *args, **kwargs: events.append("base")))
                     stack.enter_context(mock.patch.object(
-                        phases_impl.arch, "target_has_package", create=True,
-                        side_effect=lambda target, name: name in in_image))
+                        phases_impl.arch, "target_missing_packages", create=True,
+                        side_effect=lambda target, names: [n for n in names if n not in in_image]))
                     stack.enter_context(mock.patch.object(phases_impl.arch, "sanity_check", create=True))
                     opened = stack.enter_context(mock.patch.object(phases_impl.arch, "open_installer", create=True))
                     opened.return_value.__enter__.return_value = installer

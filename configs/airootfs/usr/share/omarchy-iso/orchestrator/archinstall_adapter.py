@@ -46,7 +46,7 @@ import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Iterable, Iterator
 
 # Imports are top-level so a missing/incompatible archinstall surfaces at
 # orchestrator startup, not deep inside a phase.
@@ -435,20 +435,44 @@ def open_installer(
         yield installer
 
 
+def target_missing_packages(target: Path, names: Iterable[str]) -> list[str]:
+    """The names nothing installed in the target satisfies, in the order
+    given: neither a package of that name nor one that provides it, as
+    pacman -T answers against the target's own database. A package list
+    names what a default set needs, and the image can carry a package that
+    provides it under another name (dotnet-runtime-bin for dotnet-runtime on
+    aarch64), which installing the name again only reports as up to date.
+
+    One pacman run for the whole list. A target with no local database has
+    nothing installed; pacman is not asked there, as it would create one."""
+    names = list(names)
+    dbpath = target / "var" / "lib" / "pacman"
+    if not names or not (dbpath / "local").is_dir():
+        return names
+    result = capture(["pacman", "-T", "--root", str(target), "--dbpath", str(dbpath), *names])
+    # 0 when every name is satisfied, 127 with the unsatisfied ones on stdout.
+    if result.returncode not in (0, 127):
+        raise RuntimeError(f"pacman -T could not read {dbpath}: {result.stderr.strip()}")
+    unsatisfied = set(result.stdout.splitlines())
+    return [name for name in names if name in unsatisfied]
+
+
 def target_has_package(target: Path, name: str) -> bool:
-    """Whether pacman's local db in the target records `name` as installed."""
+    """Whether a package in the target is `name` or provides it."""
+    return not target_missing_packages(target, [name])
+
+
+def target_package_names(target: Path) -> set[str]:
+    """The names of the packages installed in the target, and not what they
+    provide: for checking that the image carries the very packages this ISO
+    names (omarchy-dev provides omarchy, but a stable ISO's image must not
+    hold it). Each local database entry is name-pkgver-pkgrel, and neither
+    pkgver nor pkgrel may contain a hyphen, so the name is what is left of
+    the last two."""
     local_db = target / "var" / "lib" / "pacman" / "local"
-    for entry in local_db.glob(f"{name}-*"):
-        desc = entry / "desc"
-        if not desc.is_file():
-            continue
-        lines = desc.read_text(errors="ignore").splitlines()
-        try:
-            if lines[lines.index("%NAME%") + 1] == name:
-                return True
-        except (ValueError, IndexError):
-            continue
-    return False
+    if not local_db.is_dir():
+        return set()
+    return {entry.name.rsplit("-", 2)[0] for entry in local_db.iterdir() if (entry / "desc").is_file()}
 
 
 def install_base_delta(
@@ -505,7 +529,7 @@ def install_base_delta(
             installer.set_vconsole(locale_config)
 
     with _time_step("DELTA.package_delta"):
-        delta = [pkg for pkg in installer._base_packages if not target_has_package(installer.target, pkg)]
+        delta = target_missing_packages(installer.target, installer._base_packages)
         if delta:
             installer.pacman.strap(delta)
         installer._helper_flags["base-strapped"] = True
@@ -662,7 +686,7 @@ def install_applications(installer: Installer, arch_config: ArchConfig) -> None:
     def strap_missing(packages: str | list[str]) -> None:
         if isinstance(packages, str):
             packages = [packages]
-        missing = [pkg for pkg in packages if not target_has_package(installer.target, pkg)]
+        missing = target_missing_packages(installer.target, packages)
         if missing:
             original_strap(missing)
 

@@ -395,6 +395,43 @@ wait_for_screen() {
   sleep 1 # let the screen settle before typing
 }
 
+# Wait until the console shows either text, and set SCREEN_MATCHED to the one
+# it found.
+wait_for_screen_any() {
+  local first="$1" second="$2" timeout="$3" waited=0 screen slug
+
+  while true; do
+    screen=$(ocr_screen)
+    if grep -qi "$first" <<<"$screen"; then
+      SCREEN_MATCHED="$first"
+      sleep 1
+      return 0
+    fi
+    if grep -qi "$second" <<<"$screen"; then
+      SCREEN_MATCHED="$second"
+      sleep 1
+      return 0
+    fi
+
+    if ! vm_running; then
+      echo "VM exited while waiting for screen: $first or $second" >&2
+      return 1
+    fi
+
+    if ((waited >= timeout)); then
+      slug=${first,,}
+      slug=${slug// /-}
+      slug=${slug//[^a-z0-9-]/}
+      capture_console "failure-installer-waiting-for-$slug"
+      echo "Timed out after ${timeout}s waiting for screen: $first or $second" >&2
+      return 1
+    fi
+
+    sleep 3
+    ((waited += 3))
+  done
+}
+
 # Press a key or chord, dash-separated: "ret", "ctrl-c", "ctrl-alt-f3".
 press() {
   local part json=""
@@ -531,11 +568,21 @@ guest_layer_absent() {
   ! guest_layer_present "$1"
 }
 
-cleanup_shortcut_state() {
+# Close every shortcut surface, so one left open by a failed check cannot hold
+# the keyboard for the checks after it. The dock's app picker has no hide
+# command; its apps command toggles it.
+close_shortcut_surfaces() {
   ssh_session 'for plugin in omarchy.menu omarchy.emojis omarchy.clipboard omarchy.audio; do
     omarchy-shell shell hide "$plugin" >/dev/null 2>&1 || true
   done
-  while read -r address; do
+  if hyprctl -j layers | jq -e '\''[.. | objects | select(.namespace? == "omarchy-dock-apps")] | length > 0'\'' >/dev/null; then
+    omarchy-shell omarchy.dock apps >/dev/null 2>&1 || true
+  fi' >/dev/null 2>&1 || true
+}
+
+cleanup_shortcut_state() {
+  close_shortcut_surfaces
+  ssh_session 'while read -r address; do
     hyprctl dispatch "hl.dsp.window.close({ window = \"address:$address\" })" >/dev/null 2>&1 ||
       hyprctl dispatch closewindow "address:$address" >/dev/null 2>&1 || true
   done < <(hyprctl -j clients | jq -r '\''.[] | select(.class == "foot") | .address'\'')
@@ -543,12 +590,12 @@ cleanup_shortcut_state() {
 }
 
 verify_surface_shortcut() {
-  local name="$1" chord="$2" namespace="$3" plugin="$4"
+  local name="$1" chord="$2" namespace="$3"
 
   press "$chord"
   if ! wait_for_guest_state "$name shortcut opens" 15 guest_layer_present "$namespace"; then
     capture_console "failure-shortcut-$name-open"
-    ssh_session "omarchy-shell shell hide '$plugin' >/dev/null 2>&1 || true" || true
+    close_shortcut_surfaces
     return 1
   fi
   capture_console "success-shortcut-$name"
@@ -556,7 +603,7 @@ verify_surface_shortcut() {
   press esc
   if ! wait_for_guest_state "$name shortcut surface closes" 15 guest_layer_absent "$namespace"; then
     capture_console "failure-shortcut-$name-close"
-    ssh_session "omarchy-shell shell hide '$plugin' >/dev/null 2>&1 || true" || true
+    close_shortcut_surfaces
     return 1
   fi
 }
@@ -639,9 +686,9 @@ verify_universal_clipboard_shortcuts() {
   local terminal_result="/tmp/omarchy-universal-terminal-paste"
 
   cleanup_shortcut_state
-  ssh_session "setsid -f chromium --new-window about:blank >/dev/null 2>&1"
-  if ! wait_for_guest_state "universal clipboard test opens Chromium" 45 \
-    ssh_session "hyprctl -j clients | jq -e '[.[] | select(.class | test(\"(?i)chromium\"))] | length == 1'"; then
+  ssh_session "setsid -f google-chrome-stable --new-window about:blank >/dev/null 2>&1"
+  if ! wait_for_guest_state "universal clipboard test opens Chrome" 45 \
+    ssh_session "hyprctl -j clients | jq -e '[.[] | select(.class | test(\"(?i)google-chrome\"))] | length == 1'"; then
     capture_console "failure-shortcut-universal-clipboard-browser"
     return 1
   fi
@@ -676,7 +723,7 @@ verify_universal_clipboard_shortcuts() {
   ssh_session 'while read -r address; do
     hyprctl dispatch "hl.dsp.window.close({ window = \"address:$address\" })" >/dev/null 2>&1 ||
       hyprctl dispatch closewindow "address:$address" >/dev/null 2>&1 || true
-  done < <(hyprctl -j clients | jq -r '\''.[] | select(.class | test("(?i)chromium")) | .address'\'')' || true
+  done < <(hyprctl -j clients | jq -r '\''.[] | select(.class | test("(?i)google-chrome")) | .address'\'')' || true
 
   ssh_session "rm -f '$terminal_result'; \
     setsid -f bash -c 'printf \"%s\" \"$terminal_token\" | wl-copy' >/dev/null 2>&1; \
@@ -708,16 +755,21 @@ shortcut_smoke_phase() {
   log "Exercising primary desktop shortcuts through the VM keyboard"
 
   local status=0
-  local name chord namespace plugin
-  local shortcuts='menu|meta_l-spc|omarchy-menu|omarchy.menu
-apps-menu|meta_l-alt-spc|omarchy-menu|omarchy.menu
-emojis|meta_l-ctrl-e|omarchy-emojis|omarchy.emojis
-clipboard|meta_l-ctrl-v|omarchy-clipboard|omarchy.clipboard
-audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel|omarchy.audio'
+  local name chord namespace apps_namespace=omarchy-menu
+  # Super+Alt+Space opens the dock's app picker since omacom/omarchy#15263
+  # and the menu before it. Expect whichever the installed Omarchy binds.
+  if ssh_session "grep -q 'omarchy.dock apps' /usr/share/omarchy/default/hypr/bindings/utilities.lua"; then
+    apps_namespace=omarchy-dock-apps
+  fi
+  local shortcuts="menu|meta_l-spc|omarchy-menu
+apps|meta_l-alt-spc|$apps_namespace
+emojis|meta_l-ctrl-e|omarchy-emojis
+clipboard|meta_l-ctrl-v|omarchy-clipboard
+audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel"
 
   cleanup_shortcut_state
-  while IFS='|' read -r name chord namespace plugin; do
-    if ! verify_surface_shortcut "$name" "$chord" "$namespace" "$plugin"; then
+  while IFS='|' read -r name chord namespace; do
+    if ! verify_surface_shortcut "$name" "$chord" "$namespace"; then
       status=1
     fi
   done <<<"$shortcuts"
@@ -772,10 +824,20 @@ drive_configurator() {
   capture_console "success-installer-00-greeter"
   press ret
 
-  # Language is the first screen, with English preselected. Ctrl+C there is the
-  # hidden entry into deferred provisioning; a normal install picks a language.
-  wait_for_screen "Language" 300
-  capture_console "success-installer-00-language"
+  # The language picker is first only when the live system's omarchy package
+  # carries default/i18n/locales.json (quattro and edge). A stable ISO has no
+  # such file, so the configurator opens on the keyboard layout instead.
+  # Ctrl+C on the language picker is the only entry into deferred
+  # provisioning, so --provision needs it.
+  wait_for_screen_any "Language" "keyboard layout" 300
+  have_language=false
+  if [[ $SCREEN_MATCHED == "Language" ]]; then
+    have_language=true
+    capture_console "success-installer-00-language"
+  elif $PROVISION; then
+    echo "This ISO has no language screen, so it cannot arm deferred provisioning" >&2
+    return 1
+  fi
 
   if $PROVISION; then
     press ctrl-c # arm "prepare for another owner"
@@ -805,7 +867,9 @@ drive_configurator() {
     return 0
   fi
 
-  press ret
+  if $have_language; then
+    press ret
+  fi
   wait_for_screen "keyboard layout" 60
   capture_console "success-installer-01-keyboard-layout"
 
@@ -825,12 +889,18 @@ drive_configurator() {
   capture_console "success-installer-03-username"
   press ret
 
-  wait_for_screen "Password" 60
+  # The live ISO's console font draws "w" as a "u" with a 1-px stem, and OCR
+  # reads this label as "Passuord" while gum's blinking cursor is off. Polls
+  # come about three blink cycles apart, so they can all land in that phase
+  # until the timeout. "user + root" in the placeholder reads in both phases.
+  wait_for_screen_any "Password" "user + root" 60
   type_text "$GUEST_PASSWORD"
   capture_console "success-installer-04-password"
   press ret
 
-  wait_for_screen "Must match" 60
+  # The same cursor, the other phase: while it covers the placeholder's first
+  # letter, OCR misreads "Must match"; "you just typed" reads either way.
+  wait_for_screen_any "Must match" "you just typed" 60
   type_text "$GUEST_PASSWORD"
   capture_console "success-installer-05-password-confirmation"
   press ret

@@ -419,8 +419,8 @@ class FinishRootImageTest(unittest.TestCase):
         for patch in (
             mock.patch.object(phases_impl, "_root_image_required_packages",
                               return_value=["limine", "omarchy-keyring", "omarchy"]),
-            mock.patch.object(phases_impl.arch, "target_has_package", create=True,
-                              side_effect=lambda target, pkg: pkg in self.packages),
+            mock.patch.object(phases_impl.arch, "target_package_names", create=True,
+                              side_effect=lambda target: self.packages),
             mock.patch.object(phases_impl.subprocess, "run",
                               side_effect=lambda cmd, **kw: self.calls.append(cmd)),
         ):

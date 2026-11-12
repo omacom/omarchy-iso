@@ -57,31 +57,90 @@ sleep() {
 }
 echo 0 >"$work/slept"
 
-# ---------------------------------------------- console login on the next VT
+# ------------------------------------------ the guest authorizes SSH itself
 #
-# bootstrap_ssh logs in on tty3, then tty4, then tty5. When the VT switches
-# before the password prompt shows, that attempt is lost, not the scenario.
+# A factory first boot gets the harness's key from systemd credentials on the
+# QEMU command line: a script, the unit that runs it, and a drop-in that
+# starts the unit. No console is typed into.
 
-take bootstrap_ssh
+take ssh_authorize_smbios
 BASE_DIR="$work/base"
 SSH_KEY="$work/id_ed25519"
 HTTP_PORT=2323
 GUEST_USER=omarchy GUEST_PASSWORD=omarchy
 echo "ssh-ed25519 AAAA test" >"$SSH_KEY.pub"
 mkdir -p "$work/bin"
-printf '#!/bin/sh\nexit 0\n' >"$work/bin/python3" # the bootstrap's HTTP server
+printf '#!/bin/sh\nexit 0\n' >"$work/bin/python3" # the live bootstrap's HTTP server
 chmod +x "$work/bin/python3"
 PATH="$work/bin:$PATH"
-ocr_screen() { echo "omarchy-test login:"; }
-# The first attempt's password prompt never shows; the second one's does.
-wait_for_screen() { [[ $(grep ctrl-alt-f "$work/pressed" | tail -n1) != ctrl-alt-f3 ]]; }
-wait_for_ssh() { true; }
 
-: >"$work/pressed"
-run bootstrap_ssh
-((status == 0)) || fail "a lost password prompt on tty3 ended the scenario: $(cat "$work/out")"
-grep -qx ctrl-alt-f4 "$work/pressed" || fail "the second attempt did not use tty4: $(paste -sd' ' "$work/pressed")"
-echo "ok - a console login whose password prompt never shows is retried on the next VT"
+mapfile -t smbios < <(ssh_authorize_smbios)
+((${#smbios[@]} == 6)) || fail "expected three -smbios pairs, got: ${smbios[*]}"
+# One credential, decoded.
+credential() {
+  local arg prefix="type=11,value=io.systemd.credential.binary:$1="
+  for arg in "${smbios[@]}"; do
+    [[ $arg == "$prefix"* ]] || continue
+    base64 -d <<<"${arg#"$prefix"}"
+    return
+  done
+  return 1
+}
+for ((i = 0; i < ${#smbios[@]}; i += 2)); do
+  [[ ${smbios[i]} == -smbios ]] || fail "argument $i is not -smbios: ${smbios[i]}"
+  # QEMU splits an option at each comma.
+  [[ ${smbios[i + 1]#type=11,value=} != *,* ]] || fail "a credential carries a comma: ${smbios[i + 1]}"
+done
+script=$(credential omarchy-test.authorize-ssh) || fail "no script credential"
+bash -n <<<"$script" || fail "the script credential is not valid shell"
+grep -qF "$(<"$SSH_KEY.pub")" <<<"$script" || fail "the script does not carry the harness's key"
+grep -q "id -u $GUEST_USER .*provisioning/pending" <<<"$script" ||
+  fail "the script does not wait for the owner and the end of provisioning"
+unit=$(credential systemd.extra-unit.omarchy-test-authorize-ssh.service) || fail "no unit credential"
+grep -qx 'ExecStart=/bin/bash %d/omarchy-test.authorize-ssh' <<<"$unit" || fail "the unit does not run the script: $unit"
+grep -qx 'ImportCredential=omarchy-test.authorize-ssh' <<<"$unit" || fail "the unit does not import the script: $unit"
+dropin=$(credential "systemd.unit-dropin.multi-user.target~omarchy-test") || fail "no drop-in credential"
+grep -qx 'Wants=omarchy-test-authorize-ssh.service' <<<"$dropin" || fail "nothing starts the unit: $dropin"
+echo "ok - the guest is given a unit that authorizes the harness's SSH key after provisioning"
+
+# The script itself, run as the guest would run it, against a guest's commands
+# that only record what they were asked: the owner appears on the third look,
+# and the script runs twice, as on the boot before a reset and the one after.
+guest="$work/guest"
+mkdir -p "$guest/bin"
+cat >"$guest/bin/id" <<EOF
+#!/bin/bash
+if [[ \$1 == -gn ]]; then echo staff; exit 0; fi
+echo x >>"$guest/looked"
+(( \$(wc -l <"$guest/looked") >= 3 ))
+EOF
+cat >"$guest/bin/getent" <<EOF
+#!/bin/bash
+echo "$GUEST_USER:x:1000:1000::$guest/home:/bin/bash"
+EOF
+cat >"$guest/bin/install" <<EOF
+#!/bin/bash
+echo "install \$*" >>"$guest/calls"
+mkdir -p "\${@: -1}" && chmod 700 "\${@: -1}"
+EOF
+for command in sleep chown ufw systemctl; do
+  printf '#!/bin/bash\necho "%s $*" >>"%s/calls"\n' "$command" "$guest" >"$guest/bin/$command"
+done
+chmod +x "$guest/bin"/*
+: >"$guest/calls"
+for boot in 1 2; do
+  PATH="$guest/bin:$PATH" bash -c "$script" >"$work/out" 2>&1 || fail "the guest's script failed on boot $boot: $(cat "$work/out")"
+done
+[[ $(grep -c '^sleep 1$' "$guest/calls") == 2 ]] || fail "the script did not wait for the owner: $(cat "$guest/calls")"
+[[ $(cat "$guest/home/.ssh/authorized_keys") == "$(<"$SSH_KEY.pub")" ]] ||
+  fail "two boots left authorized_keys as: $(cat "$guest/home/.ssh/authorized_keys")"
+[[ $(stat -c %a "$guest/home/.ssh") == 700 && $(stat -c %a "$guest/home/.ssh/authorized_keys") == 600 ]] ||
+  fail "the key is not private to the owner"
+grep -qx "install -d -m 700 -o $GUEST_USER -g staff $guest/home/.ssh" "$guest/calls" || fail "~/.ssh is not the owner's: $(cat "$guest/calls")"
+grep -qx "chown $GUEST_USER: $guest/home/.ssh/authorized_keys" "$guest/calls" || fail "the key file is not the owner's"
+grep -qx "ufw allow from 10.0.2.2 to any port 22 proto tcp" "$guest/calls" || fail "the firewall is not opened to the host"
+grep -qx "systemctl enable --now sshd.service" "$guest/calls" || fail "sshd is not started"
+echo "ok - the guest's script waits for the owner, installs the key once and opens SSH"
 
 # --------------------------------------- the install wait keeps to its budget
 #
@@ -156,6 +215,8 @@ echo "ok - type_text types @ and ~ on the keys of the layout being typed into"
 take bootstrap_live_root_ssh grub_menus_waiting
 FIRMWARE=uefi KB_LAYOUT=uk TYPE_LAYOUT=uk
 ocr_screen() { echo "archiso login:"; }
+wait_for_screen() { true; }
+wait_for_ssh() { true; }
 ssh_live_root() { true; }
 type_text() { echo "$TYPE_LAYOUT $1" >>"$work/typed"; }
 : >"$work/typed"

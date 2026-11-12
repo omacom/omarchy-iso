@@ -206,6 +206,7 @@ echo "ok - fake PCI devices stay up as long as their VM, and stop after it"
   picking=false selected=0 choice=""
   type_text() { :; }
   capture_console() { :; }
+  wait_for_screen_any() { SCREEN_MATCHED="Language"; }
   wait_for_screen() {
     case $1 in
       "installation mode") picking=true ;;

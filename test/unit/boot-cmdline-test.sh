@@ -32,17 +32,17 @@ cd "$ROOT"
 # chainloader: the Snapdragon entry boots a live UKI and hands it the cmdline.
 entries=$(grep -rhE '^\s*(APPEND|linux|options|chainloader)\s.*archisobasedir=' \
   configs/syslinux/archiso_sys-linux.cfg configs/syslinux/archiso_pxe-linux.cfg \
-  configs/grub/grub.cfg configs/grub/loopback.cfg configs/efiboot/loader/entries)
+  configs/grub/grub.cfg configs/grub/loopback.cfg)
 
 count=$(printf '%s\n' "$entries" | wc -l)
 [ "$count" -ge 9 ] || { echo "expected at least 9 boot entries, found $count"; exit 1; }
 
-if grep -rq archiso_http_srv configs/syslinux configs/grub configs/efiboot; then
+if grep -rq archiso_http_srv configs/syslinux configs/grub; then
   echo "HTTP PXE entry found: that path copies only the airootfs to RAM, so the root image is never on the medium and an install can never succeed"
   exit 1
 fi
 
-if grep -rqE '^[^#]*cms_verify' configs/syslinux configs/grub configs/efiboot; then
+if grep -rqE '^[^#]*cms_verify' configs/syslinux configs/grub; then
   echo "cms_verify found: the ISO is not codesigned, so any boot entry carrying it aborts into an emergency shell"
   exit 1
 fi
@@ -62,6 +62,26 @@ while IFS= read -r line; do
     fail=1
   fi
 done <<<"$entries"
+
+# An accessibility=on entry speaks through releng's livecd-talk service, which
+# runs releng's livecd-sound before it starts espeakup. profiledef.sh replaces
+# releng's file_permissions, so unless it names livecd-sound the script ships
+# without its execute bit and the screen reader never starts.
+if grep -rq 'accessibility=on' configs/syslinux configs/grub \
+  && ! grep -Fq '["/usr/local/bin/livecd-sound"]="0:0:755"' configs/profiledef.sh; then
+  echo "profiledef.sh drops livecd-sound's execute bit: the screen reader entries boot silent"
+  fail=1
+fi
+
+# speakup reads every line the console prints. Without quiet the kernel's audit
+# records scroll over the installer and are read out without a pause, and a
+# splash would hide the text it reads.
+while IFS= read -r line; do
+  if ! grep -qE '(^|[[:space:]])quiet([[:space:]]|$)' <<<"$line" || grep -qE '(^|[[:space:]])splash([[:space:]]|$)|%BOOT_SPLASH' <<<"$line"; then
+    echo "screen reader entry that is not quiet, or shows a splash: $line"
+    fail=1
+  fi
+done < <(grep -rhE '^\s*(APPEND|linux|chainloader)\s.*accessibility=on' configs/syslinux configs/grub)
 
 [ "$fail" -eq 0 ] && echo "ok: $count boot entries pin copytoram=n and initramfs_options=size=90%"
 exit "$fail"

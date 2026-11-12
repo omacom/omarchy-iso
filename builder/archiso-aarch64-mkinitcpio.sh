@@ -12,20 +12,30 @@ configure_archiso_aarch64_mkinitcpio() {
     hid_generic
     hid_multitouch
   )
-  # What a Snapdragon X1 laptop needs before its USB ports, keyboard and panel
-  # work, on a kernel that builds these as modules. Arch Linux ARM's kernel
-  # builds them in, and the ? skips one that a kernel does not have. The DSP
-  # driver stays out (see grub.cfg).
+  # What a Snapdragon X1 or X2 laptop needs before its USB ports, keyboard and
+  # panel work, on a kernel that builds these as modules. Arch Linux ARM's
+  # kernel builds them in, and the ? skips one that a kernel does not have. The
+  # DSP driver stays out (see grub.cfg).
   local -a snapdragon_platform_modules=(
     gcc-x1e80100? tcsrcc-x1e80100? dispcc-x1e80100? gpucc-x1e80100?
+    # The X2 (Glymur) chips. The Surface Laptop 8's panel also waits for the
+    # USB-C mux that thunderbolt registers.
+    gcc-glymur? tcsrcc-glymur? dispcc-glymur? gpucc-glymur?
+    pinctrl-glymur? qnoc-glymur? thunderbolt?
     pinctrl-x1e80100? qnoc-x1e80100? qcom-rpmh-regulator? fixed? spmi-pmic-arb?
     qcom-spmi-pmic? pinctrl-spmi-gpio? gpio-shared-proxy? reset-gpio?
     qcom_hwspinlock? smem? smp2p? socinfo? llcc-qcom? qcom_aoss? icc-bwmon?
     qcom-cpucp-mbox? nvmem_qfprom? nvmem_qcom-spmi-sdam? qcom-pon? rtc-pm8xxx?
     qcom_tsens? qcom-spmi-temp-alarm? i2c-qcom-geni? i2c-hid-of?
-    phy-qcom-qmp-pcie? phy-qcom-qmp-combo? phy-qcom-eusb2-repeater?
+    phy-qcom-qmp-pcie? phy-qcom-qmp-combo? phy-qcom-eusb2-repeater? phy-nxp-ptn3222?
+    phy-qcom-qmp-usb? phy-qcom-m31-eusb2?
     phy-snps-eusb2? phy-qcom-edp? dwc3-qcom? xhci-plat-hcd? ps883x? pmic_glink?
     pmic_glink_altmode? pci-pwrctrl-pwrseq? pwrseq-qcom-wcn?
+    # Boards without retimers (the X13s, the Zenbook 14 UX3480QA) switch their
+    # USB-C SBU lines with GPIO muxes. When the early start brings up UCSI,
+    # the Type-C ports and pmic_glink_altmode wait for them; without the
+    # driver, UCSI retries for 10 s, resetting the port controller each time.
+    gpio-sbu-mux?
   )
   local -i memdisk_count=0 microcode_count=0 plymouth_count=0
 
@@ -69,6 +79,9 @@ configure_archiso_aarch64_mkinitcpio() {
   # excluding memtest86+ makes mkinitcpio report an incomplete ARM64 image.
   # Plymouth stays: 26.134.222-2 aborted in the GB10 initramfs, but -3 runs
   # there.
+  # Last, so it runs after base, which adds the init_functions it quiets
+  # (builder/qualcomm/quiet-efivars-install).
+  filtered_hooks+=(omarchy_quiet_efivars)
   printf -v replacement 'HOOKS=(%s)' "${filtered_hooks[*]}"
   sed -i "s|^HOOKS=.*$|$replacement|" "$config"
 

@@ -4,10 +4,12 @@
 # is the only thing that can refuse a bad install medium before parted, wipefs,
 # luksFormat and mkfs have already run. The full-disk path has an integration
 # scenario for its gate (corrupt-image-test.sh, which autoinstalls from cidata
-# and so never reaches the configurator at all); this path has none, and
-# deleting its gate outright leaves ./test/all green. Assert the ordering
-# statically instead: whatever else moves, omarchy-wait-root-image-verify has
-# to run before run_partition_execute.
+# and so never reaches the configurator at all). The free-space path has one
+# too (bin/omarchy-iso-test --free-space, run by install-test.yml), but it
+# drives the wizard rather than the cidata autoinstall, and ./test/all does not
+# run it: deleting this gate outright leaves ./test/all green. Assert the
+# ordering statically here: whatever else moves, omarchy-wait-root-image-verify
+# has to run before run_partition_execute.
 
 set -euo pipefail
 

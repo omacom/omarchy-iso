@@ -396,9 +396,7 @@ wait_for_screen() {
 }
 
 # Wait until the console shows either text, and set SCREEN_MATCHED to the one
-# it found. The wizard opens on the language picker only when the live
-# system's omarchy package carries default/i18n/locales.json; a stable ISO has
-# no such file and opens on the keyboard layout instead.
+# it found.
 wait_for_screen_any() {
   local first="$1" second="$2" timeout="$3" waited=0 screen slug
 
@@ -688,9 +686,9 @@ verify_universal_clipboard_shortcuts() {
   local terminal_result="/tmp/omarchy-universal-terminal-paste"
 
   cleanup_shortcut_state
-  ssh_session "setsid -f chromium --new-window about:blank >/dev/null 2>&1"
-  if ! wait_for_guest_state "universal clipboard test opens Chromium" 45 \
-    ssh_session "hyprctl -j clients | jq -e '[.[] | select(.class | test(\"(?i)chromium\"))] | length == 1'"; then
+  ssh_session "setsid -f google-chrome-stable --new-window about:blank >/dev/null 2>&1"
+  if ! wait_for_guest_state "universal clipboard test opens Chrome" 45 \
+    ssh_session "hyprctl -j clients | jq -e '[.[] | select(.class | test(\"(?i)google-chrome\"))] | length == 1'"; then
     capture_console "failure-shortcut-universal-clipboard-browser"
     return 1
   fi
@@ -725,7 +723,7 @@ verify_universal_clipboard_shortcuts() {
   ssh_session 'while read -r address; do
     hyprctl dispatch "hl.dsp.window.close({ window = \"address:$address\" })" >/dev/null 2>&1 ||
       hyprctl dispatch closewindow "address:$address" >/dev/null 2>&1 || true
-  done < <(hyprctl -j clients | jq -r '\''.[] | select(.class | test("(?i)chromium")) | .address'\'')' || true
+  done < <(hyprctl -j clients | jq -r '\''.[] | select(.class | test("(?i)google-chrome")) | .address'\'')' || true
 
   ssh_session "rm -f '$terminal_result'; \
     setsid -f bash -c 'printf \"%s\" \"$terminal_token\" | wl-copy' >/dev/null 2>&1; \
@@ -891,12 +889,18 @@ drive_configurator() {
   capture_console "success-installer-03-username"
   press ret
 
-  wait_for_screen "Password" 60
+  # The live ISO's console font draws "w" as a "u" with a 1-px stem, and OCR
+  # reads this label as "Passuord" while gum's blinking cursor is off. Polls
+  # come about three blink cycles apart, so they can all land in that phase
+  # until the timeout. "user + root" in the placeholder reads in both phases.
+  wait_for_screen_any "Password" "user + root" 60
   type_text "$GUEST_PASSWORD"
   capture_console "success-installer-04-password"
   press ret
 
-  wait_for_screen "Must match" 60
+  # The same cursor, the other phase: while it covers the placeholder's first
+  # letter, OCR misreads "Must match"; "you just typed" reads either way.
+  wait_for_screen_any "Must match" "you just typed" 60
   type_text "$GUEST_PASSWORD"
   capture_console "success-installer-05-password-confirmation"
   press ret

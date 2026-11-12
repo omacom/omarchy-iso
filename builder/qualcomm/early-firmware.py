@@ -83,9 +83,18 @@ def firmware_inventory(dtbs):
 
 
 def main():
-    dtbs = [Path(line) for line in Path(sys.argv[1]).read_text().splitlines()]
+    # --required lists only what starting the firmware owner needs: the files
+    # the ISO stages on the medium (stage-medium-firmware.sh).
+    args = sys.argv[1:]
+    required_only = args[:1] == ['--required']
+    if required_only:
+        args = args[1:]
+    if len(args) != 1:
+        raise SystemExit('usage: early-firmware.py [--required] DTB-LIST')
+    dtbs = [Path(line) for line in Path(args[0]).read_text().splitlines()]
     inventory = firmware_inventory([path.read_bytes() for path in dtbs])
-    names = sorted({name for board in inventory for name in board['required'] + board['optional']})
+    names = sorted({name for board in inventory
+                    for name in board['required'] + ([] if required_only else board['optional'])})
     for name in names:
         if Path(name).is_absolute() or '..' in Path(name).parts or any(c in name for c in '*?[]\\\n\r'):
             raise RuntimeError('Unsafe device-tree firmware name: ' + repr(name))

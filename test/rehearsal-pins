@@ -1,0 +1,112 @@
+#!/bin/bash
+# Pins omarchy and omarchy-settings to quattro the way a release candidate is
+# pinned, for an ISO built as if quattro were released now.
+#
+#   test/rehearsal-pins <arch> <dir> [omarchy-commit] [omarchy-pkgs-commit]
+#
+# omarchy-release cuts a candidate with omarchy-pkgs' own pin engine
+# (bin/omarchy-pkgs release), in a checkout of omarchy-pkgs' master, against
+# the rc channel's database. This runs that engine the same way, on throwaway
+# clones in <dir>, and pushes nothing. It leaves the pinned PKGBUILDs in
+# <dir>/omarchy-pkgs and the pinned source in <dir>/omarchy, for
+#
+#   bin/omarchy-iso-make --local-source <dir>/omarchy <dir>/omarchy-pkgs --rehearsal
+#
+# The commits default to the tips of omarchy's quattro and omarchy-pkgs'
+# master. The version is the next candidate of the next feature release: the
+# next minor after the final that master pins, or the base of the candidate it
+# pins. The engine numbers the candidate past what the rc channel serves, and
+# refuses one that does not sort after it, as it does on release day.
+#
+# The engine needs makepkg, which refuses to run as root, so it runs in the
+# Arch container of the architecture as the caller's user. Needs Docker. Its
+# output goes to stderr; stdout gets one line naming what was pinned.
+
+set -euo pipefail
+
+arch=${1:-}
+dir=${2:-}
+omarchy_commit=${3:-}
+pkgs_commit=${4:-}
+if [[ ! $arch =~ ^(x86_64|aarch64)$ || -z $dir ]]; then
+  echo "Usage: test/rehearsal-pins <x86_64|aarch64> <dir> [omarchy-commit] [omarchy-pkgs-commit]" >&2
+  exit 1
+fi
+
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+omarchy_url=https://github.com/omacom/omarchy.git
+pkgs_url=https://github.com/omacom/omarchy-pkgs.git
+
+: "${omarchy_commit:=$(git ls-remote "$omarchy_url" refs/heads/quattro | cut -f1)}"
+: "${pkgs_commit:=$(git ls-remote "$pkgs_url" refs/heads/master | cut -f1)}"
+[[ $omarchy_commit =~ ^[0-9a-f]{40}$ ]] || { echo "rehearsal-pins: no omarchy commit ('$omarchy_commit')" >&2; exit 1; }
+[[ $pkgs_commit =~ ^[0-9a-f]{40}$ ]] || { echo "rehearsal-pins: no omarchy-pkgs commit ('$pkgs_commit')" >&2; exit 1; }
+
+mkdir -p "$dir"
+dir=$(realpath "$dir")
+rm -rf "$dir/omarchy-pkgs" "$dir/omarchy"
+
+git init --quiet "$dir/omarchy-pkgs"
+git -C "$dir/omarchy-pkgs" fetch --quiet --depth 1 "$pkgs_url" "$pkgs_commit"
+git -C "$dir/omarchy-pkgs" checkout --quiet FETCH_HEAD
+
+pkgver=$(sed -n 's/^pkgver=//p' "$dir/omarchy-pkgs/pkgbuilds/omarchy/PKGBUILD" | head -1)
+if [[ $pkgver =~ ^([0-9]+)\.([0-9]+)\.[0-9]+$ ]]; then
+  base="${BASH_REMATCH[1]}.$((BASH_REMATCH[2] + 1)).0"
+elif [[ $pkgver =~ ^([0-9]+\.[0-9]+\.[0-9]+)(alpha|beta|rc)[0-9]+$ ]]; then
+  base=${BASH_REMATCH[1]}
+else
+  echo "rehearsal-pins: cannot read a release version from omarchy's pkgver '$pkgver'" >&2
+  exit 1
+fi
+
+if [[ $arch == x86_64 ]]; then
+  image=ghcr.io/archlinux/archlinux:latest
+else
+  # One place names the image: the build.
+  image=$(sed -n 's/^ *CONTAINER_IMAGE=\(ghcr\.io\/menci\/archlinuxarm@sha256:[0-9a-f]*\)$/\1/p' "$here/bin/omarchy-iso-make")
+  : "${image:?bin/omarchy-iso-make names no Arch Linux ARM image}"
+fi
+
+docker=(docker)
+docker version >/dev/null 2>&1 || docker=(sudo docker)
+# shellcheck disable=SC2016 # the script expands inside the container
+"${docker[@]}" run --rm -v "$dir:/rehearsal" \
+  -e ARCH="$arch" -e BASE="$base" -e OMARCHY_COMMIT="$omarchy_commit" -e HOST_UID="$(id -u)" \
+  "$image" bash -euo pipefail -c '
+    if [[ $ARCH == aarch64 ]]; then
+      # As test/arm64-container: Arch Linux ARM from our mirror, and no
+      # Landlock fence on a runner kernel without it.
+      sed -i "/^\[options\]/a DisableSandboxFilesystem" /etc/pacman.conf
+      echo "Server = https://arm-mirror.omarchy.org/\$arch/\$repo" >/etc/pacman.d/mirrorlist
+      pacman-key --init >/dev/null 2>&1 && pacman-key --populate archlinuxarm >/dev/null 2>&1
+    else
+      if ! grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then
+        printf "#!/bin/sh\nexec /usr/bin/pacman --disable-sandbox \"\$@\"\n" >/usr/local/bin/pacman
+        chmod 0755 /usr/local/bin/pacman
+      fi
+      sed -i "1i Server = https://mirror.omarchy.org/\$repo/os/\$arch" /etc/pacman.d/mirrorlist
+    fi
+    for attempt in 1 2 3; do
+      pacman -Syu --noconfirm --needed git >/dev/null && break
+      [ "$attempt" -lt 3 ] || { echo "rehearsal-pins: could not install git" >&2; exit 1; }
+      sleep 15
+    done
+    useradd -m -u "$HOST_UID" rehearsal
+    setpriv --reuid=rehearsal --regid="$(id -g rehearsal)" --init-groups \
+      env HOME=/home/rehearsal \
+      GIT_AUTHOR_NAME="Release rehearsal" GIT_AUTHOR_EMAIL=rehearsal@localhost \
+      GIT_COMMITTER_NAME="Release rehearsal" GIT_COMMITTER_EMAIL=rehearsal@localhost \
+      OMARCHY_EDGE_DB_URL="https://pkgs.omarchy.org/rc/$ARCH/omarchy.db.tar.zst" \
+      OMARCHY_RELEASE_CHANNELS="none, a rehearsal" \
+      bash -euo pipefail -c "
+        cd /rehearsal/omarchy-pkgs
+        bin/omarchy-pkgs release rc --base \"\$BASE\" --commit \"\$OMARCHY_COMMIT\" --no-push --yes
+        git clone --quiet --no-checkout .srcdest/omarchy /rehearsal/omarchy
+        git -C /rehearsal/omarchy checkout --quiet \"\$OMARCHY_COMMIT\"
+      "
+  ' >&2
+
+pinned() { sed -n "s/^$1=//p" "$dir/omarchy-pkgs/pkgbuilds/omarchy/PKGBUILD" | head -1 | tr -d "'\""; }
+[[ $(pinned _commit) == "$omarchy_commit" ]] || { echo "rehearsal-pins: omarchy is pinned to '$(pinned _commit)', not $omarchy_commit" >&2; exit 1; }
+echo "Rehearsal: omarchy $(pinned pkgver)-$(pinned pkgrel) from omarchy ${omarchy_commit:0:12} (quattro) and omarchy-pkgs ${pkgs_commit:0:12} (master), $arch"

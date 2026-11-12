@@ -73,7 +73,7 @@
   "progress.tip.menu": "Super + Space otvara Omarchy izbornik s aplikacijama, postavkama i više",
   "progress.tip.keybindings": "Super + K prikazuje sve tipkovničke prečace",
   "progress.tip.superKey": "Super je tipka Windows ili Command na vašoj tipkovnici",
-  "progress.tip.signPdfs": "PDF datoteke potpišite u Xournal++",
+  "progress.tip.signPdfs": "PDF datoteke potpišite u aplikaciji Signed",
   "progress.tip.localSend": "Dijelite datoteke s mobitelima i laptopima putem LocalSend",
   "progress.tip.webApps": "Web stranicu pretvorite u aplikaciju: Instaliraj > Web-aplikacija",
   "progress.tip.terminal": "Super + Return otvara terminal, Super + Shift + Return preglednik",

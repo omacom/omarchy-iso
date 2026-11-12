@@ -23,14 +23,44 @@ iso=$(realpath "$1")
 out=$(realpath -m "$2")
 [[ -f $iso ]] || { echo "No such ISO: $iso" >&2; exit 1; }
 
+# Ventoy2Disk.sh stops without parted and retries mkfs.vfat for 20 s without
+# it, and says so only on the output this script hides. Omarchy ships no
+# parted, so name what is missing before anything starts.
+missing=()
+command -v parted >/dev/null || missing+=(parted)
+command -v mkfs.vfat >/dev/null || missing+=(dosfstools)
+command -v fuser >/dev/null || missing+=(psmisc)
+if ((${#missing[@]})); then
+  echo "Making a Ventoy stick needs these packages: ${missing[*]}" >&2
+  exit 1
+fi
+
 sudo=()
 ((EUID == 0)) || sudo=(sudo -n)
 
 work=$(mktemp -d)
 loop=""
+
+# Ventoy2Disk.sh adds the stick's partitions with partprobe and partx, which a
+# loop device attached without -P keeps after it is detached. It also makes
+# their nodes with mknod when they are slow to appear, and devtmpfs never
+# replaces or removes those. Either way a stale node can name another disk: on
+# a CI runner, p1 opened a btrfs volume. So the partitions and their nodes go
+# with the device, on every exit, and nothing here opens a partition node.
+release_loop() {
+  local name=${loop#/dev/} part
+  if compgen -G "/sys/class/block/$name/${name}p*" >/dev/null; then
+    "${sudo[@]}" partx -d "$loop"
+  fi
+  "${sudo[@]}" losetup -d "$loop"
+  for part in "${loop}p1" "${loop}p2"; do
+    [[ -e /sys/class/block/${part#/dev/} ]] || "${sudo[@]}" rm -f "$part"
+  done
+  loop=""
+}
 cleanup() {
   [[ -d $work/mnt ]] && "${sudo[@]}" umount "$work/mnt" 2>/dev/null || true
-  [[ -n $loop ]] && "${sudo[@]}" losetup -d "$loop" || true
+  [[ -n $loop ]] && release_loop || true
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -47,20 +77,9 @@ truncate -s $(($(stat -c %s "$iso") + (1 << 30))) "$out"
 loop=$("${sudo[@]}" losetup --show -f "$out")
 # GPT (-g), as UEFI machines are set up; Ventoy asks twice before it writes.
 (cd "$work/ventoy-$VENTOY_VERSION" && printf 'y\ny\n' | "${sudo[@]}" sh ./Ventoy2Disk.sh -I -g "$loop" >/dev/null)
+release_loop
 
-# Nothing below opens /dev/loopNp1 or p2. Ventoy2Disk.sh adds those
-# partitions with partprobe and partx, which a loop device attached without
-# -P keeps after it is detached, and it makes their nodes with mknod when
-# they are slow to appear, which devtmpfs never replaces or removes. Either
-# way a stale node can name another disk: on a CI runner, p1 opened a btrfs
-# volume. So the partitions and their nodes go with the device, and each
-# partition is found by its offset in the image.
-"${sudo[@]}" partx -d "$loop"
-"${sudo[@]}" losetup -d "$loop"
-for part in "${loop}p1" "${loop}p2"; do
-  [[ -e /sys/class/block/${part#/dev/} ]] || "${sudo[@]}" rm -f "$part"
-done
-loop=""
+# Each partition is found by its offset in the image.
 read -r p1_start p1_sectors < <(partx -g -o START,SECTORS -n 1 "$out")
 read -r p2_start < <(partx -g -o START -n 2 "$out")
 
@@ -107,7 +126,6 @@ if "${sudo[@]}" fuser -s "$loop"; then
   echo "The exFAT driver still holds $loop after 60 s" >&2
   exit 1
 fi
-"${sudo[@]}" losetup -d "$loop"
-loop=""
+release_loop
 sync
 echo "Ventoy $VENTOY_VERSION stick with ${iso##*/}: $out"

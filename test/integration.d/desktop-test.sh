@@ -73,11 +73,21 @@ guest_layer_absent() {
   ! guest_layer_present "$1"
 }
 
-cleanup_shortcut_state() {
+# Close every shortcut surface, so one left open by a failed check cannot hold
+# the keyboard for the checks after it. The dock's app picker has no hide
+# command; its apps command toggles it.
+close_shortcut_surfaces() {
   ssh_session 'for plugin in omarchy.menu omarchy.emojis omarchy.clipboard omarchy.audio; do
     omarchy-shell shell hide "$plugin" >/dev/null 2>&1 || true
   done
-  while read -r address; do
+  if hyprctl -j layers | jq -e '\''[.. | objects | select(.namespace? == "omarchy-dock-apps")] | length > 0'\'' >/dev/null; then
+    omarchy-shell omarchy.dock apps >/dev/null 2>&1 || true
+  fi' >/dev/null 2>&1 || true
+}
+
+cleanup_shortcut_state() {
+  close_shortcut_surfaces
+  ssh_session 'while read -r address; do
     hyprctl dispatch "hl.dsp.window.close({ window = \"address:$address\" })" >/dev/null 2>&1 ||
       hyprctl dispatch closewindow "address:$address" >/dev/null 2>&1 || true
   done < <(hyprctl -j clients | jq -r '\''.[] | select(.class == "foot") | .address'\'')
@@ -85,12 +95,12 @@ cleanup_shortcut_state() {
 }
 
 verify_surface_shortcut() {
-  local name="$1" chord="$2" namespace="$3" plugin="$4"
+  local name="$1" chord="$2" namespace="$3"
 
   press "$chord"
   if ! wait_for_guest_state "$name shortcut opens" 15 guest_layer_present "$namespace"; then
     capture_console "failure-shortcut-$name-open"
-    ssh_session "omarchy-shell shell hide '$plugin' >/dev/null 2>&1 || true" || true
+    close_shortcut_surfaces
     return 1
   fi
   capture_console "success-shortcut-$name"
@@ -98,7 +108,7 @@ verify_surface_shortcut() {
   press esc
   if ! wait_for_guest_state "$name shortcut surface closes" 15 guest_layer_absent "$namespace"; then
     capture_console "failure-shortcut-$name-close"
-    ssh_session "omarchy-shell shell hide '$plugin' >/dev/null 2>&1 || true" || true
+    close_shortcut_surfaces
     return 1
   fi
 }
@@ -249,16 +259,21 @@ verify_universal_clipboard_shortcuts() {
 shortcut_smoke_phase() {
   log "Exercising primary desktop shortcuts through the VM keyboard"
 
-  local name chord namespace plugin
-  local shortcuts='menu|meta_l-spc|omarchy-menu|omarchy.menu
-apps-menu|meta_l-alt-spc|omarchy-menu|omarchy.menu
-emojis|meta_l-ctrl-e|omarchy-emojis|omarchy.emojis
-clipboard|meta_l-ctrl-v|omarchy-clipboard|omarchy.clipboard
-audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel|omarchy.audio'
+  local name chord namespace apps_namespace=omarchy-menu
+  # Super+Alt+Space opens the dock's app picker since omacom/omarchy#15263
+  # and the menu before it. Expect whichever the installed Omarchy binds.
+  if ssh_session "grep -q 'omarchy.dock apps' /usr/share/omarchy/default/hypr/bindings/utilities.lua"; then
+    apps_namespace=omarchy-dock-apps
+  fi
+  local shortcuts="menu|meta_l-spc|omarchy-menu
+apps|meta_l-alt-spc|$apps_namespace
+emojis|meta_l-ctrl-e|omarchy-emojis
+clipboard|meta_l-ctrl-v|omarchy-clipboard
+audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel"
 
   cleanup_shortcut_state
-  while IFS='|' read -r name chord namespace plugin; do
-    verify_surface_shortcut "$name" "$chord" "$namespace" "$plugin" || true
+  while IFS='|' read -r name chord namespace; do
+    verify_surface_shortcut "$name" "$chord" "$namespace" || true
   done <<<"$shortcuts"
 
   verify_desktop_shortcuts || true
@@ -310,6 +325,23 @@ login_ready() {
 
 session_unlocked() { ! ssh_guest "pgrep -x hyprlock" >/dev/null 2>&1; }
 
+# The first login's setup, omarchy-provision-first-run, runs beside the
+# session's first seconds, and its Superwhisper step (omacom/omarchy#17286)
+# has the shell reload its plugins: the menu and every panel close, an open
+# still loading is dropped, and the wallpaper is gone until they are back.
+# Super+Space pressed then opened nothing in about a third of the runs. The
+# desktop has settled once that setup is gone and the menu answers again.
+# Hyprland starts the setup with the shell, so it is still running when the
+# menu first answers; asked together, the two cannot pass before it starts.
+# The check's own shell must not spell the name out whole, or pgrep -f finds
+# it: hence the [o] and the split quoting. A renamed setup command fails the
+# wait instead of quietly letting the flake back in.
+desktop_settled() {
+  ssh_session 'command -v "omarchy-provision-first-"run >/dev/null &&
+    ! pgrep -f "[o]marchy-provision-first-run" >/dev/null &&
+    [[ $(omarchy-shell shell call omarchy.menu ping "") == ok ]]'
+}
+
 # Ground truth for when a wait above times out: what is actually running, who is
 # logged in, and where the Wayland/Hypr sockets live. Lands in the artifact.
 diagnose_login() {
@@ -345,6 +377,14 @@ reach_desktop() {
     return 1
   fi
   wait_for_guest_state "the session unlocks for the owner" 30 session_unlocked || return 1
+  if ! wait_for_guest_state "the desktop settles after the first login's setup" 120 desktop_settled; then
+    capture_console "failure-desktop-settle"
+    ssh_guest "cat ~/.local/state/omarchy/first-run.log" >"$RUN_DIR/first-run.txt" 2>&1 || true
+    ssh_session 'pgrep -af "[o]marchy-provision-first-run"; omarchy-shell shell call omarchy.menu ping ""' \
+      >"$RUN_DIR/desktop-settle.txt" 2>&1 || true
+    ssh_sudo 'journalctl -b -t omarchy-shell --no-pager' >>"$RUN_DIR/desktop-settle.txt" 2>&1 || true
+    return 1
+  fi
   capture_console "success-desktop-01-session"
 }
 

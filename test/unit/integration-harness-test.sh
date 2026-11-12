@@ -302,7 +302,7 @@ echo "ok - the live root bootstrap boots GRUB's entry when its countdown stopped
 SERIAL_LOG="$work/serial.log"
 grub_serial() {
   printf '%s\r\n' 'BdsDxe: starting Boot0002 "UEFI QEMU DVD-ROM QM00011 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x5,0xFFFF,0x0)' \
-    'GNU GRUB  version 2:2.16-1' '*Install Omarchy (x86_64, x64 UEFI)' ' Try Omarchy (x86_64, x64 UEFI)' \
+    'GNU GRUB  version 2:2.16-1' '*Install' ' Just try' \
     '   The highlighted entry will be executed automatically in 3s.' '   The highlighted entry will be executed automatically in 2s.' \
     '   The highlighted entry will be executed automatically in 1s.' "$@" >"$SERIAL_LOG"
 }
@@ -313,7 +313,7 @@ grub_serial
 count="$work/ocr-count"
 ocr_screen() {
   if ! grep -qx ret "$work/pressed"; then
-    printf '%s\n' "GHU GRUE wersion 2:2016-1" "Try Omarchy (286 64, =64 UEFL"
+    printf '%s\n' "GHU GRUE wersion 2:2016-1" "Just tny"
     return
   fi
   local n=$(($(cat "$count" 2>/dev/null || echo 0) + 1))
@@ -351,7 +351,7 @@ ocr_screen() {
 }
 for case in booted hidden; do
   if [[ $case == booted ]]; then
-    grub_serial "Booting \`Install Omarchy (x86_64, x64 UEFI)'"
+    grub_serial "Booting \`Install'"
   else
     printf '%s\r\n' 'BdsDxe: starting Boot0002 "UEFI QEMU DVD-ROM QM00011 "' >"$SERIAL_LOG"
   fi

@@ -2,7 +2,7 @@
 
 # The N1x recovery entry boots the hardware probe that only an aarch64 image
 # can run, so it stays in that image's menu and leaves the x86_64 one. The
-# x86_64 menu shows for 3 s, for Try Omarchy.
+# x86_64 menu shows for 3 s, for Just try.
 #
 # Only an x86_64 image picks its live kernel at boot: linux-t2 on a Mac,
 # %KERNEL% everywhere else. An aarch64 image has no linux-t2, so it drops that
@@ -26,7 +26,7 @@ configure_grub_platform() {
         "$config"
       ;;
     *)
-      # x86_64 has a Try Omarchy entry, so its menu shows for 3 s; left alone
+      # x86_64 has a Just try entry, so its menu shows for 3 s; left alone
       # it installs, as on every other platform.
       sed -i \
         -e '/^%N1X_ONLY_BEGIN%$/,/^%N1X_ONLY_END%$/d' \

@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Build the Try layer: what turns the root image into a live Omarchy session
-# when the ISO's "Try Omarchy" entry boots it (configs/airootfs/etc/initcpio/
+# when the ISO's "Just try" entry boots it (configs/airootfs/etc/initcpio/
 # hooks/omarchy_try). The image itself stays exactly the bytes an install
 # writes; this layer goes on top of it, read-only, under a tmpfs.
 #
@@ -212,7 +212,7 @@ install -Dm755 /dev/stdin "$merged/usr/local/bin/omarchy-try-install" <<'EOF'
 #!/bin/bash
 # Try Omarchy runs from the stick. Installing is the other entry of its boot
 # menu; offer the reboot that gets there.
-if gum confirm "Omarchy installs from the boot menu: restart now and pick \"Install Omarchy\"?"; then
+if gum confirm "Omarchy installs from the boot menu: restart now and pick \"Install\"?"; then
   systemctl reboot
 fi
 EOF

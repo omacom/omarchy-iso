@@ -17,7 +17,7 @@ set -euo pipefail
 # failed, and an install (an unattended one, with a cidata drive present) is the
 # last thing the person who picked Try wants.
 if grep -qw 'omarchy.try=1' /proc/cmdline; then
-  echo "Try Omarchy could not start, so nothing is installed. Reboot and pick Install Omarchy to install."
+  echo "Try Omarchy could not start, so nothing is installed. Reboot and pick Install to install."
   exit 0
 fi
 

@@ -16,11 +16,14 @@ if [[ ${VARIANT:-default} != default ]]; then
   exit 0
 fi
 
-# GRUB waits 3 s; wait_for_screen polls every 3 s and can miss it.
+# GRUB waits 3 s; wait_for_screen polls every 3 s and can miss it, and OCR
+# misreads its menu. GRUB draws the menu on the serial console too, with each
+# entry's title as it is written.
 pick_try() {
   local tries=0
-  until ocr_screen_once | grep -q "Try Omarchy"; do
-    vm_running && ((tries++ < 600)) || return 1
+  until grep -aq "Just try" "$SERIAL_LOG" 2>/dev/null; do
+    vm_running && ((tries++ < 1200)) || return 1
+    sleep 0.1
   done
   press down
   capture_console "success-try-menu"
@@ -60,11 +63,11 @@ if [[ $FIRMWARE == uefi ]]; then
   ACTIVE_OVMF="$RUN_DIR/OVMF_VARS.4m.fd"
 fi
 
-log "Booting the ISO alone and picking Try Omarchy"
+log "Booting the ISO alone and picking Just try"
 start_vm "$disk" "$RUN_DIR/serial.log" \
   -drive "file=$ISO,media=cdrom,if=none,format=raw,id=cdrom0" \
   -device ide-cd,drive=cdrom0,bootindex=2
-check "GRUB offers Try Omarchy within its countdown" pick_try
+check "GRUB offers Just try within its countdown" pick_try
 check "Try Omarchy reaches the desktop" wait_for_desktop
 capture_console "success-try-desktop"
 

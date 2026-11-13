@@ -2482,6 +2482,70 @@ def stage_provisioning_state(ctx: InstallContext) -> None:
     if _provision_install_encrypted(ctx):
         _stage_provisioning_luks_unlock(ctx, provisioning_dir)
 
+    _stage_oem_bundle(ctx)
+
+
+# An OEM's bundle, checked when the ISO was built (builder/oem-bundle.py). What
+# first-boot setup shows the owner goes to /etc/omarchy/oem, where the
+# runtime's install/provisioning/oem.sh reads it; the scripts run as root in
+# the new system. Both land before the factory snapshot, so a factory reset
+# returns to the machine as the OEM set it up, agreement included.
+OEM_TARGET_DIR = "etc/omarchy/oem"
+OEM_SETUP_FILES = ("oem.json", "logo.txt", "eula.txt")
+OEM_SCRIPTS_TARGET_DIR = "var/lib/omarchy/oem-setup"
+
+
+def _stage_oem_bundle(ctx: InstallContext) -> None:
+    if ctx.oem_dir is None or not (ctx.oem_dir / "oem.json").is_file():
+        return
+
+    runtime = ctx.target / "usr/share/omarchy/install/provisioning/oem.sh"
+    if not runtime.exists():
+        raise RuntimeError(
+            "this ISO carries an OEM's branding and agreement, but the installed Omarchy runtime "
+            "does not ship install/provisioning/oem.sh to show them at first boot. "
+            "Update the runtime package this ISO bundles."
+        )
+
+    info("› laying down the OEM's branding and agreement for first-boot setup")
+    oem_target = ctx.target / OEM_TARGET_DIR
+    # This bundle and nothing else: a logo or an agreement it does not have
+    # must not come from whatever was there.
+    shutil.rmtree(oem_target, ignore_errors=True)
+    oem_target.mkdir(parents=True)
+    oem_target.chmod(0o755)
+    for name in OEM_SETUP_FILES:
+        source = ctx.oem_dir / name
+        if source.is_file():
+            shutil.copyfile(source, oem_target / name)
+            (oem_target / name).chmod(0o644)
+
+
+def oem_scripts(ctx: InstallContext) -> list[Path]:
+    if ctx.oem_dir is None:
+        return []
+    return sorted(path for path in (ctx.oem_dir / "scripts").glob("*") if path.is_file())
+
+
+def run_oem_setup(ctx: InstallContext) -> None:
+    # A script may install packages, which reads the keyring the unit writes.
+    _join_target_keyring_init(ctx)
+
+    staged = ctx.target / OEM_SCRIPTS_TARGET_DIR
+    shutil.rmtree(staged, ignore_errors=True)
+    staged.mkdir(parents=True)
+    staged.chmod(0o700)
+    try:
+        for script in oem_scripts(ctx):
+            info(f"› OEM setup: {script.name}")
+            shutil.copyfile(script, staged / script.name)
+            try:
+                _run_target_setup_command(ctx, ["/bin/bash", f"/{OEM_SCRIPTS_TARGET_DIR}/{script.name}"])
+            except subprocess.CalledProcessError as exc:
+                raise RuntimeError(f"OEM setup script {script.name} exited with status {exc.returncode}") from exc
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
+
 
 # build-iso.sh bundles the build for the CPU the ISO runs on, and only for a
 # runtime whose setup unpacks it; with none bundled there is nothing to keep.
@@ -3593,6 +3657,13 @@ def _validate_provisioning_state(ctx: InstallContext) -> None:
     provisioning_dir = ctx.target / PROVISION_STATE_DIR
     if not (provisioning_dir / "pending").exists():
         raise RuntimeError(f"deferred-provisioning install but {provisioning_dir / 'pending'} is missing")
+
+    # Checked after the OEM's scripts ran: a machine must not ship without the
+    # agreement its ISO carries.
+    if ctx.oem_dir is not None and (ctx.oem_dir / "oem.json").is_file():
+        for name in OEM_SETUP_FILES:
+            if (ctx.oem_dir / name).is_file() and not (ctx.target / OEM_TARGET_DIR / name).is_file():
+                raise RuntimeError(f"OEM install but {ctx.target / OEM_TARGET_DIR / name} is missing")
 
     link = ctx.target / "etc/systemd/system/multi-user.target.wants/omarchy-provision-owner.service"
     if not link.is_symlink():

@@ -224,6 +224,57 @@ Booting this ISO immediately erases and installs onto the sole eligible internal
 
 An eligible disk is writable, unmounted, neither removable nor hotplug, not connected by USB or FireWire, and at least 32 GiB. Mounted descendants, including the boot medium and active swap, exclude the entire disk. If zero or multiple eligible disks exist, installation stops without changing any disk; disconnect extra internal disks before trying again. Existing unmounted partitions on the selected disk are erased. Configure firmware to boot the internal disk before the installation medium so the completed machine boots into owner setup instead of reinstalling from the OEM ISO.
 
+### The OEM's branding, agreement and setup scripts
+
+An OEM ISO can carry what its maker wants the machine's owner to see at first boot, and scripts for the factory install to run:
+
+```bash
+./bin/omarchy-iso-make --oem --edge --keep-pkg-cache --no-boot-offer \
+  --oem-config acme/oem.json \
+  --oem-script acme/support-info.sh --oem-script acme/owner-defaults.sh
+```
+
+`--oem-config` takes a JSON file. Only `name` is required, and paths are relative to the file:
+
+```json
+{
+  "name": "Acme Computers",
+  "logo": "logo.txt",
+  "tagline": "Acme Book 14, powered by Omarchy",
+  "color": "#ff9e64",
+  "eula": {
+    "title": "Acme Computers License Agreement",
+    "file": "eula.txt"
+  }
+}
+```
+
+| Key | What first-boot setup does with it |
+| --- | --- |
+| `name` | Names the OEM: in the title of an agreement that has none of its own, and in the record of its acceptance. |
+| `logo` | A text file, drawn in place of the Omarchy logo on setup's opening screen and on the agreement. The steps between keep Omarchy's. |
+| `tagline` | One line under the logo on setup's opening screen, in place of Omarchy's. |
+| `color` | That logo's colour, as `#RRGGBB`. Omarchy's green without it. |
+| `eula.file` | The agreement's text. With it, accepting the agreement is setup's last question. |
+| `eula.title` | The heading the agreement is shown under. |
+
+First-boot setup runs on the Linux console, before there is a desktop: text in a 512-glyph font and sixteen colours. So a logo is text art, not an SVG or a PNG: at most 81 columns by 12 rows, drawn with ASCII, the characters `▀ ▄ █ ░ ▒ ▓ ─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼` (the Omarchy logo uses the first three), or braille dots (`⠁` to `⣿`), which give four times the detail. `chafa` draws an image either way; add `--invert` for dark artwork on a light or transparent background:
+
+```bash
+chafa --format symbols --symbols braille --colors none --size 81x12 logo.svg >logo.txt             # dots
+chafa --format symbols --symbols vhalf+solid+space --colors none --size 81x12 logo.svg >logo.txt   # blocks
+```
+
+The console font has no braille. Setup draws the dot patterns a logo uses into the font while a screen that shows the logo is up, in glyphs that neither the logo nor that screen's text needs, so a logo takes at most 128 different patterns, and they and the characters beyond ASCII in the bundle's text come to at most 256.
+
+The agreement is UTF-8 text in what that font has: Latin, Greek and Cyrillic, with their punctuation. Setup wraps it to its column. `builder/oem-bundle.py` checks the whole bundle before the build starts and names the first thing the console could not draw, so a mistake stops the build and not a machine's first boot.
+
+The agreement comes after the owner has reviewed their account and before anything is created. It scrolls with the arrow, Page Up, Page Down, Home and End keys, with Accept in focus. Declining offers to shut the machine down, with going back to the agreement in focus; a machine whose owner declines is left as it was shipped, and asks again at its next boot. Accepting records the OEM's name, the SHA-256 of the text, the account and the time in `/var/lib/omarchy/oem/eula-accepted.json`. Showing all of it needs a runtime with `install/provisioning/oem.sh`; the install stops if the one this ISO bundles lacks it.
+
+Each `--oem-script` is a bash script the install runs once, as root, in the new system (a chroot, with no services running), in the order given. They run after Omarchy has configured the system and built its boot files, and before the boot checks and the factory snapshot, so a factory reset returns to the machine as they left it. A script that exits non-zero fails the install, at the factory. The system's pacman is by then set to its online repositories, so a script can install packages only where the factory has a network.
+
+`test/unit/fixtures/oem/` is a complete bundle.
+
 ## Translations
 
 The configurator asks for a language first, on the screen that carries the intro and the hidden Ctrl+C entry into preparing the machine for another owner. It offers every language in Omarchy's registry (`default/i18n/locales.json` in the settings package). A language with a catalog in `configs/airootfs/usr/share/omarchy-iso/i18n/` also translates the installer. The others are listed by their English name, the installer stays in English, and the language still goes to the installed system as `/etc/omarchy/language`. The keyboard list then preselects the language's layout from `language-defaults.json`. The timezone list preselects the network's guess, and when that fails, the capital of the language's country from the same file. English, Arabic, Swahili and Tamil have no single home country, so they fall back to the plain timezone search.

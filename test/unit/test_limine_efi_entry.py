@@ -523,6 +523,58 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
                 phases_impl._validate_uefi_boot_routes(esp, loader=LOADER, fallback_is_ours=False)
         self.assertIn("cannot be read", str(caught.exception))
 
+    def test_registering_says_whether_an_entry_boots_this_install(self):
+        self.nvram_with({}, [])
+        self.assertTrue(phases_impl._register_limine_efi_entry(Path("/dev/nvme1n1"), 3, LOADER))
+        with mock.patch.dict(os.environ, {"FAKE_REFUSE_CREATE": "1"}), \
+                mock.patch.object(phases_impl, "_warn_boot_entry_refused", lambda reason: None):
+            self.nvram_with({}, [])
+            self.assertFalse(phases_impl._register_limine_efi_entry(Path("/dev/nvme1n1"), 3, LOADER))
+
+    def install(self, *, protected=False, boot=None):
+        """_install_limine_efi into a scratch target: the skip-UEFI drop-in it
+        leaves for limine-install, or None."""
+        target = self.tmp / "target"
+        limine = target / "usr/share/limine"
+        limine.mkdir(parents=True, exist_ok=True)
+        (limine / f"BOOT{phases_impl._efi_arch_suffix()}.EFI").write_bytes(b"limine")
+        ctx = types.SimpleNamespace(target=target, is_protected=protected,
+                                    omarchy_install={"boot": boot or {}})
+        with mock.patch.object(phases_impl, "_warn_boot_entry_refused", lambda reason: None), \
+                mock.patch.object(phases_impl, "info", lambda *_: None):
+            phases_impl._install_limine_efi(ctx, esp_mount="/boot", disk=Path("/dev/nvme1n1"), part=3)
+        conf = target / "etc/limine-entry-tool.d" / phases_impl.LIMINE_SKIP_UEFI_CONF
+        return conf.read_text() if conf.exists() else None
+
+    def test_a_refused_entry_is_not_retried_on_limine_upgrades(self):
+        self.nvram_with({}, [])
+        with mock.patch.dict(os.environ, {"FAKE_REFUSE_CREATE": "1"}):
+            self.assertIn("SKIP_UEFI=yes", self.install())
+
+    def test_a_store_that_cannot_be_read_is_not_retried_either(self):
+        # efi=noruntime, or firmware that faulted and had runtime services
+        # turned off: an Acer Switch 3 (Insyde BIOS V1.14) faults in a
+        # variable-store query, and every later efibootmgr write fails.
+        self.nvram_with({}, [])
+        with mock.patch.dict(os.environ, {"FAKE_NO_EFIVARS": "1"}):
+            self.assertIn("SKIP_UEFI=yes", self.install())
+
+    def test_a_registered_entry_leaves_limine_install_as_it_is(self):
+        self.nvram_with({}, [])
+        self.assertIsNone(self.install())
+
+    def test_a_pre_mounted_target_keeps_another_oses_removable_loader(self):
+        # SKIP_UEFI makes limine-install write EFI/BOOT/BOOTX64.EFI, which on a
+        # pre-mounted target's ESP may be another OS's loader.
+        self.nvram_with({}, [])
+        with mock.patch.dict(os.environ, {"FAKE_REFUSE_CREATE": "1"}):
+            self.assertIsNone(self.install(protected=True))
+
+    def test_a_protected_install_on_its_own_esp_is_not_retried(self):
+        self.nvram_with({}, [])
+        with mock.patch.dict(os.environ, {"FAKE_REFUSE_CREATE": "1"}):
+            self.assertIn("SKIP_UEFI=yes", self.install(protected=True, boot={"enable_fallback": True}))
+
 
 if __name__ == "__main__":
     unittest.main()

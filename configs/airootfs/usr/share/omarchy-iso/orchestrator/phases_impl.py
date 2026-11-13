@@ -1419,7 +1419,14 @@ def _install_limine_efi(
     hook_command = f"/usr/bin/cp /usr/share/limine/{source_name} {target_path}"
     _write_limine_pacman_hook(ctx.target, hook_command)
 
-    _register_limine_efi_entry(disk, part, _limine_efi_loader(esp_path, efi_binary), pre_state=pre_state)
+    registered = _register_limine_efi_entry(
+        disk, part, _limine_efi_loader(esp_path, efi_binary), pre_state=pre_state
+    )
+    # SKIP_UEFI also makes limine-install write EFI/BOOT/BOOT<arch>.EFI, so it
+    # is only for an install that boots from that loader already, never one
+    # whose ESP, and removable loader, belong to another OS.
+    if not registered and (removable or _boot_intent(ctx).get("enable_fallback")):
+        _skip_uefi_registration_on_upgrades(ctx.target)
 
 
 def _limine_efi_loader(esp_path: str, efi_binary: str) -> str:
@@ -1434,7 +1441,10 @@ def _register_limine_efi_entry(
     loader: str,
     *,
     pre_state: dict | None = None,
-) -> None:
+) -> bool:
+    """Register this install's "Limine" boot entry. True when an entry boots
+    it (created, or an identical one reused); False when the firmware refused
+    and _warn_boot_entry_refused has said why."""
     pre_state = pre_state or _read_efibootmgr()
     if pre_state.get("unreadable"):
         # Every write below would be refused the same way.
@@ -1442,7 +1452,7 @@ def _register_limine_efi_entry(
             f"The EFI variable store cannot be read ({pre_state['unreadable']}), "
             "so no boot entry can be written"
         )
-        return
+        return False
     # An entry identical to the one a create would add (active, labelled
     # "Limine", this ESP, this loader) already boots this install: the loader
     # it names was just written. It is reused and nothing is created, so the
@@ -1474,7 +1484,7 @@ def _register_limine_efi_entry(
             # about why.
             reason = f"efibootmgr --create exited {created.returncode}"
             _warn_boot_entry_refused(f"{reason}: {detail}" if detail else reason)
-            return
+            return False
         if detail:
             error(f"efibootmgr: {detail}")
 
@@ -1490,7 +1500,7 @@ def _register_limine_efi_entry(
                 "efibootmgr --create exited 0 but the boot entries cannot be read back "
                 f"({post_state['unreadable']}), so BootOrder and BootNext are left alone"
             )
-            return
+            return False
         new_limine = sorted(
             [
                 num
@@ -1504,7 +1514,7 @@ def _register_limine_efi_entry(
                 "efibootmgr --create exited 0 but no 'Limine' entry is registered, so this "
                 "firmware discarded the variable as soon as it was written"
             )
-            return
+            return False
         limine_num = new_limine[0]
 
     # Duplicates of the reused entry go, never the reused one. One whose
@@ -1554,6 +1564,7 @@ def _register_limine_efi_entry(
             "If the first reboot starts another system, pick Omarchy from the firmware "
             "boot menu (F11, F12 or Esc on most boards)."
         )
+    return True
 
 
 def _create_limine_efi_entry(disk: Path, part: int, loader: str) -> subprocess.CompletedProcess:
@@ -1593,6 +1604,35 @@ def _warn_boot_entry_refused(reason: str) -> None:
         "The boot check at the end of the install stops an install that ends up with "
         "neither route."
     )
+
+
+LIMINE_SKIP_UEFI_CONF = "omarchy-skip-uefi.conf"
+
+
+def _skip_uefi_registration_on_upgrades(target: Path) -> None:
+    """Stop limine-install retrying a boot entry this firmware refused.
+
+    80-limine-efi-deploy.hook runs limine-install whenever limine or
+    limine-mkinitcpio-hook is upgraded, and limine-install registers a "Limine"
+    boot entry unless SKIP_UEFI=yes. Firmware that refused the installer's
+    entry usually refuses that one too (a store that cannot be read always
+    does), and limine-install then exits 1 with "Limine EFI install failed.":
+    every such upgrade ends in a failed hook, on a machine that boots fine from
+    EFI/BOOT/BOOT<arch>.EFI. SKIP_UEFI=yes leaves registration out and keeps
+    that removable loader current. A store that was only full may take an
+    entry once the firmware compacts it, so this is a drop-in in
+    /etc/limine-entry-tool.d (read before /etc/default/limine) that says how
+    to let limine-install try again: delete it.
+    """
+    conf = target / "etc" / "limine-entry-tool.d" / LIMINE_SKIP_UEFI_CONF
+    conf.parent.mkdir(parents=True, exist_ok=True)
+    conf.write_text(
+        "# The Omarchy installer could not register a UEFI boot entry on this firmware,\n"
+        f"# so this machine boots from EFI/BOOT/BOOT{_efi_arch_suffix()}.EFI. Delete this\n"
+        "# file to let limine-install try to register one again.\n"
+        "SKIP_UEFI=yes\n"
+    )
+    info(f"› Limine upgrades will not retry the refused boot entry (/etc/limine-entry-tool.d/{LIMINE_SKIP_UEFI_CONF})")
 
 
 def _install_limine_bios(ctx: InstallContext, boot_partition) -> None:

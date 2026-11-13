@@ -67,6 +67,15 @@ class OemBundleTest(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in (self.output / "scripts").iterdir()),
                          ["01-support-info.sh", "02-owner-defaults.sh"])
 
+    def test_text_beyond_ascii_is_laid_out_as_itself(self):
+        # First-boot setup reads this file for the characters its font must
+        # keep while a logo's dots share it: an escape would name none of them.
+        bundle.stage(self.output, self.config(name="Ωmega Rechner", tagline="Größe — Ελλάδα"), [])
+        laid_out = (self.output / "oem.json").read_text(encoding="utf-8")
+        self.assertIn("Ωmega Rechner", laid_out)
+        self.assertIn("Größe — Ελλάδα", laid_out)
+        self.assertNotIn("\\u", laid_out)
+
     def test_scripts_alone_are_a_bundle(self):
         bundle.stage(self.output, None, [self.script()])
         self.assertEqual([path.name for path in self.output.iterdir()], ["scripts"])

@@ -236,6 +236,8 @@ def stage(output: Path, config: Path | None, scripts: list[Path]) -> None:
 
     output.mkdir(parents=True, exist_ok=True)
     if staged:
+        # Characters as themselves, never \u escapes: first-boot setup keeps a
+        # font glyph for each character it finds in this file.
         (output / "oem.json").write_text(json.dumps(staged, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
     for name, text in files.items():
         (output / name).write_text(text, encoding="utf-8")

@@ -348,6 +348,12 @@ Pass `--oem` to test an OEM ISO: the harness sends the install no keys, waits fo
 ./bin/omarchy-iso-test release/omarchy-oem-*.iso --oem --install-only
 ```
 
+For an ISO built with `--oem-config`, pass the harness the same file. Where the config has an agreement, it drives it: reads on, comes back from Ctrl+C's reboot offer and from declining, reads to the end and accepts. Once the installed system is up it checks that the bundle and the record of acceptance are on it, and saves both as `oem-setup.txt`.
+
+```bash
+./bin/omarchy-iso-test release/omarchy-oem-*.iso --oem --oem-config acme/oem.json --install-only
+```
+
 ## Integration testing the ISO
 
 Scenarios under `test/integration.d/` boot a real ISO install in QEMU and assert on what the running system actually does. The runner installs the ISO once — unattended, from a generated cidata drive — and saves the result as a reusable base image; every scenario then boots a throwaway overlay of that base with its own copy of the firmware vars, so neither disk nor NVRAM state leaks between runs. Shared machinery (VM lifecycle, QMP screendump + OCR console driving, virtual keystrokes, guest SSH, the cidata build) lives in `test/integration.d/base-test.sh`, so a new scenario is one file.

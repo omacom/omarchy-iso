@@ -35,6 +35,18 @@ if [[ ! -r $DISK_PARTITIONING ]]; then
 fi
 source "$DISK_PARTITIONING"
 
+# Where home lives when the machine has another disk: which homes may be
+# adopted and which disks erased for a fresh one. Shared with first-boot setup
+# (omarchy-provision-owner) and the orchestrator, which checks the choice again;
+# vendored into the ISO like the setup form, with the same dry-run fallback.
+HOME_DRIVE="${HOME_DRIVE:-/usr/share/omarchy-iso/home-drive.sh}"
+[[ -r $HOME_DRIVE ]] || HOME_DRIVE="$OMARCHY_PATH/install/provisioning/home-drive.sh"
+if [[ ! -r $HOME_DRIVE ]]; then
+  echo "ERROR: home drive helpers not found at $HOME_DRIVE" >&2
+  exit 1
+fi
+source "$HOME_DRIVE"
+
 # Installer strings in the language picked on the first screen; t <key> [args].
 INSTALLER_I18N="${INSTALLER_I18N:-/usr/share/omarchy-iso/i18n.sh}"
 [[ -r $INSTALLER_I18N ]] ||
@@ -645,6 +657,12 @@ _EOF_
   if [[ $encrypt_installation == true ]]; then
     credentials_encryption_line="    \"encryption_password\": $password_escaped,"
   fi
+  # An encrypted home drive's passphrase: the one the user typed for it, else
+  # their password, which is what opened it. The orchestrator opens the drive
+  # with it and, on an encrypted root, adds a keyfile.
+  if [[ $home_mode == "adopt" && -n $(cut -f6 <<<"$home_row") ]]; then
+    credentials_encryption_line+=$'\n'"    \"home_encryption_password\": $(echo -n "${home_passphrase:-$password}" | jq -Rsa),"
+  fi
 
   cat <<-_EOF_ >user_credentials.json
 {
@@ -802,6 +820,7 @@ run_partition_decide() {
     clear_logo
     echo
     say "$(t freeSpace.title "$(to_gb $INSTALL_MAX_B)")"
+    home_confirm_lines "$mode"
 
     case $mode in
       encrypted)
@@ -991,6 +1010,8 @@ run_partition_execute() {
   # ignores the "Limine" NVRAM entry (some AMI/MSI boards) still finds the
   # install through the removable-media path, which is the only route left
   # when a boot variable does not survive.
+  local home_json
+  home_json=$(home_config_json)
   cat <<-_EOF_ >user_configuration.json
 {
     "app_config": null,
@@ -1000,6 +1021,7 @@ run_partition_execute() {
     "bootloader_config": { "bootloader": "Limine", "uki": false, "removable": false },
     "custom_commands": [],
     "omarchy_install": {
+        $home_json
         "input_method": "${keyboard_input_method:-none}",
         "input_xkb_layout": "${keyboard_xkb_layout:-}",
         "language": "$language",
@@ -1071,8 +1093,8 @@ disk_form() {
   boot_source=$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null || true)
   exclude_disk=$(get_root_disk "$boot_source")
 
-  # Installable disks, internal ones first, without the boot device
-  local available_disks
+  # Installable disks, internal ones first, without the boot device. Kept for
+  # the Home step, which looks at the ones not chosen here.
   available_disks=$(install_disk_candidates "$exclude_disk")
 
   # Get available disks and format them with info
@@ -1161,6 +1183,7 @@ confirm_disk_overwrite() {
     clear_logo
     echo
     say "$(t overwrite.warning)"
+    home_confirm_lines "$mode"
 
     if [[ $mode == "encrypted" ]]; then
       say --foreground 8 "$(t encryption.hint)"
@@ -1189,6 +1212,212 @@ confirm_disk_overwrite() {
         ;;
     esac
   done
+}
+
+# STEP 5: HOME (only when the machine has another disk)
+
+home_mode=disk
+home_row=""
+home_password=""
+home_passphrase=""
+home_scan_result=""
+
+# Bytes as the disk list shows sizes: 1.3T, 512G.
+home_size() {
+  LC_ALL=C numfmt --to=iec "${1:-0}" 2>/dev/null || echo "$1"
+}
+
+# The Home step's menu: "label<TAB>value" per row, in the order
+# home_drive_choices gives (the user's existing home, locked drives, the
+# install disk, disks to erase), so Enter never erases. Nothing when the only
+# choice is the install disk.
+home_step_rows() {
+  local scan=$1 choices=$2 install_disk=$3 user=$4
+  local kind index row device fstype used
+
+  grep -qv $'^disk\t' <<<"$choices" || return 0
+
+  while IFS=$'\t' read -r kind index; do
+    [[ -n $kind ]] || continue
+    row=""
+    ((index > 0)) && row=$(sed -n "${index}p" <<<"$scan")
+    device=$(cut -f3 <<<"$row")
+    case $kind in
+      adopt)
+        fstype=$(cut -f4 <<<"$row")
+        [[ -n $(cut -f7 <<<"$row") ]] && fstype+=" $(cut -f7 <<<"$row")"
+        used=$(home_size "$(cut -f10 <<<"$row")")
+        # Field 15 (dir): the user's folder is inside another system's root.
+        if [[ -n $(cut -f15 <<<"$row") ]]; then
+          printf '%s\t%s\n' "$(t home.existingInSystem "$user" "$device" "$fstype" "$used")" "adopt:$index"
+        else
+          printf '%s\t%s\n' "$(t home.existing "$user" "$device" "$fstype" "$used")" "adopt:$index"
+        fi
+        ;;
+      locked) printf '%s\t%s\n' "$(t home.locked "$device")" "locked:$index" ;;
+      disk) printf '%s\t%s\n' "$(t home.onInstallDisk "$install_disk")" disk ;;
+      fresh) printf '%s\t%s\n' "$(t home.fresh "$device")" "fresh:$index" ;;
+    esac
+  done <<<"$choices"
+}
+
+# Lines shown under the Home step's title: the other homes left untouched
+# beside the user's, why a home of the user's cannot be adopted, and that the
+# passphrase just typed for a drive (tried) did not unlock it.
+home_step_hints() {
+  local scan=$1 user=$2 tried=${3:-} row status device others reason why
+  # cut, not read: tab is whitespace to read, which would merge empty fields.
+  while IFS= read -r row; do
+    status=$(cut -f1 <<<"$row")
+    device=$(cut -f3 <<<"$row")
+    others=$(cut -f13 <<<"$row")
+    reason=$(cut -f14 <<<"$row")
+    if [[ $status == "adoptable" && -n $others ]]; then
+      t home.othersHint "${others//,/, }"
+      echo
+    elif [[ $status == "locked" && -n $tried && $device == "$tried" ]]; then
+      t home.passphraseWrong "$device"
+      echo
+    elif [[ $status == "refused" ]]; then
+      case $reason in
+        uid-below-1000) why=$(t home.reason.systemAccount) ;;
+        uid-taken) why=$(t home.reason.uidTaken) ;;
+        gid-taken) why=$(t home.reason.gidTaken) ;;
+        *) why=$(t home.reason.notFolder) ;;
+      esac
+      t home.refused "$user" "$device" "$why"
+      echo
+    fi
+  done <<<"$scan"
+}
+
+# Whether the machine has a disk besides the install disk to look at.
+home_step_needed() {
+  local candidates=$1 install_disk=$2
+  grep -qvxF -- "$install_disk" <<<"$candidates"
+}
+
+# Ask where home lives: sets home_mode (disk|adopt|fresh) and home_row (the
+# scan row chosen). Skipped without a word when there is nothing to choose.
+# Returns OMARCHY_FORM_BACK for Esc; Ctrl+C ends the install as on the disk list.
+home_step() {
+  local boot_source exclude_disk scan choices rows hints choice status line typed tried=""
+  local -a menu
+
+  home_mode=disk
+  home_row=""
+  boot_source=$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null || true)
+  exclude_disk=$(get_root_disk "$boot_source")
+  # One disk: nothing to look at, and no flash of a scanning screen.
+  home_step_needed "$available_disks" "$disk" || return 0
+
+  while true; do
+    # The scan opens LUKS drives (seconds each), so it runs under the spinner.
+    # Both the user's password and a passphrase typed for a drive are tried;
+    # they reach it through the environment, not the command line.
+    clear_logo
+    echo
+    scan=$(HOME_DRIVE_SECRET="$password"$'\n'"$home_password" gum spin --spinner pulse --title "$(t home.scanning)" \
+      --show-output -- bash -c 'source "$0"; home_drive_scan "$1" "$HOME_DRIVE_SECRET" "${@:2}"' \
+      "$HOME_DRIVE" "$username" "$disk" $exclude_disk) && status=0 || status=$?
+    if ((status != 0)); then
+      # A scan that failed or was interrupted printed part of the machine at
+      # most: home stays on the install disk rather than offering a menu
+      # built from that, and whatever the scan had mounted or open goes.
+      home_drive_scan_cleanup >/dev/null 2>&1 || true
+      return 0
+    fi
+    home_scan_result=$scan
+    choices=$(home_drive_choices "$scan")
+    rows=$(home_step_rows "$scan" "$choices" "$disk" "$username")
+    [[ -n $rows ]] || return 0
+
+    step "$(t home.intro)"
+    hints=$(home_step_hints "$scan" "$username" "$tried")
+    while IFS= read -r line; do
+      [[ -n $line ]] && say --foreground 8 "$line"
+    done <<<"$hints"
+    [[ -n $hints ]] && echo
+
+    mapfile -t menu <<<"$rows"
+    choice=$(gum choose --label-delimiter $'\t' --header "$(t home.header)" "${menu[@]}") && status=0 || status=$?
+    if ((status != 0)); then
+      ((status == OMARCHY_FORM_BACK)) && return "$OMARCHY_FORM_BACK"
+      abort
+    fi
+
+    case $choice in
+      disk)
+        return 0
+        ;;
+      adopt:* | fresh:*)
+        home_mode=${choice%%:*}
+        home_row=$(sed -n "${choice#*:}p" <<<"$scan")
+        home_passphrase=""
+        if [[ $home_mode == "adopt" && -n $(cut -f6 <<<"$home_row") ]]; then
+          home_passphrase=$(home_drive_luks_passphrase "$(cut -f3 <<<"$home_row")" "$password"$'\n'"$home_password")
+        fi
+        return 0
+        ;;
+      locked:*)
+        line=$(sed -n "${choice#locked:}p" <<<"$scan" | cut -f3)
+        # Every passphrase typed is kept, newline-separated as the scan tries
+        # them: a second locked drive's must not lock the first one again.
+        tried=""
+        if typed=$(gum input --password --header "$(t home.passphrase "$line")") && [[ -n $typed ]]; then
+          home_password+=${home_password:+$'\n'}$typed
+          tried=$line
+        fi
+        ;;
+    esac
+  done
+}
+
+# The home choice, spelled out on the confirmation before anything is written.
+home_confirm_lines() {
+  local encrypted=$1 device
+  device=$(cut -f3 <<<"$home_row")
+  case $home_mode in
+    adopt)
+      if [[ -n $(cut -f15 <<<"$home_row") ]]; then
+        say "$(t home.confirmAdoptInSystem "$device")"
+      else
+        say "$(t home.confirmAdopt "$device")"
+      fi
+      if [[ $encrypted == "encrypted" && -z $(cut -f6 <<<"$home_row") ]]; then
+        say --foreground 8 "$(t home.unencryptedHint "$device")"
+      fi
+      ;;
+    fresh)
+      say --foreground 1 "$(t home.confirmFresh "$device")"
+      if awk -F'\t' -v disk="$device" '$1 == "adoptable" && $11 == disk { found = 1 } END { exit !found }' <<<"$home_scan_result"; then
+        say --foreground 1 "$(t home.freshHasHome "$device")"
+      fi
+      ;;
+  esac
+}
+
+# omarchy_install.home for the orchestrator, which mounts or prepares the home
+# drive and checks this choice against the drive again before writing.
+home_config_json() {
+  local device fstype uuid luks_uuid subvol uid gid dir
+  [[ $home_mode == "disk" ]] && return 0
+  device=$(cut -f3 <<<"$home_row")
+  fstype=$(cut -f4 <<<"$home_row")
+  uuid=$(cut -f5 <<<"$home_row")
+  luks_uuid=$(cut -f6 <<<"$home_row")
+  subvol=$(cut -f7 <<<"$home_row")
+  uid=$(cut -f8 <<<"$home_row")
+  gid=$(cut -f9 <<<"$home_row")
+  dir=$(cut -f15 <<<"$home_row")
+  if [[ $home_mode == "fresh" ]]; then
+    jq -cn --arg disk "$device" '{mode: "fresh", disk: $disk}' | sed 's/^/"home": /; s/$/,/'
+  else
+    jq -cn --arg device "$device" --arg uuid "$uuid" --arg fstype "$fstype" --arg subvol "$subvol" \
+      --arg luks "$luks_uuid" --argjson uid "$uid" --argjson gid "$gid" --arg dir "$dir" \
+      '{mode: "adopt", device: $device, uuid: $uuid, fstype: $fstype, subvol: $subvol, luks_uuid: $luks, uid: $uid, gid: $gid, dir: $dir}' |
+      sed 's/^/"home": /; s/$/,/'
+  fi
 }
 
 # Decide what and how to install: sets install_target (full_disk|free_space),
@@ -1222,6 +1451,12 @@ select_installation() {
 
     case "$install_mode" in
       full_disk)
+        # Esc on the Home step goes back to the mode list (or, with the
+        # picker skipped, to the disk list).
+        if ! home_step; then
+          $full_disk_only && disk_form
+          continue
+        fi
         if confirm_disk_overwrite; then
           install_target="full_disk"
           return 0
@@ -1231,6 +1466,7 @@ select_installation() {
         $full_disk_only && disk_form
         ;;
       free_space)
+        home_step || continue
         if run_partition_decide; then
           install_target="free_space"
           return 0
@@ -1365,6 +1601,7 @@ else
   disk_encryption_config=""
 fi
 
+home_json=$(home_config_json)
 cat <<-_EOF_ >user_configuration.json
 {
     "app_config": null,
@@ -1374,6 +1611,7 @@ cat <<-_EOF_ >user_configuration.json
     "bootloader_config": { "bootloader": "Limine", "uki": false, "removable": false },
     "custom_commands": [],
     "omarchy_install": {
+        $home_json
         "input_method": "${keyboard_input_method:-none}",
         "input_xkb_layout": "${keyboard_xkb_layout:-}",
         "language": "$language",

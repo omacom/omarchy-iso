@@ -84,6 +84,7 @@ def main() -> int:
     from .phases_impl import (
         boost_cpu_governor,
         cleanup_bind_mounts,
+        cleanup_home_drive,
         cleanup_protected_state,
         cleanup_target_hook_masks,
         restore_cpu_governors,
@@ -114,6 +115,9 @@ def main() -> int:
         cleanup_bind_mounts(ctx)
         cleanup_target_hook_masks(ctx)
         if not success:
+            # The home drive first: protected mode's release unmounts the
+            # target but sees a home mapping only while it is mounted.
+            cleanup_home_drive(ctx)
             cleanup_protected_state(ctx)
 
 

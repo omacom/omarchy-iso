@@ -406,6 +406,7 @@ if [[ -d /omarchy-source ]]; then
   base_pkg_lists=(/omarchy-source/install/omarchy-base.packages /omarchy-source/install/omarchy-other.packages)
   setup_form=/omarchy-source/install/provisioning/setup-form.sh
   progress_icon=/omarchy-source/install/provisioning/progress-icon.sh
+  home_drive=/omarchy-source/install/provisioning/home-drive.sh
   mise_work=/omarchy-source/install/user/mise-work.sh
 else
   # Pull the same package lists out of the freshly-downloaded Omarchy runtime
@@ -430,6 +431,8 @@ else
   setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/progress-icon.sh 2>/dev/null || true
   progress_icon=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/progress-icon.sh
+  bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/home-drive.sh 2>/dev/null || true
+  home_drive=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/home-drive.sh
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/user/mise-work.sh 2>/dev/null || true
   mise_work=/tmp/omarchy-pkglists/usr/share/omarchy/install/user/mise-work.sh
   # The aarch64 list, each platform's own and the x86_64-only one. Runtimes
@@ -573,6 +576,22 @@ if [[ ! -f $progress_icon ]]; then
   exit 1
 fi
 cp "$progress_icon" "$build_cache_dir/airootfs/usr/share/omarchy-iso/progress-icon.sh"
+
+# The Home step's rules come from the same runtime, so the installer and the
+# first-boot setup that finishes a deferred install offer the same homes.
+if [[ ! -f $home_drive ]]; then
+  if [[ -d /omarchy-source ]]; then
+    echo "ERROR: the --local-source checkout ships no install/provisioning/home-drive.sh" >&2
+    remedy="Update the checkout to a revision carrying the shared home drive helpers."
+  else
+    echo "ERROR: $OMARCHY_RUNTIME_PACKAGE does not ship install/provisioning/home-drive.sh" >&2
+    remedy="Publish a runtime carrying the shared home drive helpers, or build with --local-source against a checkout that has it."
+  fi
+  echo "       The configurator sources the Home step's rules from that file." >&2
+  echo "       $remedy" >&2
+  exit 1
+fi
+cp "$home_drive" "$build_cache_dir/airootfs/usr/share/omarchy-iso/home-drive.sh"
 
 # Omarchy installs Node lazily through mise since omacom/omarchy#15876. A
 # runtime from before it unpacks a bundled Node tarball during setup and stops

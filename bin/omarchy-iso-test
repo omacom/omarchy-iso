@@ -19,6 +19,9 @@
 #   --encrypt          Drive the encrypted install flow (default: unencrypted)
 #   --provision              Drive the deferred-provisioning install flow: no user during install, the
 #                      first boot runs omarchy-provision-owner and creates it there
+#   --oem              Test an OEM ISO: it installs onto the VM's one disk with
+#                      no keystrokes, encrypted, and reboots into the first-boot
+#                      setup, which is then driven the way --provision drives it
 #   --free-space       Install into the free space of a synthetic Windows-style
 #                      disk (existing ESP + data partition kept) and verify the
 #                      existing partitions survive
@@ -46,6 +49,7 @@ INSTALL_TIMEOUT=2400
 BOOT_TIMEOUT=600
 ENCRYPT=false
 PROVISION=false
+OEM=false
 FREE_SPACE=false
 REUSE_BASE=false
 INSTALL_ONLY=false
@@ -94,6 +98,9 @@ while (($#)); do
     --keyboard) KEYBOARD_LABEL="$2"; shift ;;
     --encrypt) ENCRYPT=true ;;
     --provision) PROVISION=true ;;
+    # An OEM install is a deferred-provisioning install nobody answers for:
+    # always full-disk and encrypted (the configurator's --oem path).
+    --oem) OEM=true; PROVISION=true; ENCRYPT=true ;;
     --free-space) FREE_SPACE=true ;;
     --reuse-base) REUSE_BASE=true ;;
     --install-only) INSTALL_ONLY=true ;;
@@ -134,6 +141,11 @@ case "$KEYBOARD_LABEL" in
   "English (US)" | "English (UK)" | "Japanese" | "Japanese (US keyboard)" | "Korean" | "Chinese (Simplified, Pinyin)" | "Taiwan (Zhuyin)" | "Hong Kong (Cangjie)") ;;
   *) echo "The VM harness cannot type credentials with keyboard: $KEYBOARD_LABEL" >&2; exit 1 ;;
 esac
+
+if $OEM && $FREE_SPACE; then
+  echo "--oem installs over the whole disk, so there is no free-space install to test with it" >&2
+  exit 1
+fi
 
 omarchy-pkg-add qemu-full edk2-ovmf socat imagemagick tesseract tesseract-data-eng
 # --battery and --acpi-hid compile their SSDT with iasl.
@@ -817,6 +829,13 @@ PYTHON
 }
 
 drive_configurator() {
+  if $OEM; then
+    # Nothing to drive: an OEM ISO picks the machine's one internal disk and
+    # installs without a question. A keystroke here would be a test bug.
+    log "OEM install: sending no keys"
+    return 0
+  fi
+
   log "Driving the installer wizard"
 
   # A greeter (animated logo + tagline) opens the installer; Return begins.
@@ -974,17 +993,25 @@ drive_configurator() {
 drive_provision_owner() {
   log "Driving the deferred-provisioning first-boot setup"
 
-  # Deferred provisioning defers the keyboard step to first boot; it comes before the user form.
-  # Pick English (UK) (one row below the preselected English (US), which leads
-  # the list) so the verifier can prove the deferred step applied a non-default
-  # layout — UK leaves every letter identical to US, so the typed password (sent
-  # as raw keycodes) still matches the literal one the harness pipes to sudo.
   # A greeter (animated logo + tagline) opens first boot; Return begins.
   wait_for_screen "Linux by DHH" 600
   capture_console "success-provision-00-greeter"
   press ret
 
-  wait_for_screen "keyboard layout" 120
+  # A runtime that lets the owner pick a language asks that first, as the
+  # installer does; an older one opens on the keyboard layout.
+  wait_for_screen_any "Language" "keyboard layout" 120
+  if [[ $SCREEN_MATCHED == "Language" ]]; then
+    capture_console "success-provision-00-language"
+    press ret
+    wait_for_screen "keyboard layout" 60
+  fi
+
+  # Deferred provisioning defers the keyboard step to first boot.
+  # Pick English (UK) (one row below the preselected English (US), which leads
+  # the list) so the verifier can prove the deferred step applied a non-default
+  # layout — UK leaves every letter identical to US, so the typed password (sent
+  # as raw keycodes) still matches the literal one the harness pipes to sudo.
   if [[ $KEYBOARD_LABEL == "English (US)" ]]; then
     press down # preserve the harness's default UK provisioning coverage
   else
@@ -993,39 +1020,93 @@ drive_provision_owner() {
   capture_console "success-provision-01-keyboard-layout"
   press ret
 
-  wait_for_screen "Username" 120
-  capture_console "success-provision-02-username"
-  type_text "$GUEST_USER"
-  press ret
+  # The account questions, in whatever order this runtime asks them: each is
+  # told apart by its prompt, the only one on screen while it waits (the
+  # placeholders are too dim for OCR). The review table ends the form.
+  local screen prompt answered="" waited=0
+  while true; do
+    screen=$(ocr_screen)
+    prompt=""
+    if grep -qi "look right" <<<"$screen"; then
+      break
+    elif grep -qi "Conf *irm" <<<"$screen"; then
+      prompt=confirmation
+    elif grep -qi "Password" <<<"$screen"; then
+      prompt=password
+    elif grep -qi "Username" <<<"$screen"; then
+      prompt=username
+    elif grep -qi "Hostname" <<<"$screen"; then
+      prompt=hostname
+    elif grep -q "[A-Z][a-z]\+/[A-Z][a-z]" <<<"$screen"; then
+      # The picker's list of zones, not a heading that names the step while
+      # the guess is still being fetched: a Return sent then is lost.
+      prompt=timezone
+    fi
 
-  wait_for_screen "Password" 60
-  type_text "$GUEST_PASSWORD"
-  capture_console "success-provision-03-password"
-  press ret
+    # The screen still showing a prompt just answered is the console catching
+    # up, not the question asked twice.
+    if [[ -n $prompt && " $answered " != *" $prompt "* ]]; then
+      case $prompt in
+        username) type_text "$GUEST_USER" ;;
+        password | confirmation) type_text "$GUEST_PASSWORD" ;;
+        hostname) type_text "$GUEST_HOSTNAME" ;;
+        timezone) ;; # accept the guess that leads the list
+      esac
+      capture_console "success-provision-02-$prompt"
+      press ret
+      answered+=" $prompt"
+      waited=0
+    fi
 
-  wait_for_screen "Conf *irm" 60
-  type_text "$GUEST_PASSWORD"
-  press ret
+    if ! vm_running; then
+      echo "VM exited during first-boot setup" >&2
+      return 1
+    fi
+    # Generous: the timezone guess over first-boot networking can lag.
+    if ((waited >= 180)); then
+      capture_console "failure-provision-form-stalled"
+      echo "First-boot setup stopped answering after:${answered:- nothing}" >&2
+      return 1
+    fi
+    sleep 2
+    ((waited += 2))
+  done
 
-  # Hostname is deferred to first boot too.
-  wait_for_screen "Hostname" 60
-  type_text "$GUEST_HOSTNAME"
-  capture_console "success-provision-05-hostname"
-  press ret
-
-  # Timezone is deferred to first boot too; accept the geo-guessed default.
-  # Generous timeout: the tzupdate geo-guess over first-boot networking can lag.
-  wait_for_screen "Timezone" 180
-  capture_console "success-provision-06-timezone"
-  press ret
-
-  wait_for_screen "look right" 60
   capture_console "success-provision-07-review"
   press ret
 
-  # Finalization (user setup, LUKS re-key on encrypted installs)
-  # runs before SDDM appears.
-  capture_console "success-provision-08-finalizing"
+  # Finalization (user setup, LUKS re-key on encrypted installs) runs under the
+  # progress screen until the display manager takes the console. Its percentage
+  # is the one line bright enough for OCR, which reads the sign as anything.
+  # OCR reads nothing from a screen caught mid-redraw or gone black for the
+  # handoff, which says nothing either way: it takes two readable screens in a
+  # row without the percentage to call the progress screen gone.
+  local shots=0 gone=0 progress
+  waited=0
+  sleep 2
+  while ((gone < 2)); do
+    if ((waited >= 900)); then
+      capture_console "failure-provision-finalizing-timeout"
+      echo "Timed out waiting for first-boot setup to finish" >&2
+      return 1
+    fi
+
+    progress=$(ocr_screen | tr -d ' \n')
+    if [[ $progress =~ ^[0-9]{1,3}.?$ ]]; then
+      gone=0
+      if ((waited % 20 == 0)); then
+        printf -v prompt 'success-provision-08-finalizing-%03ds' "$waited"
+        capture_console "$prompt"
+        shots=$((shots + 1))
+      fi
+    elif [[ -n $progress ]]; then
+      gone=$((gone + 1))
+    fi
+
+    sleep 4
+    ((waited += 4))
+  done
+  ((shots)) || capture_console "success-provision-08-finalizing"
 }
 
 wait_for_install() {

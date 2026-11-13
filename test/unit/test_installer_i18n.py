@@ -171,6 +171,123 @@ class LanguageDefaultsTest(unittest.TestCase):
                     self.assertIn(defaults["timezone"], zones)
 
 
+class LanguagePickerTest(unittest.TestCase):
+    def picker(self, responses, initial="en", visits=1, confirm_status=0):
+        # Exercise the real form without starting the rest of the installer.
+        configurator = SOURCES[0].read_text()
+        functions = "\n".join(re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", configurator, re.MULTILINE | re.DOTALL).group(0)
+                              for name in ("language_default", "set_form_language", "language_label", "language_rows", "language_form"))
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            (work / "i18n").mkdir()
+            for code in ("en", "pl", "de"):
+                (work / "i18n" / f"{code}.json").write_text("{}")
+            (work / "locales.json").write_text(json.dumps({
+                "pl": {"name": "Polski", "englishName": "Polish"},
+                "zh-CN": {"name": "简体中文", "englishName": "Chinese (Simplified)"},
+                "de": {"name": "Deutsch", "englishName": "German"},
+                "en": {"name": "English", "englishName": "English"},
+            }))
+            (work / "responses").write_text("".join(f"{status}|{choice}\n" for status, choice in responses))
+            script = r'''
+source "$I18N_HELPERS"
+language=$INITIAL_LANGUAGE
+defer_provisioning=false
+OMARCHY_FORM_SIGNAL=130
+clear_logo() { :; }
+say() { :; }
+confirm_prepare_for_another_owner() { return "$CONFIRM_STATUS"; }
+gum() {
+  local call status reply
+  printf '%s\n' "$*" >> "$PICKER_WORK/calls"
+  call=$(wc -l < "$PICKER_WORK/calls")
+  cat > "$PICKER_WORK/input.$call"
+  IFS='|' read -r status reply < "$PICKER_WORK/responses" || exit 99
+  sed -i '1d' "$PICKER_WORK/responses"
+  [[ $reply != :first: ]] || reply=$(head -n1 "$PICKER_WORK/input.$call")
+  printf '%s' "$reply"
+  return "$status"
+}
+''' + functions + r'''
+for ((visit=0; visit<VISITS; visit++)); do language_form; done
+jq -n --arg language "$language" --arg deferred "$defer_provisioning" \
+  --arg formLanguage "${OMARCHY_FORM_LANGUAGE:-}" \
+  --arg keyboard "${OMARCHY_FORM_KEYBOARD_DEFAULT:-}" \
+  --arg timezone "${OMARCHY_FORM_TIMEZONE_FALLBACK:-}" \
+  '{language: $language, deferred: $deferred, formLanguage: $formLanguage, keyboard: $keyboard, timezone: $timezone}'
+'''
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, check=True, timeout=10,
+                env={"PATH": os.environ["PATH"], "PICKER_WORK": str(work), "INITIAL_LANGUAGE": initial,
+                     "VISITS": str(visits), "CONFIRM_STATUS": str(confirm_status),
+                     "I18N_HELPERS": str(SHARE / "i18n.sh"), "OMARCHY_ISO_I18N_DIR": str(work / "i18n"),
+                     "LANGUAGES_JSON": str(work / "locales.json"), "LANGUAGE_DEFAULTS": str(SHARE / "language-defaults.json")},
+            )
+            calls = (work / "calls").read_text().splitlines()
+            inputs = [(work / f"input.{number}").read_text().splitlines() for number in range(1, len(calls) + 1)]
+            return json.loads(result.stdout), calls, inputs
+
+    def test_a_visible_label_sets_the_language_code_and_defaults(self):
+        result, calls, inputs = self.picker([(0, "Polski")])
+        self.assertEqual(result, {"language": "pl", "deferred": "false", "formLanguage": "pl",
+                                  "keyboard": "Polish", "timezone": "Europe/Warsaw"})
+        self.assertTrue(calls[0].startswith("filter "))
+        self.assertNotIn("--selected", calls[0])
+        self.assertNotIn("--value", calls[0])
+        self.assertEqual(inputs[0][0], "English")
+        self.assertIn("Polski", inputs[0])
+        self.assertTrue(all("\t" not in label for label in inputs[0]))
+
+    def test_returning_to_the_picker_keeps_the_previous_language_as_default(self):
+        result, _, inputs = self.picker([(0, "Polski"), (0, ":first:")], visits=2)
+        self.assertEqual(inputs[1][0], "Polski")
+        self.assertEqual(result["language"], "pl")
+
+    def test_a_new_selection_replaces_the_previous_default(self):
+        result, _, inputs = self.picker([(0, "Deutsch")], initial="pl")
+        self.assertEqual(inputs[0][0], "Polski")
+        self.assertEqual(result["language"], "de")
+
+    def test_an_english_fallback_label_still_maps_to_its_language_code(self):
+        result, _, inputs = self.picker([(0, "Chinese (Simplified)")])
+        self.assertIn("Chinese (Simplified)", inputs[0])
+        self.assertNotIn("简体中文", inputs[0])
+        self.assertEqual(result["language"], "zh-CN")
+
+    def test_an_empty_or_cancelled_selection_reopens_the_picker(self):
+        for status in (0, 1, 130):
+            with self.subTest(status=status):
+                result, calls, _ = self.picker([(status, ""), (0, "Polski")], confirm_status=1)
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(result["language"], "pl")
+                self.assertEqual(result["deferred"], "false")
+
+    def test_ctrl_c_can_defer_provisioning_without_changing_the_language(self):
+        result, calls, _ = self.picker([(130, "")], initial="pl")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(result["language"], "pl")
+        self.assertEqual(result["deferred"], "true")
+
+    def test_real_language_labels_are_unique_and_safe_for_lookup(self):
+        registry = omarchy_file("default/i18n/locales.json")
+        if registry is None:
+            self.skipTest("no Omarchy runtime to read the language registry from")
+        function = re.search(r"^language_rows\(\) \{\n.*?^\}\n", SOURCES[0].read_text(), re.MULTILINE | re.DOTALL).group(0)
+        result = subprocess.run(
+            ["bash", "-c", function + "\nlanguage=en; language_rows"], capture_output=True, text=True, check=True,
+            env={"PATH": os.environ["PATH"], "LANGUAGES_JSON": str(registry), "OMARCHY_ISO_I18N_DIR": str(I18N)},
+        )
+        rows = [line.split("\t") for line in result.stdout.splitlines()]
+        self.assertEqual(len(rows), len(json.loads(registry.read_text())))
+        for row in rows:
+            self.assertEqual(len(row), 2)
+        labels = [row[0] for row in rows]
+        self.assertEqual(len(labels), len(set(labels)))
+        for label in labels:
+            self.assertTrue(label.strip())
+            self.assertNotRegex(label, r"[\t\n\\]")
+
+
 class ConsoleFontTest(unittest.TestCase):
     def test_the_live_console_font_draws_every_translated_string(self):
         registry = omarchy_file("default/i18n/locales.json")

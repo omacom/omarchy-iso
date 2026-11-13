@@ -43,6 +43,7 @@ def build_phases(ctx: InstallContext):
         configure_dev_ssh,
         DEV_SSH_SCRIPT,
         configure_tailscale,
+        run_custom_commands,
         validate_boot,
         create_factory_snapshot,
     )
@@ -66,6 +67,9 @@ def build_phases(ctx: InstallContext):
         *([("DEV ONLY: N1x debug SSH", configure_dev_ssh)] if DEV_SSH_SCRIPT.exists() else []),
         ("Configuring Tailscale",      configure_tailscale),
         ("Configuring DNS resolver",   configure_dns_resolver),
+        # Last before validation, so commands see the finished system and the
+        # factory snapshot keeps what they did.
+        ("Running custom commands",    run_custom_commands),
         ("Validating boot setup",      validate_boot),
         ("Creating factory snapshot",  create_factory_snapshot),
     ]

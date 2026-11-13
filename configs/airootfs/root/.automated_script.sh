@@ -171,4 +171,5 @@ rm -f /run/omarchy-install/state.json
     --encrypt-file /root/user_encrypt_installation.txt \
     --authorized-keys-file /root/authorized_keys \
     --tailscale-authkey-file /root/tailscale_authkey \
+    --cidata-dir /run/cidata \
     --defer-provisioning-file /root/defer-provisioning

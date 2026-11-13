@@ -103,6 +103,7 @@ BASE_OVMF="$BASE_DIR/OVMF_VARS.4m.fd"
 ACTIVE_OVMF="$BASE_OVMF"
 SSH_KEY="$BASE_DIR/id_ed25519"
 CIDATA_IMG="$BASE_DIR/cidata.img"
+BASE_CONFIG="$BASE_DIR/base-user_configuration.json"
 HTTP_PORT=$((SSH_PORT + 1))
 HTTP_PID=""
 
@@ -712,6 +713,10 @@ cidata_cloud_init() {
 
 build_cidata() {
   local dir="$BASE_DIR/cidata" hash encryption_config="" credentials_encryption=""
+  # The one custom command copies a file from the drive into the installed
+  # system; custom-commands-test.sh expects these two, so change them together.
+  local payload_path=/var/lib/omarchy-integration/custom-command-payload
+  local payload="ran from the cidata drive"
   local disk_bytes=$((DISK_GB * 1024 * 1024 * 1024))
   local mib=$((1024 * 1024)) gib=$((1024 * 1024 * 1024))
   local boot_start=$mib boot_size=$((2 * gib))
@@ -766,7 +771,7 @@ EOF
     "auth_config": {},
     "audio_config": { "audio": "pipewire" },
     "bootloader_config": { "bootloader": "Limine", "uki": $UKI, "removable": false },
-    "custom_commands": [],
+    "custom_commands": [ "install -Dm644 \$CIDATA/custom-command-payload $payload_path" ],
     "omarchy_install": {
         "mode": "full_disk",
         "defer_provisioning": false,
@@ -855,6 +860,7 @@ EOF
 
   echo "$ENCRYPT" >"$dir/user_encrypt_installation.txt"
   cp "$SSH_KEY.pub" "$dir/authorized_keys"
+  echo "$payload" >"$dir/custom-command-payload"
 
   cidata_cloud_init "$dir"
 
@@ -1013,6 +1019,9 @@ install_phase() {
   [[ -f $SSH_KEY ]] || ssh-keygen -t ed25519 -N "" -q -C "omarchy-integration" -f "$SSH_KEY"
   detect_packages
   build_cidata
+  # What the base was installed with: other scenarios rebuild the drive, and a
+  # reused base (--reuse-base) can predate a change to it.
+  cp "$BASE_DIR/cidata/user_configuration.json" "$BASE_CONFIG"
 
   # Build under a staging name: the finished base is promoted only after a
   # clean shutdown, so a failed install can never pass for a reusable base.

@@ -956,6 +956,15 @@ if (( status != 0 )); then
   exit "$failure_status"
 fi
 
+# Run post-install scripts if OMARCHY_SCRIPTS_POST presents
+if [[ -n ${OMARCHY_SCRIPTS_POST:-} && -d $OMARCHY_SCRIPTS_POST ]]; then
+  for script in "$OMARCHY_SCRIPTS_POST"/*; do
+    [[ -f "$script" ]] || continue
+    echo "Running post-install scripts: $script"
+    . "$script"
+  done
+fi
+
 # Deferred-provisioning installs finish silently and reboot on their own — the
 # owner completes setup (and sees the send-off) at first boot, so the "Installed
 # Omarchy in ..." celebration and the Reboot Now prompt belong to a direct

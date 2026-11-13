@@ -417,6 +417,18 @@ CONF
   rm -f "$root/etc/mkinitcpio-prebuilt-uki.conf" "$root/etc/kernel/cmdline.prebuilt-uki"
 fi
 
+# post-install/localdb.sh runs updatedb on every install, about 1.0 s of a
+# 17.5 s install in CI, and what it indexes is this image's files. Build the
+# database here and let the script keep it: the scheduled updatedb picks up
+# what the install adds. Patched here until the runtime package carries the
+# change. If updatedb fails here, the script is left alone and runs as before.
+localdb_sh="$root/usr/share/omarchy/install/post-install/localdb.sh"
+if [[ -f $localdb_sh ]] && grep -q '^updatedb ' "$localdb_sh" &&
+   arch-chroot "$root" updatedb --prune-bind-mounts=no --add-prunepaths=/.snapshots; then
+  sed -i 's|^updatedb |[[ -s /var/lib/plocate/plocate.db ]] \|\| updatedb |' "$localdb_sh"
+  bash -n "$localdb_sh" && echo "localdb.sh: the locate database is built into the image"
+fi
+
 # The image is the loop backing file itself: the same on-disk bytes, written
 # to the target partition as they are.
 #

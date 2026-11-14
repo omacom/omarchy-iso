@@ -1,0 +1,46 @@
+#!/bin/busybox sh
+# PID 1 of every subvolume in the test root filesystem. Reports which
+# subvolume, kernel and boot entry actually came up, then powers off.
+
+bb=/bin/busybox
+$bb mount -t proc proc /proc
+$bb mount -t sysfs sys /sys
+$bb mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null
+
+LOADER=4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
+GLOBAL=8be4df61-93ca-11d2-aa0d-00e098032b8c
+
+# EFI variables are a 4-byte attribute header followed by the value. The
+# loader's strings are UTF-16 (ASCII here), NUL-separated in lists. The
+# initcpio busybox has no tr or od, and efivarfs files cannot be seeked, so
+# read each whole file as hex and decode it with awk.
+efivar_hex() {
+  f=/sys/firmware/efi/efivars/$1
+  [ -f "$f" ] && $bb cat "$f" | $bb xxd -p | $bb awk '{ s = s $0 } END { print substr(s, 9) }'
+}
+
+efivar_string() {
+  efivar_hex "$1" | $bb awk 'BEGIN { h = "0123456789abcdef" } { s = s $0 }
+    END { for (i = 1; i <= length(s); i += 4) {
+      v = (index(h, substr(s, i, 1)) - 1) * 16 + index(h, substr(s, i + 1, 1)) - 1
+      if (v == 0) printf " "; else printf "%c", v } }'
+}
+
+case $(efivar_hex SecureBoot-$GLOBAL | $bb cut -c1-2) in
+01) secureboot=1 ;;
+00) secureboot=0 ;;
+*) secureboot=unknown ;;
+esac
+root=$($bb awk '$2 == "/" { line = $1 " " $3 " " $4 } END { print line }' /proc/mounts)
+if echo probe >/.proto-write 2>/dev/null; then writable=yes; else writable=no; fi
+
+echo "PROTO-RESULT id=$($bb cat /etc/proto-id) kernel=$($bb uname -r) secureboot=$secureboot writable=$writable"
+echo "PROTO-ENTRY $(efivar_string LoaderEntrySelected-$LOADER)"
+echo "PROTO-PROFILE $(efivar_string StubProfile-$LOADER)"
+echo "PROTO-ROOT $root"
+echo "PROTO-CMDLINE $($bb cat /proc/cmdline)"
+echo "PROTO-ENTRIES $(efivar_string LoaderEntries-$LOADER)"
+echo "PROTO-DONE"
+
+$bb sync
+$bb poweroff -f

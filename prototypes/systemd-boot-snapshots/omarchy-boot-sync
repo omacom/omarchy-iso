@@ -1,0 +1,250 @@
+#!/bin/bash
+
+# Prototype of the systemd-boot replacement for limine-snapper-sync.
+#
+# Builds one signed multi-profile UKI per boot image (kernel version +
+# initramfs) and writes it to $ESP/EFI/Linux, where systemd-boot lists every
+# profile as its own menu entry:
+#
+#   omarchy-<kver>-<image>.efi
+#     .linux .initrd .uname .osrel .cmdline        shared base
+#     .profile  "Omarchy"                          the live system (only for
+#                                                  a currently installed image)
+#     .profile  "Snapshot 12 · 4.6.0 · Nov 14"     + .cmdline with
+#     .cmdline                                       rootflags=subvol=@/.snapshots/12/snapshot
+#     ...
+#
+# Under Secure Boot systemd-stub ignores any command line handed to it from
+# outside when the UKI carries its own, so each snapshot's subvol= has to be
+# inside the signed image. One profile per snapshot keeps that to a single
+# signed file per boot image instead of one full UKI per snapshot.
+#
+# A snapshot is pinned to the boot image that was current when it was taken,
+# not just to its kernel version: an update that breaks the initramfs must not
+# also break the snapshots you would roll back to.
+#
+# Commands:
+#   import KVER VMLINUZ INITRAMFS  Store a freshly built boot image for KVER and
+#                                  make it current (mkinitcpio post hook).
+#   pin NUM                        Pin snapshot NUM to the current image of the
+#                                  kernel inside it (snapper create-snapshot-post).
+#   sync                           Build, sign and install UKIs; drop unused ones.
+#
+# Settings (environment, or /etc/omarchy/boot-sync.conf in production):
+#   OMARCHY_BOOT_ESP        ESP root                       (/boot)
+#   OMARCHY_BOOT_STORE      boot image store on the encrypted root; must
+#                           survive a snapshot restore    (/var/lib/omarchy/boot)
+#   OMARCHY_BOOT_SNAPSHOTS  snapper's snapshot directory   (/.snapshots)
+#   OMARCHY_BOOT_CMDLINE    live kernel command line       (/etc/kernel/cmdline)
+#   OMARCHY_BOOT_LIVE       installed kernel versions      (/usr/lib/modules/*/pkgbase)
+#   OMARCHY_BOOT_KEY/CERT   machine signing key and certificate
+#   OMARCHY_BOOT_STUB       systemd-stub                   (linuxx64.efi.stub)
+#   OMARCHY_BOOT_SPLASH     optional BMP shown by systemd-stub while booting
+#   OMARCHY_BOOT_MAX        newest snapshots to list       (10)
+
+set -euo pipefail
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+[[ -f /etc/omarchy/boot-sync.conf ]] && source /etc/omarchy/boot-sync.conf
+
+ESP=${OMARCHY_BOOT_ESP:-/boot}
+STORE=${OMARCHY_BOOT_STORE:-/var/lib/omarchy/boot}
+SNAPSHOTS=${OMARCHY_BOOT_SNAPSHOTS:-/.snapshots}
+STUB=${OMARCHY_BOOT_STUB:-/usr/lib/systemd/boot/efi/linuxx64.efi.stub}
+MAX=${OMARCHY_BOOT_MAX:-10}
+SBSIGN=${OMARCHY_BOOT_SBSIGN:-/usr/lib/systemd/systemd-sbsign}
+UKI_BUILD=${OMARCHY_BOOT_UKI_BUILD:-$here/lib/uki_build.py}
+
+die() { echo "omarchy-boot-sync: $*" >&2; exit 1; }
+log() { echo "omarchy-boot-sync: $*"; }
+
+live_cmdline() {
+  if [[ -n ${OMARCHY_BOOT_CMDLINE:-} ]]; then
+    echo "$OMARCHY_BOOT_CMDLINE"
+  else
+    tr -s '[:space:]' ' ' </etc/kernel/cmdline
+  fi
+}
+
+live_kernels() {
+  if [[ -n ${OMARCHY_BOOT_LIVE:-} ]]; then
+    tr ' ' '\n' <<<"$OMARCHY_BOOT_LIVE"
+  else
+    for pkgbase in /usr/lib/modules/*/pkgbase; do
+      [[ -f $pkgbase ]] && basename "$(dirname "$pkgbase")"
+    done
+  fi
+}
+
+# The image id currently in use for a kernel version, e.g. 7.2.14-1-omarchy-3f9c0a1b2c4d
+current_image() {
+  local link=$STORE/current/$1
+  [[ -L $link ]] && basename "$(readlink "$link")"
+}
+
+cmd_import() {
+  local kver=$1 vmlinuz=$2 initramfs=$3 hash image
+  [[ -f $vmlinuz && -f $initramfs ]] || die "import: missing kernel or initramfs"
+  hash=$(cat "$vmlinuz" "$initramfs" | sha256sum | cut -c1-12)
+  image=$kver-$hash
+
+  mkdir -p "$STORE/images" "$STORE/current"
+  if [[ ! -d $STORE/images/$image ]]; then
+    mkdir -p "$STORE/images/$image.tmp"
+    cp "$vmlinuz" "$STORE/images/$image.tmp/vmlinuz"
+    cp "$initramfs" "$STORE/images/$image.tmp/initramfs.img"
+    echo "$kver" >"$STORE/images/$image.tmp/kver"
+    mv "$STORE/images/$image.tmp" "$STORE/images/$image"
+  fi
+  ln -sfn "../images/$image" "$STORE/current/$kver"
+  log "imported $image"
+}
+
+snapshot_kernel() {
+  local modules
+  for modules in "$SNAPSHOTS/$1/snapshot/usr/lib/modules"/*/; do
+    [[ -f $modules/pkgbase ]] && { basename "$modules"; return; }
+  done
+}
+
+cmd_pin() {
+  local num=$1 kver image
+  kver=$(snapshot_kernel "$num")
+  [[ -n $kver ]] || die "pin: no kernel found in snapshot $num"
+  image=$(current_image "$kver")
+  [[ -n $image ]] || die "pin: no boot image stored for $kver"
+  echo "$image" >"$SNAPSHOTS/$num/omarchy-boot-image"
+  log "pinned snapshot $num to $image"
+}
+
+info_field() {
+  sed -n "s:.*<$2>\(.*\)</$2>.*:\1:p" "$1" | head -1
+}
+
+snapshot_title() {
+  local num=$1 info=$SNAPSHOTS/$1/info.xml desc date
+  desc=$(info_field "$info" description)
+  date=$(info_field "$info" date)
+  date=$(date -d "${date} UTC" '+%b %-d %H:%M' 2>/dev/null || echo "$date")
+  echo "Snapshot $num · ${desc:-no description} · $date"
+}
+
+snapshot_cmdline() {
+  local subvol="@/.snapshots/$1/snapshot"
+  # Replace the subvol of rootflags=, keeping any other rootflags options.
+  sed -E "s#(rootflags=([^ ]*,)?)subvol=[^ ,]*#\1subvol=$subvol#" <<<"$2"
+}
+
+# Snapshot numbers that have a pinned image, newest first, at most $MAX.
+bootable_snapshots() {
+  local dir num
+  for dir in "$SNAPSHOTS"/*/; do
+    num=$(basename "$dir")
+    [[ $num =~ ^[0-9]+$ && -f $dir/omarchy-boot-image && -d $dir/snapshot ]] && echo "$num"
+  done | sort -rn | head -n "$MAX"
+}
+
+build_uki() {
+  local image=$1 is_live=$2 out=$3
+  shift 3
+  local snapshots=("$@")
+  local dir=$STORE/images/$image kver work cmdline num
+  [[ -d $dir ]] || die "boot image $image is missing from $STORE"
+  kver=$(<"$dir/kver")
+  cmdline=$(live_cmdline)
+  work=$(mktemp -d)
+
+  # Pretty name and sort key for the base; profiles carry the titles.
+  printf 'NAME="Omarchy"\nID=omarchy\nPRETTY_NAME="Omarchy (%s)"\nVERSION_ID=%s\n' "$kver" "$kver" >"$work/osrel"
+  printf '%s' "$cmdline" >"$work/cmdline"
+  printf '%s' "$kver" >"$work/uname"
+  local sections=(".osrel=$work/osrel" ".cmdline=$work/cmdline" ".uname=$work/uname")
+  [[ -n ${OMARCHY_BOOT_SPLASH:-} ]] && sections+=(".splash=$OMARCHY_BOOT_SPLASH")
+  sections+=(".initrd=$dir/initramfs.img" ".linux=$dir/vmlinuz")
+
+  if [[ $is_live == yes ]]; then
+    printf 'ID=omarchy\nTITLE=Omarchy\n' >"$work/profile-live"
+    sections+=(".profile=$work/profile-live")
+  fi
+  for num in "${snapshots[@]}"; do
+    printf 'ID=snapshot-%s\nTITLE=%s\n' "$num" "$(snapshot_title "$num")" >"$work/profile-$num"
+    printf '%s' "$(snapshot_cmdline "$num" "$cmdline")" >"$work/cmdline-$num"
+    sections+=(".profile=$work/profile-$num" ".cmdline=$work/cmdline-$num")
+  done
+
+  python3 -I "$UKI_BUILD" --stub "$STUB" --out "$work/unsigned.efi" "${sections[@]}"
+  "$SBSIGN" sign --private-key="${OMARCHY_BOOT_KEY:?}" --certificate="${OMARCHY_BOOT_CERT:?}" \
+    --output="$work/signed.efi" "$work/unsigned.efi" >/dev/null
+
+  # Write beside the target and rename over it, so a crash never leaves a
+  # half-written UKI as the only boot entry.
+  cp "$work/signed.efi" "$out.new"
+  sync -f "$out.new" 2>/dev/null || true
+  mv -f "$out.new" "$out"
+  rm -rf "$work"
+}
+
+set_default() {
+  local conf=$ESP/loader/loader.conf
+  mkdir -p "$(dirname "$conf")"
+  touch "$conf"
+  if grep -q '^default ' "$conf"; then
+    sed -i "s|^default .*|default $1|" "$conf"
+  else
+    echo "default $1" >>"$conf"
+  fi
+}
+
+cmd_sync() {
+  local -A live_images=() snaps_by_image=()
+  local kver image num wanted=() out
+
+  while read -r kver; do
+    [[ -n $kver ]] || continue
+    image=$(current_image "$kver")
+    [[ -n $image ]] || die "no boot image stored for installed kernel $kver"
+    live_images[$image]=1
+  done < <(live_kernels)
+
+  for num in $(bootable_snapshots); do
+    image=$(<"$SNAPSHOTS/$num/omarchy-boot-image")
+    if [[ ! -d $STORE/images/$image ]]; then
+      log "skipping snapshot $num: its boot image $image is gone"
+      continue
+    fi
+    snaps_by_image[$image]+="$num "
+  done
+
+  mkdir -p "$ESP/EFI/Linux"
+  for image in $(printf '%s\n' "${!live_images[@]}" "${!snaps_by_image[@]}" | sort -u); do
+    out=$ESP/EFI/Linux/omarchy-$image.efi
+    # shellcheck disable=SC2086
+    build_uki "$image" "$([[ -n ${live_images[$image]:-} ]] && echo yes || echo no)" "$out" ${snaps_by_image[$image]:-}
+    wanted+=("$out")
+    log "wrote $(basename "$out"): ${live_images[$image]:+live }snapshots ${snaps_by_image[$image]:-none}"
+  done
+
+  # Boot the first installed kernel's live profile by default. It is profile 0
+  # of its UKI, and systemd-boot names profile 0 after the file alone.
+  set_default "omarchy-$(current_image "$(live_kernels | head -1)").efi"
+
+  # Drop UKIs and stored images nothing refers to any more.
+  for out in "$ESP/EFI/Linux"/omarchy-*.efi; do
+    [[ -e $out ]] || continue
+    [[ " ${wanted[*]} " == *" $out "* ]] || { rm -f "$out"; log "removed $(basename "$out")"; }
+  done
+  for dir in "$STORE/images"/*/; do
+    image=$(basename "$dir")
+    [[ -n ${live_images[$image]:-} || -n ${snaps_by_image[$image]:-} ]] && continue
+    grep -qsx "$image" "$SNAPSHOTS"/*/omarchy-boot-image && continue
+    rm -rf "$dir"
+    log "dropped unused boot image $image"
+  done
+}
+
+case ${1:-} in
+import) shift; cmd_import "$@" ;;
+pin) shift; cmd_pin "$@" ;;
+sync) cmd_sync ;;
+*) die "usage: omarchy-boot-sync import KVER VMLINUZ INITRAMFS | pin NUM | sync" ;;
+esac

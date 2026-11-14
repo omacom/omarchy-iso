@@ -1,8 +1,9 @@
 #!/bin/bash
 #
 # Unit tests for builder/omarchy-image-write.c, the tool that packs the root
-# image into independent zstd frames at build time and writes it to the target
-# with parallel O_DIRECT writes at install time. It is compiled here with the
+# image into independent zstd frames (or reads the blocks of the squashfs the
+# ISO ships it in) and writes it to the target with parallel O_DIRECT writes at
+# install time. It is compiled here with the
 # address and undefined-behaviour sanitizers, so a memory error fails the test
 # even where the output happens to come out right.
 #
@@ -305,3 +306,150 @@ run write "$work/zero-altered.zst" "$work/target" 1
 [[ $status == 1 ]] || fail "a zero frame that is not byte-identical is decoded, not skipped" "status $status: $(cat "$work/stderr")"
 grep -q "frame 4:" "$work/stderr" || fail "names the altered zero frame" "$(cat "$work/stderr")"
 pass "a zero frame that is not byte-identical is decoded, not skipped"
+
+# --- write-squashfs -------------------------------------------------------
+# The raw image as the ISO ships it: the one file of a squashfs. With 256 KiB
+# blocks each frame of the synthetic image is one block: 0-3 random, which
+# mksquashfs stores uncompressed; 4-5 zeros, which it does not store at all
+# (sparse); 6-9 text, compressed; 10 the short last block, which
+# -no-fragments keeps a block.
+
+command -v mksquashfs >/dev/null || fail "write-squashfs tests need mksquashfs (squashfs-tools)"
+squashfs() { # output, mksquashfs options
+  local out="$1" dir
+  shift
+  dir=$(mktemp -d -p "$work")
+  cp "$raw" "$dir/omarchy-root.img"
+  mksquashfs "$dir" "$out" -noappend -no-xattrs -quiet -no-progress "$@" >/dev/null
+}
+sfs="$work/image.sfs"
+squashfs "$sfs" -comp zstd -b 256K -no-fragments
+
+for threads in 1 3 8; do
+  target "$work/target" 0
+  run write-squashfs "$sfs" "$work/target" "$threads"
+  [[ $status == 0 ]] || fail "write-squashfs with $threads threads succeeds" "$(cat "$work/stderr")"
+  cmp -s "$work/target" "$raw" || fail "write-squashfs with $threads threads reproduces the raw image"
+  pass "write-squashfs with $threads threads reproduces the raw image"
+done
+
+grep -q "(11 frames, 2 zero, .* cached, 8 threads)" "$work/stderr" ||
+  fail "write-squashfs reports what it did" "$(cat "$work/stderr")"
+pass "write-squashfs reports what it did"
+
+# The cache is the container's again: with all of it cached, every frame
+# counts as cached.
+cp "$sfs" "$disk/image.sfs"
+cat "$disk/image.sfs" >/dev/null
+target "$work/target" 0
+run write-squashfs "$disk/image.sfs" "$work/target" 3
+[[ $status == 0 ]] && grep -q "(11 frames, 2 zero, 11 cached, 3 threads)" "$work/stderr" ||
+  fail "write-squashfs orders by what the page cache holds of the squashfs" "$(cat "$work/stderr")"
+pass "write-squashfs orders by what the page cache holds of the squashfs"
+
+# Sparse blocks are left unwritten: over a target of 170s, frames 4 and 5 keep
+# the 170s and everything else is the image.
+target "$work/target" 170
+run write-squashfs "$sfs" "$work/target"
+[[ $status == 0 ]] || fail "write-squashfs over a non-zero target succeeds" "$(cat "$work/stderr")"
+python3 - "$work/target" "$raw" <<'PY' || fail "write-squashfs leaves the zero blocks unwritten"
+import sys
+frame = 256 * 1024
+target, raw = open(sys.argv[1], "rb").read(), open(sys.argv[2], "rb").read()
+assert target[4 * frame:6 * frame] == bytes([170]) * 2 * frame
+assert target[:4 * frame] == raw[:4 * frame] and target[6 * frame:] == raw[6 * frame:]
+PY
+pass "write-squashfs leaves the zero blocks unwritten"
+
+# Squashfs it does not write, refused untouched so the installer mounts it
+# and uses dd instead.
+# mksquashfs packs a tail into a fragment only when told to.
+squashfs "$work/fragment.sfs" -comp zstd -b 256K -always-use-fragments
+target "$work/target" 170
+run write-squashfs "$work/fragment.sfs" "$work/target"
+untouched 2 "write-squashfs refuses a file that ends in a fragment" "$work/target"
+grep -q "no-fragments" "$work/stderr" || fail "says to build it with -no-fragments" "$(cat "$work/stderr")"
+
+squashfs "$work/gzip.sfs" -comp gzip -b 256K -no-fragments
+target "$work/target" 170
+run write-squashfs "$work/gzip.sfs" "$work/target"
+untouched 2 "write-squashfs refuses a squashfs not compressed with zstd" "$work/target"
+
+two=$(mktemp -d -p "$work")
+cp "$raw" "$two/omarchy-root.img"
+cp "$raw" "$two/other.img"
+mksquashfs "$two" "$work/two.sfs" -noappend -no-xattrs -quiet -no-progress -comp zstd -b 256K -no-fragments >/dev/null
+target "$work/target" 170
+run write-squashfs "$work/two.sfs" "$work/target"
+untouched 2 "write-squashfs refuses a squashfs of more than one file" "$work/target"
+
+target "$work/target" 170
+run write-squashfs "$image" "$work/target"
+untouched 2 "write-squashfs refuses a file that is not a squashfs" "$work/target"
+
+head -c $(( $(stat -c %s "$sfs") - 4096 )) "$sfs" >"$work/truncated.sfs"
+target "$work/target" 170
+run write-squashfs "$work/truncated.sfs" "$work/target"
+untouched 2 "write-squashfs refuses a truncated squashfs" "$work/target"
+
+run write-squashfs "$work/missing.sfs" "$work/target"
+untouched 2 "write-squashfs refuses a missing image" "$work/target"
+
+# An inode that lies about where its blocks are or how big the file is.
+# Built with -noI, so the inode table is stored as it is and the file's
+# inode can be patched in place: from a copy whose zeros are holes, so that
+# mksquashfs writes the extended inode (type 9) with 64-bit fields, as it
+# does for the root image.
+holes=$(mktemp -d -p "$work")
+cp --sparse=always "$raw" "$holes/omarchy-root.img"
+mksquashfs "$holes" "$work/plain-inodes.sfs" -noappend -no-xattrs -quiet -no-progress \
+  -comp zstd -b 256K -no-fragments -noI >/dev/null
+lying_inode() { # output, field offset in the inode, little-endian u64 value
+  python3 - "$work/plain-inodes.sfs" "$@" <<'PY'
+import struct, sys
+data = bytearray(open(sys.argv[1], "rb").read())
+table = struct.unpack_from("<Q", data, 64)[0]
+inode = table + 2  # past the metadata block's header
+assert struct.unpack_from("<H", data, table)[0] & 0x8000, "inode table is not stored"
+assert struct.unpack_from("<H", data, inode)[0] == 9, "not an extended file inode"
+struct.pack_into("<Q", data, inode + int(sys.argv[3]), int(sys.argv[4], 0))
+open(sys.argv[2], "wb").write(data)
+PY
+}
+target "$work/target" 0
+run write-squashfs "$work/plain-inodes.sfs" "$work/target"
+[[ $status == 0 ]] && cmp -s "$work/target" "$raw" || fail "write-squashfs writes a squashfs with stored inodes" "$(cat "$work/stderr")"
+lying_inode "$work/wrapped-start.sfs" 16 0xfffffffffffff000
+target "$work/target" 170
+run write-squashfs "$work/wrapped-start.sfs" "$work/target"
+untouched 2 "write-squashfs refuses blocks that start outside the data" "$work/target"
+lying_inode "$work/wrapped-size.sfs" 24 0xfffffffffffff000
+target "$work/target" 170
+run write-squashfs "$work/wrapped-size.sfs" "$work/target"
+untouched 2 "write-squashfs refuses a file size beyond off_t" "$work/target"
+
+target "$work/small" 170 $((raw_size - 4096))
+run write-squashfs "$sfs" "$work/small"
+untouched 1 "write-squashfs fails on a target smaller than the image, without writing" "$work/small"
+
+for args in "write-squashfs" "write-squashfs $sfs" "write-squashfs $sfs $work/target 0"; do
+  # shellcheck disable=SC2086
+  run $args
+  [[ $status == 2 ]] || fail "write-squashfs refuses bad arguments: '$args'" "status $status"
+done
+pass "write-squashfs refuses bad arguments"
+
+# The first compressed block (frame 6, the text) with its zstd magic broken
+# fails the write with status 1 and names the frame. Data blocks start right
+# after the 96-byte superblock; frames 0-3 are stored, 256 KiB each, and 4-5
+# take no space.
+start=$((96 + 4 * frame))
+[[ $(od -An -tx1 -j "$start" -N 4 "$sfs" | tr -d ' ') == 28b52ffd ]] ||
+  fail "the test squashfs has its first compressed block where expected" "$(od -An -tx1 -j "$start" -N 4 "$sfs")"
+cp "$sfs" "$work/corrupt.sfs"
+printf '\xff' | dd of="$work/corrupt.sfs" bs=1 seek="$start" conv=notrunc status=none
+target "$work/target" 0
+run write-squashfs "$work/corrupt.sfs" "$work/target" 1
+[[ $status == 1 ]] || fail "a corrupt squashfs block fails the write with status 1" "status $status: $(cat "$work/stderr")"
+grep -q "frame 6:" "$work/stderr" || fail "names the corrupt block" "$(cat "$work/stderr")"
+pass "a corrupt squashfs block fails the write with status 1 and names the frame"

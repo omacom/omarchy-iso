@@ -44,7 +44,6 @@ The first boot lands on the Omarchy login screen, drawn by the NVIDIA GPU.
 
 The **USB stick** boots the installer without showing a menu. Press Esc while it starts for:
 
-- **Omarchy with speakup screen reader**.
 - **N1x recovery shell (hardware probe, no installer)**. Records the GPU, display, input and network state to `/var/log/omarchy-n1x-live-probe.log` and leaves you at a root prompt, without touching the disk.
 
 The **installed system** (Limine) offers:

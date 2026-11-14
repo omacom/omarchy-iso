@@ -165,16 +165,21 @@ def _time_step(label: str):
 
 
 # The root image: the invariant target system as a btrfs filesystem image
-# (build-root-image.sh), packed as independent 256 KiB zstd frames with a seek
-# table and written onto the target partition in place of pacstrapping it.
+# (build-root-image.sh), shipped as omarchy-root.sfs: a squashfs holding the raw
+# image as omarchy-root.img, which the kernel can mount. The install mounts it
+# and writes the image onto the target partition in place of pacstrapping it;
+# the boot menu's Try Omarchy boots the same image (hooks/omarchy_try).
 # build-iso.sh ships it as a plain file on the ISO, read straight off the boot
 # medium, with its sha256 next to it. Its one subvolume becomes @.
 # archiso names the directory after the architecture, which is what
 # platform.machine() says on the live system: arch/x86_64 or arch/aarch64.
 ROOT_IMAGE_DIR = Path("/run/archiso/bootmnt/arch") / platform.machine()
-ROOT_IMAGE = ROOT_IMAGE_DIR / "omarchy-root.img.zst"
+ROOT_IMAGE = ROOT_IMAGE_DIR / "omarchy-root.sfs"
+# Where the installer mounts ROOT_IMAGE, and the image file inside it.
+ROOT_IMAGE_MOUNT = Path("/run/omarchy-iso/root-image")
+ROOT_IMAGE_FILE = "omarchy-root.img"
 ROOT_IMAGE_SUBVOLUME = "omarchy-root"
-# Writes ROOT_IMAGE in parallel; compiled and installed by build-iso.sh.
+# Writes the image in parallel; compiled and installed by build-iso.sh.
 IMAGE_WRITE = Path("/usr/local/bin/omarchy-image-write")
 
 
@@ -992,79 +997,72 @@ def _medium_bytes_read() -> int | None:
         return None
 
 
-def _write_root_image_frames(image: Path, device: str) -> bool:
-    """Write the image with omarchy-image-write (builder/omarchy-image-write.c):
-    the ISO packs it as independent 256 KiB zstd frames with a seek table,
-    which N threads decode and pwrite with O_DIRECT, so the drive sees N
-    requests in flight where zstdcat | dd gives it one (2.5 s -> 0.9 s on a
-    990 PRO, stream in RAM). False when the tool is not on the ISO or the
-    image is not one it writes (exit 2, nothing written), so the caller can
-    use the pipe instead. Exit 1 is an error: the target could not be used
-    (in use, too small) or the write failed partway."""
+def _mount_root_image(container: Path) -> Path:
+    """Mount ROOT_IMAGE read-only and return the raw image inside it, for dd
+    when omarchy-image-write cannot write it. threads=multi lets squashfs
+    decompress on every core instead of one (linux-omarchy builds the multi
+    decompressor; without the option a mount uses one thread). A kernel that
+    refuses the option still mounts it, single-threaded."""
+    image = ROOT_IMAGE_MOUNT / ROOT_IMAGE_FILE
+    if not os.path.ismount(ROOT_IMAGE_MOUNT):
+        ROOT_IMAGE_MOUNT.mkdir(parents=True, exist_ok=True)
+        base = ["mount", "-t", "squashfs", "-o"]
+        mounted = subprocess.run([*base, "ro,loop,threads=multi", str(container), str(ROOT_IMAGE_MOUNT)],
+                                 capture_output=True, text=True, check=False)
+        if mounted.returncode != 0:
+            info("› squashfs refused threads=multi; mounting the root image single-threaded")
+            subprocess.run([*base, "ro,loop", str(container), str(ROOT_IMAGE_MOUNT)],
+                           capture_output=True, text=True, check=True)
+    if not image.is_file():
+        raise RuntimeError(f"{container} holds no {ROOT_IMAGE_FILE}")
+    return image
+
+
+def _umount_root_image() -> None:
+    if os.path.ismount(ROOT_IMAGE_MOUNT):
+        subprocess.run(["umount", str(ROOT_IMAGE_MOUNT)], capture_output=True, check=False)
+
+
+def _write_root_image_parallel(container: Path, device: str) -> bool:
+    """Write the image with omarchy-image-write write-squashfs
+    (builder/omarchy-image-write.c), straight from the squashfs without
+    mounting it: N threads each decode the next 1 MiB block with libzstd and
+    pwrite it with O_DIRECT, skipping zero blocks, so the drive sees N
+    requests in flight where dd gives it one. False when the tool is not on
+    the ISO or refuses the image (exit 2, nothing written), so the caller can
+    use dd instead. Exit 1 is an error: the target could not be used (in use,
+    too small) or the write failed partway."""
     if not IMAGE_WRITE.is_file():
         return False
-    with _time_step("F1.image_write (parallel frames, O_DIRECT)"):
-        proc = subprocess.run([str(IMAGE_WRITE), "write", str(image), device],
+    with _time_step("F1.image_write (parallel, O_DIRECT)"):
+        proc = subprocess.run([str(IMAGE_WRITE), "write-squashfs", str(container), device],
                               stderr=subprocess.PIPE, text=True, check=False)
     for line in proc.stderr.splitlines():
         info(f"› {line}")
     if proc.returncode == 2:
-        info("› image-write refused the image; writing it through zstdcat | dd")
+        info("› image-write refused the image; writing it with dd")
         return False
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, proc.args, stderr=proc.stderr)
     return True
 
 
-def _write_root_image_pipe(image: Path, device: str) -> None:
-    with _time_step("F1.dd (zstdcat | dd oflag=direct)"):
-        # dd blocks on its writes, so the pipe paces zstd to the disk,
-        # and the decoding runs on another core.
-        #
-        # iflag=fullblock is what makes oflag=direct true. A read from a
-        # pipe returns at most one pipe buffer (64 KiB), dd treats that
-        # as a partial block, and for a partial block it silently drops
-        # O_DIRECT, so without fullblock every write is buffered. On a
-        # LUKS mapper with 512-byte sectors the block device's writeback
-        # then goes out 512 bytes at a time: 2 million NVMe requests per
-        # GiB, 87 s for this image on a 980 PRO against 2.7 s
-        # with full blocks. QEMU hides it (4.9 s there), real disks do
-        # not. bs: 1M-4M measure the same within noise, 2M best, 16M and
-        # 64M slower (on the same drive, stream in RAM).
-        # status=noxfer keeps dd's record counts for the check below.
-        #
-        # The pipe is ours, not the shell's, for two reasons. Size: with
-        # the default 64 KiB pipe zstd stalls on every dd write and dd on
-        # every read; 4 MiB lets zstd stay two blocks ahead (2.5 s -> 2.1 s
-        # on a 990 PRO, stream in RAM; 1-16 MiB measure the same, 64 MiB
-        # and up slower). Above 1 MiB, F_SETPIPE_SZ needs
-        # CAP_SYS_RESOURCE, which the orchestrator has as root. Status:
-        # a shell pipeline reports dd's alone, so a zstd that died on a
-        # bad frame read as a short image written successfully.
-        read_end, write_end = os.pipe()
-        try:
-            fcntl.fcntl(write_end, fcntl.F_SETPIPE_SZ, 4 << 20)
-        except OSError:
-            pass  # a smaller pipe is slower, not wrong
-        # zstd's stderr is captured so its reason ("premature end", a bad
-        # frame) travels with the failure; it only writes there on an error.
-        zstd = subprocess.Popen(["zstdcat", str(image)], stdout=write_end,
-                                stderr=subprocess.PIPE, text=True)
-        dd = subprocess.Popen(
-            ["dd", f"of={device}", "bs=2M", "iflag=fullblock",
+def _write_root_image_dd(image: Path, device: str) -> None:
+    with _time_step("F1.dd (oflag=direct)"):
+        # oflag=direct so the writeback is the drive's full blocks, not 512
+        # bytes at a time on a LUKS mapper with 512-byte sectors (87 s for
+        # this image on a 980 PRO against 2.7 s); iflag=fullblock so a short
+        # read never makes dd drop O_DIRECT for that block. bs: 1M-4M measure
+        # the same within noise, 2M best. conv=sparse leaves zero blocks
+        # unwritten; status=noxfer keeps dd's record counts for the check.
+        dd = subprocess.run(
+            ["dd", f"if={image}", f"of={device}", "bs=2M", "iflag=fullblock",
              "conv=sparse,fsync", "oflag=direct", "status=noxfer"],
-            stdin=read_end, stderr=subprocess.PIPE, text=True,
+            stderr=subprocess.PIPE, text=True, check=False,
         )
-        os.close(read_end)
-        os.close(write_end)
-        _, dd_stderr = dd.communicate()
-        _, zstd_stderr = zstd.communicate()
-        # dd first: when dd dies, zstd dies of the broken pipe after it.
         if dd.returncode != 0:
-            raise subprocess.CalledProcessError(dd.returncode, dd.args, stderr=dd_stderr)
-        if zstd.returncode != 0:
-            raise subprocess.CalledProcessError(zstd.returncode, zstd.args, stderr=zstd_stderr)
-        _check_dd_full_blocks(dd_stderr)
+            raise subprocess.CalledProcessError(dd.returncode, dd.args, stderr=dd.stderr)
+        _check_dd_full_blocks(dd.stderr)
 
 
 def _place_root_image(ctx: InstallContext) -> None:
@@ -1073,10 +1071,10 @@ def _place_root_image(ctx: InstallContext) -> None:
     the same ~940 packages a pacstrap would install, at the speed of the
     drive."""
     target = ctx.target
-    raw_image = _root_image()
+    container = _root_image()
     mounts, device = _root_image_target_mounts(target)
 
-    info(f"› writing root image ({raw_image.stat().st_size >> 20} MiB from {raw_image})")
+    info(f"› writing root image from {container} ({container.stat().st_size >> 20} MiB)")
 
     with _time_step("F1.umount_target_tree"):
         _umount_tree(target)
@@ -1085,12 +1083,15 @@ def _place_root_image(ctx: InstallContext) -> None:
     # the page cache: near zero when the verify left it all cached, up to the
     # whole image on a machine whose RAM could not hold it.
     medium_before = _medium_bytes_read()
-    if not _write_root_image_frames(raw_image, device):
-        _write_root_image_pipe(raw_image, device)
+    if not _write_root_image_parallel(container, device):
+        try:
+            _write_root_image_dd(_mount_root_image(container), device)
+        finally:
+            _umount_root_image()
     medium_after = _medium_bytes_read()
     if medium_before is not None and medium_after is not None:
         info(f"› read {(medium_after - medium_before) / 1048576:.0f} MiB of the "
-             f"{raw_image.stat().st_size / 1048576:.0f} MiB image off the install medium while writing it")
+             f"{ROOT_IMAGE.stat().st_size / 1048576:.0f} MiB image off the install medium while writing it")
 
     # -m sets a fresh fsid via the METADATA_UUID feature (kernel 5.0+) by
     # writing the superblocks only; -u rewrites every metadata block of the

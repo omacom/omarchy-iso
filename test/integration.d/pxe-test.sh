@@ -123,7 +123,7 @@ assert_nbd_medium() {
   check "kernel cmdline pinned copytoram=n" \
     ssh_live_root "grep -q 'copytoram=n' /proc/cmdline"
   check "root image is reachable on the netboot medium" \
-    ssh_live_root "test -f /run/archiso/bootmnt/arch/x86_64/omarchy-root.img.zst"
+    ssh_live_root "test -f /run/archiso/bootmnt/arch/x86_64/omarchy-root.sfs"
 }
 
 assert_installed_system() {

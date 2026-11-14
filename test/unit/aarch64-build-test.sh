@@ -139,8 +139,15 @@ for cfg in grub.cfg loopback.cfg; do
       done
     fi
     grep -Eq '^%(N1X|X86)_ONLY|%LIVE_(KERNEL|INITRD)%' "$fixture/$platform-$cfg" && fail "template markers remain in $cfg"
-    grep -Fqx 'timeout_style=hidden' "$fixture/$platform-$cfg" || fail "$cfg ($platform) shows the boot menu"
-    grep -Fqx 'timeout=0' "$fixture/$platform-$cfg" || fail "$cfg ($platform) waits at the boot menu"
+    if [[ $platform == x86_64 ]]; then
+      # Try Omarchy is an x86_64 entry, so that menu shows for 3 s.
+      grep -Fqx 'timeout_style=menu' "$fixture/$platform-$cfg" || fail "$cfg ($platform) hides the menu with Try Omarchy"
+      grep -Fqx 'timeout=3' "$fixture/$platform-$cfg" || fail "$cfg ($platform) does not show the menu for 3 s"
+      grep -Fq -- "--id 'try'" "$fixture/$platform-$cfg" || fail "$cfg ($platform) lacks the Try Omarchy entry"
+    else
+      grep -Fqx 'timeout_style=hidden' "$fixture/$platform-$cfg" || fail "$cfg ($platform) shows the boot menu"
+      grep -Fqx 'timeout=0' "$fixture/$platform-$cfg" || fail "$cfg ($platform) waits at the boot menu"
+    fi
   done
 done
 

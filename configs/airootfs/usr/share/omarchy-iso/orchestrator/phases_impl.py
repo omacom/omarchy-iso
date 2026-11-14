@@ -3659,11 +3659,16 @@ def _validate_provisioning_state(ctx: InstallContext) -> None:
         raise RuntimeError(f"deferred-provisioning install but {provisioning_dir / 'pending'} is missing")
 
     # Checked after the OEM's scripts ran: a machine must not ship without the
-    # agreement its ISO carries.
+    # agreement its ISO carries, or with one the build never checked.
     if ctx.oem_dir is not None and (ctx.oem_dir / "oem.json").is_file():
         for name in OEM_SETUP_FILES:
-            if (ctx.oem_dir / name).is_file() and not (ctx.target / OEM_TARGET_DIR / name).is_file():
-                raise RuntimeError(f"OEM install but {ctx.target / OEM_TARGET_DIR / name} is missing")
+            bundled, laid_down = ctx.oem_dir / name, ctx.target / OEM_TARGET_DIR / name
+            if not bundled.is_file():
+                continue
+            if not laid_down.is_file():
+                raise RuntimeError(f"OEM install but {laid_down} is missing")
+            if laid_down.read_bytes() != bundled.read_bytes():
+                raise RuntimeError(f"OEM install but {laid_down} is no longer the {name} this ISO was built with")
 
     link = ctx.target / "etc/systemd/system/multi-user.target.wants/omarchy-provision-owner.service"
     if not link.is_symlink():

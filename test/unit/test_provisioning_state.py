@@ -317,6 +317,11 @@ class StageProvisioningStateTest(unittest.TestCase):
         self.assertEqual({path.stat().st_mode & 0o777 for path in laid_down.iterdir()}, {0o644})
         phases_impl._validate_provisioning_state(make_ctx(self.target, oem_dir=oem))
 
+        # Nor may an OEM script that rewrote it ship terms the build never checked.
+        (laid_down / "eula.txt").write_text("")
+        with self.assertRaisesRegex(RuntimeError, "eula.txt is no longer the eula.txt this ISO was built with"):
+            phases_impl._validate_provisioning_state(make_ctx(self.target, oem_dir=oem))
+
         # An OEM script that lost the agreement must not ship a machine that never asks for it.
         (laid_down / "eula.txt").unlink()
         with self.assertRaisesRegex(RuntimeError, "eula.txt is missing"):

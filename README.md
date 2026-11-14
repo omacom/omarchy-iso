@@ -311,6 +311,8 @@ The kernel is `linux-omarchy`, as on x86_64, and it is the only one an aarch64 i
 
 Snapdragon laptops get no device tree from their firmware, so the live system also carries a UKI with one for every supported laptop, built from the device trees the kernel package ships. GRUB boots it by default where the processor is a Snapdragon, and systemd-stub picks the device tree by the machine's SMBIOS data. Every other machine boots the kernel directly.
 
+The Raspberry Pi 4 draft uses this same image with separately prepared UEFI firmware in Device Tree mode. Its kernel, firmware handoff and board tests remain prerequisites; see [RASPBERRY-PI.md](RASPBERRY-PI.md). The ISO is not a native Pi EEPROM-bootable SD image.
+
 The runtime the image installs must have the platform detector and the Snapdragon hardware setup (`install/hardware/qualcomm/`), which lists those device trees for the installed system's own UKI. The build refuses a runtime without them. On a laptop that still has Windows, the installer copies the vendor-signed firmware off the Windows partition before the disk is written.
 
 ## Testing the ISO

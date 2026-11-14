@@ -12,6 +12,9 @@ configure_archiso_aarch64_mkinitcpio() {
     hid_generic
     hid_multitouch
   )
+  # Pi 4 needs its mailbox/reset providers before the PCIe USB host can find
+  # the install medium. Required modules: an older kernel must fail the build.
+  local -a raspberrypi_modules=(raspberrypi pcie-brcmstb reset-raspberrypi sdhci-brcmstb sdhci-iproc bcm2835 fixed gpio-regulator)
   # What a Snapdragon X1 or X2 laptop needs before its USB ports, keyboard and
   # panel work, on a kernel that builds these as modules. Arch Linux ARM's
   # kernel builds them in, and the ? skips one that a kernel does not have. The
@@ -90,7 +93,7 @@ configure_archiso_aarch64_mkinitcpio() {
   # other NVIDIA boards) and the I2C-HID transport before the live root is
   # mounted. The generic keyboard hook does not include drivers under
   # hid/i2c-hid.
-  modules+=("${early_input_modules[@]}" "${snapdragon_platform_modules[@]}")
+  modules+=("${early_input_modules[@]}" "${snapdragon_platform_modules[@]}" "${raspberrypi_modules[@]}")
   printf -v modules_line 'MODULES=(%s)' "${modules[*]}"
   printf '%s\n' "$modules_line" >>"$config"
 

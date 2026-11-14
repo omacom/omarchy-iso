@@ -36,6 +36,23 @@ OPEN_FLAGS = ["--persistent", "--allow-discards", "--perf-no_read_workqueue"]
 # The same options as the busybox encrypt hook and crypttab spell them.
 CMDLINE_OPTIONS = "allow-discards,no-read-workqueue"
 
+# The installed system also bypasses the write workqueue where that helps:
+# an NVMe SSD, a CPU with AES instructions, and real hardware. dm-crypt's write
+# path otherwise hands every write to one kcryptd thread that sorts all pending
+# writes by sector, so a small fsync from the desktop waits behind a background
+# writer's backlog. On a Ryzen AI Max+ 395 with a Samsung 990 PRO 4TB (LUKS2 +
+# btrfs, kernel 7.2) a 4K write+fdatasync under a buffered 6.5 GB/s background
+# writer went from p99 114 ms / max 199 ms to p99 23 ms / max 46 ms, 6x more
+# syncs completed; the background writer lost 9% (6.7 -> 6.1 GB/s) and 4K
+# random reads under that load rose from p99 0.45 ms to 2 ms. The sorting helps
+# rotating disks, and the offload helps when encryption is slow; neither holds
+# for an NVMe SSD with AES instructions. In a VM (virtio) the install image
+# write was slower with it, so VMs keep the queue. The install itself keeps
+# OPEN_FLAGS above either way; this only adds the option to what the installed
+# system opens with. OMARCHY_LUKS_WRITE_WORKQUEUE=bypass|keep overrides the check.
+WRITE_WORKQUEUE_OPTION = "no-write-workqueue"
+WRITE_WORKQUEUE_ENV = "OMARCHY_LUKS_WRITE_WORKQUEUE"
+
 
 def _unlock(self: Luks2, key_file: Path | None = None) -> None:
     debug(f"Unlocking luks2 device (omarchy tuning): {self.luks_dev_path}")
@@ -138,6 +155,14 @@ def apply() -> None:
     Installer.run_command = _run_command   # type: ignore[method-assign]
 
 
+def _spec_device(spec: str) -> Path:
+    """The device path a cryptdevice= spec names (UUID=, PARTUUID=, or a path)."""
+    if "=" in spec:
+        tag, _, value = spec.partition("=")
+        return Path("/dev/disk") / f"by-{tag.lower()}" / value
+    return Path(spec)
+
+
 def _luks_uuid_of(spec: str) -> str | None:
     """LUKS header UUID of the device a cryptdevice= spec names
     (UUID=, PARTUUID=, or a path).
@@ -147,19 +172,74 @@ def _luks_uuid_of(spec: str) -> str | None:
     fallback whenever the link is not there yet or blkid has nothing to say:
     a lookup hiccup must never silently drop the unlock parameters."""
     fallback = None
-    if "=" in spec:
-        tag, _, value = spec.partition("=")
-        dev = Path("/dev/disk") / f"by-{tag.lower()}" / value
-        if tag.upper() == "UUID":
-            fallback = value
-    else:
-        dev = Path(spec)
+    tag, _, value = spec.partition("=")
+    if value and tag.upper() == "UUID":
+        fallback = value
+    dev = _spec_device(spec)
     if not dev.exists():
         return fallback
     try:
         return run(["blkid", "-s", "UUID", "-o", "value", str(dev)]).stdout.decode().strip() or fallback
     except CalledProcessError:
         return fallback
+
+
+def _in_vm() -> bool:
+    try:
+        return run(["systemd-detect-virt", "--vm"]).stdout.decode().strip() not in ("", "none")
+    except CalledProcessError:
+        return False  # exit status 1 and "none": not virtualized
+    except OSError:
+        return True   # cannot tell: keep the default queue
+
+
+def _cpu_has_aes(cpuinfo: Path = Path("/proc/cpuinfo")) -> bool:
+    """AES instructions: x86 lists `aes` in flags, arm64 in Features."""
+    try:
+        for line in cpuinfo.read_text().splitlines():
+            key, _, values = line.partition(":")
+            if key.strip() in ("flags", "Features") and "aes" in values.split():
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def _is_nvme_ssd(dev: Path) -> bool:
+    """True when the disk under dev (a partition or a whole disk) is a
+    non-rotational NVMe device."""
+    try:
+        parent = run(["lsblk", "-ndo", "PKNAME", str(dev)]).stdout.decode().strip()
+        disk = f"/dev/{parent}" if parent else str(dev)
+        fields = run(["lsblk", "-ndo", "TRAN,ROTA", disk]).stdout.decode().split()
+    except (CalledProcessError, OSError):
+        return False
+    return fields == ["nvme", "0"]
+
+
+def bypass_write_workqueue(spec: str) -> bool:
+    """Whether the installed system should open this LUKS device with
+    no-write-workqueue (see WRITE_WORKQUEUE_OPTION)."""
+    forced = os.environ.get(WRITE_WORKQUEUE_ENV, "").strip().lower()
+    if forced in ("bypass", "keep"):
+        return forced == "bypass"
+    dev = _spec_device(spec)
+    if not dev.exists():
+        return False
+    return not _in_vm() and _cpu_has_aes() and _is_nvme_ssd(dev)
+
+
+def cmdline_options(spec: str) -> str:
+    """dm-crypt options for the installed system, in the busybox encrypt
+    hook's spelling (crypttab and rd.luks.options= say discard for
+    allow-discards; see crypttab_options)."""
+    if bypass_write_workqueue(spec):
+        return f"{CMDLINE_OPTIONS},{WRITE_WORKQUEUE_OPTION}"
+    return CMDLINE_OPTIONS
+
+
+def crypttab_options(options: str) -> str:
+    return options.replace("allow-discards", "discard")
 
 
 def with_cmdline_options(cmdline: str) -> str:
@@ -178,15 +258,16 @@ def with_cmdline_options(cmdline: str) -> str:
     extra = []
     for param in cmdline.split():
         if param.startswith("cryptdevice=") and param.count(":") == 1:
-            param = f"{param}:{CMDLINE_OPTIONS}"
+            param = f"{param}:{cmdline_options(param[len('cryptdevice='):].partition(':')[0])}"
         if param.startswith("cryptdevice="):
             spec, _, rest = param[len("cryptdevice="):].partition(":")
-            name = rest.split(":")[0] or "root"
+            name, _, options = rest.partition(":")
+            name = name or "root"
             uuid = _luks_uuid_of(spec)
             # Idempotent: every cmdline passes through here once at the
             # writer, and the archinstall-derived one has been here before.
             if uuid and f"rd.luks.name={uuid}=" not in cmdline:
                 extra += [f"rd.luks.name={uuid}={name}",
-                          f"rd.luks.options={uuid}={CMDLINE_OPTIONS.replace('allow-discards', 'discard')}"]
+                          f"rd.luks.options={uuid}={crypttab_options(options or CMDLINE_OPTIONS)}"]
         out.append(param)
     return " ".join(out + extra)

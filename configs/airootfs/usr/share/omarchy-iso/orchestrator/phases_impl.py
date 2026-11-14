@@ -1997,8 +1997,10 @@ def _write_pre_mounted_crypttab(ctx: InstallContext) -> None:
     luks_uuid = storage.get("luks_uuid")
     if not luks_uuid:
         return
+    from .luks_tuning import cmdline_options, crypttab_options
+    options = crypttab_options(cmdline_options(f"UUID={luks_uuid}"))
     crypttab = ctx.target / "etc" / "crypttab.initramfs"
-    crypttab.write_text(f"omarchy_root  UUID={luks_uuid}  none  luks,discard,no-read-workqueue\n")
+    crypttab.write_text(f"omarchy_root  UUID={luks_uuid}  none  luks,{options}\n")
 
 
 # systemd (257 and later) asks the console for its size with ANSI escape
@@ -2018,9 +2020,11 @@ CONSOLE_NO_ANSI_QUERY = "systemd.tty.term.console=dumb"
 def _build_pre_mounted_cmdline(ctx: InstallContext, btrfs_uuid: str) -> str:
     storage = _storage_intent(ctx)
     if storage.get("luks_uuid"):
+        from .luks_tuning import cmdline_options
         root_mapper = storage.get("root_mapper") or "/dev/mapper/omarchy_root"
+        options = cmdline_options(f"UUID={storage['luks_uuid']}")
         return (
-            f"cryptdevice=UUID={storage['luks_uuid']}:omarchy_root:allow-discards,no-read-workqueue "
+            f"cryptdevice=UUID={storage['luks_uuid']}:omarchy_root:{options} "
             f"root={root_mapper} zswap.enabled=0 "
             "rootflags=subvol=@ rw rootfstype=btrfs"
         )

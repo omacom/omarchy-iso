@@ -252,7 +252,7 @@ left_padding() {
 visible_len() {
   local text="$1"
   text="$(printf '%b' "$text" | sed -E $'s/\x1b\\[[0-9;?]*[A-Za-z]//g')"
-  printf '%s' "${#text}"
+  display_width "$text"
 }
 
 blank_line() { printf '\r%s\n' "$CLEAR_LINE"; }
@@ -520,9 +520,9 @@ render_finish() {
     # actually happened, so a failed one withdraws the offer instead of
     # printing a promise the machine is not keeping.
     if [[ $TARGET_RELEASED == yes ]]; then
-      center "${DIM}You can now remove the install medium${RESET}" "$CONTENT_WIDTH"
+      center "${DIM}$(t finish.removeMedium)${RESET}" "$CONTENT_WIDTH"
     else
-      center "${DIM}Leave the install medium in until the reboot completes${RESET}" "$CONTENT_WIDTH"
+      center "${DIM}$(t finish.keepMedium)${RESET}" "$CONTENT_WIDTH"
     fi
   } >"$TTY_PATH"
 
@@ -596,7 +596,9 @@ warm_reboot_path() {
   # render_finish, so the logo effect (up to 8s of it), the timeout in front
   # of it, the stty that sizes the prompt, and the button gum paints are all
   # still ahead of the moment the user is invited to pull the stick.
-  for binary in systemctl ttfx gum timeout stty; do
+  # kmscon too when it draws this screen: it repaints from the medium-backed
+  # live root on every frame of the effect and the button.
+  for binary in systemctl ttfx gum timeout stty ${OMARCHY_ISO_KMSCON:+kmscon}; do
     path=$(command -v "$binary" 2>/dev/null) || continue
     cat "$path" >/dev/null 2>&1 || true
     while IFS= read -r dep; do
@@ -647,7 +649,7 @@ reboot_prompt() {
 
   # The button is the label with two columns of padding either side.
   label="$(t finish.reboot)"
-  prompt_pad=$(( ( $(term_cols) - ${#label} - 8 ) / 2 ))
+  prompt_pad=$(( ( $(term_cols) - $(display_width "$label") - 8 ) / 2 ))
   (( prompt_pad < 0 )) && prompt_pad=0
   gum confirm \
     --padding "0 0 0 $prompt_pad" \
@@ -658,10 +660,20 @@ reboot_prompt() {
     "" <"$TTY_PATH" >"$TTY_PATH" 2>&1
 }
 
+# Cut to width columns, not characters: a CJK character takes two.
 truncate_for_width() {
-  local text="$1" width="$2"
-  if (( ${#text} > width )); then
-    printf '%s…' "${text:0:$((width - 1))}"
+  local text="$1" width="$2" cut columns
+  (( width < 1 )) && width=1
+  if (( $(display_width "$text") > width )); then
+    # A character takes at most two columns, so dropping half the excess never
+    # cuts too much, and a couple of passes reach the width.
+    cut=${text:0:$((width - 1))}
+    columns=$(display_width "$cut")
+    while (( columns > width - 1 )); do
+      cut=${cut:0:$((${#cut} - (columns - width + 2) / 2))}
+      columns=$(display_width "$cut")
+    done
+    printf '%s…' "$cut"
   else
     printf '%s' "$text"
   fi

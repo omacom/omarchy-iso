@@ -1,0 +1,118 @@
+#!/bin/bash
+#
+# Runs the installer inside kmscon on this VT, for languages the Linux console
+# cannot draw. kmscon renders with fontconfig (the CJK font bundled in the live
+# image) and reads keys through XKB, so loadkeys has no effect in it: the
+# layout is passed here, from the keymap the configurator saved.
+#
+#   omarchy-iso-kmscon <command...>   run command in kmscon; returns when it exits
+#   omarchy-iso-kmscon --xkb <keymap> print the XKB "layout model variant options"
+#                                     for a keymap, "-" for an empty field
+
+STATE=/run/omarchy-iso
+
+# Console keymap → XKB settings, from systemd's table (the same one localectl
+# and the installed system use). The disk password typed here is typed again
+# at boot under the console keymap, so the layouts must place keys alike.
+# systemd has no row for the keymaps below; they use the settings
+# omarchy-provision-owner (keyboard_xkb_settings) gives the installed system.
+# Unknown keymaps fall back to us.
+xkb_for_keymap() {
+  local keymap=${1:-us} layout=- model=- variant=- options=-
+  local switch=grp:shifts_toggle,grp_led:scroll
+  case $keymap in
+    colemak) layout=us variant=colemak ;;
+    bg-cp1251) layout=bg,us variant=phonetic, options=$switch ;;
+    cz) layout=cz,us variant=qwerty, options=$switch ;;
+    de_CH-latin1) layout=ch ;;
+    kyrgyz) layout=kg,us options=$switch ;;
+    no-latin1) layout=no ;;
+    pl) layout=pl ;;
+    ua) layout=ua,us options=$switch ;;
+    *)
+      read -r layout model variant options < <(awk -v k="$keymap" '$1 == k { print $2, $3, $4, $5; exit }' /usr/share/systemd/kbd-model-map)
+      [[ -n $layout ]] || layout=us
+      ;;
+  esac
+  printf '%s %s %s %s\n' "$layout" "${model:--}" "${variant:--}" "${options:--}"
+}
+
+# Pixel height for about 100 columns (cells are ~0.6 of the height wide) and no
+# more than 36 rows, so the 81-column logo fits and a 4K panel isn't 300 columns
+# of tiny text.
+font_size() {
+  local w h size
+  { IFS=, read -r w h </sys/class/graphics/fb0/virtual_size; } 2>/dev/null || { w=1280 h=800; }
+  size=$((h / 36))
+  ((w * 10 / 6 / 100 < size)) && size=$((w * 10 / 6 / 100))
+  ((size < 14)) && size=14
+  printf '%s' "$size"
+}
+
+if [[ ${1:-} == "--xkb" ]]; then
+  xkb_for_keymap "${2:-us}"
+  exit 0
+fi
+
+keymap=us
+if [[ -r $STATE/kmscon-resume ]]; then
+  keymap=$(bash -c 'source "$1"; printf "%s" "${keyboard:-us}"' _ "$STATE/kmscon-resume")
+fi
+OMARCHY_ISO_KMSCON_XKB=$(xkb_for_keymap "$keymap")
+read -r layout model variant options <<<"$OMARCHY_ISO_KMSCON_XKB"
+[[ $model == "-" ]] && model=""
+[[ $variant == "-" ]] && variant=""
+[[ $options == "-" ]] && options=""
+
+export OMARCHY_ISO_KMSCON=1
+export OMARCHY_ISO_KMSCON_XKB
+# C.UTF-8 like the live system: bash string lengths count characters, and gum's
+# width tables stay on narrow ambiguous-width glyphs, as libtsm draws them.
+export LANG=C.UTF-8
+unset LC_ALL
+# The console's size, exported on tty1, would stand in for kmscon's grid:
+# tput and Python read COLUMNS and LINES before asking the terminal.
+unset COLUMNS LINES
+
+# The script exits 75 to ask for a relaunch (new layout); anything else that is
+# not success leaves a shell here, so an abort's message stays readable and the
+# installer can be rerun in Chinese.
+# The shell keeps this PID, so a retry from it that asks for a relaunch can
+# hang it up, which ends kmscon and lets tty1 relaunch it.
+inner='"$@"; status=$?; ((status == 0 || status == 75)) && exit $status; export OMARCHY_ISO_KMSCON_SHELL=$$; exec bash -l'
+
+mkdir -p "$STATE"
+exec kmscon \
+  --vt="$(tty)" \
+  --oneshot \
+  --no-reset-env \
+  --no-mouse \
+  --dpms-timeout=0 \
+  --font-engine=pango \
+  --font-name="${OMARCHY_ISO_KMSCON_FONT:-monospace}" \
+  --font-size="${OMARCHY_ISO_KMSCON_FONT_SIZE:-$(font_size)}" \
+  --xkb-layout="$layout" \
+  ${model:+--xkb-model="$model"} \
+  ${variant:+--xkb-variant="$variant"} \
+  ${options:+--xkb-options="$options"} \
+  --palette=custom \
+  --palette-black="26, 27, 38" \
+  --palette-red="247, 118, 142" \
+  --palette-green="158, 206, 106" \
+  --palette-yellow="224, 175, 104" \
+  --palette-blue="122, 162, 247" \
+  --palette-magenta="187, 154, 247" \
+  --palette-cyan="125, 207, 255" \
+  --palette-light-grey="169, 177, 214" \
+  --palette-dark-grey="65, 72, 104" \
+  --palette-light-red="247, 118, 142" \
+  --palette-light-green="158, 206, 106" \
+  --palette-light-yellow="224, 175, 104" \
+  --palette-light-blue="122, 162, 247" \
+  --palette-light-magenta="187, 154, 247" \
+  --palette-light-cyan="125, 207, 255" \
+  --palette-white="192, 202, 245" \
+  --palette-foreground="169, 177, 214" \
+  --palette-background="26, 27, 38" \
+  --login -- /bin/bash -c "$inner" _ "$@" \
+  >>"$STATE/kmscon.log" 2>&1

@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import types
+import unicodedata
 import unittest
 from pathlib import Path
 
@@ -37,6 +38,15 @@ sys.modules.setdefault("orchestrator.archinstall_adapter", types.ModuleType("orc
 
 from orchestrator import phases_impl  # noqa: E402
 from orchestrator.context import validate_language  # noqa: E402
+
+
+# Catalogs only kmscon draws, with real fonts (i18n_needs_kmscon); the console
+# font never has to carry them.
+KMSCON_ONLY = re.compile(r"^(zh-[A-Z]{2}|ja|ko)$")
+
+
+def columns(text):
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
 
 
 def catalogs():
@@ -87,7 +97,7 @@ class CatalogTest(unittest.TestCase):
             for key, tip in catalog.items():
                 if key.startswith("progress.tip."):
                     with self.subTest(code=code, key=key):
-                        self.assertLessEqual(len(line.replace("%1", tip)), 80)
+                        self.assertLessEqual(columns(line.replace("%1", tip)), 80)
 
     def test_codes_are_omarchy_languages(self):
         registry = omarchy_file("default/i18n/locales.json")
@@ -118,7 +128,7 @@ class LanguageDefaultsTest(unittest.TestCase):
                               for name in ("language_default", "set_form_language"))
         steps = "".join(f'language={code}; set_form_language; env | grep "^OMARCHY_FORM_" | sort; echo --;' for code in languages)
         output = subprocess.run(
-            ["bash", "-c", f"{functions}\n{steps}"],
+            ["bash", "-c", f"source {SHARE / 'i18n.sh'}\n{functions}\n{steps}"],
             env={"PATH": os.environ["PATH"], "LANGUAGE_DEFAULTS": str(SHARE / "language-defaults.json")},
             capture_output=True, text=True, check=True,
         ).stdout
@@ -131,7 +141,9 @@ class LanguageDefaultsTest(unittest.TestCase):
         # Picking again replaces the fallback. A language with no home country
         # falls back to UTC: with no fallback at all, an offline form opens
         # its timezone search, where Enter takes the first zone, Africa/Abidjan.
-        self.assertEqual(arabic, {"OMARCHY_FORM_LANGUAGE": "ar", "OMARCHY_FORM_KEYBOARD_DEFAULT": "English (US)",
+        # A script the console cannot draw keeps the form in English, as the
+        # rest of the installer is, rather than drawing its headers as boxes.
+        self.assertEqual(arabic, {"OMARCHY_FORM_LANGUAGE": "en", "OMARCHY_FORM_KEYBOARD_DEFAULT": "English (US)",
                                   "OMARCHY_FORM_TIMEZONE_FALLBACK": "UTC"})
         self.assertEqual(english["OMARCHY_FORM_TIMEZONE_FALLBACK"], "UTC")
         self.assertEqual(unknown["OMARCHY_FORM_KEYBOARD_DEFAULT"], "English (US)")
@@ -187,6 +199,8 @@ class ConsoleFontTest(unittest.TestCase):
             module.patch(width, height, glyphs, table)
             drawable = {codepoint for codepoints in table for codepoint in codepoints}
             for code, catalog in catalogs().items():
+                if KMSCON_ONLY.match(code):
+                    continue
                 text = "".join(catalog.values()) + names.get(code, {}).get("name", "") + UI_GLYPHS
                 missing = sorted({c for c in text if ord(c) > 0x7E and ord(c) not in drawable})
                 with self.subTest(size=size, code=code):
@@ -270,6 +284,45 @@ class ShellLookupTest(unittest.TestCase):
             self.assertEqual(self.lookup('i18n_load da; t a.b /dev/sda 32GB', directory), "32GB på /dev/sda & mere")
             self.assertEqual(self.lookup('i18n_load da; t a.only', directory), "English only")
             self.assertEqual(self.lookup('i18n_load ../da; t a.b x y', directory), "Disk x has y")
+
+
+class KmsconLanguageTest(unittest.TestCase):
+    def shell(self, script, **env):
+        return subprocess.run(
+            ["bash", "-c", f'source "{SHARE}/i18n.sh"; {script}'],
+            env={"PATH": os.environ["PATH"], "LANG": "C.UTF-8", **env},
+            capture_output=True, text=True, check=True,
+        ).stdout
+
+    def test_chinese_speaks_only_inside_kmscon(self):
+        # On the Linux console Chinese would be boxes, so the installer stays English there.
+        script = "i18n_load zh-CN; t finish.reboot"
+        self.assertEqual(self.shell(script), "Reboot Now")
+        self.assertEqual(self.shell(script, OMARCHY_ISO_KMSCON="1"), "立即重启")
+        self.assertEqual(self.shell("i18n_load de; t common.yes"), "Ja")
+
+    def test_display_width_counts_cjk_as_two_columns(self):
+        # Centering uses it: by characters, Chinese lands half its width too far right.
+        self.assertEqual(self.shell('display_width "Omarchy 安装完成，用时 1m"'), "25")
+        self.assertEqual(self.shell('display_width "abc…—·"'), "6")
+        # Icon-font glyphs (private use area) stay one column wide.
+        self.assertEqual(self.shell('display_width "\ue900ab"'), "3")
+
+    @unittest.skipUnless(Path("/usr/share/systemd/kbd-model-map").exists(), "needs systemd's kbd-model-map")
+    def test_kmscon_types_like_the_boot_keymap(self):
+        # The disk password typed in kmscon is typed again at boot under the console
+        # keymap: a keymap systemd's table lacks must not quietly become us, and a
+        # two-group layout needs its switch or Latin letters cannot be typed.
+        def xkb(keymap):
+            return subprocess.run(
+                ["bash", str(ROOT / "configs/airootfs/usr/local/bin/omarchy-iso-kmscon"), "--xkb", keymap],
+                capture_output=True, text=True, check=True,
+            ).stdout.split()
+        self.assertEqual(xkb("de_CH-latin1")[0], "ch")
+        self.assertEqual(xkb("colemak")[2], "colemak")
+        self.assertIn("grp:shifts_toggle", xkb("ua")[3])
+        self.assertIn("grp:shifts_toggle", xkb("ru")[3])
+        self.assertEqual(xkb("jp106")[:2], ["jp", "jp106"])
 
 
 class ConsoleFontLoadTest(unittest.TestCase):

@@ -66,6 +66,14 @@ fi
 rm -rf /usr/share/doc /usr/share/man /usr/share/info /usr/share/gtk-doc /usr/share/gir-1.0 /usr/include
 find /usr/share/locale -mindepth 1 -maxdepth 1 ! -name 'en*' ! -name locale.alias -exec rm -rf {} +
 
+# kmscon draws the CJK installer with one face: Noto Sans Mono CJK, which lives
+# in the Regular collection. The other weights and the serif set are ~280 MB of
+# live root nobody sees.
+if [[ -d /usr/share/fonts/noto-cjk ]]; then
+  find /usr/share/fonts/noto-cjk -type f ! -name NotoSansCJK-Regular.ttc -delete
+  fc-cache -f >/dev/null 2>&1 || true
+fi
+
 mirror=/var/cache/omarchy/mirror/offline
 shipped_list=/usr/share/omarchy-iso/offline-mirror.shipped
 

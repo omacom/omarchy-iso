@@ -121,12 +121,16 @@ info_field() {
   sed -n "s:.*<$2>\(.*\)</$2>.*:\1:p" "$1" | head -1
 }
 
-snapshot_title() {
-  local num=$1 info=$SNAPSHOTS/$1/info.xml desc date
+snapshot_details() {
+  local info=$SNAPSHOTS/$1/info.xml desc date
   desc=$(info_field "$info" description)
   date=$(info_field "$info" date)
   date=$(date -d "${date} UTC" '+%b %-d %H:%M' 2>/dev/null || echo "$date")
-  echo "Snapshot $num · ${desc:-no description} · $date"
+  echo "${desc:-no description} · $date"
+}
+
+profile_osrel() { # pretty-name order
+  printf 'NAME="Omarchy"\nID=omarchy\nIMAGE_ID=omarchy\nPRETTY_NAME="%s"\nIMAGE_VERSION=%s\n' "$1" "$2"
 }
 
 snapshot_cmdline() {
@@ -154,22 +158,30 @@ build_uki() {
   cmdline=$(live_cmdline)
   work=$(mktemp -d)
 
-  # Pretty name and sort key for the base; profiles carry the titles.
-  printf 'NAME="Omarchy"\nID=omarchy\nPRETTY_NAME="Omarchy (%s)"\nVERSION_ID=%s\n' "$kver" "$kver" >"$work/osrel"
+  printf 'NAME="Omarchy"\nID=omarchy\nPRETTY_NAME="Omarchy"\nVERSION_ID=%s\n' "$kver" >"$work/osrel"
   printf '%s' "$cmdline" >"$work/cmdline"
   printf '%s' "$kver" >"$work/uname"
   local sections=(".osrel=$work/osrel" ".cmdline=$work/cmdline" ".uname=$work/uname")
   [[ -n ${OMARCHY_BOOT_SPLASH:-} ]] && sections+=(".splash=$OMARCHY_BOOT_SPLASH")
   sections+=(".initrd=$dir/initramfs.img" ".linux=$dir/vmlinuz")
 
+  # systemd-boot titles a profile "PRETTY_NAME (TITLE)". Without a TITLE,
+  # every profile after the first still gets "(ID)" appended, so snapshots
+  # always carry one: "Snapshot 12 (4.6.1 · Nov 13 09:05)" reads the same
+  # whether the snapshot is profile 0 of an older image's UKI or profile 3 of
+  # the live one. Entries sort by IMAGE_ID, then newest IMAGE_VERSION first,
+  # across all UKIs, so each profile's .osrel puts the live system on top
+  # and snapshots below it, newest first.
   if [[ $is_live == yes ]]; then
-    printf 'ID=omarchy\nTITLE=Omarchy\n' >"$work/profile-live"
-    sections+=(".profile=$work/profile-live")
+    printf 'ID=omarchy\n' >"$work/profile-live"
+    profile_osrel "Omarchy" 999999 >"$work/osrel-live"
+    sections+=(".profile=$work/profile-live" ".osrel=$work/osrel-live")
   fi
   for num in "${snapshots[@]}"; do
-    printf 'ID=snapshot-%s\nTITLE=%s\n' "$num" "$(snapshot_title "$num")" >"$work/profile-$num"
+    printf 'ID=snapshot-%s\nTITLE=%s\n' "$num" "$(snapshot_details "$num")" >"$work/profile-$num"
+    profile_osrel "Snapshot $num" "$num" >"$work/osrel-$num"
     printf '%s' "$(snapshot_cmdline "$num" "$cmdline")" >"$work/cmdline-$num"
-    sections+=(".profile=$work/profile-$num" ".cmdline=$work/cmdline-$num")
+    sections+=(".profile=$work/profile-$num" ".osrel=$work/osrel-$num" ".cmdline=$work/cmdline-$num")
   done
 
   python3 -I "$UKI_BUILD" --stub "$STUB" --out "$work/unsigned.efi" "${sections[@]}"

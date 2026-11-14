@@ -10,11 +10,17 @@
 # then boots OVMF in Secure Boot Setup Mode: systemd-boot enrolls the key,
 # and every later boot runs with Secure Boot enforcing. Each case boots one
 # menu entry, and the guest reports over serial what actually came up.
+#
+# Takes about a minute; needs qemu, edk2-ovmf, KVM access, an older
+# linux-omarchy package in the pacman cache, and nothing run as root.
+#
+#   SPLASH=logo.bmp       embed a systemd-stub splash in every UKI
+#   SDBOOT_EFI=boot.efi   boot a different systemd-boot (e.g. a recolored one)
 
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-WORK=${1:-${CLAUDE_JOB_DIR:-/tmp}/sdboot-proto}
+WORK=${1:-${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-sdboot-prototype}
 OVMF=/usr/share/edk2/x64
 SDBOOT_EFI=${SDBOOT_EFI:-/usr/lib/systemd/boot/efi/systemd-bootx64.efi}
 SBSIGN=/usr/lib/systemd/systemd-sbsign

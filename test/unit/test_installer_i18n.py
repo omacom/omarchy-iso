@@ -50,6 +50,13 @@ def omarchy_file(relative):
     return None
 
 
+def form_language_functions():
+    # Sourcing the whole configurator would start the installer.
+    configurator = SOURCES[0].read_text()
+    return "\n".join(re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", configurator, re.MULTILINE | re.DOTALL).group(0)
+                     for name in ("language_default", "set_form_language"))
+
+
 def console_font():
     spec = importlib.util.spec_from_file_location("console_font", SHARE / "console-font.py")
     module = importlib.util.module_from_spec(spec)
@@ -112,13 +119,9 @@ class LanguageDefaultsTest(unittest.TestCase):
         self.defaults = json.loads((SHARE / "language-defaults.json").read_text())
 
     def form_environment(self, *languages):
-        # The configurator runs its screens when sourced, so take the two functions out of it.
-        configurator = SOURCES[0].read_text()
-        functions = "\n".join(re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", configurator, re.MULTILINE | re.DOTALL).group(0)
-                              for name in ("language_default", "set_form_language"))
         steps = "".join(f'language={code}; set_form_language; env | grep "^OMARCHY_FORM_" | sort; echo --;' for code in languages)
         output = subprocess.run(
-            ["bash", "-c", f"{functions}\n{steps}"],
+            ["bash", "-c", f'source "{SHARE}/i18n.sh"\n{form_language_functions()}\n{steps}'],
             env={"PATH": os.environ["PATH"], "LANGUAGE_DEFAULTS": str(SHARE / "language-defaults.json")},
             capture_output=True, text=True, check=True,
         ).stdout
@@ -131,11 +134,28 @@ class LanguageDefaultsTest(unittest.TestCase):
         # Picking again replaces the fallback. A language with no home country
         # falls back to UTC: with no fallback at all, an offline form opens
         # its timezone search, where Enter takes the first zone, Africa/Abidjan.
-        self.assertEqual(arabic, {"OMARCHY_FORM_LANGUAGE": "ar", "OMARCHY_FORM_KEYBOARD_DEFAULT": "English (US)",
+        self.assertEqual(arabic, {"OMARCHY_FORM_LANGUAGE": "en", "OMARCHY_FORM_KEYBOARD_DEFAULT": "English (US)",
                                   "OMARCHY_FORM_TIMEZONE_FALLBACK": "UTC"})
         self.assertEqual(english["OMARCHY_FORM_TIMEZONE_FALLBACK"], "UTC")
         self.assertEqual(unknown["OMARCHY_FORM_KEYBOARD_DEFAULT"], "English (US)")
         self.assertEqual(unknown["OMARCHY_FORM_TIMEZONE_FALLBACK"], "UTC")
+
+    def test_cjk_forms_fall_back_without_losing_language_defaults(self):
+        languages = ("zh-CN", "zh-TW", "ja", "ko")
+        for code, environment in zip(languages, self.form_environment(*languages)):
+            with self.subTest(code=code):
+                self.assertEqual(environment["OMARCHY_FORM_LANGUAGE"], "en")
+                self.assertEqual(environment["OMARCHY_FORM_KEYBOARD_DEFAULT"], self.defaults[code]["keyboard"])
+                self.assertEqual(environment["OMARCHY_FORM_TIMEZONE_FALLBACK"], self.defaults[code]["timezone"])
+
+    def test_every_language_uses_the_console_gate_and_keeps_its_defaults(self):
+        languages = sorted(self.defaults)
+        supported = set(catalogs())
+        for code, environment in zip(languages, self.form_environment(*languages)):
+            with self.subTest(code=code):
+                self.assertEqual(environment["OMARCHY_FORM_LANGUAGE"], code if code in supported else "en")
+                self.assertEqual(environment["OMARCHY_FORM_KEYBOARD_DEFAULT"], self.defaults[code]["keyboard"])
+                self.assertEqual(environment["OMARCHY_FORM_TIMEZONE_FALLBACK"], self.defaults[code].get("timezone", "UTC"))
 
     def test_every_language_in_the_picker_has_defaults(self):
         self.assertLessEqual(set(catalogs()), set(self.defaults))
@@ -170,6 +190,67 @@ class LanguageDefaultsTest(unittest.TestCase):
             if "timezone" in defaults:
                 with self.subTest(code=code):
                     self.assertIn(defaults["timezone"], zones)
+
+
+class SharedFormTranslationTest(unittest.TestCase):
+    def test_real_shared_catalog_text_after_selecting_and_reselecting_languages(self):
+        form = omarchy_file("install/provisioning/setup-form.sh")
+        if form is None:
+            if os.environ.get("CI"):
+                self.fail("CI must provide the real shared form through OMARCHY_PATH")
+            self.skipTest("set OMARCHY_PATH to an Omarchy checkout to test the shared form")
+        runtime = form.parents[2]
+        registry = json.loads((runtime / "default/i18n/locales.json").read_text())
+        english = json.loads((runtime / "default/i18n/en/cli.json").read_text())
+        keys = sorted(key for key in english if key.startswith("setupForm."))
+        self.assertTrue(keys, "the runtime must contain the shared form's English catalog")
+        defaults = json.loads((SHARE / "language-defaults.json").read_text())
+        supported = set(catalogs())
+        translations = {code: json.loads((runtime / f"default/i18n/{code}/cli.json").read_text())
+                        for code in supported}
+        # All registered scripts, including CJK, Arabic, Persian, Hebrew and
+        # Indic scripts. Return to a supported translation after each choice,
+        # exercising back-navigation without leaving stale form state behind.
+        languages = [code for choice in sorted(registry) for code in (choice, "pl")]
+        script = f'''
+set -e
+source "{SHARE}/i18n.sh"
+{form_language_functions()}
+source "$OMARCHY_PATH/install/provisioning/setup-form.sh"
+for language in "$@"; do
+  set_form_language
+  printf '%s\\0' "$language" "$OMARCHY_FORM_LANGUAGE" "$OMARCHY_FORM_KEYBOARD_DEFAULT" "$OMARCHY_FORM_TIMEZONE_FALLBACK"
+  for key in {" ".join(keys)}; do
+    printf '%s\\0' "$(omarchy_form_text "$key")"
+  done
+done
+'''
+        result = subprocess.run(
+            ["bash", "-c", script, "shared-form", *languages],
+            env={"PATH": os.environ["PATH"], "OMARCHY_PATH": str(runtime),
+                 "OMARCHY_FORM_DEFAULTS": "/nonexistent/form-defaults",
+                 "LANGUAGE_DEFAULTS": str(SHARE / "language-defaults.json")},
+            capture_output=True, text=True, check=True,
+        )
+        values = result.stdout.split("\0")
+        self.assertEqual(values.pop(), "")
+        self.assertEqual(len(values), len(languages) * (4 + len(keys)))
+        for index, code in enumerate(languages):
+            with self.subTest(code=code, selection=index):
+                start = index * (4 + len(keys))
+                chosen, effective, keyboard, timezone, *texts = values[start:start + 4 + len(keys)]
+                expected = code if code in supported else "en"
+                self.assertEqual(chosen, code, "fallback must not overwrite the installed-system language")
+                self.assertEqual(effective, expected)
+                self.assertEqual(keyboard, defaults[code]["keyboard"])
+                self.assertEqual(timezone, defaults[code].get("timezone", "UTC"))
+                translated = translations[expected]
+                self.assertEqual(dict(zip(keys, texts)), {key: translated.get(key, english[key]) for key in keys})
+                if expected == "en":
+                    self.assertEqual(texts, [english[key] for key in keys])
+        # A real translated positive control catches accidentally forcing every
+        # language to English, even if that would make CJK readable.
+        self.assertNotEqual(translations["pl"]["setupForm.usernamePrompt"], english["setupForm.usernamePrompt"])
 
 
 class ConsoleFontTest(unittest.TestCase):
@@ -325,8 +406,10 @@ class LanguageMarkerTest(unittest.TestCase):
             return marker.read_text() if marker.exists() else None
 
     def test_a_chosen_language_reaches_the_target_and_english_writes_nothing(self):
-        self.assertEqual(self.marker("da"), "da\n")
-        self.assertEqual(self.marker("zh-CN"), "zh-CN\n")
+        for code in json.loads((SHARE / "language-defaults.json").read_text()):
+            if code != "en":
+                with self.subTest(code=code):
+                    self.assertEqual(self.marker(code), f"{code}\n")
         self.assertIsNone(self.marker("en"))
         self.assertIsNone(self.marker(None))
 

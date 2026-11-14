@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -284,6 +285,35 @@ class ConsoleFontLoadTest(unittest.TestCase):
                 capture_output=True, text=True,
             )
             self.assertEqual(result.stdout, "survived\n", result.stderr)
+
+    def run_with_runtime_font(self, routine):
+        # i18n.sh as the ISO lays it out: beside the runtime's console-font.sh
+        # when the bundled runtime ships one.
+        with tempfile.TemporaryDirectory() as directory:
+            share = Path(directory)
+            shutil.copy(SHARE / "i18n.sh", share / "i18n.sh")
+            (share / "console-font.sh").write_text(f"omarchy_console_font() {{ {routine}; }}\n")
+            for tool in ("showconsolefont", "setfont", "python3"):
+                (share / tool).write_text(f'#!/bin/bash\necho {tool} >>"{share}/own-path"\nexit 1\n')
+                (share / tool).chmod(0o755)
+            result = subprocess.run(
+                ["bash", "-c", f'set -euo pipefail; source "{share}/i18n.sh"; i18n_console_font /dev/tty1; echo survived'],
+                env={**os.environ, "PATH": f"{share}:{os.environ['PATH']}", "OMARCHY_ISO_CONSOLE_FONT": f"{share}/run/console.psf"},
+                capture_output=True, text=True,
+            )
+            asked = (share / "asked").read_text() if (share / "asked").exists() else ""
+            return result, asked, (share / "own-path").exists()
+
+    def test_the_bundled_runtimes_font_routine_is_the_one_used(self):
+        result, asked, own_path = self.run_with_runtime_font('echo "$1" >"$(dirname "${BASH_SOURCE[0]}")/asked"')
+        self.assertEqual(result.stdout, "survived\n", result.stderr)
+        self.assertEqual(asked, "/dev/tty1\n")
+        self.assertFalse(own_path, "the installer built its own font beside the runtime's")
+
+    def test_the_runtimes_font_routine_failing_never_stops_a_strict_caller(self):
+        result, _, own_path = self.run_with_runtime_font("return 1")
+        self.assertEqual(result.stdout, "survived\n", result.stderr)
+        self.assertFalse(own_path)
 
 
 class LanguageMarkerTest(unittest.TestCase):

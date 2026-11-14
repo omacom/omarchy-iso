@@ -44,6 +44,10 @@ while [[ $# -gt 0 ]]; do
     fi
     shift 2
     ;;
+  --oem)
+    OMARCHY_OEM_INSTALL=1
+    shift
+    ;;
   --no-cache)
     NO_CACHE=1
     shift
@@ -101,7 +105,7 @@ while [[ $# -gt 0 ]]; do
     ;;
   *)
     echo "Unknown option: $1"
-    echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout> [--rehearsal]]"
+    echo "Usage: $0 [--oem] [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout> [--rehearsal]]"
     echo "       $0 --arch aarch64 [--edge|--rc] [--package-dir DIR] [--dev-ssh <pubkey>] [--local-source <omarchy-checkout> <pkgs-checkout>] [...]"
     exit 1
     ;;
@@ -220,6 +224,7 @@ DOCKER_ARGS=(
   --privileged
   -e "OMARCHY_ISO_REF=$OMARCHY_ISO_REF"
   -e "OMARCHY_MIRROR=$OMARCHY_MIRROR"
+  -e "OMARCHY_OEM_INSTALL=${OMARCHY_OEM_INSTALL:-}"
   -e "OMARCHY_INSTALL_DEBUG=${OMARCHY_INSTALL_DEBUG:-}"
   -e "OMARCHY_ARCH=$OMARCHY_ARCH"
   -e "OMARCHY_KERNEL=$OMARCHY_KERNEL"
@@ -288,7 +293,9 @@ fi
 
 "${DOCKER[@]}" run "${CONTAINER_PLATFORM_ARGS[@]}" "${DOCKER_ARGS[@]}" "$CONTAINER_IMAGE" /$BUILD_SCRIPT
 
-latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*.iso | head -n1)
+iso_name=omarchy
+[[ ${OMARCHY_OEM_INSTALL:-} == "1" ]] && iso_name=omarchy-oem
+latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/"$iso_name"-*.iso | head -n1)
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   iso_ref="${latest_iso%.*}${N1X_DEV_SSH_KEY:+-devssh}-$OMARCHY_ISO_REF.iso"
 else

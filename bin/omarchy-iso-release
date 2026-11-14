@@ -80,8 +80,10 @@ else
   echo -e "\e[31mSkipping remaking ISOs\e[0m"
 fi
 
-# Sign and upload ISO
-latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*"$ARCH-$ISO_REF".iso | head -n1)
+# Sign and upload ISO. The build to release is named by its date. An OEM build
+# (omarchy-oem-...) ends in the same architecture and channel and erases the
+# disk of whoever boots it, so it is never the one a release publishes.
+latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/omarchy-[0-9]*"$ARCH-$ISO_REF".iso | head -n1)
 release_iso="$BUILD_RELEASE_PATH/omarchy-$BUILD_VERSION$RELEASE_SUFFIX$ARCH_SUFFIX.iso"
 cp "$latest_iso" "$release_iso"
 

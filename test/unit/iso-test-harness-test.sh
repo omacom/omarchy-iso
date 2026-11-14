@@ -42,6 +42,7 @@ RUN_DIR="$work"
 ISO="$work/omarchy.iso"
 BOOT_TIMEOUT=60
 FREE_SPACE=false PROVISION=false ENCRYPT=false NO_NETWORK=true
+OEM=false
 touch "$SSH_KEY" "$OVMF_VARS_TEMPLATE"
 
 log() { :; }
@@ -194,6 +195,97 @@ for pid in "${FAKE_PCI_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
 (($(alive) == 0)) || fail "the fake device servers were left running after the VM stopped"
 
 echo "ok - fake PCI devices stay up as long as their VM, and stop after it"
+
+# ------------------------------------------------------------------- --oem
+#
+# An OEM ISO installs without a question, so the harness must not answer one:
+# a key sent here could land in the first-boot setup that follows.
+
+(
+  take drive_configurator
+  OEM=true
+  press() { fail "the harness pressed $1 during an OEM install"; }
+  type_text() { fail "the harness typed during an OEM install"; }
+  wait_for_screen() { fail "the harness waited for an installer screen during an OEM install"; }
+  drive_configurator
+)
+
+# An OEM install is always full-disk, so asking for the free-space fixture
+# with it is refused before a disk is made or a package installed.
+touch "$work/omarchy-oem.iso"
+mkdir -p "$work/refuse"
+printf '#!/bin/bash\necho reached >"%s/refuse/setup"\nexit 1\n' "$work" >"$work/refuse/omarchy-pkg-add"
+chmod +x "$work/refuse/omarchy-pkg-add"
+! PATH="$work/refuse:$PATH" bash "$harness" "$work/omarchy-oem.iso" --oem --free-space 2>"$work/err" ||
+  fail "--oem --free-space was accepted"
+grep -q -- "--oem installs over the whole disk" "$work/err" || fail "--oem --free-space was refused without saying why: $(cat "$work/err")"
+[[ ! -e $work/refuse/setup ]] || fail "--oem --free-space got as far as installing dependencies"
+
+echo "ok - an OEM install is sent no keys, and is not asked for a free-space install"
+
+# ------------------------------------------------------- first-boot setup
+#
+# First-boot setup asks the account questions in the installer's order on a
+# runtime that has the language step and in its older order on one that does
+# not. The driver answers whichever prompt is on screen, each once.
+
+(
+  take drive_provision_owner wait_for_screen wait_for_screen_any
+  KEYBOARD_LABEL="English (US)" GUEST_USER=owner GUEST_PASSWORD=secret GUEST_HOSTNAME=box
+  press() {
+    [[ $(sed -n "$(($(<"$work/screen") - 1))p" "$work/screens") != "Let's set your timezone..." ]] ||
+      fail "the harness answered the timezone heading, before the picker was up"
+    echo "press $1" >>"$work/actions"
+  }
+  type_text() { echo "type $1" >>"$work/actions"; }
+  capture_console() { [[ $1 != *finalizing-* ]] || echo "$1" >>"$work/captured-progress"; }
+  # As offline_install above: an `||` around the driver would switch set -e
+  # off inside it and hide a step that failed.
+  drive() {
+    : >"$work/actions" >"$work/captured-progress"
+    screens "$@"
+    set +e
+    (set -e; drive_provision_owner) 2>"$work/err"
+    driven=$?
+    set -e
+  }
+  driven_ok() { ((driven == 0)) || fail "first-boot setup was not driven: $(cat "$work/err")"; }
+
+  zones="Timezone > Filter... America/Chicago Africa/Abidjan" # one line: a scripted screen is a line
+  drive "Linux by DHH" "Language" "Select keyboard layout" "$zones" "Username>" "Username>" "Password>" \
+    "Confirm>" "Hostname>" "Does this look right?" "477" "" "" "48>" "desktop" "" "login:" "never read"
+  driven_ok
+  # OCR reads the percent sign as anything, and from a screen caught mid-redraw
+  # nothing at all: the progress screen lasts until two readable screens in a
+  # row are not it.
+  [[ -s $work/captured-progress && $(<"$work/screen") == 18 ]] || fail "the setup progress screen was not followed to its end"
+  expected="press ret,press ret,press down,press ret,press ret,type owner,press ret,type secret,press ret,type secret,press ret,type box,press ret,press ret,"
+  [[ $(tr '\n' ',' <"$work/actions") == "$expected" ]] ||
+    fail "the installer's order was answered as: $(tr '\n' ' ' <"$work/actions")"
+
+  # The older runtime names the step in a heading while it fetches its guess;
+  # a Return then is lost, so only the picker itself is answered.
+  drive "Linux by DHH" "Select keyboard layout" "Username>" "Password>" "Confirm>" "Hostname>" \
+    "Let's set your timezone..." "$zones" "Does this look right?" "desktop" "desktop"
+  driven_ok
+  expected="press ret,press down,press ret,type owner,press ret,type secret,press ret,type secret,press ret,type box,press ret,press ret,press ret,"
+  [[ $(tr '\n' ',' <"$work/actions") == "$expected" ]] ||
+    fail "the older order was answered as: $(tr '\n' ' ' <"$work/actions")"
+
+  # A form that stops on a screen the driver cannot answer fails the run.
+  drive "Linux by DHH" "Select keyboard layout" "Passwords didn't match!"
+  ((driven != 0)) || fail "a first-boot form that stalled passed"
+
+  # Setup that never leaves its progress screen, or leaves the screen black,
+  # fails the run instead of waiting forever or passing unseen.
+  for stuck in "50%" ""; do
+    drive "Linux by DHH" "Select keyboard layout" "Does this look right?" "$stuck"
+    ((driven != 0)) && grep -q "Timed out waiting for first-boot setup to finish" "$work/err" ||
+      fail "first-boot setup stuck on '${stuck:-a blank screen}' did not time out: $(cat "$work/err")"
+  done
+)
+
+echo "ok - first-boot setup is answered in whichever order it asks"
 
 # The free-space fixture has existing partitions. Drive the real wizard
 # function against the product's actual ordering, refusing an erase choice.

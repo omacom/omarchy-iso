@@ -7,7 +7,7 @@ OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
 OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
 OMARCHY_KERNEL="${OMARCHY_KERNEL:-linux-omarchy}"
 # profiledef.sh reads both in the mkarchiso environment.
-export OMARCHY_ARCH OMARCHY_KERNEL
+export OMARCHY_ARCH OMARCHY_KERNEL OMARCHY_OEM_INSTALL
 
 source /builder/node-release.sh
 source /builder/arm64-kernel-image.sh
@@ -223,6 +223,10 @@ mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
 echo "$OMARCHY_MIRROR" > "$build_cache_dir/airootfs/root/omarchy_mirror"
 echo "$OMARCHY_ISO_REF" > "$build_cache_dir/airootfs/root/omarchy_iso_ref"
 echo "$OMARCHY_ARCH" > "$build_cache_dir/airootfs/root/omarchy_arch"
+if [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]]; then
+  touch "$build_cache_dir/airootfs/usr/share/omarchy-iso/oem-install"
+  sed -i 's/^TIMEOUT .*/TIMEOUT 1/' "$build_cache_dir/syslinux/archiso_sys.cfg"
+fi
 # The kernel the installer puts on the target: the image's own on aarch64,
 # empty on x86_64, where the installer picks per machine.
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
@@ -406,6 +410,7 @@ if [[ -d /omarchy-source ]]; then
   base_pkg_lists=(/omarchy-source/install/omarchy-base.packages /omarchy-source/install/omarchy-other.packages)
   setup_form=/omarchy-source/install/provisioning/setup-form.sh
   progress_icon=/omarchy-source/install/provisioning/progress-icon.sh
+  console_font=/omarchy-source/install/provisioning/console-font
   mise_work=/omarchy-source/install/user/mise-work.sh
 else
   # Pull the same package lists out of the freshly-downloaded Omarchy runtime
@@ -430,6 +435,9 @@ else
   setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/progress-icon.sh 2>/dev/null || true
   progress_icon=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/progress-icon.sh
+  bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/console-font.sh \
+    usr/share/omarchy/install/provisioning/console-font.py 2>/dev/null || true
+  console_font=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/console-font
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/user/mise-work.sh 2>/dev/null || true
   mise_work=/tmp/omarchy-pkglists/usr/share/omarchy/install/user/mise-work.sh
   # The aarch64 list, each platform's own and the x86_64-only one. Runtimes
@@ -573,6 +581,15 @@ if [[ ! -f $progress_icon ]]; then
   exit 1
 fi
 cp "$progress_icon" "$build_cache_dir/airootfs/usr/share/omarchy-iso/progress-icon.sh"
+
+# The console font comes from the same runtime too, so the installer and
+# first-boot setup are set in one font at one size. A runtime predating the
+# split ships none, and i18n.sh then builds the font with the copy of
+# console-font.py this repository still carries.
+rm -f "$build_cache_dir/airootfs/usr/share/omarchy-iso/console-font.sh"
+if [[ -f $console_font.sh && -f $console_font.py ]]; then
+  cp "$console_font.sh" "$console_font.py" "$build_cache_dir/airootfs/usr/share/omarchy-iso/"
+fi
 
 # Omarchy installs Node lazily through mise since omacom/omarchy#15876. A
 # runtime from before it unpacks a bundled Node tarball during setup and stops

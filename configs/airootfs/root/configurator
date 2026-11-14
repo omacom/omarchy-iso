@@ -1247,15 +1247,22 @@ select_installation() {
 
 defer_provisioning=false
 install_target="full_disk"
+oem_install=false
+if [[ ${1:-} == "--oem" ]]; then
+  [[ -f /usr/share/omarchy-iso/oem-install ]] || { echo "OEM install requires an OEM ISO" >&2; exit 1; }
+  oem_install=true
+  defer_provisioning=true
+fi
 
 # Let the live VT reach its settled width before the first screen so the logo
 # isn't measured against the transient 80-column boot console.
 wait_for_stable_terminal
 i18n_console_font "$(tty 2>/dev/null)"
 
-greeter
-
-language_form
+if ! $oem_install; then
+  greeter
+  language_form
+fi
 
 $defer_provisioning || keyboard_form
 
@@ -1284,11 +1291,19 @@ if $defer_provisioning; then
 
   # Jump straight to disk selection + overwrite confirmation (encrypted by
   # default, Ctrl+C toggles unencrypted). deferred provisioning is always a full-disk install.
-  disk_form
-  stage_qualcomm_firmware
-  until confirm_disk_overwrite; do
+  if $oem_install; then
+    disk=$(python3 /usr/share/omarchy-iso/oem-disk.py) || exit 1
+    encrypt_installation=true
+    clear_logo
+    say "OEM install: preparing $disk for another owner"
+    stage_qualcomm_firmware
+  else
     disk_form
-  done
+    stage_qualcomm_firmware
+    until confirm_disk_overwrite; do
+      disk_form
+    done
+  fi
   install_target="full_disk"
 else
   disk_form

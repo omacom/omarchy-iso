@@ -216,6 +216,14 @@ Encrypted autoinstalls are not fully unattended — the LUKS passphrase prompt s
 
 `omarchy_install.language` in `user_configuration.json` takes a code from Omarchy's language registry, like `da` or `ja`, and becomes the installed system's language. Leave it out, or set `en`, for English.
 
+## OEM ISO
+
+Build factory installation media tracking quattro with `./bin/omarchy-iso-make --oem --edge --keep-pkg-cache --no-boot-offer`. The output is named `omarchy-oem-<date>-<architecture>-edge.iso`, separate from the ordinary interactive ISO, and `omarchy-iso-release` never publishes one. The current quattro installer requires the shared progress display from the edge runtime. Add the usual architecture options when needed.
+
+Booting this ISO immediately erases and installs onto the sole eligible internal disk, without a wizard, credentials, a cidata drive, or any key presses. It keeps the existing boot splash and install dashboard, uses the encrypted full-disk "for another user" flow, and reboots automatically after a successful install. The next boot runs the existing owner setup, where the owner chooses their account, password, language, keyboard and timezone. Installation defaults are English, US keyboard, UTC and hostname `omarchy`.
+
+An eligible disk is writable, unmounted, neither removable nor hotplug, not connected by USB or FireWire, and at least 32 GiB. Mounted descendants, including the boot medium and active swap, exclude the entire disk. If zero or multiple eligible disks exist, installation stops without changing any disk; disconnect extra internal disks before trying again. Existing unmounted partitions on the selected disk are erased. Configure firmware to boot the internal disk before the installation medium so the completed machine boots into owner setup instead of reinstalling from the OEM ISO.
+
 ## Translations
 
 The configurator asks for a language first, on the screen that carries the intro and the hidden Ctrl+C entry into preparing the machine for another owner. It offers every language in Omarchy's registry (`default/i18n/locales.json` in the settings package). A language with a catalog in `configs/airootfs/usr/share/omarchy-iso/i18n/` also translates the installer. The others are listed by their English name, the installer stays in English, and the language still goes to the installed system as `/etc/omarchy/language`. The keyboard list then preselects the language's layout from `language-defaults.json`. The timezone list preselects the network's guess, and when that fails, the capital of the language's country from the same file. English, Arabic, Swahili and Tamil have no single home country, so they fall back to the plain timezone search.
@@ -281,6 +289,13 @@ The harness syncs the acceptance suite from `$OMARCHY_PATH` when it is available
 ```
 
 Pass `--encrypt` to drive the encrypted install flow (including typing the LUKS passphrase at boot) instead of the unencrypted one. Pass `--no-preview` to collect the same visual artifacts without opening them in `imv` when the run finishes.
+
+Pass `--oem` to test an OEM ISO: the harness sends the install no keys, waits for it to reboot on its own, then drives the first-boot owner setup (language, keyboard, account) and carries on as above.
+
+```bash
+./bin/omarchy-iso-make --oem --edge --keep-pkg-cache --no-boot-offer
+./bin/omarchy-iso-test release/omarchy-oem-*.iso --oem --install-only
+```
 
 ## Integration testing the ISO
 

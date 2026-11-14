@@ -9,6 +9,9 @@ LOCAL_PKGS_PATH=""
 OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
 N1X_DEV_SSH_KEY=""
 PACKAGE_DIR=""
+OEM_CONFIG=""
+OEM_SCRIPTS=()
+OEM_BUNDLE_DIR=""
 REHEARSAL=""
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -47,6 +50,27 @@ while [[ $# -gt 0 ]]; do
   --oem)
     OMARCHY_OEM_INSTALL=1
     shift
+    ;;
+  --oem-config)
+    # What first-boot setup shows the owner of a machine this OEM ISO
+    # installs: the OEM's name, logo, tagline and colour, and an agreement to
+    # accept. builder/oem-bundle.py describes the file and checks it.
+    OEM_CONFIG="${2:-}"
+    if [[ -z $OEM_CONFIG ]]; then
+      echo "Error: --oem-config requires a JSON file" >&2
+      exit 1
+    fi
+    shift 2
+    ;;
+  --oem-script)
+    # A bash script the install runs as root in the new system. Repeat it to
+    # run several, in the order given.
+    if [[ -z ${2:-} ]]; then
+      echo "Error: --oem-script requires a script" >&2
+      exit 1
+    fi
+    OEM_SCRIPTS+=("$2")
+    shift 2
     ;;
   --no-cache)
     NO_CACHE=1
@@ -105,7 +129,7 @@ while [[ $# -gt 0 ]]; do
     ;;
   *)
     echo "Unknown option: $1"
-    echo "Usage: $0 [--oem] [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout> [--rehearsal]]"
+    echo "Usage: $0 [--oem [--oem-config FILE] [--oem-script FILE]...] [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout> [--rehearsal]]"
     echo "       $0 --arch aarch64 [--edge|--rc] [--package-dir DIR] [--dev-ssh <pubkey>] [--local-source <omarchy-checkout> <pkgs-checkout>] [...]"
     exit 1
     ;;
@@ -126,6 +150,20 @@ if [[ -n $LOCAL_OMARCHY_PATH ]]; then
   [[ -d $LOCAL_PKGS_PATH ]]    || { echo "Error: pkgs checkout not found at $LOCAL_PKGS_PATH" >&2; exit 1; }
   LOCAL_OMARCHY_PATH=$(realpath "$LOCAL_OMARCHY_PATH")
   LOCAL_PKGS_PATH=$(realpath "$LOCAL_PKGS_PATH")
+fi
+
+# An OEM's bundle is checked and laid out here, before anything is built, so a
+# logo the console cannot draw stops this command and not a machine's first boot.
+if [[ -n $OEM_CONFIG ]] || (( ${#OEM_SCRIPTS[@]} )); then
+  if [[ ${OMARCHY_OEM_INSTALL:-} != "1" ]]; then
+    echo "Error: --oem-config and --oem-script are for an OEM ISO; add --oem" >&2
+    exit 1
+  fi
+  OEM_BUNDLE_DIR=$(mktemp -d)
+  trap 'rm -rf "$OEM_BUNDLE_DIR"' EXIT
+  python3 "${BASH_SOURCE[0]%/*}/../builder/oem-bundle.py" "$OEM_BUNDLE_DIR" \
+    ${OEM_CONFIG:+"--config=$OEM_CONFIG"} "${OEM_SCRIPTS[@]/#/--script=}"
+  chmod -R u=rwX,go=rX "$OEM_BUNDLE_DIR"
 fi
 
 # Architecture selection. Both architectures boot linux-omarchy live; x86_64
@@ -258,6 +296,10 @@ fi
 
 if [[ -n $N1X_DEV_SSH_KEY ]]; then
   DOCKER_ARGS+=(-v "$N1X_DEV_SSH_KEY:/dev-ssh/authorized_keys:ro")
+fi
+
+if [[ -n $OEM_BUNDLE_DIR ]]; then
+  DOCKER_ARGS+=(-v "$OEM_BUNDLE_DIR:/oem:ro")
 fi
 
 # The host pacman cache belongs to the host architecture; sharing it with an

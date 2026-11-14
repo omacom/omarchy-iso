@@ -227,6 +227,13 @@ if [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]]; then
   touch "$build_cache_dir/airootfs/usr/share/omarchy-iso/oem-install"
   sed -i 's/^TIMEOUT .*/TIMEOUT 1/' "$build_cache_dir/syslinux/archiso_sys.cfg"
 fi
+# The OEM's own bundle (--oem-config, --oem-script), as builder/oem-bundle.py
+# checked and laid it out: the installer hands its branding and agreement to
+# first-boot setup and runs its scripts in the new system.
+rm -rf "$build_cache_dir/airootfs/usr/share/omarchy-iso/oem"
+if [[ -d /oem ]]; then
+  cp -r /oem "$build_cache_dir/airootfs/usr/share/omarchy-iso/oem"
+fi
 # The kernel the installer puts on the target: the image's own on aarch64,
 # empty on x86_64, where the installer picks per machine.
 if [[ $OMARCHY_ARCH == aarch64 ]]; then

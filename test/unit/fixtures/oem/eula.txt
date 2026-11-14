@@ -1,0 +1,43 @@
+ACME COMPUTERS END USER LICENSE AGREEMENT
+
+This is a sample agreement. It shows what an OEM's own text looks like in first-boot setup, and it is long enough to scroll.
+
+1. The agreement
+
+This agreement is between you and Acme Computers ("Acme"). It covers the Acme software, firmware and documentation supplied with this computer. By choosing Accept you agree to it. If you do not agree, choose Decline: the computer is left exactly as it was shipped, and you may return it under the terms of your purchase.
+
+2. Omarchy and other open source software
+
+This computer runs Omarchy, which is made of open source software. Each of those programs is licensed to you by its authors under its own license, such as the MIT License or the GNU General Public License. Nothing in this agreement limits the rights those licenses give you, and where this agreement and one of those licenses disagree about that program, the program's license decides.
+
+3. Acme software
+
+Acme grants you a personal, non-exclusive license to use the Acme software on this computer. You may not rent it, lease it or sublicense it. You may transfer it only together with the computer, and only if the new owner accepts this agreement.
+
+4. Updates
+
+Acme may offer updates to its software and firmware. Updates are covered by this agreement unless they come with terms of their own.
+
+5. Privacy
+
+Acme collects no information from this computer unless you choose to send it, for example by registering the computer or by contacting support. Registration is optional.
+
+6. Warranty
+
+The hardware warranty is described on the warranty card in the box and at acme.example/warranty. To the extent the law allows, the software is provided "as is", without warranty of any kind.
+
+7. Limitation of liability
+
+To the extent the law allows, Acme is not liable for indirect, incidental or consequential damages arising from the use of the software, including lost data. Nothing in this agreement limits liability that cannot be limited by law.
+
+8. Ending this agreement
+
+This agreement lasts until you stop using the Acme software. It ends automatically if you break its terms. Sections 6 and 7 continue to apply after it ends.
+
+9. Governing law
+
+This agreement is governed by the law of the place where you bought the computer.
+
+10. Contact
+
+Questions about this agreement: legal@acme.example.

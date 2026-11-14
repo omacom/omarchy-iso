@@ -22,6 +22,9 @@
 #   --oem              Test an OEM ISO: it installs onto the VM's one disk with
 #                      no keystrokes, encrypted, and reboots into the first-boot
 #                      setup, which is then driven the way --provision drives it
+#   --oem-config FILE  The config the OEM ISO was built with (omarchy-iso-make
+#                      --oem-config): first boot is then expected to carry its
+#                      branding, and to end on its agreement where it has one
 #   --free-space       Install into the free space of a synthetic Windows-style
 #                      disk (existing ESP + data partition kept) and verify the
 #                      existing partitions survive
@@ -50,6 +53,7 @@ BOOT_TIMEOUT=600
 ENCRYPT=false
 PROVISION=false
 OEM=false
+OEM_CONFIG=""
 FREE_SPACE=false
 REUSE_BASE=false
 INSTALL_ONLY=false
@@ -101,6 +105,7 @@ while (($#)); do
     # An OEM install is a deferred-provisioning install nobody answers for:
     # always full-disk and encrypted (the configurator's --oem path).
     --oem) OEM=true; PROVISION=true; ENCRYPT=true ;;
+    --oem-config) OEM_CONFIG="$2"; shift ;;
     --free-space) FREE_SPACE=true ;;
     --reuse-base) REUSE_BASE=true ;;
     --install-only) INSTALL_ONLY=true ;;
@@ -147,6 +152,17 @@ if $OEM && $FREE_SPACE; then
   exit 1
 fi
 
+if [[ -n $OEM_CONFIG ]]; then
+  if ! $OEM; then
+    echo "--oem-config describes an OEM ISO's bundle; add --oem" >&2
+    exit 1
+  fi
+  if [[ ! -f $OEM_CONFIG ]]; then
+    echo "No OEM config at $OEM_CONFIG" >&2
+    exit 1
+  fi
+fi
+
 omarchy-pkg-add qemu-full edk2-ovmf socat imagemagick tesseract tesseract-data-eng
 # --battery and --acpi-hid compile their SSDT with iasl.
 if $BATTERY || ((${#ACPI_HIDS[@]})); then
@@ -179,6 +195,24 @@ HTTP_PORT=$((SSH_PORT + 1))
 HTTP_PID=""
 
 mkdir -p "$BASE_DIR" "$RUN_DIR"
+
+# First-boot setup's greeter is known by its tagline. An OEM's config can
+# replace that with words OCR may misread, so there the greeter is known by
+# the hint under it, which is dim and needs a threshold of its own.
+GREETER_TEXT="Linux by DHH"
+GREETER_OCR_THRESHOLD=50
+OEM_BUNDLE=""
+OEM_EULA=false
+if [[ -n $OEM_CONFIG ]]; then
+  # Laid out the way the build lays it out, to hold the installed machine to.
+  OEM_BUNDLE="$RUN_DIR/oem-bundle"
+  python3 "$REPO_DIR/builder/oem-bundle.py" "$OEM_BUNDLE" "--config=$OEM_CONFIG"
+  if grep -q '^  "tagline":' "$OEM_BUNDLE/oem.json"; then
+    GREETER_TEXT="Start Setup"
+    GREETER_OCR_THRESHOLD=80
+  fi
+  [[ ! -f $OEM_BUNDLE/eula.txt ]] || OEM_EULA=true
+fi
 
 # Unix socket paths are capped at ~108 bytes, which a run directory nested in
 # test-runs/<iso-name>/runs/<timestamp> can exceed. Keep the socket in /tmp.
@@ -376,7 +410,7 @@ ocr_screen() {
   [[ -s $shot ]] || return 0
   # Black on white: the negated grays alone read the focused button on the
   # finished install, dark text on a light bar, as "Reboot Nou".
-  magick "$shot" -colorspace gray -negate -resize 150% -threshold 50% "$prepped" 2>/dev/null || return 0
+  magick "$shot" -colorspace gray -negate -resize 150% -threshold "${OCR_THRESHOLD:-50}%" "$prepped" 2>/dev/null || return 0
   tesseract "$prepped" - --psm 6 2>/dev/null || true
 }
 
@@ -987,6 +1021,68 @@ drive_configurator() {
   capture_console "success-installer-14-install-started"
 }
 
+# The OEM's agreement is first-boot setup's last question. The driver reads
+# on, then takes each way out but the last before accepting: Ctrl+C offers a
+# reboot, declining offers to shut down, and neither may cost the owner more
+# than a keypress to come back from.
+drive_oem_agreement() {
+  wait_for_screen "accept this agreement" 60
+  capture_console "success-provision-08-agreement-1-shown"
+  press pgdn
+  capture_console "success-provision-08-agreement-2-read-on"
+
+  press ctrl-c
+  wait_for_screen "Reboot this machine" 30
+  capture_console "success-provision-08-agreement-3-ctrl-c"
+  press right
+  press ret
+  wait_for_screen "accept this agreement" 30
+
+  press tab
+  capture_console "success-provision-08-agreement-4-decline-in-focus"
+  press ret
+  # The answer in focus, which has no "w" for OCR to read as "u".
+  wait_for_screen "back to the agreement" 30
+  capture_console "success-provision-08-agreement-5-declined"
+  # Going back to the agreement is the answer in focus.
+  press ret
+  wait_for_screen "accept this agreement" 30
+
+  press end
+  capture_console "success-provision-08-agreement-6-read-to-the-end"
+  press ret
+}
+
+# What an ISO built with --oem-config leaves on the installed machine: the
+# bundle as the config lays it out, where first-boot setup reads it, and a
+# record that this owner accepted this OEM's agreement, by the hash of its text.
+verify_oem_setup() {
+  local report="$RUN_DIR/oem-setup.txt" file expected record
+  local name='import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["name"])'
+  local accepted='import json, sys; record = json.load(sys.stdin); print(record["oem"], record["sha256"], record["accepted_by"], sep="|")'
+
+  ssh_guest "tail -n +1 /etc/omarchy/oem/* /var/lib/omarchy/oem/eula-accepted.json; ls -la /etc/omarchy/oem" >"$report" 2>&1 || true
+
+  for file in oem.json logo.txt eula.txt; do
+    [[ -f $OEM_BUNDLE/$file ]] || continue
+    if [[ $(ssh_guest "cat /etc/omarchy/oem/$file" 2>/dev/null | sha256sum) != "$(sha256sum <"$OEM_BUNDLE/$file")" ]]; then
+      echo "The installed system's /etc/omarchy/oem/$file is not what the config lays out; see $report" >&2
+      return 1
+    fi
+  done
+  log "OEM bundle laid down for first-boot setup"
+
+  if $OEM_EULA; then
+    expected="$(python3 -c "$name" "$OEM_BUNDLE/oem.json")|$(sha256sum <"$OEM_BUNDLE/eula.txt" | cut -d' ' -f1)|$GUEST_USER"
+    record=$(ssh_guest "cat /var/lib/omarchy/oem/eula-accepted.json" 2>/dev/null | python3 -c "$accepted" 2>/dev/null) || record=""
+    if [[ $record != "$expected" ]]; then
+      echo "The record of the accepted agreement is '${record:-missing}', not '$expected'; see $report" >&2
+      return 1
+    fi
+    log "OEM agreement recorded as accepted by $GUEST_USER"
+  fi
+}
+
 # The deferred-provisioning first boot runs the user form on tty1 (omarchy-provision-owner) before
 # SDDM. Encrypted deferred-provisioning installs auto-unlock from the staged keyfile, so there
 # is no LUKS prompt to answer here either way.
@@ -994,7 +1090,7 @@ drive_provision_owner() {
   log "Driving the deferred-provisioning first-boot setup"
 
   # A greeter (animated logo + tagline) opens first boot; Return begins.
-  wait_for_screen "Linux by DHH" 600
+  OCR_THRESHOLD=$GREETER_OCR_THRESHOLD wait_for_screen "$GREETER_TEXT" 600
   capture_console "success-provision-00-greeter"
   press ret
 
@@ -1075,6 +1171,10 @@ drive_provision_owner() {
   capture_console "success-provision-07-review"
   press ret
 
+  if $OEM_EULA; then
+    drive_oem_agreement
+  fi
+
   # Finalization (user setup, LUKS re-key on encrypted installs) runs under the
   # progress screen until the display manager takes the console. Its percentage
   # is the one line bright enough for OCR, which reads the sign as anything.
@@ -1126,7 +1226,7 @@ wait_for_install() {
     # Deferred-provisioning installs skip the celebration and reboot on their own
     # (no Reboot Now prompt); the first-boot greeter tagline appearing means the
     # install finished and rebooted into setup.
-    if $PROVISION && grep -qi "Linux by DHH" <<<"$text"; then
+    if $PROVISION && OCR_THRESHOLD=$GREETER_OCR_THRESHOLD ocr_screen | grep -qi "$GREETER_TEXT"; then
       log "Install finished and auto-rebooted into first-boot setup."
       capture_console "success-installer-15-autoreboot"
       return 0
@@ -1474,6 +1574,9 @@ install_phase() {
       return 1
     fi
     log "hostname applied at first boot: $got_host"
+    if [[ -n $OEM_CONFIG ]]; then
+      verify_oem_setup
+    fi
     if [[ -n $got_tz && $got_tz != "UTC" ]]; then
       log "timezone applied at first boot: $got_tz"
     else

@@ -230,8 +230,9 @@ echo "ok - an OEM install is sent no keys, and is not asked for a free-space ins
 # not. The driver answers whichever prompt is on screen, each once.
 
 (
-  take drive_provision_owner wait_for_screen wait_for_screen_any
+  take drive_provision_owner drive_oem_agreement wait_for_screen wait_for_screen_any
   KEYBOARD_LABEL="English (US)" GUEST_USER=owner GUEST_PASSWORD=secret GUEST_HOSTNAME=box
+  GREETER_TEXT="Linux by DHH" GREETER_OCR_THRESHOLD=50 OEM_EULA=false
   press() {
     [[ $(sed -n "$(($(<"$work/screen") - 1))p" "$work/screens") != "Let's set your timezone..." ]] ||
       fail "the harness answered the timezone heading, before the picker was up"
@@ -272,6 +273,26 @@ echo "ok - an OEM install is sent no keys, and is not asked for a free-space ins
   [[ $(tr '\n' ',' <"$work/actions") == "$expected" ]] ||
     fail "the older order was answered as: $(tr '\n' ' ' <"$work/actions")"
 
+  # An OEM's greeter carries its own tagline, so it is known by its hint, and
+  # its agreement is the form's last question: the driver reads on, comes back
+  # from Ctrl+C's reboot offer and from declining, and only then accepts.
+  GREETER_TEXT="Start Setup" OEM_EULA=true
+  agreement="Do you accept this agreement?"
+  drive "Acme Book 14, pouwered by Omarchy Press Return to Start Setup" "Language" "Select keyboard layout" "$zones" "Username>" "Password>" \
+    "Confirm>" "Hostname>" "Does this look right?" "$agreement" "Reboot this machine?" "$agreement" \
+    "Shut doun this machine? Yes, shut doun No, back to the agreement" "$agreement" "50%" "desktop" "desktop"
+  driven_ok
+  expected="press ret,press ret,press down,press ret,press ret,type owner,press ret,type secret,press ret,type secret,press ret,type box,press ret,press ret,"
+  expected+="press pgdn,press ctrl-c,press right,press ret,press tab,press ret,press ret,press end,press ret,"
+  [[ $(tr '\n' ',' <"$work/actions") == "$expected" ]] ||
+    fail "the OEM's agreement was answered as: $(tr '\n' ' ' <"$work/actions")"
+
+  # An ISO whose agreement never comes up was not built with the config named.
+  drive "Press Return to Start Setup" "Select keyboard layout" "Does this look right?" "50%"
+  ((driven != 0)) && grep -q "waiting for screen: accept this agreement" "$work/err" ||
+    fail "a first boot without the expected agreement passed: $(cat "$work/err")"
+  GREETER_TEXT="Linux by DHH" OEM_EULA=false
+
   # A form that stops on a screen the driver cannot answer fails the run.
   drive "Linux by DHH" "Select keyboard layout" "Passwords didn't match!"
   ((driven != 0)) || fail "a first-boot form that stalled passed"
@@ -286,6 +307,50 @@ echo "ok - an OEM install is sent no keys, and is not asked for a free-space ins
 )
 
 echo "ok - first-boot setup is answered in whichever order it asks"
+
+# ------------------------------------------------------------ --oem-config
+#
+# The installed machine is held to the bundle the config lays out, and the
+# record of acceptance to this OEM, this agreement's text and this owner: a
+# machine that asked for other terms, or recorded them, does not pass.
+
+(
+  take verify_oem_setup
+  GUEST_USER=owner OEM_EULA=true RUN_DIR="$work/oem-run" OEM_BUNDLE="$work/oem-run/oem-bundle"
+  guest="$work/oem-guest"
+  mkdir -p "$RUN_DIR" "$guest/etc/omarchy" "$guest/var/lib/omarchy/oem"
+  python3 "$ROOT/builder/oem-bundle.py" "$OEM_BUNDLE" "--config=$ROOT/test/unit/fixtures/oem/oem.json"
+  log() { :; }
+  # The guest's files are the ones under $guest.
+  ssh_guest() {
+    local command=${1//\/etc\/omarchy/$guest/etc/omarchy}
+    bash -c "${command//\/var\/lib\/omarchy/$guest/var/lib/omarchy}"
+  }
+  accepted() {
+    printf '{"oem": "%s", "sha256": "%s", "accepted_by": "%s"}\n' "$@" >"$guest/var/lib/omarchy/oem/eula-accepted.json"
+  }
+  verified() { (set -e; verify_oem_setup) 2>"$work/err"; }
+  terms=$(sha256sum <"$OEM_BUNDLE/eula.txt" | cut -d' ' -f1)
+
+  cp -r "$OEM_BUNDLE" "$guest/etc/omarchy/oem"
+  accepted "Acme Computers" "$terms" owner
+  verified || fail "a machine carrying the bundle and its accepted agreement was refused: $(cat "$work/err")"
+
+  accepted "Acme Computers" "$(printf other | sha256sum | cut -d' ' -f1)" owner
+  ! verified || fail "a record of other terms passed"
+  accepted "Another OEM" "$terms" owner
+  ! verified || fail "a record naming another OEM passed"
+  accepted "Acme Computers" "$terms" someone-else
+  ! verified || fail "a record of another account passed"
+  rm "$guest/var/lib/omarchy/oem/eula-accepted.json"
+  ! verified || fail "a machine with no record of acceptance passed"
+
+  accepted "Acme Computers" "$terms" owner
+  echo "older terms" >"$guest/etc/omarchy/oem/eula.txt"
+  ! verified || fail "a machine carrying another agreement passed"
+)
+
+echo "ok - an OEM install is held to its config's bundle and to a record of its own agreement"
 
 # The free-space fixture has existing partitions. Drive the real wizard
 # function against the product's actual ordering, refusing an erase choice.

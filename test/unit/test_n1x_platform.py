@@ -138,6 +138,50 @@ class N1xLimineContractTest(unittest.TestCase):
             self.validate("timeout: 3\n/EFI fallback\nprotocol: efi\npath: boot():/EFI/BOOT/BOOTAA64.EFI\n", "n1x")
 
 
+class N1xPrebuiltUkiTest(unittest.TestCase):
+    # build-root-image.sh records the image's MODULES lines plus n1x.sh's next
+    # to the N1x UKI; an N1x install whose lines are exactly those copies it.
+    IMAGE = ["MODULES+=(thunderbolt)"]
+    N1X = ["MODULES+=(i2c_mt65xx i2c_hid_acpi)", "MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)"]
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.target = Path(tmp.name)
+        self.state = self.target / "var/lib/omarchy-iso"
+        self.state.mkdir(parents=True)
+        (self.state / "prebuilt-uki-n1x.efi").write_bytes(b"MZ")
+        (self.state / "prebuilt-uki-n1x.modules").write_text("\n".join(sorted(self.IMAGE + self.N1X)) + "\n")
+        self.confd = self.target / "etc/mkinitcpio.conf.d"
+        self.confd.mkdir(parents=True)
+
+    def write_lines(self, lines):
+        for i, line in enumerate(lines):
+            (self.confd / f"{i:02}.conf").write_text(f"# drop-in\n{line}\n")
+
+    def test_an_n1x_with_its_modules_takes_the_n1x_uki(self):
+        self.write_lines(self.IMAGE + self.N1X)
+        self.assertEqual(phases_impl._n1x_prebuilt_uki(self.target, "n1x"), self.state / "prebuilt-uki-n1x.efi")
+
+    # Pre-release firmware keeps the GPU off: no nvidia.conf.
+    def test_an_n1x_without_the_gpu_builds_its_own(self):
+        self.write_lines(self.IMAGE + self.N1X[:1])
+        self.assertIsNone(phases_impl._n1x_prebuilt_uki(self.target, "n1x"))
+
+    def test_an_n1x_adding_anything_else_builds_its_own(self):
+        self.write_lines(self.IMAGE + self.N1X + ["MODULES+=(apple_bce)"])
+        self.assertIsNone(phases_impl._n1x_prebuilt_uki(self.target, "n1x"))
+
+    def test_other_machines_never_take_it(self):
+        self.write_lines(self.IMAGE + self.N1X)
+        self.assertIsNone(phases_impl._n1x_prebuilt_uki(self.target, ""))
+
+    def test_an_image_without_it_builds_its_own(self):
+        self.write_lines(self.IMAGE + self.N1X)
+        (self.state / "prebuilt-uki-n1x.efi").unlink()
+        self.assertIsNone(phases_impl._n1x_prebuilt_uki(self.target, "n1x"))
+
+
 class Aarch64ConsoleTest(unittest.TestCase):
     # arm64 firmware (the N1x, QEMU's virt machine) publishes an ACPI serial
     # console that would take the disk passphrase prompt off the screen.

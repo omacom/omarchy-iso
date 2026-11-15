@@ -46,6 +46,116 @@ prebuilt_uki_size_ok() {
   fi
 }
 
+# The N1x UKI boots a laptop whose kernel alone is 61 MiB (arm64 kernels are
+# not compressed) and whose NVIDIA firmware is most of 100 MiB more. The N1x
+# boots such a UKI on every installed system, so it gets its own ceiling; the
+# 128 MiB one is for the x86 laptops of omacom/omarchy#5980.
+n1x_prebuilt_uki_size_ok() {
+  local bytes limit=$((256 * 1024 * 1024))
+  bytes=$(stat -c %s "$1")
+  if ((bytes > limit)); then
+    echo "ERROR: the N1x pre-built UKI is $bytes bytes, over the $limit limit" >&2
+    return 1
+  fi
+}
+
+# The MODULES+= lines n1x.sh writes on an N1x whose GPU drives the panel,
+# normalized the way the installer reads them (_initramfs_module_lines).
+n1x_module_lines() {
+  grep -hE '^\s*MODULES\s*\+?=' "$1" | sed -E 's/\s+/ /g; s/^ //; s/ $//' | sort -u
+}
+
+# Set up N1x's boot-time state in the overlay at $1 and build its UKI there.
+# Each step returns on failure: set -e does not apply in a function whose
+# status the caller tests.
+build_n1x_uki_in() {
+  local merged=$1 line
+  local -a modules=(thunderbolt) line_modules
+
+  pacstrap -C "$pacman_conf" -c -G -M "$merged" linux-omarchy-nvidia-open nvidia-utils || return 1
+
+  # As n1x.sh sets up an N1x whose GPU drives the panel: nvidia-drm's fbdev
+  # draws the console and Plymouth's LUKS prompt.
+  printf '%s\n' 'options nvidia_drm modeset=1 fbdev=1' >"$merged/etc/modprobe.d/nvidia.conf" || return 1
+
+  # n1x.sh lights the dim power-on panel for the LUKS prompt with a busybox
+  # hook, which a systemd initramfs never runs. A udev rule does the same in
+  # both: write the backlight once nvidia_drm registers it.
+  install -d "$merged/etc/udev/rules.d" "$merged/etc/initcpio/install" || return 1
+  cat >"$merged/etc/udev/rules.d/90-omarchy-n1x-boot-brightness.rules" <<'RULE' || return 1
+ACTION=="add", SUBSYSTEM=="backlight", KERNEL=="nvidia_0", ATTR{brightness}="60"
+RULE
+  cat >"$merged/etc/initcpio/install/sd-omarchy-n1x-boot-brightness" <<'INSTALL' || return 1
+#!/usr/bin/env bash
+build() {
+    add_file /etc/udev/rules.d/90-omarchy-n1x-boot-brightness.rules /usr/lib/udev/rules.d/90-omarchy-n1x-boot-brightness.rules
+}
+help() {
+    cat <<HELPEOF
+Light the NVIDIA N1x panel for Plymouth's LUKS prompt.
+HELPEOF
+}
+INSTALL
+
+  # The generic UKI's config, with the N1x modules and the brightness hook.
+  for line in "${n1x_lines[@]}"; do
+    eval "line_modules=${line#*=}"
+    modules+=("${line_modules[@]}")
+  done
+  sed -E \
+    -e "s/^MODULES=.*/MODULES=(${modules[*]})/" \
+    -e 's/ plymouth / plymouth sd-omarchy-n1x-boot-brightness /' \
+    "$root/etc/mkinitcpio-prebuilt-uki.conf" >"$merged/etc/mkinitcpio-prebuilt-uki-n1x.conf" || return 1
+  grep -q " plymouth sd-omarchy-n1x-boot-brightness " "$merged/etc/mkinitcpio-prebuilt-uki-n1x.conf" || return 1
+
+  echo "Pre-building the N1x UKI (modules: ${modules[*]})"
+  arch-chroot "$merged" mkinitcpio \
+    -k "/usr/lib/modules/${image_kver}/vmlinuz" \
+    -c /etc/mkinitcpio-prebuilt-uki-n1x.conf \
+    --cmdline /etc/kernel/cmdline.prebuilt-uki \
+    -U /var/lib/omarchy-iso/prebuilt-uki-n1x.efi \
+    -S autodetect 2>&1 | tail -25
+  [[ -f "$merged/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" ]] || return 1
+  n1x_prebuilt_uki_size_ok "$merged/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" || return 1
+  install -m 0644 "$merged/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" || return 1
+  echo "Pre-built N1x UKI: $(du -h "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" | cut -f1)"
+  # The lines an N1x install will have: the image's own and n1x.sh's.
+  { cat "$root/var/lib/omarchy-iso/prebuilt-uki.modules"; printf '%s\n' "${n1x_lines[@]}"; } |
+    sort -u >"$root/var/lib/omarchy-iso/prebuilt-uki-n1x.modules"
+}
+
+# Build /var/lib/omarchy-iso/prebuilt-uki-n1x.efi from a throwaway overlay of
+# $root. Runs while the generic UKI's config and cmdline are still in $root.
+build_n1x_prebuilt_uki() {
+  local overlay status=0
+  local -a n1x_lines
+  mapfile -t n1x_lines < <(n1x_module_lines "$1")
+  if ((${#n1x_lines[@]} == 0)); then
+    echo "WARNING: $1 writes no MODULES lines" >&2
+    return 1
+  fi
+
+  overlay=$(mktemp -d)
+  mkdir -p "$overlay/rw" "$overlay/merged"
+  # tmpfs for the upper layer: the image's btrfs has no room to spare, and the
+  # builder's own root is an overlay, which cannot be an upper layer.
+  if ! mount -t tmpfs -o size=6G omarchy-n1x-uki "$overlay/rw"; then
+    rm -rf "$overlay"
+    return 1
+  fi
+  mkdir -p "$overlay/rw/upper" "$overlay/rw/work"
+  if mount -t overlay omarchy-n1x-uki \
+       -o "lowerdir=$root,upperdir=$overlay/rw/upper,workdir=$overlay/rw/work" "$overlay/merged"; then
+    build_n1x_uki_in "$overlay/merged" || status=1
+    umount -R "$overlay/merged" || status=1
+  else
+    status=1
+  fi
+  umount "$overlay/rw" || status=1
+  rm -rf "$overlay"
+  return "$status"
+}
+
 pacman_conf="${1:-}"
 output="${2:-}"
 shift 2 || true
@@ -413,6 +523,23 @@ CONF
     # Clean up any partial output that would upset btrfs shrink downstream.
     rm -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi"
   fi
+  # N1x: a second pre-built UKI. Its hardware setup always adds the same
+  # early-loading modules, the NVIDIA stack for early KMS and the I2C keyboard
+  # for the LUKS prompt, so the generic UKI never fits it and every N1x built
+  # its own at install, about 20s. This one is built with them, read from the
+  # image's own n1x.sh so the two cannot drift, and recorded the same way; the
+  # installer copies it where the machine's lines match (_n1x_prebuilt_uki).
+  # The NVIDIA packages go into a throwaway overlay of the image, never into
+  # the image itself: the installer installs them from the same mirror, so the
+  # driver in the UKI matches the one on disk.
+  n1x_script="$root/usr/share/omarchy/install/hardware/n1x.sh"
+  if [[ $(uname -m) == aarch64 && -f $n1x_script && -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
+    build_n1x_prebuilt_uki "$n1x_script" || {
+      echo "WARNING: no N1x pre-built UKI; N1x installs build their own"
+      rm -f "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.modules"
+    }
+  fi
+
   # Only this build uses these; the installed system has no use for them.
   rm -f "$root/etc/mkinitcpio-prebuilt-uki.conf" "$root/etc/kernel/cmdline.prebuilt-uki"
 fi

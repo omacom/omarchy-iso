@@ -121,6 +121,10 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         if: env.ARCH == 'x86_64'
 
+      # The ISO builds in podman; a runner image may not ship it.
+      - name: Install podman
+        run: command -v podman || { sudo apt-get update -q && sudo apt-get install -yq podman; }
+
       # A pull request's or merge's ISO installs what the edge channel serves,
       # built from omarchy's quattro, as the nightly does; on aarch64 that runs
       # linux-omarchy, the one kernel for every aarch64 board. A run by hand

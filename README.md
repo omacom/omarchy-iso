@@ -287,6 +287,8 @@ To add a string, put it in `en.json` and print it with `t <key> [args]`, where `
 
 Run `./bin/omarchy-iso-make`; output goes into `./release`. By default the ISO uses the Omarchy packages and tracks the `quattro` branch, from the stable mirror. Pass `--edge` to use `omarchy-dev` and `omarchy-settings-dev` from the edge mirror.
 
+The build runs in a privileged container with `sudo podman` (`pacman -S podman`); there is no daemon to start. Rootless podman cannot run it, as the build mounts loop devices.
+
 For local development, build the ISO from sibling checkouts:
 
 ```bash

@@ -14,7 +14,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # Nothing here may reach a build: these stand in for what one would start with.
 mkdir -p "$work/bin" "$work/tmp" "$work/cwd"
-for tool in docker sudo git; do
+for tool in podman sudo git; do
   printf '#!/bin/bash\necho "reached %s" >>"%s/reached"\nexit 99\n' "$tool" "$work" >"$work/bin/$tool"
 done
 chmod +x "$work/bin"/*

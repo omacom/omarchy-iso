@@ -85,7 +85,7 @@ sudo ufw delete allow ssh
 
 ## Building the images
 
-Builds run natively on an aarch64 host with Docker, from sibling checkouts of omarchy, omarchy-pkgs and this repository. The kernel and the N1x packages come from the edge aarch64 repository.
+Builds run natively on an aarch64 host with podman, from sibling checkouts of omarchy, omarchy-pkgs and this repository. The kernel and the N1x packages come from the edge aarch64 repository.
 
 ```bash
 # Normal image

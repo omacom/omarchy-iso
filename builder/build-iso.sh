@@ -972,8 +972,14 @@ echo "[timing] root image end $(date +%s)"
 # The installer verifies the image against this before it touches the disk
 # (orchestrator prepare_install_target), so a truncated copy on a badly
 # flashed USB fails the install while it is still free to fail. Next to the
-# image, so it ships on the ISO beside it.
-(cd "$root_image_dir" && sha256sum "${root_image##*/}" >"$root_image.sha256")
+# image, so it ships on the ISO beside it. A platform layer next to the image
+# (the N1x's, build-root-image.sh) is listed in the same file, so the same
+# boot-time `sha256sum --check` covers it.
+(
+  cd "$root_image_dir"
+  shopt -s nullglob
+  sha256sum "${root_image##*/}" omarchy-layer.*.tar.zst >"$root_image.sha256"
+)
 
 # aarch64: each Snapdragon laptop's ADSP firmware, as plain files next to the
 # root image with a SHA256SUMS list. The live UKI holds only linux-firmware's;

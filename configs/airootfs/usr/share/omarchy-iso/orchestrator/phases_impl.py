@@ -3363,9 +3363,8 @@ def _validate_package_signing(ctx: InstallContext, mirror: Path = OFFLINE_MIRROR
 # The N1x firmware publishes an ACPI SPCR serial console the kernel adopts
 # unless told otherwise, and Limine hands each entry's cmdline to the UKI as
 # load options that replace the embedded one. So the contract has to hold in
-# the generated limine.conf itself: every entry keeps the console on the panel,
-# and the rescue entry boots to a text login. Both failures look like a black
-# screen, which is how the first N1x installs went.
+# the generated limine.conf itself: every entry keeps the console on the panel.
+# Losing it looks like a black screen, which is how the first N1x installs went.
 N1X_REQUIRED_CMDLINE = ("console=tty0", "acpi=nospcr")
 
 

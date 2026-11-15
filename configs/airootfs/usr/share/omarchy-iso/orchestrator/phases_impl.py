@@ -1211,9 +1211,11 @@ def _start_target_keyring_init(ctx: InstallContext) -> None:
     Started after the last pacstrap (each runs its own --init on this dir)
     and joined by create_factory_snapshot: on x86_64 nothing in between
     reads the keyring (the offline repo is SigLevel = Never) or writes it,
-    and the snapshot must not capture it half-written. On aarch64 the
-    runtime's post-install inits and populates it itself, so
-    run_system_finalizer joins it first. A unit rather than a plain
+    and the snapshot must not capture it half-written. Where the runtime's
+    post-install inits and populates it itself, no unit starts: the
+    finalizer had to wait for it before doing the same work again. Apple
+    Silicon, whose image brings its keyrings, keeps it, and
+    run_system_finalizer joins it there first. A unit rather than a plain
     child process: pacman-key leaves a gpg-agent and dirmngr behind, which
     systemd kills with the rest of the unit's cgroup the moment pacman-key
     exits (sockets under the target's gnupg dir would otherwise block the
@@ -1222,6 +1224,8 @@ def _start_target_keyring_init(ctx: InstallContext) -> None:
     is in the journal whatever happens to the orchestrator. --wait --pipe
     give a child to join with the unit's exit status and output.
     """
+    if _runtime_populates_target_keyring():
+        return
     gpgdir = shlex.quote(str(ctx.target / "etc" / "pacman.d" / "gnupg"))
     keyrings = shlex.quote(str(ctx.target / "usr" / "share" / "pacman" / "keyrings"))
     script = (
@@ -1239,6 +1243,13 @@ def _start_target_keyring_init(ctx: InstallContext) -> None:
         stderr=subprocess.STDOUT,
         text=True,
     )
+
+
+def _runtime_populates_target_keyring() -> bool:
+    """Whether omarchy-apply-system inits and populates the target keyring
+    itself (omarchy's install/post-install/pacman.sh): every aarch64 platform
+    but Apple Silicon."""
+    return platform.machine() == "aarch64" and hw_platform() != "aarch64-apple"
 
 
 def _target_keyrings() -> list[str]:

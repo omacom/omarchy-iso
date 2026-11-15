@@ -114,7 +114,7 @@ jobs:
         if: startsWith(matrix.channel, 'edge')
         run: |
           command -v podman || { sudo apt-get update -q && sudo apt-get install -yq podman; }
-          printf '[storage]\ndriver = "vfs"\n' | sudo tee /etc/containers/storage.conf
+          printf '[storage]\ndriver = "vfs"\nrunroot = "/run/containers/storage"\ngraphroot = "/var/lib/containers/storage"\n' | sudo tee /etc/containers/storage.conf
           printf '[containers]\nkeyring = false\n' | sudo tee /etc/containers/containers.conf
 
       # No package cache, on purpose: every package the ISO is made of is

@@ -58,26 +58,24 @@ This preserves offline tamper resistance for `/boot` while avoiding any central 
 - No TPM auto-unlock for Omarchy root in v1.
 - No attempt to modify Windows BitLocker protectors or TPM ownership.
 - Secure Boot mode uses signed UKIs only; no unsigned external kernel, initramfs, or command line files.
-- Secure Boot mode may use a different boot manager than the current Limine path until Limine has a proven verified-boot story.
+- Secure Boot installs boot systemd-boot (see Bootloader Decision); existing Limine installs move with `omarchy-boot-switch` first.
 
 ## Bootloader Decision
 
-Installed systems already boot a UKI through Limine, so the boot *artifact* needs no change. But signing Limine as an EFI binary is not sufficient if Limine will then load unsigned payloads or take direction from an unsigned `limine.conf`. For v1 Secure Boot support, use a boot path with a small, enforceable verification surface:
+The second stage behind shim is systemd-boot, for every x86 install, not only Secure Boot ones:
 
 ```text
 shim -> systemd-boot -> signed UKI
 ```
 
-Policy:
-
-- Keep Limine as the normal non-Secure-Boot bootloader unless we later prove Limine enforces signed payloads correctly.
-- Use systemd-boot only for Secure Boot installs if that is the fastest reliable path.
-- Boot only UKIs with embedded command line and initramfs.
-- Disable or avoid unsigned boot entry editing in Secure Boot mode.
-
-If later validation proves Limine can enforce signed payloads behind shim, this plan can swap the second stage while keeping the shim, MOK, UKI, and signing architecture.
+- Shim review's established second stages are GRUB and systemd-boot. Limine would need its own review (and an SBAT section it doesn't ship), so systemd-boot is the path we take.
+- systemd-stub ignores any command line passed from outside a UKI that carries its own when Secure Boot is on, so a signed UKI pins kernel, initramfs and command line together. GRUB leaves `grub.cfg` and the initramfs unverified.
+- Snapper snapshots keep working: omacom/omarchy's `systemd-boot` branch (`omarchy-boot-switch`, `omarchy-boot-sync`; reference in its `docs/boot.md`) builds one UKI per boot image with a profile per snapshot, each carrying its own signed `rootflags=subvol=`, and restores snapshots through an initramfs hook. The QEMU prototype in `prototypes/systemd-boot-snapshots/` proved the Secure Boot side: signed profiles boot, an injected command line is ignored, tampered and unsigned images are refused.
+- Existing installs move with the opt-in `omarchy-boot-switch` (staged, BootNext trial, promotion, finalization; Limine stays as fallback until the firmware proves it starts systemd-boot). Fresh installs still get Limine until the installer phases below change.
+- Boot only UKIs with embedded command line and initramfs; the menu editor is off (`editor no`).
 
 ## Required Artifacts
+
 
 ### Omarchy Shim Artifacts
 
@@ -350,7 +348,7 @@ Minimum hardware tests:
 
 - Kick off the EV certificate purchase and `shim-review` submission prep immediately — this is the calendar-bound item that gates Phase 4, and nothing else depends on it being done first.
 - Confirm shim submission requirements and timeline.
-- Confirm selected second-stage boot manager (systemd-boot unless Limine's signature enforcement is proven).
+- ~~Confirm selected second-stage boot manager~~ — resolved: systemd-boot.
 - ~~Confirm UKI generation mechanism on Arch~~ — resolved: mkinitcpio already builds the installed UKI today.
 - Confirm package availability for signing and MOK workflows.
 - Decide local MOK key storage and update-hook policy.
@@ -399,9 +397,9 @@ Minimum hardware tests:
 
 ## Open Questions
 
-- Whether Limine can enforce signature verification on the UKIs and config it loads; if not proven, Secure Boot installs use systemd-boot as the second stage while non-Secure-Boot installs keep Limine.
+- ~~Whether Limine can enforce signature verification~~ — moot: systemd-boot for every x86 install.
 - Whether the local MOK private key should be encrypted with a user-supplied passphrase or stored root-only on encrypted root.
 - How to support signed out-of-tree kernel modules, especially proprietary GPU drivers or DKMS packages. **This must be answered for v1:** once Secure Boot is enforcing, unsigned modules will not load, and NVIDIA laptops are exactly the consumer hardware this plan targets. The module signing hook must sign with the machine-local MOK alongside the UKI.
-- How snapshot booting (factory reset restores from Btrfs snapshots) should work when each bootable kernel must be a signed UKI.
+- ~~How snapshot booting should work when each bootable kernel must be a signed UKI~~ — one signed multi-profile UKI per boot image (omarchy `systemd-boot` branch). Factory reset after a switch is still open: the factory root is a Limine root.
 - Whether official builds should always be Secure Boot-capable or ship a separate Secure Boot ISO flavor.
 - What user-facing recovery path should exist if MOK enrollment is skipped or fails.

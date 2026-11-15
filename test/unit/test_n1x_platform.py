@@ -315,5 +315,61 @@ class N1xHardwareGateTest(unittest.TestCase):
         run.assert_not_called()
 
 
+class PlatformLayerTest(unittest.TestCase):
+    """The N1x layer replaces the install-time pacstrap of its NVIDIA stack."""
+
+    def test_layer_is_found_by_the_machines_platform(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "omarchy-layer.aarch64-n1x.tar.zst").write_bytes(b"")
+            for detected, expected in [
+                ("aarch64-n1x", directory / "omarchy-layer.aarch64-n1x.tar.zst"),
+                ("aarch64-qualcomm", None),
+                ("aarch64", None),
+                ("", None),
+            ]:
+                with mock.patch.object(phases_impl, "hw_platform", return_value=detected):
+                    self.assertEqual(phases_impl._platform_layer(directory), expected, detected)
+
+    def test_no_layer_extracts_nothing(self):
+        ctx = types.SimpleNamespace(target=Path("/mnt"))
+        with mock.patch.object(phases_impl, "_platform_layer", return_value=None), \
+                mock.patch.object(phases_impl.subprocess, "run") as run:
+            phases_impl._apply_platform_layer(ctx)
+        run.assert_not_called()
+
+    def test_layer_lands_over_the_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            built = tmp / "upper"
+            (built / "var/lib/pacman/local/nvidia-utils-615.78.08-3").mkdir(parents=True)
+            (built / "var/lib/pacman/local/nvidia-utils-615.78.08-3/desc").write_text(
+                "%NAME%\nnvidia-utils\n\n%VERSION%\n615.78.08-3\n")
+            (built / "usr/lib").mkdir(parents=True)
+            (built / "usr/lib/libnvidia-glcore.so.615.78.08").write_text("lib")
+            layer = tmp / "omarchy-layer.aarch64-n1x.tar.zst"
+            subprocess.run(["tar", "--zstd", "-cf", str(layer), "-C", str(built), "."], check=True)
+
+            target = tmp / "target"
+            (target / "usr/lib").mkdir(parents=True)
+            (target / "lib").symlink_to("usr/lib")
+            ctx = types.SimpleNamespace(target=target)
+            with mock.patch.object(phases_impl, "info"):
+                phases_impl._apply_platform_layer(ctx, layer)
+
+            self.assertTrue((target / "lib").is_symlink())
+            self.assertEqual((target / "usr/lib/libnvidia-glcore.so.615.78.08").read_text(), "lib")
+            self.assertTrue((target / "var/lib/pacman/local/nvidia-utils-615.78.08-3/desc").is_file())
+
+    def test_layer_follows_the_image_write_and_precedes_the_package_delta(self):
+        source = Path(phases_impl.__file__).read_text()
+        body = source[source.index("def arch_install_system("):]
+        image = body.index("_install_root_image(ctx)")
+        layer = body.index("_apply_platform_layer(ctx)")
+        delta = body.index("arch.install_base_delta(")
+        self.assertLess(image, layer)
+        self.assertLess(layer, delta)
+
+
 if __name__ == "__main__":
     unittest.main()

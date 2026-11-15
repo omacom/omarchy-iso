@@ -637,6 +637,7 @@ def arch_install_system(ctx: InstallContext) -> None:
 
         with _time_step("STEP.install_root_image"):
             _install_root_image(ctx)
+        _apply_platform_layer(ctx)
 
         if not pre_mounted and arch.is_encrypted(config):
             installer.generate_key_files()
@@ -678,6 +679,9 @@ def arch_install_system(ctx: InstallContext) -> None:
             if platform_packages:
                 with _time_step(f"STEP.platform_packages ({_base_package_file().name})"):
                     installer.add_additional_packages(platform_packages)
+            elif _base_package_file().name != "omarchy-base.packages":
+                # The platform layer installed the set; still name it in the log.
+                info(f"› {_base_package_file().name}: all installed")
 
             with _time_step("STEP.configure_keyboard"):
                 if not configure_keyboard(
@@ -1174,6 +1178,41 @@ def _place_root_image(ctx: InstallContext) -> None:
 def _install_root_image(ctx: InstallContext) -> None:
     _place_root_image(ctx)
     _finish_root_image(ctx)
+
+
+def _platform_layer(directory: Path = ROOT_IMAGE_DIR) -> Path | None:
+    """The layer build-root-image.sh packed for this machine's platform next to
+    the root image (the N1x's NVIDIA stack), or None. Listed in the image's
+    sha256 file, so omarchy-root-image-verify checked it with the image."""
+    detected = hw_platform()
+    if not detected:
+        return None
+    layer = directory / f"omarchy-layer.{detected}.tar.zst"
+    return layer if layer.is_file() else None
+
+
+def _apply_platform_layer(ctx: InstallContext, layer: Path | None = None) -> None:
+    """Extract the platform layer over the freshly written image: the packages
+    the platform's list adds, their pacman database entries, and the module
+    index, linker cache and system users their hooks left, all made against
+    this same image at build time. _platform_delta_packages then finds nothing
+    missing, so no pacstrap runs: on an N1x that pacstrap took 22.6s, most of
+    it depmod and ldconfig reading the new disk cold.
+
+    Right after the image write, before anything else changes the target, as
+    the layer's /etc/passwd and friends are the image's plus the packages'
+    system users."""
+    layer = layer or _platform_layer()
+    if layer is None:
+        return
+    info(f"› extracting platform layer ({layer.stat().st_size >> 20} MiB from {layer.name})")
+    with _time_step(f"STEP.platform_layer ({layer.name})"):
+        subprocess.run(
+            ["tar", "--zstd", "-xpf", str(layer), "-C", str(ctx.target),
+             "--numeric-owner", "--acls", "--xattrs", "--xattrs-include=*",
+             "--keep-directory-symlink"],
+            check=True,
+        )
 
 
 def _finish_root_image(ctx: InstallContext) -> None:

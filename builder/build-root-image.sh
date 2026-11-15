@@ -65,14 +65,64 @@ n1x_module_lines() {
   grep -hE '^\s*MODULES\s*\+?=' "$1" | sed -E 's/\s+/ /g; s/^ //; s/ $//' | sort -u
 }
 
-# Set up N1x's boot-time state in the overlay at $1 and build its UKI there.
-# Each step returns on failure: set -e does not apply in a function whose
-# status the caller tests.
-build_n1x_uki_in() {
-  local merged=$1 line
-  local -a modules=(thunderbolt) line_modules
+# The N1x layer: what an N1x adds to the image on disk, packed next to the
+# image for the installer to extract (phases_impl._apply_platform_layer).
+# Installing the NVIDIA stack at install time took 22.6s on an N1x, 16s of it
+# depmod and ldconfig reading the freshly written disk cold; extracting the
+# same files takes a second or two. The image itself stays generic.
+n1x_layer_path() {
+  printf '%s/omarchy-layer.aarch64-n1x.tar.zst\n' "${output%/*}"
+}
 
-  pacstrap -C "$pacman_conf" -c -G -M "$merged" linux-omarchy-nvidia-open nvidia-utils || return 1
+# Pack the overlay's upper directory $1, the files pacstrap and its hooks wrote
+# over the image, as the N1x layer. Paths the target makes or owns for itself
+# are left out: mount points, caches and logs, the sync databases (the image
+# ships its own), and the keyring the installer creates per machine.
+write_n1x_layer() {
+  local upper=$1 layer
+  layer=$(n1x_layer_path)
+
+  # tar has no way to say "delete": an overlay whiteout (a 0:0 character
+  # device) or an opaque directory in the upper layer would be extracted as
+  # junk. A pacstrap of new packages deletes nothing; fail if one did.
+  if [[ -n $(find "$upper" -type c -print -quit) ]] ||
+    getfattr -R --absolute-names -d -m '^trusted\.overlay\.opaque' "$upper" 2>/dev/null | grep -q .; then
+    echo "ERROR: the N1x layer deletes files from the image; it cannot be packed as a tarball" >&2
+    return 1
+  fi
+
+  tar -C "$upper" --numeric-owner --acls --xattrs --xattrs-include='*' \
+    --xattrs-exclude='trusted.overlay.*' \
+    --exclude=./boot --exclude=./dev --exclude=./proc --exclude=./sys \
+    --exclude=./run --exclude=./tmp --exclude=./var/cache --exclude=./var/log \
+    --exclude=./var/tmp --exclude=./var/lib/pacman/sync \
+    --exclude=./etc/pacman.d/gnupg \
+    -cf - . | zstd -q -T0 -15 -o "$layer" || return 1
+  echo "N1x layer: $(du -h "$layer" | cut -f1) at $layer"
+}
+
+# Set up N1x's boot-time state in the overlay at $1 (upper directory $2), pack
+# its packages as the N1x layer, and build its UKI there. Each step returns on
+# failure: set -e does not apply in a function whose status the caller tests.
+build_n1x_uki_in() {
+  local merged=$1 upper=$2 line
+  local -a modules=(thunderbolt) line_modules n1x_packages
+
+  # Every package the N1x list adds to the image, as the installer would
+  # install them (_platform_delta_packages), from the same mirror.
+  mapfile -t n1x_packages < <(grep -hv '^\s*#\|^\s*$' "$merged/usr/share/omarchy/install/omarchy-aarch64-n1x.packages")
+  ((${#n1x_packages[@]})) || return 1
+  pacstrap -C "$pacman_conf" -c -G -M "$merged" --needed "${n1x_packages[@]}" || return 1
+
+  # What the installed system's pacman hooks would have left, whether or not
+  # the building system has those hooks: the module index and linker cache
+  # cover the new modules and libraries, and the packages' system users exist.
+  arch-chroot "$merged" depmod "$image_kver" || return 1
+  arch-chroot "$merged" ldconfig || return 1
+  systemd-sysusers --root="$merged" || return 1
+
+  # Before anything below writes boot-time state into the overlay.
+  write_n1x_layer "$upper" || return 1
 
   # As n1x.sh sets up an N1x whose GPU drives the panel: nvidia-drm's fbdev
   # draws the console and Plymouth's LUKS prompt.
@@ -146,7 +196,7 @@ build_n1x_prebuilt_uki() {
   mkdir -p "$overlay/rw/upper" "$overlay/rw/work"
   if mount -t overlay omarchy-n1x-uki \
        -o "lowerdir=$root,upperdir=$overlay/rw/upper,workdir=$overlay/rw/work" "$overlay/merged"; then
-    build_n1x_uki_in "$overlay/merged" || status=1
+    build_n1x_uki_in "$overlay/merged" "$overlay/rw/upper" || status=1
     umount -R "$overlay/merged" || status=1
   else
     status=1
@@ -530,13 +580,17 @@ CONF
   # image's own n1x.sh so the two cannot drift, and recorded the same way; the
   # installer copies it where the machine's lines match (_n1x_prebuilt_uki).
   # The NVIDIA packages go into a throwaway overlay of the image, never into
-  # the image itself: the installer installs them from the same mirror, so the
-  # driver in the UKI matches the one on disk.
+  # the image itself. What they add is packed from that overlay as the N1x
+  # layer, which the installer extracts on an N1x, so the driver in the UKI is
+  # the one on disk.
   n1x_script="$root/usr/share/omarchy/install/hardware/n1x.sh"
+  # The output directory persists between builds: no layer from an older one.
+  rm -f "$(n1x_layer_path)"
   if [[ $(uname -m) == aarch64 && -f $n1x_script && -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
     build_n1x_prebuilt_uki "$n1x_script" || {
-      echo "WARNING: no N1x pre-built UKI; N1x installs build their own"
-      rm -f "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.modules"
+      echo "WARNING: no N1x pre-built UKI or layer; N1x installs build their own and pacstrap the NVIDIA stack"
+      rm -f "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.modules" \
+        "$(n1x_layer_path)"
     }
   fi
 

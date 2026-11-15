@@ -174,7 +174,15 @@ check() { # description, then a command run in the guest that must succeed
 {
   check "the system reaches running or degraded" \
     's=$(timeout 180 systemctl is-system-running --wait); [ "$s" = running ] || [ "$s" = degraded ]'
-  check "no unit failed" '[ -z "$(systemctl --failed --no-legend)" ]'
+  # The N1x run fakes the laptop's PCI IDs in a VM with no GPU behind them, so
+  # nvidia-container-toolkit's CDI refresh, which asks nvidia-smi for the GPU,
+  # can only fail there: it retries until systemd's start limit. On the
+  # hardware it writes the CDI spec Podman hands the GPU to containers with.
+  failed_units='systemctl --failed --no-legend --plain'
+  if [[ ${PLATFORM:-} == aarch64-n1x ]]; then
+    failed_units+=" | grep -v '^nvidia-cdi-refresh\\.'"
+  fi
+  check "no unit failed" "[ -z \"\$($failed_units)\" ]"
   check "the desktop is up: Hyprland is running" 'for i in $(seq 1 60); do pgrep -x Hyprland && exit 0; sleep 1; done; exit 1'
   check "it runs the kernel it was told to install" \
     "pacman -Qo /usr/lib/modules/\$(uname -r) | grep -q ' ${KERNEL:-linux-omarchy} '"

@@ -123,12 +123,14 @@ jobs:
 
       # The ISO builds in podman; a runner image may not ship it. The runners
       # are containers themselves: their root is overlayfs, which podman's
-      # overlay storage cannot sit on, and they refuse crun a session keyring.
+      # overlay storage cannot sit on; they refuse crun a session keyring; and
+      # their cgroups and /proc/sys, which container networking writes, are
+      # read-only.
       - name: Install podman
         run: |
           command -v podman || { sudo apt-get update -q && sudo apt-get install -yq podman; }
           printf '[storage]\ndriver = "vfs"\nrunroot = "/run/containers/storage"\ngraphroot = "/var/lib/containers/storage"\n' | sudo tee /etc/containers/storage.conf
-          printf '[containers]\nkeyring = false\n' | sudo tee /etc/containers/containers.conf
+          printf '[containers]\nkeyring = false\ncgroups = "disabled"\nnetns = "host"\n' | sudo tee /etc/containers/containers.conf
 
       # A pull request's or merge's ISO installs what the edge channel serves,
       # built from omarchy's quattro, as the nightly does; on aarch64 that runs

@@ -109,13 +109,15 @@ jobs:
 
       # The ISO builds in podman; a runner image may not ship it. The runners
       # are containers themselves: their root is overlayfs, which podman's
-      # overlay storage cannot sit on, and they refuse crun a session keyring.
+      # overlay storage cannot sit on; they refuse crun a session keyring; and
+      # their cgroups and /proc/sys, which container networking writes, are
+      # read-only.
       - name: Install podman
         if: startsWith(matrix.channel, 'edge')
         run: |
           command -v podman || { sudo apt-get update -q && sudo apt-get install -yq podman; }
           printf '[storage]\ndriver = "vfs"\nrunroot = "/run/containers/storage"\ngraphroot = "/var/lib/containers/storage"\n' | sudo tee /etc/containers/storage.conf
-          printf '[containers]\nkeyring = false\n' | sudo tee /etc/containers/containers.conf
+          printf '[containers]\nkeyring = false\ncgroups = "disabled"\nnetns = "host"\n' | sudo tee /etc/containers/containers.conf
 
       # No package cache, on purpose: every package the ISO is made of is
       # fetched from the mirrors again each night, so one that has gone

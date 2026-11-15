@@ -679,6 +679,9 @@ def arch_install_system(ctx: InstallContext) -> None:
             if platform_packages:
                 with _time_step(f"STEP.platform_packages ({_base_package_file().name})"):
                     installer.add_additional_packages(platform_packages)
+            elif _base_package_file().name != "omarchy-base.packages":
+                # The platform layer installed the set; still name it in the log.
+                info(f"› {_base_package_file().name}: all installed")
 
             with _time_step("STEP.configure_keyboard"):
                 if not configure_keyboard(

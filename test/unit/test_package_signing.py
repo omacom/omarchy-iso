@@ -32,24 +32,33 @@ class TargetKeyringTest(unittest.TestCase):
     # The root image ships no keyring; the installer populates the target's
     # from the keyring packages the image holds, archlinuxarm-keyring among
     # them on aarch64.
-    def script(self, machine):
+    def script(self, machine, hw="x86"):
         ctx = mock.Mock()
         ctx.target = Path("/mnt")
         ctx.state = {}
         with mock.patch.object(phases_impl.platform, "machine", return_value=machine), \
+                mock.patch.object(phases_impl, "hw_platform", return_value=hw), \
                 mock.patch.object(phases_impl.subprocess, "run"), \
                 mock.patch.object(phases_impl.subprocess, "Popen") as popen, \
                 mock.patch.object(phases_impl, "info", lambda _message: None):
             phases_impl._start_target_keyring_init(ctx)
-        return popen.call_args.args[0][-1]
+        return popen.call_args.args[0][-1] if popen.called else None
 
-    def test_aarch64_populates_the_arch_linux_arm_keys(self):
-        self.assertIn("--populate archlinux omarchy archlinuxarm", self.script("aarch64"))
+    def test_apple_silicon_populates_the_arch_linux_arm_keys(self):
+        self.assertIn("--populate archlinux omarchy archlinuxarm", self.script("aarch64", "aarch64-apple"))
 
     def test_x86_64_does_not(self):
         script = self.script("x86_64")
         self.assertIn("--populate archlinux omarchy", script)
         self.assertNotIn("archlinuxarm", script)
+
+    # The runtime's post-install inits and populates the keyring on every
+    # other aarch64 platform, after waiting for this unit: doing it twice cost
+    # an N1x install about 2s.
+    def test_other_aarch64_leaves_it_to_the_runtime(self):
+        for hw in ("aarch64", "aarch64-n1x", "aarch64-gb10", "aarch64-qualcomm"):
+            with self.subTest(hw=hw):
+                self.assertIsNone(self.script("aarch64", hw))
 
 
 class KeyringBeforeSystemFinalizerTest(unittest.TestCase):

@@ -272,6 +272,17 @@ else
   # hardware scripts add to them (nvidia.sh, fix-t2.sh) builds its own UKI.
   { grep -hE '^\s*MODULES\s*\+?=' "$root"/etc/mkinitcpio.conf.d/*.conf 2>/dev/null || true; } |
     sed -E 's/\s+/ /g; s/^ //; s/ $//' | sort -u >"$root/var/lib/omarchy-iso/prebuilt-uki.modules"
+  # The modprobe lines that keep a driver off a device, as this UKI carries
+  # them. The modconf hook copies /etc/modprobe.d and /usr/lib/modprobe.d into
+  # the initramfs, and this one is built without autodetect, so it holds every
+  # driver and udev binds them in the initrd by modalias. A blacklist that a
+  # hardware script adds later (broadcom-wl-dkms's for bcma and b43 on the
+  # BCM4331/BCM4360) never reaches a UKI that is only copied: bcma claims the
+  # card before switch-root and wl finds nothing to drive. options lines are
+  # left out on purpose: fix-fkeys.sh writes one on nearly every machine, and
+  # counting it would cost every install the rebuild.
+  { grep -hE '^\s*(blacklist|install)\s' "$root"/etc/modprobe.d/*.conf "$root"/usr/lib/modprobe.d/*.conf 2>/dev/null || true; } |
+    sed -E 's/\s+/ /g; s/^ //; s/ $//' | sort -u >"$root/var/lib/omarchy-iso/prebuilt-uki.modprobe"
   # The console keymap this UKI is built with. omarchy_hooks.conf runs the
   # `keymap` hook, which compiles the keymap named by /etc/vconsole.conf into
   # the initramfs at build time, and bundles vconsole.conf itself for Plymouth.

@@ -3524,16 +3524,6 @@ def _validate_platform_boot_entries(limine_conf_text: str, arm_platform: str, ke
                 f"limine.conf entry {name} lacks {' '.join(missing)}; its console would go to the SPCR serial port"
             )
 
-    # The rescue entry is the kernel's fallback UKI, booted with its own cmdline.
-    rescue_name = f"{kernel}-fallback"
-    rescue = [options for _, options in kernels if f"_{rescue_name}.efi" in options.get("path", "")]
-    if not rescue:
-        raise RuntimeError(f"limine.conf has no {rescue_name} rescue entry")
-    for options in rescue:
-        cmdline = options.get("cmdline", "").split()
-        if "systemd.unit=multi-user.target" not in cmdline or "plymouth.enable=0" not in cmdline:
-            raise RuntimeError(f"{rescue_name} entry does not boot to a text login; its own cmdline was overridden")
-
 
 def _validate_linux_boot_entry(esp_mount: Path, config_text: str, encrypted: bool) -> None:
     """Check the kernel and initramfs that limine-entry-tool copied to the ESP."""

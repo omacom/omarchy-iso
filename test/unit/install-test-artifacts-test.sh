@@ -76,7 +76,9 @@ job_of() {
   awk -v job="$1" '/^  [A-Za-z0-9_-]+:/ { keep = ($0 == "  " job ":") } keep' "$WORKFLOW"
 }
 for arch in x86_64 aarch64; do
-  job_of "build-$arch" | grep -Eq "^      ARCH: $arch\$" || fail "no build-$arch job builds the $arch ISO"
+  # Not piped: grep -q quits at its match, and awk, still writing, dies of
+  # SIGPIPE, which pipefail turns into a failure.
+  grep -Eq "^      ARCH: $arch\$" <<<"$(job_of "build-$arch")" || fail "no build-$arch job builds the $arch ISO"
   fetchers=0
   for job in $(sed -nE 's/^  ([A-Za-z0-9_-]+):$/\1/p' "$WORKFLOW"); do
     block=$(job_of "$job")

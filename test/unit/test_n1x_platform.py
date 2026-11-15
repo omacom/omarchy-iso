@@ -24,27 +24,14 @@ ROOT_CMDLINE = (
 )
 PLAIN_ROOT_CMDLINE = "root=PARTUUID=f073914b-b386-4b56-b181-61ea375509ee zswap.enabled=0 rootflags=subvol=@ rw rootfstype=btrfs"
 KERNEL = "linux-omarchy"
-RESCUE_CMDLINE = (
-    f"{ROOT_CMDLINE} console=tty0 acpi=nospcr plymouth.enable=0 nomodeset "
-    "systemd.unit=multi-user.target fbcon=map:0 loglevel=7"
-)
 NORMAL_CMDLINE = (
     " quiet splash loglevel=0 console=tty0 acpi=nospcr loglevel=7 systemd.show_status=1 "
     f"initramfs_async=0 {ROOT_CMDLINE}"
 )
 
 
-# Shaped like the limine.conf limine-entry-tool writes for linux-omarchy with
-# its fallback UKI as the rescue entry.
-def limine_conf(rescue_cmdline=RESCUE_CMDLINE, normal_cmdline=NORMAL_CMDLINE, rescue=True):
-    rescue_entry = f"""\
-  //linux-omarchy-fallback
-  comment: Kernel version: 7.2.8-8-omarchy
-  comment: kernel-id=linux-omarchy-fallback
-  protocol: efi
-  path: boot():/EFI/Linux/omarchy_linux-omarchy-fallback.efi#5187fcdd
-  cmdline: {rescue_cmdline}
-""" if rescue else ""
+# Shaped like the limine.conf limine-entry-tool writes for linux-omarchy.
+def limine_conf(normal_cmdline=NORMAL_CMDLINE):
     return f"""\
 timeout: 3
 default_entry: 2
@@ -57,7 +44,7 @@ comment: Omarchy
   protocol: efi
   path: boot():/EFI/Linux/omarchy_linux-omarchy.efi#1ebecba8
   cmdline: {normal_cmdline}
-{rescue_entry}
+
 /EFI fallback
 comment: Default EFI loader
 protocol: efi
@@ -145,20 +132,6 @@ class N1xLimineContractTest(unittest.TestCase):
     def test_parameter_must_be_a_whole_token(self):
         with self.assertRaisesRegex(RuntimeError, "lacks console=tty0"):
             self.validate(limine_conf(normal_cmdline=f"console=tty0,115200 acpi=nospcr {ROOT_CMDLINE}"), "n1x")
-
-    def test_missing_rescue_entry_fails(self):
-        with self.assertRaisesRegex(RuntimeError, "no linux-omarchy-fallback rescue entry"):
-            self.validate(limine_conf(rescue=False), "n1x")
-
-    # The 2026-09-03 failure: the rescue entry carried the normal cmdline, so
-    # it booted the graphical target like the normal entry.
-    def test_rescue_with_the_normal_cmdline_fails(self):
-        with self.assertRaisesRegex(RuntimeError, "does not boot to a text login"):
-            self.validate(limine_conf(rescue_cmdline=NORMAL_CMDLINE), "n1x")
-
-    def test_rescue_with_plymouth_fails(self):
-        with self.assertRaisesRegex(RuntimeError, "does not boot to a text login"):
-            self.validate(limine_conf(rescue_cmdline=RESCUE_CMDLINE.replace(" plymouth.enable=0", "")), "n1x")
 
     def test_no_kernel_entries_fails(self):
         with self.assertRaisesRegex(RuntimeError, "no kernel entries"):

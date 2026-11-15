@@ -50,7 +50,6 @@ The **USB stick** boots the installer without showing a menu. Press Esc while it
 The **installed system** (Limine) offers:
 
 - **linux-omarchy**, the normal desktop. It boots by default.
-- **linux-omarchy-fallback**, the rescue entry. It boots the same system to a text login with the NVIDIA driver blocked and Plymouth off; use it if the desktop comes up black. It is rebuilt with every kernel update.
 - **Snapshots**, once Omarchy has taken some.
 
 `sudo omarchy-n1x-probe` records hardware and boot details to `/var/log/omarchy-n1x-probe.log` on demand.

@@ -201,6 +201,12 @@ check() { # description, then a command run in the guest that must succeed
   fi
 } | tee "$out/checks"
 failures=$(grep -c '^not ok' "$out/checks" || true)
+# A failed unit is named nowhere the run uploads, so print each one, with its
+# last log lines, into the job's own log.
+if grep -q '^not ok - no unit failed' "$out/checks"; then
+  guest "echo $GUEST_PASSWORD | sudo -S -p '' systemctl status --state=failed --no-pager --lines=30" 2>&1 |
+    sed 's/^/arm64-install: failed unit: /' >&2 || true
+fi
 guest 'uname -r; cat /proc/cmdline; systemctl --failed --no-legend; grep -E "^Server" /etc/pacman.d/mirrorlist' >"$out/facts" 2>&1 || true
 # What a nightly says it published: the Omarchy package, then the kernel.
 guest 'pacman -Q omarchy-dev omarchy 2>/dev/null; uname -r' >"$out/packages.txt" 2>/dev/null || true

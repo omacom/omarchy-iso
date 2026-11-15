@@ -2635,6 +2635,20 @@ def _prebuilt_module_lines(target: Path) -> set[str]:
     return {line for line in recorded.read_text().splitlines() if line}
 
 
+def _n1x_prebuilt_uki(target: Path, arm_platform: str) -> Path | None:
+    """The image's N1x UKI, for an N1x whose hardware setup wrote exactly the
+    early-loading modules it was built with (build-root-image.sh records them):
+    the image's own and n1x.sh's, the NVIDIA stack and the I2C keyboard. An
+    N1x whose firmware keeps the GPU off, or that adds anything else, builds
+    its own, as every N1x did before."""
+    uki = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-n1x.efi"
+    recorded = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-n1x.modules"
+    if arm_platform != "n1x" or not uki.is_file() or not recorded.is_file():
+        return None
+    lines = {line for line in recorded.read_text().splitlines() if line}
+    return uki if _initramfs_module_lines(target) == lines else None
+
+
 def _keymap_of(vconsole: Path) -> str:
     """KEYMAP= from a vconsole.conf, or "" when unset or unreadable."""
     if not vconsole.is_file():
@@ -2827,6 +2841,13 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     # builds them for everyone; the pre-built one stays the fast path for
     # every machine that adds nothing.
     added_modules = sorted(_initramfs_module_lines(ctx.target) - _prebuilt_module_lines(ctx.target))
+    # An N1x always adds the same ones, and the image carries a UKI built with
+    # them: it takes that one instead.
+    n1x_uki = _n1x_prebuilt_uki(ctx.target, _installed_arm_platform(ctx)) if prebuilt_uki.is_file() else None
+    if n1x_uki:
+        info("› N1x: using the image's N1x UKI, built with this machine's initramfs modules")
+        prebuilt_uki = n1x_uki
+        added_modules = []
     if prebuilt_uki.is_file() and added_modules:
         info(f"› hardware setup added initramfs modules ({'; '.join(added_modules)}); "
              "building the UKI on this machine instead of using the pre-built one")
@@ -2860,12 +2881,13 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     if prebuilt_uki.is_file() and not skip_prebuilt and not arch.has_uefi():
         info("› BIOS firmware; the pre-built UKI is UEFI-only, building the boot files on this machine")
 
-    # A board with a platform of its own boots by its hardware scripts' rules
-    # (the N1x: the console on the panel in every entry, a fallback UKI as the
-    # rescue entry; validate_boot checks them), which limine-mkinitcpio applies
-    # and a UKI built in the image cannot know. Every other machine, a generic
-    # aarch64 one included, takes the image's UKI.
-    if prebuilt_uki.is_file() and not skip_prebuilt and arch.has_uefi() and not _arm_platform_boot():
+    # A board with a platform of its own boots by its hardware scripts' rules,
+    # which limine-mkinitcpio applies and a UKI built in the image cannot know.
+    # The N1x's are its modules and its cmdline (the console on the panel, which
+    # validate_boot checks), and the N1x UKI carries the one while Limine's
+    # entry and the embedded cmdline carry the other. Every other machine, a
+    # generic aarch64 one included, takes the image's UKI.
+    if prebuilt_uki.is_file() and not skip_prebuilt and arch.has_uefi() and (n1x_uki or not _arm_platform_boot()):
         used_prebuilt_uki = True
         with _time_step("LIMINE.deploy_prebuilt_uki (copy from image)"):
             esp_uki.parent.mkdir(parents=True, exist_ok=True)

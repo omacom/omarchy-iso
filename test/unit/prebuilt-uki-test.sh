@@ -35,3 +35,32 @@ prebuilt_uki_size_ok "$work/small.efi" >/dev/null 2>&1 || fail "a 96 MiB UKI is 
 if prebuilt_uki_size_ok "$work/big.efi" >/dev/null 2>"$work/err"; then fail "a 129 MiB UKI is accepted"; fi
 grep -q "over the" "$work/err" || fail "the refusal does not say why: $(cat "$work/err")"
 echo "ok - a pre-built UKI over 128 MiB stops the build"
+
+# The N1x UKI is built with the MODULES lines omarchy's n1x.sh writes, read out
+# of its heredocs and normalized the way the installer reads the target's
+# (_initramfs_module_lines), or no N1x would ever match it.
+eval "$(sed -n '/^n1x_module_lines() {$/,/^}$/p' "$builder")"
+declare -F n1x_module_lines >/dev/null || fail "the builder has no n1x_module_lines"
+cat >"$work/n1x.sh" <<'SCRIPT'
+cat > /etc/mkinitcpio.conf.d/omarchy-n1x-input.conf <<'CONF'
+MODULES+=(i2c_mt65xx   i2c_hid_acpi)
+CONF
+if true; then
+  cat > /etc/mkinitcpio.conf.d/nvidia.conf <<'CONF'
+MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)
+CONF
+fi
+# MODULES+=(commented out)
+SCRIPT
+[[ $(n1x_module_lines "$work/n1x.sh" | paste -sd '|') == "MODULES+=(i2c_mt65xx i2c_hid_acpi)|MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)" ]] ||
+  fail "n1x_module_lines read: $(n1x_module_lines "$work/n1x.sh" | paste -sd '|')"
+echo "ok - the N1x UKI takes its modules from n1x.sh, as the installer will read them"
+
+# The N1x's 61 MiB kernel and NVIDIA firmware put its UKI past 128 MiB; the N1x
+# boots one that size on every installed system, so it has its own ceiling.
+eval "$(sed -n '/^n1x_prebuilt_uki_size_ok() {$/,/^}$/p' "$builder")"
+truncate -s 190M "$work/n1x.efi"
+truncate -s 257M "$work/n1x-big.efi"
+n1x_prebuilt_uki_size_ok "$work/n1x.efi" >/dev/null 2>&1 || fail "a 190 MiB N1x UKI is refused"
+if n1x_prebuilt_uki_size_ok "$work/n1x-big.efi" >/dev/null 2>&1; then fail "a 257 MiB N1x UKI is accepted"; fi
+echo "ok - the N1x UKI has a ceiling of its own"

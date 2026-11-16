@@ -17,6 +17,7 @@ KEY_SIZE = 512
 MIN_MEMORY = 65536
 MAX_MEMORY = 1048576
 SECTOR_SIZE = 4096
+BENCHMARK_RUNS = 3
 
 
 def memory_total() -> int:
@@ -49,6 +50,35 @@ def validate_cost(data: dict) -> None:
             raise ValueError(f"invalid {key}")
 
 
+def benchmark() -> dict:
+    """One cryptsetup Argon2id benchmark at the format's policy."""
+    output = subprocess.run(
+        ["cryptsetup", "benchmark", "--pbkdf", "argon2id", "--iter-time", str(ITER_TIME),
+         "--key-size", str(KEY_SIZE)], check=True, capture_output=True, text=True,
+        env={**os.environ, "LC_ALL": "C"}, timeout=60).stdout
+    return parse_benchmark(output)
+
+
+def best_benchmark(runs: int = BENCHMARK_RUNS) -> dict | None:
+    """The most iterations of several full-memory benchmarks, or None.
+
+    One benchmark measures the CPU it gets while it runs, and anything else
+    running can only lower the count it picks. At live boot that was
+    sometimes half of what the machine had: 6 or 7 iterations where both
+    of the formats a minute later chose 13 or 14. The best of three
+    estimates the idle machine that unlocks the disk at every boot.
+
+    Only the full default memory cost counts. A benchmark that reduced it
+    (memory pressure or a slow CPU) is not evidence for a reusable policy.
+    """
+    results = [benchmark() for _ in range(runs)]
+    print("Argon2id benchmarks: " + ", ".join(
+        f"{result['iterations']} iterations at {result['memory']} KiB" for result in results),
+        file=sys.stderr)
+    full = [result for result in results if result["memory"] == MAX_MEMORY]
+    return max(full, key=lambda result: result["iterations"], default=None)
+
+
 def calibrate() -> None:
     STATE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     STATE.unlink(missing_ok=True)
@@ -59,14 +89,8 @@ def calibrate() -> None:
     if memory_total() < 4 * 1024 * 1024 or memory_available() < 1536 * 1024:
         print("Skipping background LUKS calibration: insufficient memory headroom")
         return
-    output = subprocess.run(
-        ["cryptsetup", "benchmark", "--pbkdf", "argon2id", "--iter-time", str(ITER_TIME),
-         "--key-size", str(KEY_SIZE)], check=True, capture_output=True, text=True,
-        env={**os.environ, "LC_ALL": "C"}, timeout=60).stdout
-    data = parse_benchmark(output)
-    # Only reuse the full default memory cost. A benchmark that reduced it
-    # (memory pressure or a slow CPU) is not evidence for a reusable policy.
-    if data["memory"] != MAX_MEMORY:
+    data = best_benchmark()
+    if data is None:
         print("Skipping cached LUKS calibration: benchmark reduced the memory cost")
         return
     data.update(schema=1, iter_time=ITER_TIME, key_size=KEY_SIZE,
@@ -80,7 +104,7 @@ def calibrate() -> None:
         os.replace(name, STATE)
     finally:
         Path(name).unlink(missing_ok=True)
-    print(output.strip())
+    print(f"Cached {data['iterations']} iterations, the most of {BENCHMARK_RUNS} benchmarks")
 
 
 def stop_calibration() -> None:

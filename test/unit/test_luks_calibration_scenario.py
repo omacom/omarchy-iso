@@ -60,8 +60,10 @@ class FormatCoverage(unittest.TestCase):
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.state = self.directory / 'result.json'
         self.cost = dict(iterations=13, memory=1048576, parallel=4)
+        self.reference = dict(iterations=13, memory=1048576, parallel=4)
         self.calibration = types.SimpleNamespace(STATE=self.state, MIN_MEMORY=65536, MAX_MEMORY=1048576,
-                                                cached_options=lambda *_: ['costs'] if self.state.exists() else [])
+                                                cached_options=lambda *_: ['costs'] if self.state.exists() else [],
+                                                best_benchmark=lambda: self.reference)
         self.report = {'runs': []}
         self.calls = []
         self.iterations, self.unlock = {}, {}
@@ -112,8 +114,9 @@ class FormatCoverage(unittest.TestCase):
         self.assertIn(('archinstall', saved), self.calls)
         self.assertEqual(self.state.read_bytes(), saved)
 
-    def format_with_cache(self, iterations, unlock={}):
+    def format_with_cache(self, iterations, unlock={}, reference=13):
         self.has_cache = True
+        self.reference = None if reference is None else {**self.reference, 'iterations': reference}
         self.iterations, self.unlock = iterations, unlock
         self.cost['iterations'] = iterations['cached']
         self.state.write_text(json.dumps(self.cost))
@@ -123,8 +126,9 @@ class FormatCoverage(unittest.TestCase):
         # CI run 40310348498: the unlock seconds put the cache at 0.59 of an
         # ordinary format while the host's speed moved between unlocks.
         self.format_with_cache(dict(cached=10, absent=13, malformed=10, archinstall=10),
-                               dict(cached=1.54, absent=2.61, malformed=2.04, archinstall=1.54))
+                               dict(cached=1.54, absent=2.61, malformed=2.04, archinstall=1.54), reference=11)
         self.assertAlmostEqual(self.report['cached_to_ordinary_iterations_ratio'], 10 / 11.5)
+        self.assertAlmostEqual(self.report['cached_to_reference_iterations_ratio'], 10 / 11)
         self.assertLess(self.report['cached_to_ordinary_unlock_ratio'], 0.70)
 
     def test_a_materially_weaker_or_stronger_cache_fails(self):
@@ -132,6 +136,22 @@ class FormatCoverage(unittest.TestCase):
             with self.subTest(cached=cached), self.assertRaisesRegex(AssertionError, 'iterations_ratio'):
                 self.report = {'runs': []}
                 self.format_with_cache(dict(cached=cached, absent=13, malformed=13, archinstall=cached))
+
+    def test_formats_that_measured_a_busy_cpu_do_not_fail_an_equal_cache(self):
+        # CI run 41861623990: the cache held 9 iterations, both formats chose
+        # 4 a minute later, and the three-run reference agrees with the cache.
+        self.format_with_cache(dict(cached=9, absent=4, malformed=4, archinstall=9), reference=9)
+        self.assertAlmostEqual(self.report['cached_to_ordinary_iterations_ratio'], 9 / 4)
+        self.assertEqual(self.report['reference_iterations'], 9)
+
+    def test_a_cache_from_a_busy_boot_fails_against_the_reference(self):
+        # CI run 43858289899: 4 cached iterations where the machine does 7.
+        with self.assertRaisesRegex(AssertionError, 'iterations_ratio'):
+            self.format_with_cache(dict(cached=4, absent=7, malformed=7, archinstall=4), reference=7)
+
+    def test_a_reference_that_reduced_the_memory_cost_fails(self):
+        with self.assertRaisesRegex(AssertionError, 'reduced the memory cost'):
+            self.format_with_cache(dict(cached=13, absent=13, malformed=13, archinstall=13), reference=None)
 
     def test_small_memory_expectation_still_rejects_an_unexpected_cache(self):
         self.has_cache = True

@@ -117,6 +117,18 @@ class Calibration(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs['env']['LC_ALL'], 'C')
         self.assertNotIn('luksFormat', run.call_args.args[0])
 
+    def test_the_most_iterations_of_three_full_cost_benchmarks_is_cached(self):
+        # A run that shares the CPU picks fewer iterations, and a run that
+        # reduced the memory cost does not count, whatever its iterations.
+        runs = [LINE.replace(' 13 ', ' 6 '),
+                LINE.replace(' 13 ', ' 19 ').replace('1048576 memory', '96082 memory'),
+                LINE]
+        with mock.patch.object(luks.subprocess, 'run',
+                               side_effect=[types.SimpleNamespace(stdout=output) for output in runs]) as run:
+            luks.calibrate()
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(json.loads(self.path.read_text()), self.data)
+
     def test_failed_or_skipped_benchmark_removes_stale_result(self):
         self.write()
         with mock.patch.object(luks.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, 'cryptsetup')):

@@ -110,13 +110,20 @@ def exercise_formats(calibration, Luks2, report, expect_no_cache=False):
                 # The cost of a guess is the KDF's: memory and parallelism are
                 # the cache's in every mode (above), so compare iterations, not
                 # unlock seconds, which move with the CI host's speed between
-                # two unlocks. Against both ordinary calibrations, because one
-                # benchmark alone varies too: absent 13 and malformed 10 within
-                # a minute on one runner, where unlock seconds put the cache at
-                # 0.59 of ordinary. Keep raw timings; fail a material weakening.
+                # two unlocks. Not against the formats' own calibrations either:
+                # each is one benchmark, and one benchmark measures the CPU it
+                # got while it ran. Two of them a minute apart chose 4 and 7 on
+                # one runner, and in 151 CI reports 8 such pairs fell outside
+                # the bounds below. The cache is the most of three benchmarks,
+                # so measure the reference the same way. Fail a material
+                # weakening; keep the formats' counts and raw timings.
                 ordinary = statistics.median([runs['absent']['kdf']['time'], runs['malformed']['kdf']['time']])
                 report['cached_to_ordinary_iterations_ratio'] = runs['cached']['kdf']['time'] / ordinary
-                assert 0.70 <= report['cached_to_ordinary_iterations_ratio'] <= 1.40, report
+                reference = calibration.best_benchmark()
+                assert reference is not None, 'every reference benchmark reduced the memory cost'
+                report['reference_iterations'] = reference['iterations']
+                report['cached_to_reference_iterations_ratio'] = runs['cached']['kdf']['time'] / reference['iterations']
+                assert 0.70 <= report['cached_to_reference_iterations_ratio'] <= 1.40, report
                 assert report['format_saved_seconds'] > 1, report
             assert len({row['kdf']['salt'] for row in report['runs']}) == len(modes)
     finally:

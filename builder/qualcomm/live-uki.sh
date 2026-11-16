@@ -24,6 +24,33 @@ for dtb in "$dtb_dir"/x1*.dtb "$dtb_dir"/hamoa*.dtb "$dtb_dir"/purwa*.dtb "$dtb_
   [[ $dtb == *-el2.dtb ]] && continue
   dtbs+=("$dtb")
 done
+# systemd-stub only picks a tree whose compatible a hardware ID file names, so
+# the image carries those and leaves out the rest, which no SMBIOS data can
+# select. Every tree is a section, and the stub's header has room for about
+# 120 (see below). A compatible string starts its property's value or follows
+# another's terminating zero, and ends with one of its own.
+if [[ -d $hwids ]]; then
+  hwid_compatibles=$(grep -rhoE --include='*.json' '"compatible"[[:space:]]*:[[:space:]]*"[^"]+"' "$hwids" |
+    sed -E 's/.*"([^"]+)"$/\1/' | sort -u || true)
+  if [[ -n $hwid_compatibles ]]; then
+    alternatives=$(while IFS= read -r compatible; do
+      printf '%s' "$compatible" | od -An -v -tx1 | tr -d '\n'
+      echo
+    done <<<"$hwid_compatibles" | sed 's/^ //' | paste -sd '|' -)
+    named="( 00| 00 00 00 03( [0-9a-f]{2}){8}) (${alternatives}) 00"
+    selectable=()
+    for dtb in "${dtbs[@]}"; do
+      if grep -qE "$named" <(od -An -v -tx1 "$dtb" | tr -d '\n'); then
+        selectable+=("$dtb")
+      fi
+    done
+    if (( ${#selectable[@]} > 0 )); then
+      echo "live-uki: ${#selectable[@]} of ${#dtbs[@]} device trees have hardware IDs"
+      dtbs=("${selectable[@]}")
+    fi
+  fi
+fi
+
 if (( ${#dtbs[@]} == 0 )); then
   echo "live-uki: $1 ships no Windows-on-ARM device trees under $dtb_dir; this image will not boot a Snapdragon laptop"
   exit 0
@@ -57,7 +84,8 @@ initrd="$work/initramfs.img"
 # Each tree is a section of its own. ukify writes every section's header into
 # the room the stub leaves before its first section and stops with "Not enough
 # header space" once it is full. With systemd 262's aa64 stub that is 120
-# trees beside .linux, .initrd, .hwids, .osrel, .uname and .sbat. At about
+# trees beside .linux, .initrd, .hwids, .osrel, .uname and .sbat, which is why
+# the list above keeps only trees with hardware IDs. At about
 # 190 KB a tree, the size limit below leaves room for more than that.
 args=()
 for dtb in "${dtbs[@]}"; do

@@ -226,6 +226,18 @@ else:
         self.assertNotIn('el2',call['dtbs']); self.assertNotIn('sm8550',call['dtbs'])
         self.assertFalse(Path(call['args'][call['args'].index('-g')+1]).exists())
 
+    def test_uki_carries_only_trees_with_hardware_ids(self):
+        dtb_root=self.root/'boot/dtbs/test/qcom'
+        def tree(name,compatible):
+            value=compatible.encode()+b'\0'
+            (dtb_root/name).write_bytes(b'\xd0\x0d\xfe\xed'+b'\0\0\0\x03'+len(value).to_bytes(4,'big')+b'\0\0\0\x0a'+value+b'\0\0\0\x09')
+        tree('x1-named.dtb','vendor,named-laptop'); tree('x1-unnamed.dtb','vendor,unnamed-board')
+        (self.root/'hwids/named.json').write_text('{"type": "devicetree", "compatible": "vendor,named-laptop", "hwids": []}\n')
+        result=self.builder(); self.assertEqual(result.returncode,0,result.stderr)
+        args=json.loads((self.root/'ukify-call.json').read_text())
+        trees=[x for x in args if x.startswith('--devicetree-auto=')]
+        self.assertEqual(len(trees),1); self.assertTrue(trees[0].endswith('x1-named.dtb'))
+
     def test_failed_initramfs_cannot_produce_uki(self):
         (self.root/'boot/dtbs/test/qcom/x1-test.dtb').touch()
         self.env['FAIL_MKINITCPIO']='1'

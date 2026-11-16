@@ -13,6 +13,7 @@ source /builder/node-release.sh
 source /builder/arm64-kernel-image.sh
 source /builder/archiso-aarch64-mkinitcpio.sh
 source /builder/grub-platform.sh
+source /builder/required-packages.sh
 
 # The online pacman configuration drives every package download below: one per
 # architecture and channel. On aarch64 it points at Omarchy's aarch64
@@ -766,6 +767,11 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   mapfile -t target_packages < <(printf '%s\n' "${target_packages[@]}" "${qcom_oem_firmware[@]}" | sort -u)
 fi
 mapfile -t offered < <(pacman --config "$online_pacman_conf" --dbpath /tmp/offlinedb -Slq | sort -u)
+mapfile -t missing_required < <(printf '%s\n' "${offered[@]}" | missing_required_packages "$OMARCHY_ARCH")
+if (( ${#missing_required[@]} )); then
+  echo "ERROR: no configured repository offers ${missing_required[*]}, which every $OMARCHY_ARCH image must carry" >&2
+  exit 1
+fi
 mapfile -t unresolved < <(comm -23 <(printf '%s\n' "${all_packages[@]}" | sort -u) <(printf '%s\n' "${offered[@]}"))
 if (( ${#unresolved[@]} )); then
   # Groups and virtual names (base-devel, ttfx, ...) are not in -Slq; keep

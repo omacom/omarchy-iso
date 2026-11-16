@@ -361,6 +361,7 @@ install_progress() {
     "Finalizing boot and user")   lo=855 hi=978  tau=90  ;;
     "Configuring login")          lo=978 hi=988  tau=5   ;;
     "Configuring DNS resolver")   lo=988 hi=994  tau=5   ;;
+    "Running OEM setup")          lo=994 hi=997  tau=60  ;;
     "Validating boot setup")      lo=994 hi=998  tau=5   ;;
     "Creating factory snapshot")  lo=998 hi=1000 tau=5   ;;
     *)

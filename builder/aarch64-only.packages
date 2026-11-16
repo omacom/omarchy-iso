@@ -9,10 +9,12 @@ asus-proart-pz13-audio
 asus-zenbook-a16-audio
 asus-zenbook-a16-firmware
 asus-zenbook-14-ux3480qa-audio
+hp-omnibook-3-audio
 iptsd
 microsoft-surface-laptop-8-support
 microsoft-surface-pro-11-sensors
 microsoft-surface-pro-11-support
+microsoft-surface-snapdragon-addresses
 
 # The same packages under the names omarchy-pkgs used before it renamed them.
 # A stable image reads these lists from the stable omarchy package, which names

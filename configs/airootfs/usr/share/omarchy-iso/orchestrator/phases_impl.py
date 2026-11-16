@@ -637,6 +637,7 @@ def arch_install_system(ctx: InstallContext) -> None:
 
         with _time_step("STEP.install_root_image"):
             _install_root_image(ctx)
+        _apply_platform_layer(ctx)
 
         if not pre_mounted and arch.is_encrypted(config):
             installer.generate_key_files()
@@ -678,6 +679,9 @@ def arch_install_system(ctx: InstallContext) -> None:
             if platform_packages:
                 with _time_step(f"STEP.platform_packages ({_base_package_file().name})"):
                     installer.add_additional_packages(platform_packages)
+            elif _base_package_file().name != "omarchy-base.packages":
+                # The platform layer installed the set; still name it in the log.
+                info(f"› {_base_package_file().name}: all installed")
 
             with _time_step("STEP.configure_keyboard"):
                 if not configure_keyboard(
@@ -1176,6 +1180,41 @@ def _install_root_image(ctx: InstallContext) -> None:
     _finish_root_image(ctx)
 
 
+def _platform_layer(directory: Path = ROOT_IMAGE_DIR) -> Path | None:
+    """The layer build-root-image.sh packed for this machine's platform next to
+    the root image (the N1x's NVIDIA stack), or None. Listed in the image's
+    sha256 file, so omarchy-root-image-verify checked it with the image."""
+    detected = hw_platform()
+    if not detected:
+        return None
+    layer = directory / f"omarchy-layer.{detected}.tar.zst"
+    return layer if layer.is_file() else None
+
+
+def _apply_platform_layer(ctx: InstallContext, layer: Path | None = None) -> None:
+    """Extract the platform layer over the freshly written image: the packages
+    the platform's list adds, their pacman database entries, and the module
+    index, linker cache and system users their hooks left, all made against
+    this same image at build time. _platform_delta_packages then finds nothing
+    missing, so no pacstrap runs: on an N1x that pacstrap took 22.6s, most of
+    it depmod and ldconfig reading the new disk cold.
+
+    Right after the image write, before anything else changes the target, as
+    the layer's /etc/passwd and friends are the image's plus the packages'
+    system users."""
+    layer = layer or _platform_layer()
+    if layer is None:
+        return
+    info(f"› extracting platform layer ({layer.stat().st_size >> 20} MiB from {layer.name})")
+    with _time_step(f"STEP.platform_layer ({layer.name})"):
+        subprocess.run(
+            ["tar", "--zstd", "-xpf", str(layer), "-C", str(ctx.target),
+             "--numeric-owner", "--acls", "--xattrs", "--xattrs-include=*",
+             "--keep-directory-symlink"],
+            check=True,
+        )
+
+
 def _finish_root_image(ctx: InstallContext) -> None:
     """What the written image owes the rest of the install: it carries
     the packages the phases assume, and the target has a machine-id (the
@@ -1211,9 +1250,11 @@ def _start_target_keyring_init(ctx: InstallContext) -> None:
     Started after the last pacstrap (each runs its own --init on this dir)
     and joined by create_factory_snapshot: on x86_64 nothing in between
     reads the keyring (the offline repo is SigLevel = Never) or writes it,
-    and the snapshot must not capture it half-written. On aarch64 the
-    runtime's post-install inits and populates it itself, so
-    run_system_finalizer joins it first. A unit rather than a plain
+    and the snapshot must not capture it half-written. Where the runtime's
+    post-install inits and populates it itself, no unit starts: the
+    finalizer had to wait for it before doing the same work again. Apple
+    Silicon, whose image brings its keyrings, keeps it, and
+    run_system_finalizer joins it there first. A unit rather than a plain
     child process: pacman-key leaves a gpg-agent and dirmngr behind, which
     systemd kills with the rest of the unit's cgroup the moment pacman-key
     exits (sockets under the target's gnupg dir would otherwise block the
@@ -1222,6 +1263,8 @@ def _start_target_keyring_init(ctx: InstallContext) -> None:
     is in the journal whatever happens to the orchestrator. --wait --pipe
     give a child to join with the unit's exit status and output.
     """
+    if _runtime_populates_target_keyring():
+        return
     gpgdir = shlex.quote(str(ctx.target / "etc" / "pacman.d" / "gnupg"))
     keyrings = shlex.quote(str(ctx.target / "usr" / "share" / "pacman" / "keyrings"))
     script = (
@@ -1239,6 +1282,13 @@ def _start_target_keyring_init(ctx: InstallContext) -> None:
         stderr=subprocess.STDOUT,
         text=True,
     )
+
+
+def _runtime_populates_target_keyring() -> bool:
+    """Whether omarchy-apply-system inits and populates the target keyring
+    itself (omarchy's install/post-install/pacman.sh): every aarch64 platform
+    but Apple Silicon."""
+    return platform.machine() == "aarch64" and hw_platform() != "aarch64-apple"
 
 
 def _target_keyrings() -> list[str]:
@@ -2482,6 +2532,70 @@ def stage_provisioning_state(ctx: InstallContext) -> None:
     if _provision_install_encrypted(ctx):
         _stage_provisioning_luks_unlock(ctx, provisioning_dir)
 
+    _stage_oem_bundle(ctx)
+
+
+# An OEM's bundle, checked when the ISO was built (builder/oem-bundle.py). What
+# first-boot setup shows the owner goes to /etc/omarchy/oem, where the
+# runtime's install/provisioning/oem.sh reads it; the scripts run as root in
+# the new system. Both land before the factory snapshot, so a factory reset
+# returns to the machine as the OEM set it up, agreement included.
+OEM_TARGET_DIR = "etc/omarchy/oem"
+OEM_SETUP_FILES = ("oem.json", "logo.txt", "eula.txt")
+OEM_SCRIPTS_TARGET_DIR = "var/lib/omarchy/oem-setup"
+
+
+def _stage_oem_bundle(ctx: InstallContext) -> None:
+    if ctx.oem_dir is None or not (ctx.oem_dir / "oem.json").is_file():
+        return
+
+    runtime = ctx.target / "usr/share/omarchy/install/provisioning/oem.sh"
+    if not runtime.exists():
+        raise RuntimeError(
+            "this ISO carries an OEM's branding and agreement, but the installed Omarchy runtime "
+            "does not ship install/provisioning/oem.sh to show them at first boot. "
+            "Update the runtime package this ISO bundles."
+        )
+
+    info("› laying down the OEM's branding and agreement for first-boot setup")
+    oem_target = ctx.target / OEM_TARGET_DIR
+    # This bundle and nothing else: a logo or an agreement it does not have
+    # must not come from whatever was there.
+    shutil.rmtree(oem_target, ignore_errors=True)
+    oem_target.mkdir(parents=True)
+    oem_target.chmod(0o755)
+    for name in OEM_SETUP_FILES:
+        source = ctx.oem_dir / name
+        if source.is_file():
+            shutil.copyfile(source, oem_target / name)
+            (oem_target / name).chmod(0o644)
+
+
+def oem_scripts(ctx: InstallContext) -> list[Path]:
+    if ctx.oem_dir is None:
+        return []
+    return sorted(path for path in (ctx.oem_dir / "scripts").glob("*") if path.is_file())
+
+
+def run_oem_setup(ctx: InstallContext) -> None:
+    # A script may install packages, which reads the keyring the unit writes.
+    _join_target_keyring_init(ctx)
+
+    staged = ctx.target / OEM_SCRIPTS_TARGET_DIR
+    shutil.rmtree(staged, ignore_errors=True)
+    staged.mkdir(parents=True)
+    staged.chmod(0o700)
+    try:
+        for script in oem_scripts(ctx):
+            info(f"› OEM setup: {script.name}")
+            shutil.copyfile(script, staged / script.name)
+            try:
+                _run_target_setup_command(ctx, ["/bin/bash", f"/{OEM_SCRIPTS_TARGET_DIR}/{script.name}"])
+            except subprocess.CalledProcessError as exc:
+                raise RuntimeError(f"OEM setup script {script.name} exited with status {exc.returncode}") from exc
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
+
 
 # build-iso.sh bundles the build for the CPU the ISO runs on, and only for a
 # runtime whose setup unpacks it; with none bundled there is nothing to keep.
@@ -2569,6 +2683,20 @@ def _prebuilt_module_lines(target: Path) -> set[str]:
     if not recorded.is_file():
         return set()
     return {line for line in recorded.read_text().splitlines() if line}
+
+
+def _n1x_prebuilt_uki(target: Path, arm_platform: str) -> Path | None:
+    """The image's N1x UKI, for an N1x whose hardware setup wrote exactly the
+    early-loading modules it was built with (build-root-image.sh records them):
+    the image's own and n1x.sh's, the NVIDIA stack and the I2C keyboard. An
+    N1x whose firmware keeps the GPU off, or that adds anything else, builds
+    its own, as every N1x did before."""
+    uki = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-n1x.efi"
+    recorded = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-n1x.modules"
+    if arm_platform != "n1x" or not uki.is_file() or not recorded.is_file():
+        return None
+    lines = {line for line in recorded.read_text().splitlines() if line}
+    return uki if _initramfs_module_lines(target) == lines else None
 
 
 def _keymap_of(vconsole: Path) -> str:
@@ -2763,6 +2891,13 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     # builds them for everyone; the pre-built one stays the fast path for
     # every machine that adds nothing.
     added_modules = sorted(_initramfs_module_lines(ctx.target) - _prebuilt_module_lines(ctx.target))
+    # An N1x always adds the same ones, and the image carries a UKI built with
+    # them: it takes that one instead.
+    n1x_uki = _n1x_prebuilt_uki(ctx.target, _installed_arm_platform(ctx)) if prebuilt_uki.is_file() else None
+    if n1x_uki:
+        info("› N1x: using the image's N1x UKI, built with this machine's initramfs modules")
+        prebuilt_uki = n1x_uki
+        added_modules = []
     if prebuilt_uki.is_file() and added_modules:
         info(f"› hardware setup added initramfs modules ({'; '.join(added_modules)}); "
              "building the UKI on this machine instead of using the pre-built one")
@@ -2796,12 +2931,13 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     if prebuilt_uki.is_file() and not skip_prebuilt and not arch.has_uefi():
         info("› BIOS firmware; the pre-built UKI is UEFI-only, building the boot files on this machine")
 
-    # A board with a platform of its own boots by its hardware scripts' rules
-    # (the N1x: the console on the panel in every entry, a fallback UKI as the
-    # rescue entry; validate_boot checks them), which limine-mkinitcpio applies
-    # and a UKI built in the image cannot know. Every other machine, a generic
-    # aarch64 one included, takes the image's UKI.
-    if prebuilt_uki.is_file() and not skip_prebuilt and arch.has_uefi() and not _arm_platform_boot():
+    # A board with a platform of its own boots by its hardware scripts' rules,
+    # which limine-mkinitcpio applies and a UKI built in the image cannot know.
+    # The N1x's are its modules and its cmdline (the console on the panel, which
+    # validate_boot checks), and the N1x UKI carries the one while Limine's
+    # entry and the embedded cmdline carry the other. Every other machine, a
+    # generic aarch64 one included, takes the image's UKI.
+    if prebuilt_uki.is_file() and not skip_prebuilt and arch.has_uefi() and (n1x_uki or not _arm_platform_boot()):
         used_prebuilt_uki = True
         with _time_step("LIMINE.deploy_prebuilt_uki (copy from image)"):
             esp_uki.parent.mkdir(parents=True, exist_ok=True)
@@ -3363,9 +3499,8 @@ def _validate_package_signing(ctx: InstallContext, mirror: Path = OFFLINE_MIRROR
 # The N1x firmware publishes an ACPI SPCR serial console the kernel adopts
 # unless told otherwise, and Limine hands each entry's cmdline to the UKI as
 # load options that replace the embedded one. So the contract has to hold in
-# the generated limine.conf itself: every entry keeps the console on the panel,
-# and the rescue entry boots to a text login. Both failures look like a black
-# screen, which is how the first N1x installs went.
+# the generated limine.conf itself: every entry keeps the console on the panel.
+# Losing it looks like a black screen, which is how the first N1x installs went.
 N1X_REQUIRED_CMDLINE = ("console=tty0", "acpi=nospcr")
 
 
@@ -3448,16 +3583,6 @@ def _validate_platform_boot_entries(limine_conf_text: str, arm_platform: str, ke
             raise RuntimeError(
                 f"limine.conf entry {name} lacks {' '.join(missing)}; its console would go to the SPCR serial port"
             )
-
-    # The rescue entry is the kernel's fallback UKI, booted with its own cmdline.
-    rescue_name = f"{kernel}-fallback"
-    rescue = [options for _, options in kernels if f"_{rescue_name}.efi" in options.get("path", "")]
-    if not rescue:
-        raise RuntimeError(f"limine.conf has no {rescue_name} rescue entry")
-    for options in rescue:
-        cmdline = options.get("cmdline", "").split()
-        if "systemd.unit=multi-user.target" not in cmdline or "plymouth.enable=0" not in cmdline:
-            raise RuntimeError(f"{rescue_name} entry does not boot to a text login; its own cmdline was overridden")
 
 
 def _validate_linux_boot_entry(esp_mount: Path, config_text: str, encrypted: bool) -> None:
@@ -3593,6 +3718,18 @@ def _validate_provisioning_state(ctx: InstallContext) -> None:
     provisioning_dir = ctx.target / PROVISION_STATE_DIR
     if not (provisioning_dir / "pending").exists():
         raise RuntimeError(f"deferred-provisioning install but {provisioning_dir / 'pending'} is missing")
+
+    # Checked after the OEM's scripts ran: a machine must not ship without the
+    # agreement its ISO carries, or with one the build never checked.
+    if ctx.oem_dir is not None and (ctx.oem_dir / "oem.json").is_file():
+        for name in OEM_SETUP_FILES:
+            bundled, laid_down = ctx.oem_dir / name, ctx.target / OEM_TARGET_DIR / name
+            if not bundled.is_file():
+                continue
+            if not laid_down.is_file():
+                raise RuntimeError(f"OEM install but {laid_down} is missing")
+            if laid_down.read_bytes() != bundled.read_bytes():
+                raise RuntimeError(f"OEM install but {laid_down} is no longer the {name} this ISO was built with")
 
     link = ctx.target / "etc/systemd/system/multi-user.target.wants/omarchy-provision-owner.service"
     if not link.is_symlink():

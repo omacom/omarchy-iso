@@ -294,17 +294,21 @@ class KmsconLanguageTest(unittest.TestCase):
             capture_output=True, text=True, check=True,
         ).stdout
 
-    def test_chinese_speaks_only_inside_kmscon(self):
-        # On the Linux console Chinese would be boxes, so the installer stays English there.
-        script = "i18n_load zh-CN; t finish.reboot"
-        self.assertEqual(self.shell(script), "Reboot Now")
-        self.assertEqual(self.shell(script, OMARCHY_ISO_KMSCON="1"), "立即重启")
+    def test_cjk_speaks_only_inside_kmscon(self):
+        # On the Linux console CJK would be boxes, so the installer stays English there.
+        for code, reboot in (("zh-CN", "立即重启"), ("ja", "今すぐ再起動"), ("ko", "지금 다시 시작")):
+            with self.subTest(code=code):
+                script = f"i18n_load {code}; t finish.reboot"
+                self.assertEqual(self.shell(script), "Reboot Now")
+                self.assertEqual(self.shell(script, OMARCHY_ISO_KMSCON="1"), reboot)
         self.assertEqual(self.shell("i18n_load de; t common.yes"), "Ja")
 
     def test_display_width_counts_cjk_as_two_columns(self):
         # Centering uses it: by characters, Chinese lands half its width too far right.
         self.assertEqual(self.shell('display_width "Omarchy 安装完成，用时 1m"'), "25")
         self.assertEqual(self.shell('display_width "abc…—·"'), "6")
+        self.assertEqual(self.shell('display_width "今すぐ再起動 OK"'), "15")
+        self.assertEqual(self.shell('display_width "지금 다시 시작"'), "14")
         # Icon-font glyphs (private use area) stay one column wide.
         self.assertEqual(self.shell('display_width "\ue900ab"'), "3")
 

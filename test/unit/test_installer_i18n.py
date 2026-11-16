@@ -328,6 +328,18 @@ class KmsconLanguageTest(unittest.TestCase):
         self.assertIn("grp:shifts_toggle", xkb("ru")[3])
         self.assertEqual(xkb("jp106")[:2], ["jp", "jp106"])
 
+    def test_kmscon_draws_han_in_the_languages_forms(self):
+        # The configurator relaunches kmscon when this changes, so Chinese picked
+        # first and Japanese on the way back ends up in Japanese forms.
+        def face(language):
+            return subprocess.run(
+                ["bash", str(ROOT / "configs/airootfs/usr/local/bin/omarchy-iso-kmscon"), "--face", language],
+                capture_output=True, text=True, check=True,
+            ).stdout
+        self.assertEqual(face("ja"), "Noto Sans Mono CJK JP")
+        self.assertEqual(face("ko"), "Noto Sans Mono CJK KR")
+        self.assertEqual(face("zh-CN"), "Noto Sans Mono CJK SC")
+
 
 class ConsoleFontLoadTest(unittest.TestCase):
     def test_a_failing_font_probe_never_stops_a_strict_caller(self):

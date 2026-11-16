@@ -278,7 +278,7 @@ make_refuses 'Unknown option: --platform' --arch aarch64 --platform n1x --edge
 # firmware provides none. Every image tries to build one from its own kernel.
 uki="$ROOT/builder/qualcomm/live-uki.sh"
 bash -n "$uki"
-grep -Fq 'parted systemd-ukify linux-firmware-qcom qcom-firmware-extract python)' "$ROOT/builder/build-iso.sh" \
+grep -Fq 'parted systemd-ukify systemd-stub-omarchy linux-firmware-qcom qcom-firmware-extract python)' "$ROOT/builder/build-iso.sh" \
   || fail "the live image lacks ukify or the Snapdragon firmware tools"
 # The UKI is built in the image's customize step, once pacstrap has made the
 # kernel and initramfs it wraps: the builder's own lines, run against the live

@@ -12,6 +12,7 @@ kernel=/boot/vmlinuz-$1
 initrd=/boot/initramfs-$1.img
 uki=/boot/omarchy-live.efi
 hwids=/usr/lib/systemd/boot/hwids/aa64
+stub=/usr/lib/systemd-stub-omarchy/linuxaa64.efi.stub
 
 # The kernel package keeps its Snapdragon device trees under its own name.
 dtb_dir=/boot/dtbs/$1/qcom
@@ -56,10 +57,15 @@ initrd="$work/initramfs.img"
 
 # Each tree is a section of its own. ukify writes every section's header into
 # the room the stub leaves before its first section and stops with "Not enough
-# header space" once it is full. With systemd 262's aa64 stub that is 120
-# trees beside .linux, .initrd, .hwids, .osrel, .uname and .sbat. At about
-# 190 KB a tree, the size limit below leaves room for more than that.
+# header space" once it is full. Arch Linux ARM's systemd 262 aa64 stub has
+# room for about 119 trees beside .linux, .initrd, .hwids, .osrel, .uname and
+# .sbat, so the UKI is built on systemd-stub-omarchy's, the same release with
+# room for 1024. At about 190 KB a tree, the size limit below is the one that
+# binds.
 args=()
+if [[ -f $stub ]]; then
+  args+=("--stub=$stub")
+fi
 for dtb in "${dtbs[@]}"; do
   args+=("--devicetree-auto=$dtb")
 done

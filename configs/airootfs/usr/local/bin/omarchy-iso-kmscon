@@ -54,10 +54,19 @@ if [[ ${1:-} == "--xkb" ]]; then
   exit 0
 fi
 
-keymap=us
+keymap=us language=
 if [[ -r $STATE/kmscon-resume ]]; then
-  keymap=$(bash -c 'source "$1"; printf "%s" "${keyboard:-us}"' _ "$STATE/kmscon-resume")
+  { read -r keymap; read -r language; } < <(bash -c 'source "$1"; printf "%s\n%s\n" "${keyboard:-us}" "${language:-}"' _ "$STATE/kmscon-resume")
 fi
+
+# Han characters take a different form in each CJK language, and the bundled
+# collection carries every one of them: draw them as the language writes them.
+case $language in
+  ja) cjk="Noto Sans Mono CJK JP" ;;
+  ko) cjk="Noto Sans Mono CJK KR" ;;
+  zh-TW) cjk="Noto Sans Mono CJK TC" ;;
+  *) cjk="Noto Sans Mono CJK SC" ;;
+esac
 OMARCHY_ISO_KMSCON_XKB=$(xkb_for_keymap "$keymap")
 read -r layout model variant options <<<"$OMARCHY_ISO_KMSCON_XKB"
 [[ $model == "-" ]] && model=""
@@ -89,7 +98,7 @@ exec kmscon \
   --no-mouse \
   --dpms-timeout=0 \
   --font-engine=pango \
-  --font-name="${OMARCHY_ISO_KMSCON_FONT:-monospace}" \
+  --font-name="${OMARCHY_ISO_KMSCON_FONT:-Adwaita Mono,$cjk,monospace}" \
   --font-size="${OMARCHY_ISO_KMSCON_FONT_SIZE:-$(font_size)}" \
   --xkb-layout="$layout" \
   ${model:+--xkb-model="$model"} \

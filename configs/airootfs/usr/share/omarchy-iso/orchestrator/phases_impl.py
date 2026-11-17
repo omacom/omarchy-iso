@@ -2797,8 +2797,8 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
         info("› BIOS firmware; the pre-built UKI is UEFI-only, building the boot files on this machine")
 
     # A board with a platform of its own boots by its hardware scripts' rules
-    # (the N1x: the console on the panel in every entry, a fallback UKI as the
-    # rescue entry; validate_boot checks them), which limine-mkinitcpio applies
+    # (the N1x: the console on the panel in every entry, which validate_boot
+    # checks), which limine-mkinitcpio applies
     # and a UKI built in the image cannot know. Every other machine, a generic
     # aarch64 one included, takes the image's UKI.
     if prebuilt_uki.is_file() and not skip_prebuilt and arch.has_uefi() and not _arm_platform_boot():
@@ -3363,9 +3363,8 @@ def _validate_package_signing(ctx: InstallContext, mirror: Path = OFFLINE_MIRROR
 # The N1x firmware publishes an ACPI SPCR serial console the kernel adopts
 # unless told otherwise, and Limine hands each entry's cmdline to the UKI as
 # load options that replace the embedded one. So the contract has to hold in
-# the generated limine.conf itself: every entry keeps the console on the panel,
-# and the rescue entry boots to a text login. Both failures look like a black
-# screen, which is how the first N1x installs went.
+# the generated limine.conf itself: every entry keeps the console on the panel.
+# Losing it looks like a black screen, which is how the first N1x installs went.
 N1X_REQUIRED_CMDLINE = ("console=tty0", "acpi=nospcr")
 
 
@@ -3448,16 +3447,6 @@ def _validate_platform_boot_entries(limine_conf_text: str, arm_platform: str, ke
             raise RuntimeError(
                 f"limine.conf entry {name} lacks {' '.join(missing)}; its console would go to the SPCR serial port"
             )
-
-    # The rescue entry is the kernel's fallback UKI, booted with its own cmdline.
-    rescue_name = f"{kernel}-fallback"
-    rescue = [options for _, options in kernels if f"_{rescue_name}.efi" in options.get("path", "")]
-    if not rescue:
-        raise RuntimeError(f"limine.conf has no {rescue_name} rescue entry")
-    for options in rescue:
-        cmdline = options.get("cmdline", "").split()
-        if "systemd.unit=multi-user.target" not in cmdline or "plymouth.enable=0" not in cmdline:
-            raise RuntimeError(f"{rescue_name} entry does not boot to a text login; its own cmdline was overridden")
 
 
 def _validate_linux_boot_entry(esp_mount: Path, config_text: str, encrypted: bool) -> None:

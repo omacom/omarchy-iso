@@ -2797,8 +2797,8 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
         info("› BIOS firmware; the pre-built UKI is UEFI-only, building the boot files on this machine")
 
     # A board with a platform of its own boots by its hardware scripts' rules
-    # (the N1x: the console on the panel in every entry, a fallback UKI as the
-    # rescue entry; validate_boot checks them), which limine-mkinitcpio applies
+    # (the N1x: the console on the panel in every entry, which validate_boot
+    # checks), which limine-mkinitcpio applies
     # and a UKI built in the image cannot know. Every other machine, a generic
     # aarch64 one included, takes the image's UKI.
     if prebuilt_uki.is_file() and not skip_prebuilt and arch.has_uefi() and not _arm_platform_boot():

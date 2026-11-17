@@ -471,10 +471,11 @@ install_duration() {
       | ((.finished_at // 0) | tonumber? // 0) as $finished
       | if $started <= 0 or $finished <= 0 or $finished < $started then empty
         else (($finished - $started) * 100 | round) as $cs
-          | ($cs / 100 | floor) as $secs
-          | "\($secs % 60).\($cs % 100 | tostring | if length < 2 then "0" + . else . end)s" as $s
-          | if $secs >= 3600 then "\($secs / 3600 | floor)h \($secs % 3600 / 60 | floor)m \($s)"
-            else "\($secs / 60 | floor)m \($s)"
+          | (($finished - $started) | round) as $secs
+          | if $cs < 3000 then "\($cs / 100 | floor).\($cs % 100 | tostring | if length < 2 then "0" + . else . end)s"
+            elif $secs < 60 then "\($secs)s"
+            elif $secs >= 3600 then "\($secs / 3600 | floor)h \($secs % 3600 / 60 | floor)m \($secs % 60)s"
+            else "\($secs / 60 | floor)m \($secs % 60)s"
             end
         end
     ' "$STATE_FILE" 2>/dev/null || true)"

@@ -43,7 +43,8 @@ class InitramfsModuleDropInTest(unittest.TestCase):
 
     def write_drop_in(self):
         def modinfo(argv, **_):
-            release, module = argv[-2], argv[-1]
+            self.assertEqual(argv[:4], ["modinfo", "--basedir", str(self.target), "-k"])
+            release, module = argv[4], argv[5]
             return subprocess.CompletedProcess(argv, 0 if module in SHIPPED[release] else 1)
 
         with mock.patch.object(phases_impl.subprocess, "run", side_effect=modinfo), \
@@ -52,18 +53,29 @@ class InitramfsModuleDropInTest(unittest.TestCase):
         return self.conf_dir / phases_impl.INITRAMFS_MODULES_CONF
 
     def modules_for(self, drop_in, release):
-        # Source the drop-in as mkinitcpio does, with modinfo answering for
-        # the kernel being built.
+        # Source the drop-in as mkinitcpio does for the kernel being built.
+        # modinfo knows every installed kernel and answers for the one named
+        # after -k, so a drop-in that asks about another kernel (the running
+        # one, say) gets that kernel's answer, not the built one's.
         script = (
-            'modinfo() { [[ $1 == -k ]] || return 2; [[ " $SHIPPED " == *" $3 "* ]]; }\n'
+            "modinfo() {\n"
+            '  [[ $# == 3 && $1 == -k ]] || return 2\n'
+            "  local line\n"
+            "  while IFS= read -r line; do\n"
+            '    [[ ${line%%:*} == "$2" ]] || continue\n'
+            '    [[ " ${line#*:} " == *" $3 "* ]]\n'
+            "    return\n"
+            '  done <<<"$SHIPPED"\n'
+            "  return 1\n"
+            "}\n"
             "MODULES=(t2bce_vhci usbhid hid_apple)\n"
             f'. "{drop_in}"\n'
             'printf "%s\\n" "${MODULES[*]}"\n'
         )
+        shipped = "\n".join(f"{kernel}:{' '.join(sorted(modules))}" for kernel, modules in SHIPPED.items())
         result = subprocess.run(
             ["bash", "-c", script],
-            env={"KERNELVERSION": release, "SHIPPED": " ".join(sorted(SHIPPED[release])),
-                 "PATH": "/usr/bin:/bin"},
+            env={"KERNELVERSION": release, "SHIPPED": shipped, "PATH": "/usr/bin:/bin"},
             check=True, capture_output=True, text=True,
         )
         return result.stdout.split()

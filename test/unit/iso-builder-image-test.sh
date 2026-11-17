@@ -34,7 +34,7 @@ elif [[ $1 == "run" ]]; then
   if [[ ${TEST_DOCKER_FAIL:-0} == 1 ]]; then
     exit 23
   fi
-  printf 'fake iso\n' >"$TEST_RELEASE/omarchy.iso"
+  printf 'fake iso\n' >"$TEST_RELEASE/omarchy-test-x86_64.iso"
 fi
 STUB
 
@@ -69,13 +69,13 @@ assert_pinned_run() {
 run_builder || fail "warm builder launch failed"
 assert_pinned_run
 if grep -qxF -- '--pull=always' "$TEST_DOCKER_LOG"; then fail "warm build pulled unconditionally"; fi
-[[ -f $TEST_RELEASE/omarchy-quattro.iso ]] || fail "warm build did not finish"
+[[ -f $TEST_RELEASE/omarchy-test-x86_64-quattro.iso ]] || fail "warm build did not finish"
 printf 'ok - warm build uses pinned image\n'
 
 run_builder --no-cache || fail "cold builder launch failed"
 assert_pinned_run
 grep -qxF -- '--pull=always' "$TEST_DOCKER_LOG" || fail "cold build lost pull behavior"
-[[ -f $TEST_RELEASE/omarchy-quattro.iso ]] || fail "cold build did not finish"
+[[ -f $TEST_RELEASE/omarchy-test-x86_64-quattro.iso ]] || fail "cold build did not finish"
 printf 'ok - cold build refreshes pinned image\n'
 
 TEST_DOCKER_NEEDS_SUDO=1 run_builder || fail "sudo builder launch failed"
@@ -86,11 +86,11 @@ printf 'ok - socket denial uses sudo with pinned image\n'
 if TEST_DOCKER_FAIL=1 run_builder; then fail "failed warm docker launch returned success"; fi
 assert_pinned_run
 if grep -qxF -- '--pull=always' "$TEST_DOCKER_LOG"; then fail "failed warm build pulled unconditionally"; fi
-[[ ! -e $TEST_RELEASE/omarchy-quattro.iso ]] || fail "failed warm launch produced an ISO"
+[[ ! -e $TEST_RELEASE/omarchy-test-x86_64-quattro.iso ]] || fail "failed warm launch produced an ISO"
 printf 'ok - failed warm docker launch stops without image fallback\n'
 
 if TEST_DOCKER_FAIL=1 run_builder --no-cache; then fail "failed cold docker launch returned success"; fi
 assert_pinned_run
 grep -qxF -- '--pull=always' "$TEST_DOCKER_LOG" || fail "failed cold build lost pull behavior"
-[[ ! -e $TEST_RELEASE/omarchy-quattro.iso ]] || fail "failed cold launch produced an ISO"
+[[ ! -e $TEST_RELEASE/omarchy-test-x86_64-quattro.iso ]] || fail "failed cold launch produced an ISO"
 printf 'ok - failed cold pull stops without image fallback\n'

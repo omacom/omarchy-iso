@@ -13,4 +13,9 @@ for test in "$ROOT"/test/unit/*-test.sh; do
 done
 
 printf '==> test/unit/test_*.py\n'
-python3 -m unittest discover -t "$ROOT" -s "$ROOT/test/unit"
+# -t test/unit, not the repo root: discovery names modules relative to -t, and
+# from the root that is `test.unit.<name>`, which imports Python's own stdlib
+# `test` package, since there is no test/__init__.py to shadow it. Every module
+# then fails to load ("No module named 'test.unit'") and the run reports a
+# single failed loader instead of running the tests.
+python3 -m unittest discover -t "$ROOT/test/unit" -s "$ROOT/test/unit"

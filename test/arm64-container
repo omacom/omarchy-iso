@@ -10,7 +10,7 @@ set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 # One place names the image: the build.
-image=$(sed -n 's/^ *CONTAINER_IMAGE=\(menci\/archlinuxarm@sha256:[0-9a-f]*\)$/\1/p' "$here/bin/omarchy-iso-make")
+image=$(sed -n 's/^ *CONTAINER_IMAGE=\(ghcr\.io\/menci\/archlinuxarm@sha256:[0-9a-f]*\)$/\1/p' "$here/bin/omarchy-iso-make")
 : "${image:?bin/omarchy-iso-make names no Arch Linux ARM image}"
 
 docker=(docker)
@@ -24,7 +24,7 @@ docker version >/dev/null 2>&1 || docker=(sudo docker)
   for attempt in 1 2 3; do
     pacman -Syu --noconfirm --needed qemu-system-aarch64 qemu-hw-display-virtio-gpu qemu-hw-display-virtio-gpu-pci \
       qemu-img mtools dosfstools jq openssl openssh \
-      python tesseract tesseract-data-eng libarchive curl >/dev/null && break
+      python tesseract tesseract-data-eng libarchive curl ${PLATFORM:+acpica gnu-efi gcc binutils} >/dev/null && break
     [ "$attempt" -lt 3 ] || { echo "arm64-container: could not install the test tools" >&2; exit 1; }
     sleep 15
   done

@@ -21,11 +21,9 @@ mkdir -p "$out"
 
 [[ $(uname -m) == aarch64 ]] || { echo "arm64-live-boot: this needs an arm64 host" >&2; exit 1; }
 [[ -r /dev/kvm && -w /dev/kvm ]] || { echo "arm64-live-boot: /dev/kvm is not usable" >&2; exit 1; }
-for firmware in /usr/share/AAVMF/AAVMF_CODE.fd:/usr/share/AAVMF/AAVMF_VARS.fd \
-  /usr/share/edk2/aarch64/QEMU_CODE.fd:/usr/share/edk2/aarch64/QEMU_VARS.fd; do
-  [[ -f ${firmware%%:*} && -f ${firmware##*:} ]] && { code=${firmware%%:*}; vars=${firmware##*:}; break; }
-done
-: "${code:?no aarch64 UEFI firmware found}"
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/bin/lib/aarch64-firmware.sh"
+aarch64_uefi_firmware || { echo "arm64-live-boot: no aarch64 UEFI firmware found" >&2; exit 1; }
+code=$AARCH64_UEFI_CODE vars=$AARCH64_UEFI_VARS
 
 state=$(mktemp -d /var/tmp/arm64-live.XXXXXX)
 cleanup() {

@@ -1,4 +1,4 @@
-# mkinitcpio preset for the N1x live kernel.
+# mkinitcpio preset for the live linux-omarchy kernel.
 
 PRESETS=('archiso')
 

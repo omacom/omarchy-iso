@@ -15,13 +15,23 @@ from typing import Any
 
 from .keyboard import validate_input_selection
 
+LANGUAGES = Path("/usr/share/omarchy/default/i18n/locales.json")
+
+
+def validate_language(language: Any, registry: Path | None = None) -> None:
+    """The installer's language is a registry code, checked before any disk is
+    touched; the target only ever reads it back as data."""
+    registry = registry or LANGUAGES
+    if language is None or language in ("", "en"):
+        return
+    if not isinstance(language, str) or not registry.is_file() or language not in json.loads(registry.read_text()):
+        raise RuntimeError(f"Unsupported language: {language!r}")
+
 
 @dataclass
 class InstallContext:
     config_path: Path
     creds_path: Path
-    full_name: str
-    email: str
     encrypt: bool
     authorized_keys_path: Path | None
     tailscale_authkey_path: Path | None
@@ -31,6 +41,10 @@ class InstallContext:
     arch_config_path: Path
     omarchy_install: dict[str, Any]
     defer_provisioning: bool = False
+    # An OEM's bundle (omarchy-iso-make --oem-config, --oem-script). Its
+    # branding and agreement are for the owner a deferred install hands the
+    # machine to, so no other install takes it.
+    oem_dir: Path | None = None
 
     target: Path = Path("/mnt")
     omarchy_path: Path = Path("/usr/share/omarchy")
@@ -62,6 +76,7 @@ class InstallContext:
             user_configuration["kernels"] = [kernel]
 
         validate_input_selection(omarchy_install.get("input_method"), omarchy_install.get("input_xkb_layout", ""))
+        validate_language(omarchy_install.get("language"))
 
         # Deferred provisioning: the whole system installs but user creation is deferred to
         # first boot. Selected by the configurator (omarchy_install.defer_provisioning) or by
@@ -117,8 +132,6 @@ class InstallContext:
         ctx = cls(
             config_path=config_path,
             creds_path=creds_path,
-            full_name=_read_text(os.environ.get("OMARCHY_INSTALL_FULL_NAME_FILE")),
-            email=_read_text(os.environ.get("OMARCHY_INSTALL_EMAIL_FILE")),
             encrypt=_read_text(os.environ.get("OMARCHY_INSTALL_ENCRYPT_FILE")).lower() in ("true", "yes", "1"),
             authorized_keys_path=_optional_path(os.environ.get("OMARCHY_INSTALL_AUTHORIZED_KEYS_FILE")),
             tailscale_authkey_path=_optional_path(os.environ.get("OMARCHY_INSTALL_TAILSCALE_AUTHKEY_FILE")),
@@ -127,6 +140,7 @@ class InstallContext:
             arch_config_path=arch_config_path,
             omarchy_install=omarchy_install,
             defer_provisioning=defer_provisioning,
+            oem_dir=_optional_path(os.environ.get("OMARCHY_INSTALL_OEM_DIR")) if defer_provisioning else None,
             state_dir=state_dir,
         )
         disk_config = user_configuration.get("disk_config", {})
@@ -244,6 +258,8 @@ def _default_omarchy_install(user_configuration: dict) -> dict[str, Any]:
             "esp_mount": "/boot",
             "esp_path": "/EFI/limine",
             "efi_binary": "limine_aa64.efi" if platform.machine() == "aarch64" else "limine_x64.efi",
+            # Only a full-disk install is known to own its ESP; a
+            # pre-mounted target's may be shared. See _boot_intent.
             "enable_fallback": mode == "full_disk",
         },
         "storage": {},

@@ -137,6 +137,10 @@ fi
 # otherwise, as on x86_64, and make one image for every board, on the
 # linux-omarchy that repository publishes.
 # build-iso.sh refuses a runtime without the platform support.
+# The x86_64 builder is an Arch image of 2026-09-26, pinned by digest. Its tools
+# are upgraded to the channel's Arch snapshot with pacman -Syu, which does not
+# downgrade them, so the image must be older than every channel's snapshot.
+# :latest broke stable builds once Arch moved to openssl 4.
 CONTAINER_IMAGE=docker.io/archlinux/archlinux@sha256:a1cd6a460b8c8d2c9e9482d7853b7acab4888f448a7914fdc676ce037ff0a5dc
 CONTAINER_PLATFORM_ARGS=()
 OMARCHY_KERNEL=linux-omarchy

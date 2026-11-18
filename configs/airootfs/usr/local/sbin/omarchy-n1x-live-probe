@@ -47,6 +47,9 @@ section() {
 
   section network
   ip -4 -brief address | awk '$1 != "lo" && $3 { print $1, $3 }'
+  echo
+  echo "To unlock, mount and chroot into an installed system, run: omarchy-chroot"
+  echo "It includes the boot partition and this ISO's offline packages, and cleans up when you exit."
   # Only a --dev-ssh image lets anyone log in remotely.
   if [[ -x /usr/local/sbin/omarchy-n1x-dev-ssh ]]; then
     echo "DEV image: the development key logs in as root:"

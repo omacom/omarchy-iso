@@ -3280,12 +3280,9 @@ def _authorized_keys(path: Path) -> list[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# run_custom_commands: run the commands an autoinstall drive asked for, in
-# order, as root under arch-chroot. The drive, still mounted on the live
-# system, is bind-mounted read-only at CIDATA in the new system so the commands
-# can use its files, and unmounted after. Nothing is copied, so the drive's
-# files, credentials included, do not stay in the new system. A failing
-# command fails the install.
+# run_custom_commands: run the commands an autoinstall drive asked for in the
+# new system. The drive is bind-mounted, not copied, so its files, credentials
+# included, do not stay there.
 # ─────────────────────────────────────────────────────────────────────────────
 
 CIDATA_IN_TARGET = Path("/root/cidata")
@@ -3298,6 +3295,9 @@ def run_custom_commands(ctx: InstallContext) -> None:
     if not commands:
         return
 
+    # A command may install packages, which reads the keyring the unit writes.
+    _join_target_keyring_init(ctx)
+
     drive = ctx.cidata_dir if ctx.cidata_dir is not None and os.path.ismount(ctx.cidata_dir) else None
     mountpoint = ctx.target / CIDATA_IN_TARGET.relative_to("/")
     if drive is not None:
@@ -3306,10 +3306,10 @@ def run_custom_commands(ctx: InstallContext) -> None:
     try:
         for number, command in enumerate(commands, 1):
             info(f"› custom command {number} of {len(commands)}")
-            subprocess.run(
-                ["arch-chroot", str(ctx.target), "env", f"CIDATA={CIDATA_IN_TARGET}", "/bin/bash", "-c", command],
-                check=True,
-            )
+            try:
+                _run_target_setup_command(ctx, ["env", f"CIDATA={CIDATA_IN_TARGET}", "/bin/bash", "-c", command])
+            except subprocess.CalledProcessError as exc:
+                raise RuntimeError(f"custom command {number} exited with status {exc.returncode}") from exc
     finally:
         if drive is not None:
             subprocess.run(["umount", str(mountpoint)], check=True)

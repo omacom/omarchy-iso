@@ -41,7 +41,6 @@ class InstallContext:
     arch_config_path: Path
     omarchy_install: dict[str, Any]
     defer_provisioning: bool = False
-    # Where the autoinstall drive is mounted, for custom_commands to read.
     cidata_dir: Path | None = None
     # An OEM's bundle (omarchy-iso-make --oem-config, --oem-script). Its
     # branding and agreement are for the owner a deferred install hands the

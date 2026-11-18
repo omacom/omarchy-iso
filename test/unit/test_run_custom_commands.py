@@ -1,8 +1,8 @@
 """Unit tests for the orchestrator's run_custom_commands phase.
 
-The phase touches the target only through mount, arch-chroot and one
-directory, so the tests run it against a temp directory with subprocess.run
-recorded and the drive's mount faked.
+The phase touches the target only through mount, the shared target setup
+runner and one directory, so the tests run it against a temp directory with
+subprocess.run and the runner recorded and the drive's mount faked.
 """
 
 import subprocess
@@ -37,9 +37,11 @@ class RunCustomCommandsTest(unittest.TestCase):
         self.calls = []
         self.fail_on = None
 
-        info_patch = mock.patch.object(phases_impl, "info")
-        info_patch.start()
-        self.addCleanup(info_patch.stop)
+        for name, replacement in (("info", None), ("_join_target_keyring_init", lambda ctx: self.calls.append("keyring")),
+                                  ("_run_target_setup_command", self.fake_target_command)):
+            patch = mock.patch.object(phases_impl, name, side_effect=replacement)
+            patch.start()
+            self.addCleanup(patch.stop)
 
         run_patch = mock.patch.object(phases_impl.subprocess, "run", side_effect=self.fake_run)
         run_patch.start()
@@ -51,17 +53,20 @@ class RunCustomCommandsTest(unittest.TestCase):
 
     def fake_run(self, cmd, **kwargs):
         self.calls.append(cmd)
-        if cmd[-1] == self.fail_on:
-            raise subprocess.CalledProcessError(1, cmd)
         return CompletedProcess(cmd, 0)
+
+    def fake_target_command(self, ctx, cmd):
+        self.calls.append(cmd)
+        if cmd[-1] == self.fail_on:
+            raise subprocess.CalledProcessError(7, cmd)
 
     def run_phase(self, commands=None):
         config = {} if commands is None else {"custom_commands": commands}
         ctx = types.SimpleNamespace(target=self.target, user_configuration=config, cidata_dir=self.drive)
         phases_impl.run_custom_commands(ctx)
 
-    def chroot(self, command):
-        return ["arch-chroot", str(self.target), "env", "CIDATA=/root/cidata", "/bin/bash", "-c", command]
+    def command(self, command):
+        return ["env", "CIDATA=/root/cidata", "/bin/bash", "-c", command]
 
     def test_no_commands_is_a_no_op(self):
         self.run_phase()
@@ -71,9 +76,10 @@ class RunCustomCommandsTest(unittest.TestCase):
     def test_runs_each_command_in_order_with_the_drive_mounted_read_only(self):
         self.run_phase(commands=["echo one", "echo two"])
         self.assertEqual(self.calls, [
+            "keyring",
             ["mount", "--bind", "-o", "ro", str(self.drive), str(self.mountpoint)],
-            self.chroot("echo one"),
-            self.chroot("echo two"),
+            self.command("echo one"),
+            self.command("echo two"),
             ["umount", str(self.mountpoint)],
         ])
         self.assertFalse(self.mountpoint.exists())
@@ -81,13 +87,13 @@ class RunCustomCommandsTest(unittest.TestCase):
     def test_without_a_mounted_drive_the_commands_still_run(self):
         self.drive_mounted = False
         self.run_phase(commands=["echo one"])
-        self.assertEqual(self.calls, [self.chroot("echo one")])
+        self.assertEqual(self.calls, ["keyring", self.command("echo one")])
 
     def test_a_failing_command_fails_the_install_and_unmounts_the_drive(self):
         self.fail_on = "false"
-        with self.assertRaises(subprocess.CalledProcessError):
+        with self.assertRaisesRegex(RuntimeError, "custom command 1 exited with status 7"):
             self.run_phase(commands=["false", "echo never"])
-        self.assertEqual(self.calls[1:], [self.chroot("false"), ["umount", str(self.mountpoint)]])
+        self.assertEqual(self.calls[2:], [self.command("false"), ["umount", str(self.mountpoint)]])
         self.assertFalse(self.mountpoint.exists())
 
     def test_rejects_anything_but_a_list_of_strings(self):

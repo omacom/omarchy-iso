@@ -43,6 +43,8 @@ def build_phases(ctx: InstallContext):
         configure_dev_ssh,
         DEV_SSH_SCRIPT,
         configure_tailscale,
+        oem_scripts,
+        run_oem_setup,
         run_custom_commands,
         validate_boot,
         create_factory_snapshot,
@@ -67,8 +69,11 @@ def build_phases(ctx: InstallContext):
         *([("DEV ONLY: N1x debug SSH", configure_dev_ssh)] if DEV_SSH_SCRIPT.exists() else []),
         ("Configuring Tailscale",      configure_tailscale),
         ("Configuring DNS resolver",   configure_dns_resolver),
-        # Last before validation, so commands see the finished system and the
-        # factory snapshot keeps what they did.
+        # Listed only where an OEM ISO's build was given scripts. Last before
+        # the checks, so they run in the finished system and it is still
+        # validated, and snapshotted, with what they did to it.
+        *([("Running OEM setup", run_oem_setup)] if oem_scripts(ctx) else []),
+        # After the OEM's setup, so a drive's commands have the last word.
         ("Running custom commands",    run_custom_commands),
         ("Validating boot setup",      validate_boot),
         ("Creating factory snapshot",  create_factory_snapshot),

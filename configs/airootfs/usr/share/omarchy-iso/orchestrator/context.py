@@ -43,6 +43,10 @@ class InstallContext:
     defer_provisioning: bool = False
     # Where the autoinstall drive is mounted, for custom_commands to read.
     cidata_dir: Path | None = None
+    # An OEM's bundle (omarchy-iso-make --oem-config, --oem-script). Its
+    # branding and agreement are for the owner a deferred install hands the
+    # machine to, so no other install takes it.
+    oem_dir: Path | None = None
 
     target: Path = Path("/mnt")
     omarchy_path: Path = Path("/usr/share/omarchy")
@@ -139,6 +143,7 @@ class InstallContext:
             arch_config_path=arch_config_path,
             omarchy_install=omarchy_install,
             defer_provisioning=defer_provisioning,
+            oem_dir=_optional_path(os.environ.get("OMARCHY_INSTALL_OEM_DIR")) if defer_provisioning else None,
             state_dir=state_dir,
         )
         disk_config = user_configuration.get("disk_config", {})

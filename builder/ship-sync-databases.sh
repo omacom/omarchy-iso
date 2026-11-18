@@ -16,8 +16,7 @@
 # offline mirror was downloaded against, so they describe exactly the versions
 # the image holds: installing more needs no partial upgrade. Only the
 # repositories the image's runtime can configure are shipped: its pacman.conf
-# templates, plus the repositories its hardware scripts add (arch-mact2 on a T2
-# Mac). Build-only repositories such as aarch64's file:// [platform] bundle stay
+# templates, plus any repositories its hardware scripts add. Build-only repositories such as aarch64's file:// [platform] bundle stay
 # behind. offline.db stays too: the installer runs the target's own pacman
 # against the offline config until the final pacman.conf restore.
 #
@@ -48,7 +47,7 @@ mkdir -p "$sync_dir"
 shipped=()
 for repo in "${repos[@]}"; do
   # A repository only one platform or one machine uses (multilib on x86,
-  # alarm on ARM, arch-mact2) has no index in another build's sync.
+  # alarm on ARM) has no index in another build's sync.
   [[ -f $source_dir/$repo.db ]] || continue
   # -p keeps the mtime pacman compares against the server's on the next -Sy.
   cp -p "$source_dir/$repo.db" "$sync_dir/$repo.db"

@@ -73,7 +73,7 @@
   "progress.tip.menu": "Super + Space otwiera menu Omarchy: aplikacje, ustawienia i więcej",
   "progress.tip.keybindings": "Super + K pokazuje wszystkie skróty klawiszowe",
   "progress.tip.superKey": "Super to klawisz Windows lub Command na klawiaturze",
-  "progress.tip.signPdfs": "Podpisuj pliki PDF w Xournal++",
+  "progress.tip.signPdfs": "Podpisuj pliki PDF w aplikacji Signed",
   "progress.tip.localSend": "Udostępniaj pliki telefonom i laptopom przez LocalSend",
   "progress.tip.webApps": "Zmień dowolną stronę w aplikację: Instaluj > Aplikacja webowa w menu",
   "progress.tip.terminal": "Super + Return otwiera terminal, Super + Shift + Return przeglądarkę",

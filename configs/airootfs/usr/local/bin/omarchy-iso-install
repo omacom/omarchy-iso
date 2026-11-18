@@ -18,6 +18,7 @@ while [[ $# -gt 0 ]]; do
     --tailscale-authkey-file) export OMARCHY_INSTALL_TAILSCALE_AUTHKEY_FILE="$2"; shift 2 ;;
     --cidata-dir)           export OMARCHY_INSTALL_CIDATA_DIR="$2"; shift 2 ;;
     --defer-provisioning-file)             export OMARCHY_INSTALL_DEFER_PROVISIONING_FILE="$2"; shift 2 ;;
+    --oem-dir)              export OMARCHY_INSTALL_OEM_DIR="$2"; shift 2 ;;
     *)                      echo "omarchy-iso-install: unknown arg $1" >&2; exit 2 ;;
   esac
 done

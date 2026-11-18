@@ -1,0 +1,22 @@
+#!/bin/bash
+
+# A Snapdragon laptop's EFI variables are reached through the QSEECOM driver,
+# which loads from the real root, so the initramfs's efivarfs mount fails and
+# prints "fsopen() failed: Operation not supported" on every live boot. The
+# live root mounts efivarfs again once the driver is there. Quiet that one
+# mount in the image's copy of init_functions, as an installed Omarchy does
+# with its own omarchy-quiet-efivars hook.
+
+build() {
+    local init_functions="$BUILDROOT/init_functions"
+
+    [[ -f $init_functions ]] || return 0
+    sed -i 's|^\([[:space:]]*mount -t efivarfs efivarfs /sys/firmware/efi/efivars -o nosuid,nodev,noexec\)$|\1 2>/dev/null|' "$init_functions"
+}
+
+help() {
+    cat <<HELP
+Quiets the initramfs efivarfs mount, which fails on Snapdragon laptops until
+their EFI variable driver loads from the live root.
+HELP
+}

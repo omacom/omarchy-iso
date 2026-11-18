@@ -73,7 +73,7 @@
   "progress.tip.menu": "Super + Space avaa Omarchy-valikon sovelluksille, asetuksille ja muulle",
   "progress.tip.keybindings": "Super + K näyttää kaikki pikanäppäimet",
   "progress.tip.superKey": "Super on näppäimistösi Windows- tai Command-näppäin",
-  "progress.tip.signPdfs": "Allekirjoita PDF-tiedostoja Xournal++:lla",
+  "progress.tip.signPdfs": "Allekirjoita PDF-tiedostoja Signed-sovelluksella",
   "progress.tip.localSend": "Jaa tiedostoja puhelimiin ja kannettaviin LocalSendillä",
   "progress.tip.webApps": "Tee sivustosta sovellus valikon kohdasta Asenna > Verkkosovellus",
   "progress.tip.terminal": "Super + Return avaa päätteen, Super + Shift + Return selaimen",

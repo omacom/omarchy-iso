@@ -473,6 +473,8 @@ class TargetKeyringUnitTest(unittest.TestCase):
             mock.patch.object(phases_impl.subprocess, "run", side_effect=fake_run),
             mock.patch.object(phases_impl.subprocess, "Popen", side_effect=fake_popen),
             mock.patch.object(phases_impl, "info"),
+            # The x86_64 unit, whatever machine runs the tests.
+            mock.patch.object(phases_impl.platform, "machine", return_value="x86_64"),
         ):
             patch.start()
             self.addCleanup(patch.stop)

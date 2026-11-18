@@ -134,7 +134,10 @@ cd /root
 # Autoinstall: a cidata drive carrying the configurator's own output files
 # stands in for the wizard. omarchy-cidata-load copies them into /root and
 # everything downstream runs the ordinary path against ordinary inputs.
-if /usr/local/bin/omarchy-cidata-load; then
+if [[ -f /usr/share/omarchy-iso/oem-install ]]; then
+  export OMARCHY_UI_INTERACTIVE=no
+  ./configurator --oem
+elif /usr/local/bin/omarchy-cidata-load; then
   echo "Autoinstall configuration found on cidata drive; skipping the configurator."
   export OMARCHY_UI_INTERACTIVE=no
 else
@@ -172,4 +175,5 @@ rm -f /run/omarchy-install/state.json
     --authorized-keys-file /root/authorized_keys \
     --tailscale-authkey-file /root/tailscale_authkey \
     --cidata-dir /run/cidata \
-    --defer-provisioning-file /root/defer-provisioning
+    --defer-provisioning-file /root/defer-provisioning \
+    --oem-dir /usr/share/omarchy-iso/oem

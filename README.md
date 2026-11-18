@@ -230,6 +230,65 @@ Encrypted autoinstalls are not fully unattended — the LUKS passphrase prompt s
 
 `omarchy_install.language` in `user_configuration.json` takes a code from Omarchy's language registry, like `da` or `ja`, and becomes the installed system's language. Leave it out, or set `en`, for English.
 
+## OEM ISO
+
+Build factory installation media tracking quattro with `./bin/omarchy-iso-make --oem --edge --keep-pkg-cache --no-boot-offer`. The output is named `omarchy-oem-<date>-<architecture>-edge.iso`, separate from the ordinary interactive ISO, and `omarchy-iso-release` never publishes one. The current quattro installer requires the shared progress display from the edge runtime. Add the usual architecture options when needed.
+
+Booting this ISO immediately erases and installs onto the sole eligible internal disk, without a wizard, credentials, a cidata drive, or any key presses. It keeps the existing boot splash and install dashboard, uses the encrypted full-disk "for another user" flow, and reboots automatically after a successful install. The next boot runs the existing owner setup, where the owner chooses their account, password, language, keyboard and timezone. Installation defaults are English, US keyboard, UTC and hostname `omarchy`.
+
+An eligible disk is writable, unmounted, neither removable nor hotplug, not connected by USB or FireWire, and at least 32 GiB. Mounted descendants, including the boot medium and active swap, exclude the entire disk. If zero or multiple eligible disks exist, installation stops without changing any disk; disconnect extra internal disks before trying again. Existing unmounted partitions on the selected disk are erased. Configure firmware to boot the internal disk before the installation medium so the completed machine boots into owner setup instead of reinstalling from the OEM ISO.
+
+### The OEM's branding, agreement and setup scripts
+
+An OEM ISO can carry what its maker wants the machine's owner to see at first boot, and scripts for the factory install to run:
+
+```bash
+./bin/omarchy-iso-make --oem --edge --keep-pkg-cache --no-boot-offer \
+  --oem-config acme/oem.json \
+  --oem-script acme/support-info.sh --oem-script acme/owner-defaults.sh
+```
+
+`--oem-config` takes a JSON file. Only `name` is required, and paths are relative to the file:
+
+```json
+{
+  "name": "Acme Computers",
+  "logo": "logo.txt",
+  "tagline": "Acme Book 14, powered by Omarchy",
+  "color": "#ff9e64",
+  "eula": {
+    "title": "Acme Computers License Agreement",
+    "file": "eula.txt"
+  }
+}
+```
+
+| Key | What first-boot setup does with it |
+| --- | --- |
+| `name` | Names the OEM: in the title of an agreement that has none of its own, and in the record of its acceptance. |
+| `logo` | A text file, drawn in place of the Omarchy logo on setup's opening screen and on the agreement. The steps between keep Omarchy's. |
+| `tagline` | One line under the logo on setup's opening screen, in place of Omarchy's. |
+| `color` | That logo's colour, as `#RRGGBB`. Omarchy's green without it. |
+| `eula.file` | The agreement's text. With it, accepting the agreement is setup's last question. |
+| `eula.title` | The heading the agreement is shown under. |
+
+First-boot setup runs on the Linux console, before there is a desktop: text in a 512-glyph font and sixteen colours. So a logo is text art, not an SVG or a PNG: at most 81 columns by 12 rows, drawn with ASCII, the characters `▀ ▄ █ ░ ▒ ▓ ─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼` (the Omarchy logo uses the first three), or braille dots (`⠁` to `⣿`), which give four times the detail. `chafa` draws an image either way; add `--invert` for dark artwork on a light or transparent background:
+
+```bash
+chafa --format symbols --symbols braille --colors none --size 81x12 logo.svg >logo.txt             # dots
+chafa --format symbols --symbols vhalf+solid+space --colors none --size 81x12 logo.svg >logo.txt   # blocks
+```
+
+The console font has no braille. Setup draws the dot patterns a logo uses into the font while a screen that shows the logo is up, in glyphs that neither the logo nor that screen's text needs, so a logo takes at most 128 different patterns, and they and the characters beyond ASCII in the bundle's text come to at most 256.
+
+The agreement is UTF-8 text in what that font has: Latin, Greek and Cyrillic, with their punctuation. Setup wraps it to its column. `builder/oem-bundle.py` checks the whole bundle before the build starts and names the first thing the console could not draw, so a mistake stops the build and not a machine's first boot.
+
+The agreement comes after the owner has reviewed their account and before anything is created. It scrolls with the arrow, Page Up, Page Down, Home and End keys, with Accept in focus. Declining offers to shut the machine down, with going back to the agreement in focus; a machine whose owner declines is left as it was shipped, and asks again at its next boot. Accepting records the OEM's name, the SHA-256 of the text, the account and the time in `/var/lib/omarchy/oem/eula-accepted.json`. Showing all of it needs a runtime with `install/provisioning/oem.sh`; the install stops if the one this ISO bundles lacks it.
+
+Each `--oem-script` is a bash script the install runs once, as root, in the new system (a chroot, with no services running), in the order given. They run after Omarchy has configured the system and built its boot files, and before the boot checks and the factory snapshot, so a factory reset returns to the machine as they left it. A script that exits non-zero fails the install, at the factory. So does one that leaves `/etc/omarchy/oem` other than the build checked it: the branding and the agreement are the config's to set, not a script's. The system's pacman is by then set to its online repositories, so a script can install packages only where the factory has a network.
+
+`test/unit/fixtures/oem/` is a complete bundle.
+
 ## Translations
 
 The configurator asks for a language first, on the screen that carries the intro and the hidden Ctrl+C entry into preparing the machine for another owner. It offers every language in Omarchy's registry (`default/i18n/locales.json` in the settings package). A language with a catalog in `configs/airootfs/usr/share/omarchy-iso/i18n/` also translates the installer. The others are listed by their English name, the installer stays in English, and the language still goes to the installed system as `/etc/omarchy/language`. The keyboard list then preselects the language's layout from `language-defaults.json`. The timezone list preselects the network's guess, and when that fails, the capital of the language's country from the same file. English, Arabic, Swahili and Tamil have no single home country, so they fall back to the plain timezone search.
@@ -239,6 +298,8 @@ Catalogs exist only for languages the live console can draw. The kernel's own co
 To add a string, put it in `en.json` and print it with `t <key> [args]`, where `%1`, `%2` take the arguments. A catalog that lacks the key shows it in English until a translation lands. `test/unit/test_installer_i18n.py` fails on a key English does not have, on placeholders that differ from English, and on a character the patched font cannot draw. The setup form vendored from Omarchy translates its own strings from Omarchy's catalogs, in the language the configurator names in `OMARCHY_FORM_LANGUAGE`, and takes the keyboard default and the offline timezone through `OMARCHY_FORM_KEYBOARD_DEFAULT` and `OMARCHY_FORM_TIMEZONE_FALLBACK`.
 
 ## Creating the ISO
+
+The builder image is pinned by digest in `bin/omarchy-iso-make`. Update that digest through review when changing the builder. Build on a disposable host without credentials: pinning the image does not remove the container's `--privileged` access.
 
 Run `./bin/omarchy-iso-make`; output goes into `./release`. By default the ISO uses the Omarchy packages and tracks the `quattro` branch, from the stable mirror. Pass `--edge` to use `omarchy-dev` and `omarchy-settings-dev` from the edge mirror.
 
@@ -296,6 +357,19 @@ The harness syncs the acceptance suite from `$OMARCHY_PATH` when it is available
 
 Pass `--encrypt` to drive the encrypted install flow (including typing the LUKS passphrase at boot) instead of the unencrypted one. Pass `--no-preview` to collect the same visual artifacts without opening them in `imv` when the run finishes.
 
+Pass `--oem` to test an OEM ISO: the harness sends the install no keys, waits for it to reboot on its own, then drives the first-boot owner setup (language, keyboard, account) and carries on as above.
+
+```bash
+./bin/omarchy-iso-make --oem --edge --keep-pkg-cache --no-boot-offer
+./bin/omarchy-iso-test release/omarchy-oem-*.iso --oem --install-only
+```
+
+For an ISO built with `--oem-config`, pass the harness the same file. Where the config has an agreement, it drives it: reads on, comes back from Ctrl+C's reboot offer and from declining, reads to the end and accepts. Once the installed system is up it checks that the bundle and the record of acceptance are on it, and saves both as `oem-setup.txt`.
+
+```bash
+./bin/omarchy-iso-test release/omarchy-oem-*.iso --oem --oem-config acme/oem.json --install-only
+```
+
 ## Integration testing the ISO
 
 Scenarios under `test/integration.d/` boot a real ISO install in QEMU and assert on what the running system actually does. The runner installs the ISO once — unattended, from a generated cidata drive — and saves the result as a reusable base image; every scenario then boots a throwaway overlay of that base with its own copy of the firmware vars, so neither disk nor NVRAM state leaks between runs. Shared machinery (VM lifecycle, QMP screendump + OCR console driving, virtual keystrokes, guest SSH, the cidata build) lives in `test/integration.d/base-test.sh`, so a new scenario is one file.
@@ -311,6 +385,23 @@ The first scenario is `factory-reset`: it proves `omarchy-system-factory-reset` 
 `corrupt-image` proves a bad install medium is refused before the disk is touched. It copies the ISO and flips one byte a megabyte into the root image stream itself — addressed from the extent xorriso reports out of the ISO9660 directory records, so the damage lands in the shipped bytes and nowhere else — then autoinstalls from that copy: `omarchy-root-image-verify.service` (which hashes the image at boot, while a user would be in the configurator) must fail, the install must halt in its pre-flight phase with the "re-flash" advice on screen, and the target disk must still have no partition table. It boots the ISO itself rather than the base image, so it also works standalone with `OMARCHY_INTEGRATION_ISO` set.
 
 Artifacts — screenshots, the fixtured/staged/final `limine.conf`, the reset typescript, and the factory-reset log — land under `test-runs/<iso>-integration/runs/<timestamp>-<scenario>/`, and `--no-preview` skips the `imv` review just like the acceptance harness.
+
+## Release rehearsal
+
+Twice a day, the "Install test" workflow builds the ISO quattro would be released as now, and runs every install job on it. `test/rehearsal-pins` pins `omarchy` and `omarchy-settings` to quattro's tip with omarchy-pkgs' own release engine (`bin/omarchy-pkgs release rc`), against the rc channel's database, as `omarchy-release rc` does for the next feature release. It pushes nothing. The ISO is then built from that pin with `--local-source --rehearsal`, which installs the release packages and names the ISO `*-rehearsal.iso`. Every other package comes from edge as published, `omarchy-nvim` included.
+
+A failed rehearsal means the next release candidate would fail the same way, before anyone cuts it. Run it by hand on any branch:
+
+```bash
+gh workflow run install-test.yml --ref <branch> -f channel=rehearsal
+```
+
+To build the same ISO yourself:
+
+```bash
+./test/rehearsal-pins x86_64 /path/to/rehearsal
+./bin/omarchy-iso-make --local-source /path/to/rehearsal/omarchy /path/to/rehearsal/omarchy-pkgs --rehearsal
+```
 
 ## Upgrade testing
 

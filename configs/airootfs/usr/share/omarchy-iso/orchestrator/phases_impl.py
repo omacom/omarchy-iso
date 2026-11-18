@@ -3306,8 +3306,12 @@ def run_custom_commands(ctx: InstallContext) -> None:
     try:
         for number, command in enumerate(commands, 1):
             info(f"› custom command {number} of {len(commands)}")
+            # MISE_OFFLINE keeps Omarchy's own setup fast offline; a drive's
+            # commands may need mise to download a runtime.
             try:
-                _run_target_setup_command(ctx, ["env", f"CIDATA={CIDATA_IN_TARGET}", "/bin/bash", "-c", command])
+                _run_target_setup_command(
+                    ctx, ["env", "-u", "MISE_OFFLINE", f"CIDATA={CIDATA_IN_TARGET}", "/bin/bash", "-c", command]
+                )
             except subprocess.CalledProcessError as exc:
                 raise RuntimeError(f"custom command {number} exited with status {exc.returncode}") from exc
     finally:

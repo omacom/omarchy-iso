@@ -66,7 +66,7 @@ class RunCustomCommandsTest(unittest.TestCase):
         phases_impl.run_custom_commands(ctx)
 
     def command(self, command):
-        return ["env", "CIDATA=/root/cidata", "/bin/bash", "-c", command]
+        return ["env", "-u", "MISE_OFFLINE", "CIDATA=/root/cidata", "/bin/bash", "-c", command]
 
     def test_no_commands_is_a_no_op(self):
         self.run_phase()

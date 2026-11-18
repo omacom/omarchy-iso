@@ -73,7 +73,7 @@
   "progress.tip.menu": "Super + Space obre el menú d'Omarchy amb aplicacions, ajustos i més",
   "progress.tip.keybindings": "Super + K mostra totes les dreceres de teclat",
   "progress.tip.superKey": "Super és la tecla Windows o Command del teu teclat",
-  "progress.tip.signPdfs": "Fes servir Xournal++ per signar PDF",
+  "progress.tip.signPdfs": "Fes servir Signed per signar PDF",
   "progress.tip.localSend": "Comparteix fitxers amb mòbils i portàtils amb LocalSend",
   "progress.tip.webApps": "Converteix qualsevol web en aplicació amb Instal·la > Aplicació web",
   "progress.tip.terminal": "Super + Return obre un terminal, Super + Shift + Return el navegador",

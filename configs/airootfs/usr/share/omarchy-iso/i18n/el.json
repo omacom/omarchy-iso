@@ -73,7 +73,7 @@
   "progress.tip.menu": "Το Super + Space ανοίγει το μενού Omarchy: εφαρμογές, ρυθμίσεις κ.ά.",
   "progress.tip.keybindings": "Το Super + K δείχνει όλες τις συντομεύσεις",
   "progress.tip.superKey": "Το Super είναι το πλήκτρο Windows ή Command του πληκτρολογίου σου",
-  "progress.tip.signPdfs": "Υπόγραψε PDF με το Xournal++",
+  "progress.tip.signPdfs": "Υπόγραψε PDF με το Signed",
   "progress.tip.localSend": "Στείλε αρχεία σε κινητά και laptop με το LocalSend",
   "progress.tip.webApps": "Κάνε κάθε ιστότοπο εφαρμογή με Εγκατάσταση > Εφαρμογή ιστού στο μενού",
   "progress.tip.terminal": "Super + Return: τερματικός, Super + Shift + Return: browser",

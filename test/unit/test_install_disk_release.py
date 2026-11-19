@@ -10,6 +10,7 @@ cleanup scripts on PATH, so the real command capture runs.
 """
 
 import os
+import subprocess
 import sys
 import tempfile
 import types
@@ -43,6 +44,7 @@ class InstallDiskReleaseTest(unittest.TestCase):
         self.arch = mock.Mock()
         patches = [
             mock.patch.object(phases_impl, "arch", self.arch, create=True),
+            mock.patch.object(phases_impl, "_stage_apple_t2_firmware"),
             mock.patch.object(phases_impl, "_stage_qualcomm_firmware"),
         ]
         for patch in patches:
@@ -93,6 +95,18 @@ class InstallDiskReleaseTest(unittest.TestCase):
         phases_impl.prepare_live(self.ctx())
 
         self.arch.load_arch_config.assert_called_once()
+
+    def test_t2_firmware_is_staged_before_disk_cleanup(self):
+        events = []
+        released = subprocess.CompletedProcess([], 0, stdout="Released /dev/vda\n", stderr="")
+        with mock.patch.object(
+            phases_impl, "_stage_apple_t2_firmware", side_effect=lambda: events.append("stage")
+        ), mock.patch.object(
+            phases_impl, "capture", side_effect=lambda _cmd: events.append("cleanup") or released
+        ):
+            phases_impl.prepare_live(self.ctx())
+
+        self.assertEqual(events, ["stage", "cleanup"])
 
 
 if __name__ == "__main__":

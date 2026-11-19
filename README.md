@@ -101,7 +101,7 @@ The version is also in the edge ISO's file name.
 
 VM images are for testing. Users download the release ISO from iso.omarchy.org.
 
-A VM image is Omarchy already installed, as one `.qcow2` file. There is an image of the edge channel, rebuilt every night, and an image of the latest release. Every boot is a new machine, with a new machine ID and new SSH host keys.
+A VM image is Omarchy already installed, as one `.qcow2` file. There is an image of the edge channel, rebuilt every night, and an image of the latest release. Its first boot makes it a new machine, with a new machine ID and new SSH host keys. `vm-boot` and `snapshot=on` make every boot a first boot.
 
 The user is `omarchy` and the password is `omarchy`. SSH takes keys only.
 
@@ -151,6 +151,57 @@ chmod +x vm-boot
 `vm-boot` makes a new SSH key for each boot. It runs the machine on an overlay under `/var/tmp`, so the downloaded image is never changed, and deletes the overlay on exit. Set `VM_STATE_DIR` to put the overlay somewhere else.
 
 To get the URL of the edge ISO, run `jq -r .url` on the same `latest.json`.
+
+### Give it your own SSH key
+
+The image holds no SSH key. The VM manager gives the keys to each boot in an SMBIOS type 11 string. The string carries the systemd credential [`tmpfiles.extra`](https://www.freedesktop.org/software/systemd/man/latest/systemd.system-credentials.html). `vm-boot` uses this channel, and any VM manager that can set an SMBIOS type 11 string can use it too. It works for the UEFI boot and for the direct boot.
+
+The credential holds two [tmpfiles.d](https://www.freedesktop.org/software/systemd/man/latest/tmpfiles.d.html) lines. The first line creates `~/.ssh`. The second line writes `authorized_keys` from its base64 encoding. So one credential can carry several keys:
+
+```
+d /home/omarchy/.ssh 0700 omarchy omarchy -
+f+~ /home/omarchy/.ssh/authorized_keys 0600 omarchy omarchy - <the authorized_keys file, base64>
+```
+
+The SMBIOS string is the credential's name and the base64 encoding of the two lines. Make it from a file of public keys, one key on each line. This example uses one key:
+
+```bash
+keys=$(base64 -w0 ~/.ssh/id_ed25519.pub)
+credential=io.systemd.credential.binary:tmpfiles.extra=$(printf 'd /home/omarchy/.ssh 0700 omarchy omarchy -\nf+~ /home/omarchy/.ssh/authorized_keys 0600 omarchy omarchy - %s\n' "$keys" | base64 -w0)
+```
+
+For QEMU, add these arguments to the `qemu-system-x86_64` command in "Boot the image by itself". End its last line with ` \` first. Then log in with `ssh -p 2222 omarchy@127.0.0.1`:
+
+```bash
+  -smbios "type=11,value=$credential" \
+  -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:2222-:22
+```
+
+For libvirt, put the string in the domain's `oemStrings`. The `<smbios mode='sysinfo'/>` element tells libvirt to pass it to the guest. These elements go into a domain that already has the disk and a network interface. This `<os>` is a direct boot from the `unpacked/` files:
+
+```xml
+<os>
+  <type arch='x86_64' machine='q35'>hvm</type>
+  <kernel>/path/to/vmlinuz</kernel>
+  <initrd>/path/to/initrd</initrd>
+  <cmdline>the contents of the cmdline file</cmdline>
+  <smbios mode='sysinfo'/>
+</os>
+<sysinfo type='smbios'>
+  <oemStrings>
+    <entry>io.systemd.credential.binary:tmpfiles.extra=...</entry>
+  </oemStrings>
+</sysinfo>
+```
+
+For a UEFI boot, use a `<loader>` and an `<nvram>` in place of the kernel, the initrd and the command line. Use firmware without Secure Boot. The `<smbios>` and `<sysinfo>` elements stay the same.
+
+How the image uses the credential:
+
+- Each boot that carries the credential writes `authorized_keys` again. To change the keys, change the credential and boot again. On a disk that keeps its writes, a boot without the credential keeps the file from the last boot.
+- The initrd also reads the credential. It logs `Failed to resolve user 'omarchy'` for both lines, because the initrd has no such user. The installed system then writes the file.
+- The first boot takes the machine ID from the VM's SMBIOS UUID, such as a libvirt domain's `<uuid>` or QEMU's `-uuid`. Without a UUID, the ID is random. On a disk that keeps its writes, later boots keep the first ID, even when the UUID changes.
+- Omarchy ignores the power button, so `virsh shutdown` does not stop the machine. Run `systemctl poweroff` in the guest, or `virsh destroy` to cut the power.
 
 ## Autoinstall
 

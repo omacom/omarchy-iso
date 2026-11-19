@@ -8,6 +8,10 @@
 # when an install is over.
 
 set -euo pipefail
+# The expected file lists below are in byte order (SHA256SUMS before cmdline),
+# the order sort gives in CI's C.UTF-8 container. A locale like en_US.UTF-8
+# folds case and puts SHA256SUMS after initrd, so the test fails there.
+export LC_ALL=C
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 plan="$ROOT/test/vm-image/nightly-plan"

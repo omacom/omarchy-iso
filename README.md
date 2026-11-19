@@ -169,7 +169,10 @@ sudo pacman -S --needed qemu-desktop edk2-ovmf jq openssh
 ```bash
 latest=https://nightly.omarchy.org/stable/latest.json
 image=$(curl -fsSL "$latest" | jq -r .vm.url)
-[ -f "${image##*/}" ] || curl -fLO "$image"
+if [ ! -f "${image##*/}" ]; then
+  curl -fL -o download.qcow2 "$image"
+  echo "$(curl -fsSL "$image.sha256" | cut -d' ' -f1)  download.qcow2" | sha256sum -c && mv download.qcow2 "${image##*/}"
+fi
 
 [ -f omarchy-vm ] || ssh-keygen -q -t ed25519 -N '' -C omarchy-vm -f omarchy-vm
 keys=$(base64 -w0 omarchy-vm.pub)
@@ -206,7 +209,10 @@ latest=https://nightly.omarchy.org/stable/latest.json
 dir=/var/lib/libvirt/images/omarchy
 image=$(curl -fsSL "$latest" | jq -r .vm.url)
 sudo mkdir -p "$dir"
-[ -f "$dir/omarchy.qcow2" ] || sudo curl -fL -o "$dir/omarchy.qcow2" "$image"
+if [ ! -f "$dir/omarchy.qcow2" ]; then
+  sudo curl -fL -o "$dir/download.qcow2" "$image"
+  echo "$(curl -fsSL "$image.sha256" | cut -d' ' -f1)  $dir/download.qcow2" | sha256sum -c && sudo mv "$dir/download.qcow2" "$dir/omarchy.qcow2"
+fi
 
 [ -f omarchy-vm ] || ssh-keygen -q -t ed25519 -N '' -C omarchy-vm -f omarchy-vm
 keys=$(base64 -w0 omarchy-vm.pub)

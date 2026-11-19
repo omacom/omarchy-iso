@@ -15,6 +15,7 @@ microsoft-surface-laptop-8-support
 microsoft-surface-pro-11-sensors
 microsoft-surface-pro-11-support
 microsoft-surface-snapdragon-addresses
+raspberry-pi-4-bluetooth-firmware
 
 # The same packages under the names omarchy-pkgs used before it renamed them.
 # A stable image reads these lists from the stable omarchy package, which names

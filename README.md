@@ -154,47 +154,114 @@ To get the URL of the edge ISO, run `jq -r .url` on the same `latest.json`.
 
 ### Give it your own SSH key
 
-The image holds no SSH key. The VM manager gives the keys to each boot in an SMBIOS type 11 string. The string carries the systemd credential [`tmpfiles.extra`](https://www.freedesktop.org/software/systemd/man/latest/systemd.system-credentials.html). `vm-boot` uses this channel, and any VM manager that can set an SMBIOS type 11 string can use it too. It works for the UEFI boot and for the direct boot.
+The image holds no SSH key. The VM manager gives the keys to each boot in an SMBIOS type 11 string. The string carries the systemd credential [`tmpfiles.extra`](https://www.freedesktop.org/software/systemd/man/latest/systemd.system-credentials.html). `vm-boot` uses this channel, and any VM manager that can set an SMBIOS type 11 string can use it too.
 
-The credential holds two [tmpfiles.d](https://www.freedesktop.org/software/systemd/man/latest/tmpfiles.d.html) lines. The first line creates `~/.ssh`. The second line writes `authorized_keys` from its base64 encoding. So one credential can carry several keys:
+The last block of each part below is complete. Paste it into a shell and it ends in an SSH login to the new machine. It makes a key pair for the machine, `omarchy-vm` and `omarchy-vm.pub`, in the current folder. Both blocks use the stable image. For edge, change `stable` to `edge` in the first line.
+
+#### With QEMU
+
+This boots through UEFI, with a window for the desktop. `snapshot=on` keeps the downloaded image unchanged, so every boot is a fresh machine. The firmware paths are Arch's. On Arch, install what it needs first:
+
+```bash
+sudo pacman -S --needed qemu-desktop edk2-ovmf jq openssh
+```
+
+```bash
+latest=https://nightly.omarchy.org/stable/latest.json
+image=$(curl -fsSL "$latest" | jq -r .vm.url)
+[ -f "${image##*/}" ] || curl -fLO "$image"
+
+[ -f omarchy-vm ] || ssh-keygen -q -t ed25519 -N '' -C omarchy-vm -f omarchy-vm
+keys=$(base64 -w0 omarchy-vm.pub)
+credential=io.systemd.credential.binary:tmpfiles.extra=$(printf 'd /home/omarchy/.ssh 0700 omarchy omarchy -\nf+~ /home/omarchy/.ssh/authorized_keys 0600 omarchy omarchy - %s\n' "$keys" | base64 -w0)
+
+cp /usr/share/edk2/x64/OVMF_VARS.4m.fd vars.fd
+qemu-system-x86_64 -enable-kvm -cpu host -smp 4 -m 4G \
+  -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.4m.fd \
+  -drive if=pflash,format=raw,file=vars.fd \
+  -drive file="${image##*/}",if=virtio,snapshot=on \
+  -device virtio-vga \
+  -smbios "type=11,value=$credential" \
+  -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:2222-:22 &
+
+ssh_opts=(-i omarchy-vm -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+until ssh -n "${ssh_opts[@]}" -o BatchMode=yes -o ConnectTimeout=2 omarchy@127.0.0.1 true 2>/dev/null; do kill -0 $! || break; sleep 2; done
+ssh "${ssh_opts[@]}" omarchy@127.0.0.1
+```
+
+#### With libvirt
+
+This defines a machine named `omarchy` that keeps its disk, in `/var/lib/libvirt/images/omarchy`, across boots. It boots through UEFI, so it boots its own kernel after `omarchy update` installs a new one. Watch its desktop with `virt-viewer -c qemu:///system omarchy` or virt-manager. The firmware paths are Arch's. On Arch, install and start libvirt first. Its default network needs `dnsmasq` and `iptables`:
+
+```bash
+sudo pacman -S --needed libvirt qemu-base edk2-ovmf dnsmasq iptables jq openssh virt-viewer
+```
+
+```bash
+sudo systemctl enable --now libvirtd.service
+```
+
+```bash
+latest=https://nightly.omarchy.org/stable/latest.json
+dir=/var/lib/libvirt/images/omarchy
+image=$(curl -fsSL "$latest" | jq -r .vm.url)
+sudo mkdir -p "$dir"
+[ -f "$dir/omarchy.qcow2" ] || sudo curl -fL -o "$dir/omarchy.qcow2" "$image"
+
+[ -f omarchy-vm ] || ssh-keygen -q -t ed25519 -N '' -C omarchy-vm -f omarchy-vm
+keys=$(base64 -w0 omarchy-vm.pub)
+credential=io.systemd.credential.binary:tmpfiles.extra=$(printf 'd /home/omarchy/.ssh 0700 omarchy omarchy -\nf+~ /home/omarchy/.ssh/authorized_keys 0600 omarchy omarchy - %s\n' "$keys" | base64 -w0)
+
+cat >omarchy.xml <<EOF
+<domain type='kvm'>
+  <name>omarchy</name>
+  <memory unit='GiB'>4</memory>
+  <vcpu>4</vcpu>
+  <os>
+    <type arch='x86_64' machine='q35'>hvm</type>
+    <loader readonly='yes' type='pflash'>/usr/share/edk2/x64/OVMF_CODE.4m.fd</loader>
+    <nvram template='/usr/share/edk2/x64/OVMF_VARS.4m.fd'/>
+    <smbios mode='sysinfo'/>
+  </os>
+  <sysinfo type='smbios'>
+    <oemStrings>
+      <entry>$credential</entry>
+    </oemStrings>
+  </sysinfo>
+  <features><acpi/></features>
+  <cpu mode='host-passthrough'/>
+  <devices>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='$dir/omarchy.qcow2'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <interface type='network'><source network='default'/><model type='virtio'/></interface>
+    <video><model type='virtio'/></video>
+    <graphics type='vnc'/>
+  </devices>
+</domain>
+EOF
+sudo virsh net-info default | grep -q 'Active:.*yes' || sudo virsh net-start default
+sudo virsh define omarchy.xml
+sudo virsh start omarchy
+
+until ip=$(sudo virsh domifaddr omarchy | awk '/ipv4/ {sub("/.*", "", $4); print $4}'); [ -n "$ip" ]; do sleep 2; done
+ssh_opts=(-i omarchy-vm -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+until ssh -n "${ssh_opts[@]}" -o BatchMode=yes -o ConnectTimeout=2 "omarchy@$ip" true 2>/dev/null; do sleep 2; done
+ssh "${ssh_opts[@]}" "omarchy@$ip"
+```
+
+#### What the credential holds
+
+For another VM manager, pass the same SMBIOS type 11 string. It is the credential's name and the base64 encoding of two [tmpfiles.d](https://www.freedesktop.org/software/systemd/man/latest/tmpfiles.d.html) lines. The first line creates `~/.ssh`. The second line writes `authorized_keys` from its base64 encoding, so one credential can carry several keys:
 
 ```
 d /home/omarchy/.ssh 0700 omarchy omarchy -
 f+~ /home/omarchy/.ssh/authorized_keys 0600 omarchy omarchy - <the authorized_keys file, base64>
 ```
 
-The SMBIOS string is the credential's name and the base64 encoding of the two lines. Make it from a file of public keys, one key on each line. This example uses one key:
-
-```bash
-keys=$(base64 -w0 ~/.ssh/id_ed25519.pub)
-credential=io.systemd.credential.binary:tmpfiles.extra=$(printf 'd /home/omarchy/.ssh 0700 omarchy omarchy -\nf+~ /home/omarchy/.ssh/authorized_keys 0600 omarchy omarchy - %s\n' "$keys" | base64 -w0)
-```
-
-For QEMU, add these arguments to the `qemu-system-x86_64` command in "Boot the image by itself". End its last line with ` \` first. Then log in with `ssh -p 2222 omarchy@127.0.0.1`:
-
-```bash
-  -smbios "type=11,value=$credential" \
-  -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:2222-:22
-```
-
-For libvirt, put the string in the domain's `oemStrings`. The `<smbios mode='sysinfo'/>` element tells libvirt to pass it to the guest. These elements go into a domain that already has the disk and a network interface. This `<os>` is a direct boot from the `unpacked/` files:
-
-```xml
-<os>
-  <type arch='x86_64' machine='q35'>hvm</type>
-  <kernel>/path/to/vmlinuz</kernel>
-  <initrd>/path/to/initrd</initrd>
-  <cmdline>the contents of the cmdline file</cmdline>
-  <smbios mode='sysinfo'/>
-</os>
-<sysinfo type='smbios'>
-  <oemStrings>
-    <entry>io.systemd.credential.binary:tmpfiles.extra=...</entry>
-  </oemStrings>
-</sysinfo>
-```
-
-For a UEFI boot, use a `<loader>` and an `<nvram>` in place of the kernel, the initrd and the command line. Use firmware without Secure Boot. The `<smbios>` and `<sysinfo>` elements stay the same.
+To install your own keys in place of `omarchy-vm`, set `keys=$(base64 -w0 ~/.ssh/id_ed25519.pub)` and remove `-i omarchy-vm` from `ssh_opts`.
 
 How the image uses the credential:
 

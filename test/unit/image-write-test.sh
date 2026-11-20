@@ -401,7 +401,7 @@ untouched 2 "write-squashfs refuses a missing image" "$work/target"
 # mksquashfs writes the extended inode (type 9) with 64-bit fields, as it
 # does for the root image.
 holes=$(mktemp -d -p "$work")
-cp --sparse=always "$raw" "$holes/omarchy-root.img"
+cp --reflink=never --sparse=always "$raw" "$holes/omarchy-root.img"
 mksquashfs "$holes" "$work/plain-inodes.sfs" -noappend -no-xattrs -quiet -no-progress \
   -comp zstd -b 256K -no-fragments -noI >/dev/null
 lying_inode() { # output, field offset in the inode, little-endian u64 value

@@ -7,13 +7,14 @@ OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
 OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
 OMARCHY_KERNEL="${OMARCHY_KERNEL:-linux-omarchy}"
 # profiledef.sh reads both in the mkarchiso environment.
-export OMARCHY_ARCH OMARCHY_KERNEL
+export OMARCHY_ARCH OMARCHY_KERNEL OMARCHY_OEM_INSTALL
 
 source /builder/node-release.sh
 source /builder/arm64-kernel-image.sh
 source /builder/archiso-aarch64-mkinitcpio.sh
 source /builder/grub-platform.sh
 source /builder/boot-menu-theme.sh
+source /builder/required-packages.sh
 
 # The online pacman configuration drives every package download below: one per
 # architecture and channel. On aarch64 it points at Omarchy's aarch64
@@ -161,10 +162,9 @@ else
   core_server=$(channel_core_server "$online_pacman_conf") || exit 1
   sed -i "1i $core_server" /etc/pacman.d/mirrorlist
   pacman --noconfirm -Sy archlinux-keyring
-  # Full upgrade, not just -Sy: docker never re-pulls :latest once it's cached,
-  # so this container can be months behind the mirror it installs from. A plain
-  # -Sy install is then a partial upgrade — new packages linked against a glibc
-  # the container doesn't have yet.
+  # Full upgrade, not just -Sy: the pinned container can fall behind the mirror
+  # it installs from. A plain -Sy install is then a partial upgrade — new packages
+  # can link against a glibc the container doesn't have yet.
   pacman --noconfirm -Syu archiso git sudo base-devel jq grub imagemagick neovim nodejs npm tree-sitter-cli btrfs-progs terminus-font python
   mkarchiso_command=mkarchiso
 fi
@@ -224,6 +224,17 @@ mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
 echo "$OMARCHY_MIRROR" > "$build_cache_dir/airootfs/root/omarchy_mirror"
 echo "$OMARCHY_ISO_REF" > "$build_cache_dir/airootfs/root/omarchy_iso_ref"
 echo "$OMARCHY_ARCH" > "$build_cache_dir/airootfs/root/omarchy_arch"
+if [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]]; then
+  touch "$build_cache_dir/airootfs/usr/share/omarchy-iso/oem-install"
+  sed -i 's/^TIMEOUT .*/TIMEOUT 1/' "$build_cache_dir/syslinux/archiso_sys.cfg"
+fi
+# The OEM's own bundle (--oem-config, --oem-script), as builder/oem-bundle.py
+# checked and laid it out: the installer hands its branding and agreement to
+# first-boot setup and runs its scripts in the new system.
+rm -rf "$build_cache_dir/airootfs/usr/share/omarchy-iso/oem"
+if [[ -d /oem ]]; then
+  cp -r /oem "$build_cache_dir/airootfs/usr/share/omarchy-iso/oem"
+fi
 # The kernel the installer puts on the target: the image's own on aarch64,
 # empty on x86_64, where the installer picks per machine.
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
@@ -387,9 +398,10 @@ fi
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # Plymouth stays out of the live initramfs (archiso-aarch64-mkinitcpio.sh);
   # openssh and pciutils serve the recovery entry and remote debugging.
-  # For the Snapdragon laptops: ukify builds the live UKI, and the installer
+  # For the Snapdragon laptops: ukify builds the live UKI on systemd-stub-omarchy's
+  # stub, whose header holds every device tree, and the installer
   # saves a laptop's signed firmware from Windows with qcom-firmware-extract.
-  arch_packages=("$OMARCHY_KERNEL" archlinuxarm-keyring git gum jq openssl openssh pciutils plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted systemd-ukify linux-firmware-qcom qcom-firmware-extract python)
+  arch_packages=("$OMARCHY_KERNEL" archlinuxarm-keyring git gum jq openssl openssh pciutils plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted systemd-ukify systemd-stub-omarchy linux-firmware-qcom qcom-firmware-extract python)
 else
   # linux-t2 is the live kernel on a Mac (configs/grub/grub.cfg).
   arch_packages=("$OMARCHY_KERNEL" linux-t2 git gum jq openssl plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
@@ -417,6 +429,7 @@ if [[ -d /omarchy-source ]]; then
   base_pkg_lists=(/omarchy-source/install/omarchy-base.packages /omarchy-source/install/omarchy-other.packages)
   setup_form=/omarchy-source/install/provisioning/setup-form.sh
   progress_icon=/omarchy-source/install/provisioning/progress-icon.sh
+  console_font=/omarchy-source/install/provisioning/console-font
   mise_work=/omarchy-source/install/user/mise-work.sh
 else
   # Pull the same package lists out of the freshly-downloaded Omarchy runtime
@@ -441,6 +454,9 @@ else
   setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/progress-icon.sh 2>/dev/null || true
   progress_icon=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/progress-icon.sh
+  bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/console-font.sh \
+    usr/share/omarchy/install/provisioning/console-font.py 2>/dev/null || true
+  console_font=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/console-font
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/user/mise-work.sh 2>/dev/null || true
   mise_work=/tmp/omarchy-pkglists/usr/share/omarchy/install/user/mise-work.sh
   # The aarch64 list, each platform's own and the x86_64-only one. Runtimes
@@ -584,6 +600,15 @@ if [[ ! -f $progress_icon ]]; then
   exit 1
 fi
 cp "$progress_icon" "$build_cache_dir/airootfs/usr/share/omarchy-iso/progress-icon.sh"
+
+# The console font comes from the same runtime too, so the installer and
+# first-boot setup are set in one font at one size. A runtime predating the
+# split ships none, and i18n.sh then builds the font with the copy of
+# console-font.py this repository still carries.
+rm -f "$build_cache_dir/airootfs/usr/share/omarchy-iso/console-font.sh"
+if [[ -f $console_font.sh && -f $console_font.py ]]; then
+  cp "$console_font.sh" "$console_font.py" "$build_cache_dir/airootfs/usr/share/omarchy-iso/"
+fi
 
 # Omarchy installs Node lazily through mise since omacom/omarchy#15876. A
 # runtime from before it unpacks a bundled Node tarball during setup and stops
@@ -752,6 +777,11 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   mapfile -t target_packages < <(printf '%s\n' "${target_packages[@]}" "${qcom_oem_firmware[@]}" | sort -u)
 fi
 mapfile -t offered < <(pacman --config "$online_pacman_conf" --dbpath /tmp/offlinedb -Slq | sort -u)
+mapfile -t missing_required < <(printf '%s\n' "${offered[@]}" | missing_required_packages "$OMARCHY_ARCH")
+if (( ${#missing_required[@]} )); then
+  echo "ERROR: no configured repository offers ${missing_required[*]}, which every $OMARCHY_ARCH image must carry" >&2
+  exit 1
+fi
 mapfile -t unresolved < <(comm -23 <(printf '%s\n' "${all_packages[@]}" | sort -u) <(printf '%s\n' "${offered[@]}"))
 if (( ${#unresolved[@]} )); then
   # Groups and virtual names (base-devel, ttfx, ...) are not in -Slq; keep
@@ -966,8 +996,14 @@ echo "[timing] root image end $(date +%s)"
 # The installer verifies the image against this before it touches the disk
 # (orchestrator prepare_install_target), so a truncated copy on a badly
 # flashed USB fails the install while it is still free to fail. Next to the
-# image, so it ships on the ISO beside it.
-(cd "$root_image_dir" && sha256sum "${root_image##*/}" >"$root_image.sha256")
+# image, so it ships on the ISO beside it. A platform layer next to the image
+# (the N1x's, build-root-image.sh) is listed in the same file, so the same
+# boot-time `sha256sum --check` covers it.
+(
+  cd "$root_image_dir"
+  shopt -s nullglob
+  sha256sum "${root_image##*/}" omarchy-layer.*.tar.zst >"$root_image.sha256"
+)
 
 # aarch64: each Snapdragon laptop's ADSP firmware, as plain files next to the
 # root image with a SHA256SUMS list. The live UKI holds only linux-firmware's;
@@ -1007,11 +1043,14 @@ fi
 # the live system's page-ins) plus ten minutes of slack for boot. On timeout
 # systemd sets Result=timeout and omarchy-wait-root-image-verify turns that
 # into a "medium too slow" message instead of the corrupt-medium one.
-root_image_bytes=$(stat -c %s "$root_image")
+# The platform layers beside the image are read in the same hash.
+root_image_files=("$root_image" "${root_image%/*}"/omarchy-layer.*.tar.zst)
+[[ -e ${root_image_files[-1]} ]] || unset 'root_image_files[-1]'
+root_image_bytes=$(stat -c %s "${root_image_files[@]}" | awk '{ bytes += $1 } END { print bytes }')
 verify_dropin_dir="$build_cache_dir/airootfs/etc/systemd/system/omarchy-root-image-verify.service.d"
 mkdir -p "$verify_dropin_dir"
 cat >"$verify_dropin_dir/50-size-timeout.conf" <<EOF
-# Generated by build-iso.sh: 2 MiB/s floor over the $root_image_bytes-byte root image.
+# Generated by build-iso.sh: 2 MiB/s floor over the root image and its layers, $root_image_bytes bytes.
 [Service]
 TimeoutStartSec=$((root_image_bytes / (2 * 1024 * 1024) + 600))
 EOF

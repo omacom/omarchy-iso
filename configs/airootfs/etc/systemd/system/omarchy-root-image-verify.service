@@ -26,6 +26,10 @@ ExecStart=/bin/sh -c 'cd "/run/archiso/bootmnt/arch/$$(uname -m)" && exec /usr/b
 # Background work: never compete with the console or anything interactive.
 Nice=19
 IOSchedulingClass=idle
+# Group scheduling for the reason given in omarchy-mirror-verify.service:
+# the boot reads the stick beside this hash too, and on fast media the
+# mirror is done before the greeter and this one streams in its place.
+IOAccounting=yes
 
 [Install]
 WantedBy=multi-user.target

@@ -34,6 +34,14 @@ i18n_console_font() {
   local tty=$1 height terminus font=${OMARCHY_ISO_CONSOLE_FONT:-/run/omarchy-iso/console.psf}
   [[ $tty == /dev/tty[0-9]* ]] || return 0
 
+  # The bundled runtime's own routine, when it ships one: first-boot setup
+  # draws with the same file.
+  if [[ -r $OMARCHY_ISO_SHARE/console-font.sh ]]; then
+    source "$OMARCHY_ISO_SHARE/console-font.sh"
+    omarchy_console_font "$tty" || true
+    return 0
+  fi
+
   if [[ ! -s $font ]]; then
     height=$(showconsolefont -i -C "$tty" 2>/dev/null | sed -n 's/^[0-9]*x\([0-9]*\)x[0-9]*$/\1/p') || height=16
     terminus=/usr/share/kbd/consolefonts/ter-v16b.psf.gz

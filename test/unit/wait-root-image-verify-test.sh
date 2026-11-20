@@ -49,6 +49,16 @@ run_helper() { # loadstate, active_seq, start_rc, [result]  ->  sets RC and OUT
     ln -s "$box/medium/arch/x86_64/omarchy-root.sfs" "$box/proc/4242/fd/7"
     printf 'pos:\t512\nflags:\t0100000\n' >"$box/proc/4242/fdinfo/7"
   fi
+  # WITH_LAYER_HASHER=1: past the 1024-byte image, the hasher holds the N1x's
+  # 1024-byte platform layer at pos 512: 1536 of 2048 bytes, 75%.
+  if [[ -n ${WITH_LAYER_HASHER:-} ]]; then
+    mainpid=4242
+    head -c 1024 /dev/zero >"$box/medium/arch/x86_64/omarchy-root.sfs"
+    head -c 1024 /dev/zero >"$box/medium/arch/x86_64/omarchy-layer.aarch64-n1x.tar.zst"
+    mkdir -p "$box/proc/4242/fd" "$box/proc/4242/fdinfo"
+    ln -s "$box/medium/arch/x86_64/omarchy-layer.aarch64-n1x.tar.zst" "$box/proc/4242/fd/7"
+    printf 'pos:\t512\nflags:\t0100000\n' >"$box/proc/4242/fdinfo/7"
+  fi
   echo "none mq-deadline kyber [bfq]" >"$box/sys/block/sdz/queue/scheduler"
   printf '%s\n' "$active_seq" >"$box/active_seq"
   printf '%s\n' "$loadstate" >"$box/load_seq"
@@ -144,7 +154,7 @@ EOF
   chmod +x "$shim"
 
   local progress_env=()
-  [[ -n ${WITH_HASHER_PROC:-}${WITH_MIRROR_HASHER:-} ]] && progress_env=(OMARCHY_VERIFY_PROGRESS="$box/progress")
+  [[ -n ${WITH_HASHER_PROC:-}${WITH_LAYER_HASHER:-}${WITH_MIRROR_HASHER:-} ]] && progress_env=(OMARCHY_VERIFY_PROGRESS="$box/progress")
   [[ -n ${INDENT:-} ]] && progress_env+=(OMARCHY_VERIFY_PROGRESS_INDENT="$INDENT")
 
   set +e
@@ -284,6 +294,15 @@ check "mirror hash with a progress line passes" 0 "$RC" "" "$OUT"
 # (The fixture's hasher sits at byte 512 for good.)
 STALL=1 WITH_HASHER_PROC=1 run_helper loaded "activating" 0
 check "a stalled hash is reported" 1 "$RC" "install medium stopped responding" "$OUT"
+
+# The platform layer is read in the same hash, after the image: its bytes
+# count in the progress, and a read that hangs in it is a stall too.
+WITH_LAYER_HASHER=1 run_helper loaded $'activating\nactivating\nactive' 0
+[[ $PROGRESS_OUT == *" 75%"* ]] &&
+  echo "ok: progress counts the platform layer after the image" ||
+  { echo "FAIL: layer progress wrong: $(printf '%q' "$PROGRESS_OUT")"; fails=1; }
+STALL=1 WITH_LAYER_HASHER=1 run_helper loaded "activating" 0
+check "a stalled read of the platform layer is reported" 1 "$RC" "install medium stopped responding" "$OUT"
 
 # The mirror's verdict comes first: a corrupt package fails the gate before
 # the image's verdict is waited for (the image unit here never finishes).

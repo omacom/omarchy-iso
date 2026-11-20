@@ -250,6 +250,10 @@ drive_first_boot() {
       step="hostname"; [[ -v answered[$step] ]] || { type_text "$GUEST_HOSTNAME"; capture_console "success-firstboot-02-form"; press ret; }
     elif grep -qi "Timezone" <<<"$text"; then
       step="timezone"; [[ -v answered[$step] ]] || press ret
+    elif grep -qi "Language" <<<"$text"; then
+      # A runtime that lets the owner pick a language asks that first; Enter
+      # keeps English, which leads the list.
+      step="language"; [[ -v answered[$step] ]] || { capture_console "success-firstboot-00-language"; press ret; }
     fi
     [[ -n $step ]] && answered[$step]=1
 

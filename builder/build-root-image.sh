@@ -306,16 +306,7 @@ done
 
 echo "Building root image with ${#packages[@]} packages"
 truncate -s "${OMARCHY_IMAGE_SIZE:-24G}" "$backing"
-# Docker fills the container's /dev once, at start. A loop device the kernel
-# creates afterwards (loop-control hands one out on demand, loading the module
-# on a host that had none) exists on the host but has no node in here, so make
-# the nodes ourselves when they are missing.
-[[ -e /dev/loop-control ]] || mknod /dev/loop-control c 10 237
-# losetup reports a device whose node is missing as "/dev/loopN (lost)".
-loop=$(losetup --find | awk '{ print $1 }')
-[[ $loop == /dev/loop[0-9]* ]] || { echo "ERROR: no free loop device: $loop" >&2; exit 1; }
-[[ -b $loop ]] || mknod "$loop" b 7 "${loop#/dev/loop}"
-losetup "$loop" "$backing"
+loop=$(/builder/attach-loop.sh "$backing")
 mkfs.btrfs -q -L omarchy-root-image "$loop"
 mkdir -p "$mnt"
 mount -o "$IMAGE_COMPRESS" "$loop" "$mnt"
@@ -630,6 +621,7 @@ fstrim -v "$mnt" || echo "WARNING: fstrim failed; free space ships as whatever i
 sync
 umount "$mnt"
 losetup -d "$loop"
+loop=""
 truncate -s "${shrink_mb}M" "$backing"
 
 # Compress the image for the ISO. zstd collapses the unused space; the data

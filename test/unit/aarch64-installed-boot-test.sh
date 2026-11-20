@@ -52,5 +52,9 @@ grep -Fq 'aarch64_should_relaunch "$shutdown_reason"' "$ROOT/bin/omarchy-iso-boo
   || fail "the launcher does not consult the QMP shutdown reason"
 grep -Fq 'qmp-shutdown-reason.py' "$ROOT/bin/omarchy-iso-boot" \
   || fail "the launcher does not read the QMP shutdown reason"
+[[ $(grep -c 'run_aarch64 plain --no-iso$' "$ROOT/bin/omarchy-iso-boot") == 1 ]] \
+  || fail "the installed-system relaunch still attaches the installer ISO"
+[[ $(grep -c 'run_aarch64 plain$' "$ROOT/bin/omarchy-iso-boot") == 1 ]] \
+  || fail "a disk that is already installed no longer boots with the ISO attached"
 bash -n "$ROOT/bin/omarchy-iso-boot" "$ROOT/bin/lib/aarch64-installed-boot.sh"
 echo "aarch64 installed-boot checks passed"

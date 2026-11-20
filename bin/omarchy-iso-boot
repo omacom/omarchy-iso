@@ -212,7 +212,7 @@ if [[ $HOST_ARCH == aarch64 ]]; then
   # lib/aarch64-installed-boot.sh so the unit test can drive it.
   source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/aarch64-installed-boot.sh"
 
-  run_aarch64() { # gl|plain, then extra QEMU arguments
+  run_aarch64() { # gl|plain [--no-iso], then extra QEMU arguments
     local display_args
     if [[ $1 == gl ]]; then
       display_args=(-device virtio-gpu-gl-pci -display sdl,gl=on)
@@ -220,6 +220,18 @@ if [[ $HOST_ARCH == aarch64 ]]; then
       display_args=(-device virtio-gpu-pci -display gtk)
     fi
     shift
+    # The automatic relaunch boots the installed disk only. Leaving the ISO
+    # attached lets the firmware's saved boot order walk back into the installer.
+    local -a install_media=()
+    if [[ ${1:-} == --no-iso ]]; then
+      shift
+    else
+      install_media=(
+        -device virtio-scsi-pci,id=scsi0
+        -drive "file=$ISO,media=cdrom,if=none,format=raw,readonly=on,id=cdrom0"
+        -device scsi-cd,bus=scsi0.0,drive=cdrom0,bootindex=2
+      )
+    fi
     # MSIs go through a GICv2m, as in test/arm64-install: nested under Apple's
     # hypervisor the host GIC has no LPIs, so an emulated ITS's interrupts are
     # lost, while a GICv2m raises ordinary SPIs that every host delivers.
@@ -231,9 +243,7 @@ if [[ $HOST_ARCH == aarch64 ]]; then
       -drive if=pflash,format=raw,file="$OVMF_VARS" \
       -drive file="$DISK",format=qcow2,if=none,id=drive0 \
       -device virtio-blk-pci,drive=drive0,bootindex=1 \
-      -device virtio-scsi-pci,id=scsi0 \
-      -drive file="$ISO",media=cdrom,if=none,format=raw,readonly=on,id=cdrom0 \
-      -device scsi-cd,bus=scsi0.0,drive=cdrom0,bootindex=2 \
+      "${install_media[@]}" \
       "${display_args[@]}" \
       -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-tablet,bus=xhci.0 \
       -device virtio-rng-pci \
@@ -261,7 +271,7 @@ if [[ $HOST_ARCH == aarch64 ]]; then
     rm -rf "$qmp_dir"
     if aarch64_should_relaunch "$shutdown_reason"; then
       echo "Booting the installed system with the plain virtio-gpu"
-      run_aarch64 plain
+      run_aarch64 plain --no-iso
     fi
   fi
 else

@@ -9,6 +9,10 @@ LOCAL_PKGS_PATH=""
 OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
 N1X_DEV_SSH_KEY=""
 PACKAGE_DIR=""
+OEM_CONFIG=""
+OEM_SCRIPTS=()
+OEM_BUNDLE_DIR=""
+REHEARSAL=""
 while [[ $# -gt 0 ]]; do
   case $1 in
   --arch)
@@ -41,6 +45,31 @@ while [[ $# -gt 0 ]]; do
       echo "Error: --package-dir requires a directory" >&2
       exit 1
     fi
+    shift 2
+    ;;
+  --oem)
+    OMARCHY_OEM_INSTALL=1
+    shift
+    ;;
+  --oem-config)
+    # What first-boot setup shows the owner of a machine this OEM ISO
+    # installs: the OEM's name, logo, tagline and colour, and an agreement to
+    # accept. builder/oem-bundle.py describes the file and checks it.
+    OEM_CONFIG="${2:-}"
+    if [[ -z $OEM_CONFIG ]]; then
+      echo "Error: --oem-config requires a JSON file" >&2
+      exit 1
+    fi
+    shift 2
+    ;;
+  --oem-script)
+    # A bash script the install runs as root in the new system. Repeat it to
+    # run several, in the order given.
+    if [[ -z ${2:-} ]]; then
+      echo "Error: --oem-script requires a script" >&2
+      exit 1
+    fi
+    OEM_SCRIPTS+=("$2")
     shift 2
     ;;
   --no-cache)
@@ -90,20 +119,51 @@ while [[ $# -gt 0 ]]; do
     OMARCHY_MIRROR=rc
     shift
     ;;
+  # The release rehearsal: --local-source holds omarchy-pkgs with omarchy and
+  # omarchy-settings pinned the way a release is (test/rehearsal-pins). Those
+  # two are built from it, under their release names; omarchy-nvim and every
+  # other package come from edge as published. The ISO ends in -rehearsal.
+  --rehearsal)
+    REHEARSAL=1
+    shift
+    ;;
   *)
     echo "Unknown option: $1"
-    echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
+    echo "Usage: $0 [--oem [--oem-config FILE] [--oem-script FILE]...] [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout> [--rehearsal]]"
     echo "       $0 --arch aarch64 [--edge|--rc] [--package-dir DIR] [--dev-ssh <pubkey>] [--local-source <omarchy-checkout> <pkgs-checkout>] [...]"
     exit 1
     ;;
   esac
 done
 
+if [[ -n $REHEARSAL ]]; then
+  [[ -n $LOCAL_OMARCHY_PATH ]] || { echo "Error: --rehearsal builds from --local-source, which is missing" >&2; exit 1; }
+  # Whatever other channel option came before or after: a feature release
+  # promotes edge, so the rehearsal takes everything else from edge.
+  OMARCHY_ISO_REF=rehearsal
+  OMARCHY_MIRROR=edge
+  : "${OMARCHY_LOCAL_PACKAGES:=omarchy-settings omarchy}"
+fi
+
 if [[ -n $LOCAL_OMARCHY_PATH ]]; then
   [[ -d $LOCAL_OMARCHY_PATH ]] || { echo "Error: Omarchy checkout not found at $LOCAL_OMARCHY_PATH" >&2; exit 1; }
   [[ -d $LOCAL_PKGS_PATH ]]    || { echo "Error: pkgs checkout not found at $LOCAL_PKGS_PATH" >&2; exit 1; }
   LOCAL_OMARCHY_PATH=$(realpath "$LOCAL_OMARCHY_PATH")
   LOCAL_PKGS_PATH=$(realpath "$LOCAL_PKGS_PATH")
+fi
+
+# An OEM's bundle is checked and laid out here, before anything is built, so a
+# logo the console cannot draw stops this command and not a machine's first boot.
+if [[ -n $OEM_CONFIG ]] || (( ${#OEM_SCRIPTS[@]} )); then
+  if [[ ${OMARCHY_OEM_INSTALL:-} != "1" ]]; then
+    echo "Error: --oem-config and --oem-script are for an OEM ISO; add --oem" >&2
+    exit 1
+  fi
+  OEM_BUNDLE_DIR=$(mktemp -d)
+  trap 'rm -rf "$OEM_BUNDLE_DIR"' EXIT
+  python3 "${BASH_SOURCE[0]%/*}/../builder/oem-bundle.py" "$OEM_BUNDLE_DIR" \
+    ${OEM_CONFIG:+"--config=$OEM_CONFIG"} "${OEM_SCRIPTS[@]/#/--script=}"
+  chmod -R u=rwX,go=rX "$OEM_BUNDLE_DIR"
 fi
 
 # Architecture selection. Both architectures boot linux-omarchy live; x86_64
@@ -113,7 +173,11 @@ fi
 # otherwise, as on x86_64, and make one image for every board, on the
 # linux-omarchy that repository publishes.
 # build-iso.sh refuses a runtime without the platform support.
-CONTAINER_IMAGE=ghcr.io/archlinux/archlinux:latest
+# The x86_64 builder is an Arch image of 2026-09-26, pinned by digest. Its tools
+# are upgraded to the channel's Arch snapshot with pacman -Syu, which does not
+# downgrade them, so the image must be older than every channel's snapshot.
+# :latest broke stable builds once Arch moved to openssl 4.
+CONTAINER_IMAGE=docker.io/archlinux/archlinux@sha256:a1cd6a460b8c8d2c9e9482d7853b7acab4888f448a7914fdc676ce037ff0a5dc
 CONTAINER_PLATFORM_ARGS=()
 OMARCHY_KERNEL=linux-omarchy
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
@@ -202,6 +266,7 @@ PODMAN_ARGS=(
   --privileged
   -e "OMARCHY_ISO_REF=$OMARCHY_ISO_REF"
   -e "OMARCHY_MIRROR=$OMARCHY_MIRROR"
+  -e "OMARCHY_OEM_INSTALL=${OMARCHY_OEM_INSTALL:-}"
   -e "OMARCHY_INSTALL_DEBUG=${OMARCHY_INSTALL_DEBUG:-}"
   -e "OMARCHY_ARCH=$OMARCHY_ARCH"
   -e "OMARCHY_KERNEL=$OMARCHY_KERNEL"
@@ -211,6 +276,8 @@ PODMAN_ARGS=(
   # instead of the -dev ones that track quattro.
   -e "OMARCHY_RUNTIME_PACKAGE=${OMARCHY_RUNTIME_PACKAGE:-}"
   -e "OMARCHY_SETTINGS_PACKAGE=${OMARCHY_SETTINGS_PACKAGE:-}"
+  # Which of them --local-source builds; all of them unless this names fewer.
+  -e "OMARCHY_LOCAL_PACKAGES=${OMARCHY_LOCAL_PACKAGES:-}"
   -e "HOST_UID=$(id -u)"
   -e "HOST_GID=$(id -g)"
   -v "$BUILD_RELEASE_PATH/:/out/"
@@ -235,6 +302,10 @@ if [[ -n $N1X_DEV_SSH_KEY ]]; then
   PODMAN_ARGS+=(-v "$N1X_DEV_SSH_KEY:/dev-ssh/authorized_keys:ro")
 fi
 
+if [[ -n $OEM_BUNDLE_DIR ]]; then
+  PODMAN_ARGS+=(-v "$OEM_BUNDLE_DIR:/oem:ro")
+fi
+
 # The host pacman cache belongs to the host architecture; sharing it with an
 # aarch64 container would leak foreign packages into the offline mirror.
 if [[ $OMARCHY_ARCH == x86_64 && -d /var/cache/pacman/pkg ]]; then
@@ -253,8 +324,7 @@ if [[ -z "$NO_CACHE" ]]; then
   mkdir -p "$OFFLINE_REPO_BUILD_CACHE_DIR"
   PODMAN_ARGS+=(-v "$OFFLINE_REPO_BUILD_CACHE_DIR:/var/cache/airootfs/var/cache/omarchy")
 else
-  # The locally cached :latest image is a cache too — podman run never
-  # re-checks the registry for it, so refresh it when building cold.
+  # Refresh the pinned builder image when building cold.
   PODMAN_ARGS+=(--pull=always)
 fi
 
@@ -262,7 +332,9 @@ fi
 # the build terminal while keeping these privileges inside its container.
 sudo podman run "${CONTAINER_PLATFORM_ARGS[@]}" "${PODMAN_ARGS[@]}" "$CONTAINER_IMAGE" /$BUILD_SCRIPT
 
-latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*.iso | head -n1)
+iso_name=omarchy
+[[ ${OMARCHY_OEM_INSTALL:-} == "1" ]] && iso_name=omarchy-oem
+latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/"$iso_name"-*.iso | head -n1)
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   iso_ref="${latest_iso%.*}${N1X_DEV_SSH_KEY:+-devssh}-$OMARCHY_ISO_REF.iso"
 else

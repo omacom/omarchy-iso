@@ -62,11 +62,11 @@ if [[ $BUILD_VERSION == *rc* ]]; then
   RELEASE_SUFFIX=""
 fi
 
-# The x86_64 ISO keeps the plain name every download link already uses. Any
-# other architecture says so, as the nightly's do, or it would upload over it.
-ARCH_SUFFIX=""
-if [[ $ARCH != x86_64 ]]; then
-  ARCH_SUFFIX="-$ARCH"
+# From 4.5.0 on, every release ISO names its architecture, so the two never
+# upload over each other: omarchy-X.Y.Z-x86.iso and omarchy-X.Y.Z-aarch64.iso.
+ARCH_SUFFIX="-$ARCH"
+if [[ $ARCH == x86_64 ]]; then
+  ARCH_SUFFIX="-x86"
 fi
 
 BUILD_ROOT=$(realpath "${BASH_SOURCE[0]%/*}/..")
@@ -80,8 +80,10 @@ else
   echo -e "\e[31mSkipping remaking ISOs\e[0m"
 fi
 
-# Sign and upload ISO
-latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*"$ARCH-$ISO_REF".iso | head -n1)
+# Sign and upload ISO. The build to release is named by its date. An OEM build
+# (omarchy-oem-...) ends in the same architecture and channel and erases the
+# disk of whoever boots it, so it is never the one a release publishes.
+latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/omarchy-[0-9]*"$ARCH-$ISO_REF".iso | head -n1)
 release_iso="$BUILD_RELEASE_PATH/omarchy-$BUILD_VERSION$RELEASE_SUFFIX$ARCH_SUFFIX.iso"
 cp "$latest_iso" "$release_iso"
 

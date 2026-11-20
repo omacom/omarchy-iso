@@ -2,6 +2,7 @@
 # shellcheck disable=SC2034
 
 iso_name="omarchy"
+[[ ${OMARCHY_OEM_INSTALL:-} == "1" ]] && iso_name="omarchy-oem"
 iso_label="OMARCHY_$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y%m)"
 iso_publisher="Omarchy <https://omarchy.org>"
 iso_application="Omarchy Installer"
@@ -44,6 +45,7 @@ file_permissions=(
   ["/root/configurator"]="0:0:755"
   ["/root/customize_airootfs.sh"]="0:0:755"
   ["/usr/local/bin/choose-mirror"]="0:0:755"
+  ["/usr/local/bin/livecd-sound"]="0:0:755"
   ["/usr/local/bin/omarchy-cidata-load"]="0:0:755"
   ["/usr/local/bin/omarchy-wait-root-image-verify"]="0:0:755"
   ["/usr/local/bin/omarchy-image-write"]="0:0:755"

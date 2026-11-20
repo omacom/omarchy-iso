@@ -73,7 +73,7 @@
   "progress.tip.menu": "A Super + Space megnyitja az Omarchy menüt: appok, beállítások és sok más",
   "progress.tip.keybindings": "A Super + K megmutatja az összes billentyűparancsot",
   "progress.tip.superKey": "A Super a Windows vagy Command billentyű a billentyűzeteden",
-  "progress.tip.signPdfs": "PDF-eket a Xournal++ alkalmazással írhatsz alá",
+  "progress.tip.signPdfs": "PDF-eket a Signed alkalmazással írhatsz alá",
   "progress.tip.localSend": "Ossz meg fájlokat telefonokkal és laptopokkal a LocalSenddel",
   "progress.tip.webApps": "Bármely weboldalból app lesz: Telepítés > Webapp a menüben",
   "progress.tip.terminal": "Super + Return: terminál, Super + Shift + Return: böngésző",

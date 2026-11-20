@@ -25,7 +25,7 @@ have_archiso() {
 
 # --- entrypoint argument contract -------------------------------------------
 bash -n "$ROOT/bin/omarchy-iso-make" "$ROOT/builder/build-iso.sh" \
-  "$ROOT/builder/aarch64-package-filter.sh" "$ROOT/builder/grub-platform.sh" \
+  "$ROOT/builder/aarch64-package-filter.sh" "$ROOT/builder/qcom-oem-firmware.sh" "$ROOT/builder/grub-platform.sh" \
   "$ROOT/builder/archiso-aarch64-mkinitcpio.sh" "$ROOT/builder/archiso-aarch64-grub-modules.sh" \
   "$ROOT/builder/node-release.sh" "$ROOT/builder/arm64-kernel-image.sh" \
   "$ROOT/builder/n1x-dev-ssh/omarchy-n1x-dev-ssh" "$ROOT/configs/airootfs/root/.automated_script.sh"
@@ -97,7 +97,7 @@ done
 for cfg in grub.cfg loopback.cfg; do
   src="$ROOT/configs/grub/$cfg"
   grep -Fqx 'set live_kernel=%KERNEL%' "$src" || fail "$cfg does not template the kernel"
-  grep -Fq 'vmlinuz-${live_kernel}' "$src" || fail "$cfg entries do not boot the selected kernel"
+  grep -Fq 'vmlinuz-%LIVE_KERNEL%' "$src" || fail "$cfg entries do not boot the selected kernel"
   grep -Fq "if [ \"\${sys_vendor}\" == 'Apple Inc.' ]; then" "$src" || fail "$cfg boots linux-t2 on a machine Apple did not make"
   grep -Fq '%BOOT_SPLASH_KERNEL_OPTIONS%%KERNEL_OPTIONS%' "$src" || fail "$cfg does not template boot options"
   grep -Fq -- "--id 'n1x-recovery'" "$src" || fail "$cfg lacks the N1x recovery entry"
@@ -113,10 +113,32 @@ for cfg in grub.cfg loopback.cfg; do
     fi
     if [[ $platform == aarch64 ]]; then
       grep -Fq 'n1x-recovery' "$fixture/$platform-$cfg" || fail "the aarch64 menu lost the N1x recovery entry in $cfg"
+      # No T2 Mac is arm64. Ventoy hooks the initramfs it finds by literal
+      # path here; without the hook an arm64 boot from its stick can't find
+      # the ISO and drops to a shell.
+      grep -Eq 'live_kernel|linux-t2|sys_vendor' "$fixture/$platform-$cfg" && fail "the aarch64 $cfg still chooses a Mac kernel"
+      grep -Eq '^\s*initrd\s' "$fixture/$platform-$cfg" || fail "the aarch64 $cfg loads no initramfs"
+      grep -E '^\s*initrd\s' "$fixture/$platform-$cfg" | grep -Fv 'initrd /arch/boot/aarch64/initramfs-linux-omarchy.img' \
+        && fail "an aarch64 $cfg entry loads an initramfs Ventoy can't find by name"
     else
       grep -Fq 'n1x-recovery' "$fixture/$platform-$cfg" && fail "recovery entry leaked into the $platform $cfg"
+      grep -Fq "if [ \"\${sys_vendor}\" == 'Apple Inc.' ]; then" "$fixture/$platform-$cfg" || fail "the x86_64 $cfg no longer boots linux-t2 on a Mac"
+      # Ventoy skips an initrd path with a variable in it, as on aarch64.
+      grep -E '^\s*initrd\s' "$fixture/$platform-$cfg" | grep -F '$' && fail "an x86_64 $cfg entry loads an initramfs Ventoy can't find by name"
+      # Every entry that boots the live kernel loads its initramfs through
+      # live_initrd.
+      entries=$(grep -c 'vmlinuz-${live_kernel} ' "$fixture/$platform-$cfg")
+      ((entries > 0)) && [[ $(grep -cx '\s*live_initrd' "$fixture/$platform-$cfg") == "$entries" ]] \
+        || fail "an x86_64 $cfg entry boots the live kernel without live_initrd"
+      # Each kernel loads its own initramfs. live_initrd is plain enough for
+      # bash to run, with initrd printing the path GRUB would load.
+      for kernel in linux-omarchy linux-t2; do
+        # shellcheck disable=SC2034,SC2329 # used by the live_initrd under test
+        chosen=$(initrd() { echo "$1"; }; eval "$(sed -n '/^function live_initrd {$/,/^}$/p' "$fixture/$platform-$cfg")"; live_kernel=$kernel; live_initrd)
+        [[ $chosen == "/arch/boot/x86_64/initramfs-$kernel.img" ]] || fail "the x86_64 $cfg loads '$chosen' for $kernel"
+      done
     fi
-    grep -Eq '^%N1X_ONLY' "$fixture/$platform-$cfg" && fail "template markers remain in $cfg"
+    grep -Eq '^%(N1X|X86)_ONLY|%LIVE_(KERNEL|INITRD)%' "$fixture/$platform-$cfg" && fail "template markers remain in $cfg"
     grep -Fqx 'timeout_style=hidden' "$fixture/$platform-$cfg" || fail "$cfg ($platform) shows the boot menu"
     grep -Fqx 'timeout=0' "$fixture/$platform-$cfg" || fail "$cfg ($platform) waits at the boot menu"
   done
@@ -135,6 +157,12 @@ grub="$ROOT/configs/grub/grub.cfg"
 grep -Fq 'smbios --type 4 --get-string 7 --set cpu_maker' "$grub" || fail "GRUB does not ask the firmware who made the processor"
 [[ $(grep -c 'default=archlinux-uki' "$grub") == $(grep -B1 'default=archlinux-uki' "$grub" | grep -c "regexp '") ]] \
   || fail "the device tree entry is the default on a machine that is not a Snapdragon"
+# A Snapdragon can't start the kernel without a device tree, so its screen
+# reader entry boots the UKI, and the s hotkey reaches that entry first.
+sed -n "/id 'archlinux-uki-accessibility'/,/}/p" "$grub" | grep -Eq '^\s*chainloader /%INSTALL_DIR%/boot/%ARCH%/omarchy-live\.efi .*accessibility=on' \
+  || fail "a Snapdragon has no screen reader entry that boots the device tree"
+[[ $(grep -m1 -- '--hotkey s ' "$grub") == *"--id 'archlinux-uki-accessibility'"* ]] \
+  || fail "on a Snapdragon the s hotkey boots the screen reader without a device tree"
 
 # --- manifest filter -----------------------------------------------------------
 source "$ROOT/builder/aarch64-package-filter.sh"
@@ -250,7 +278,7 @@ make_refuses 'Unknown option: --platform' --arch aarch64 --platform n1x --edge
 # firmware provides none. Every image tries to build one from its own kernel.
 uki="$ROOT/builder/qualcomm/live-uki.sh"
 bash -n "$uki"
-grep -Fq 'parted systemd-ukify linux-firmware-qcom qcom-firmware-extract python)' "$ROOT/builder/build-iso.sh" \
+grep -Fq 'parted systemd-ukify systemd-stub-omarchy linux-firmware-qcom qcom-firmware-extract python)' "$ROOT/builder/build-iso.sh" \
   || fail "the live image lacks ukify or the Snapdragon firmware tools"
 # The UKI is built in the image's customize step, once pacstrap has made the
 # kernel and initramfs it wraps: the builder's own lines, run against the live
@@ -406,9 +434,24 @@ grep -q '^MODULES=(loop i2c_mt65xx i2c_tegra i2c_hid i2c_hid_acpi hid_generic hi
 # A Snapdragon laptop's platform drivers, for a kernel that builds them as
 # modules. Each is optional, so a kernel without one still gets its image.
 live_modules=$(sed -n 's/^MODULES=(\(.*\))$/\1/p' "$fixture/archiso.conf")
-for module in gcc-x1e80100 pinctrl-x1e80100 qnoc-x1e80100 gcc-glymur tcsrcc-glymur dispcc-glymur gpucc-glymur pinctrl-glymur qnoc-glymur thunderbolt phy-qcom-qmp-usb phy-qcom-m31-eusb2 spmi-pmic-arb i2c-qcom-geni i2c-hid-of dwc3-qcom phy-qcom-qmp-combo phy-nxp-ptn3222; do
+for module in gcc-x1e80100 pinctrl-x1e80100 qnoc-x1e80100 gcc-glymur tcsrcc-glymur dispcc-glymur gpucc-glymur pinctrl-glymur qnoc-glymur thunderbolt phy-qcom-qmp-usb phy-qcom-m31-eusb2 spmi-pmic-arb i2c-qcom-geni i2c-hid-of dwc3-qcom dwc3-qcom-legacy phy-qcom-qmp-combo phy-nxp-ptn3222 gpio-sbu-mux; do
   [[ " $live_modules " == *" $module? "* ]] || fail "the live initramfs lacks the Snapdragon platform driver $module"
 done
 [[ " $live_modules " != *" qcom_q6v5_pas"* ]] || fail "the live initramfs loads the DSP driver"
+# The efivarfs mount fails on Snapdragon until the live root loads the EFI
+# variable driver; the hook that quiets it must run after base adds
+# init_functions, and must match the line mkinitcpio actually writes.
+live_hooks=$(sed -n 's/^HOOKS=(\(.*\))$/\1/p' "$fixture/archiso.conf")
+[[ " $live_hooks " == *" base "*" omarchy_quiet_efivars "* ]] || fail "the efivarfs mount is not quieted after base: $live_hooks"
+mkdir -p "$fixture/buildroot"
+if [[ -f /usr/lib/initcpio/init_functions ]]; then
+  cp /usr/lib/initcpio/init_functions "$fixture/buildroot/init_functions"
+else
+  printf '%s\n' '    if [ -e /sys/firmware/efi ]; then' \
+    '        mount -t efivarfs efivarfs /sys/firmware/efi/efivars -o nosuid,nodev,noexec' '    fi' >"$fixture/buildroot/init_functions"
+fi
+(BUILDROOT="$fixture/buildroot" && source "$ROOT/builder/qualcomm/quiet-efivars-install" && build)
+grep -Eq '^[[:space:]]*mount -t efivarfs .* 2>/dev/null$' "$fixture/buildroot/init_functions" || fail "the initramfs efivarfs mount still prints its error"
+grep -Eq '^[[:space:]]*mount -t efivarfs .*noexec$' "$fixture/buildroot/init_functions" && fail "an efivarfs mount was left unquieted"
 
 echo "aarch64 build overlay tests passed"

@@ -10,11 +10,11 @@ if docker run --rm --privileged --cgroupns=host \
   -v "$root:$root" -w "$root" \
   -e NO_BOOT_OFFER -e OMARCHY_ISO_REF -e OMARCHY_MIRROR \
   -e OMARCHY_ARCH -e OMARCHY_INSTALL_DEBUG \
-  -e OMARCHY_RUNTIME_PACKAGE -e OMARCHY_SETTINGS_PACKAGE \
+  -e OMARCHY_RUNTIME_PACKAGE -e OMARCHY_SETTINGS_PACKAGE -e OMARCHY_LOCAL_PACKAGES \
   docker.io/library/ubuntu:26.04 bash -euo pipefail -c '
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-    apt-get install -y -qq --no-install-recommends podman crun sudo git ca-certificates
+    apt-get install -y -qq --no-install-recommends podman crun sudo git ca-certificates python3
     git config --global --add safe.directory "$PWD"
     git config --global --add safe.directory "$PWD/archiso"
     install -d /etc/containers/containers.conf.d

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+
+build() {
+  add_module btrfs
+  add_module loop
+  add_module squashfs
+  add_module overlay
+  add_runscript
+}
+
+help() {
+  echo "Mount the shared Omarchy system beneath the live installer."
+}

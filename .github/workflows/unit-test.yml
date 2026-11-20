@@ -38,7 +38,7 @@ jobs:
         run: |
           docker run -d --name unit --privileged --cgroupns=host \
             -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /tmp:exec \
-            -v "$PWD:/src:ro" ghcr.io/archlinux/archlinux:latest bash -c '
+            -v "$PWD:/src:ro" -v "$PWD/builder:/builder:ro" ghcr.io/archlinux/archlinux:latest bash -c '
               systemctl mask getty.target console-getty.service \
                 systemd-udev-trigger.service systemd-udevd.service \
                 systemd-vconsole-setup.service
@@ -55,10 +55,11 @@ jobs:
             # mirror that drops one file must not fail the tests.
             sed -i "1i Server = https://mirror.omarchy.org/\$repo/os/\$arch" /etc/pacman.d/mirrorlist
             for attempt in 1 2 3; do
-              pacman -Syu --noconfirm --needed python parted gcc diffutils jq zip unzip openssh patch git terminus-font imagemagick tesseract tesseract-data-eng >/dev/null && break
+              pacman -Syu --noconfirm --needed python parted gcc diffutils jq zip unzip openssh patch git terminus-font imagemagick tesseract tesseract-data-eng squashfs-tools btrfs-progs >/dev/null && break
               [ "$attempt" -lt 3 ] || { echo "::error::the test container could not install its tools"; exit 1; }
               sleep 15
             done
+            /src/test/build-live-layer
             useradd -m tester
             cp -r /src /home/tester/omarchy-iso
             chown -R tester /home/tester/omarchy-iso

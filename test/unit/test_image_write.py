@@ -5,7 +5,7 @@ status whether the image is on the target (0), whether the pipe should write it
 instead because the tool refused it untouched (2), or whether the install has
 failed (1). A stub stands in for the tool; image-write-test.sh tests the tool.
 
-_write_root_image_pipe is run for real, zstdcat and dd against a temp file.
+_write_root_image_fallback is run against a temporary target for both formats.
 """
 
 import os
@@ -55,6 +55,11 @@ class WriteRootImageFramesTest(unittest.TestCase):
     def test_missing_tool_leaves_the_image_to_the_pipe(self):
         self.assertFalse(self.write())
 
+    def test_shared_image_uses_the_squashfs_block_writer(self):
+        self.stub(0)
+        self.assertTrue(phases_impl._write_root_image_frames(Path("/medium/omarchy-root.sfs"), "/dev/test"))
+        self.assertEqual(self.calls.read_text(), "write-squashfs /medium/omarchy-root.sfs /dev/test\n")
+
     def test_success_writes_the_image_and_logs_the_tool(self):
         self.stub(0, "omarchy-image-write: wrote 4.67 of 6.37 GiB\\n")
         self.assertTrue(self.write())
@@ -96,7 +101,14 @@ class WriteRootImagePipeTest(unittest.TestCase):
         self.target.write_bytes(bytes(len(self.raw)))
 
     def test_writes_the_image(self):
-        phases_impl._write_root_image_pipe(self.image, str(self.target))
+        phases_impl._write_root_image_fallback(self.image, str(self.target))
+        self.assertEqual(self.target.read_bytes(), self.raw)
+
+    def test_shared_fallback_reads_the_raw_image_mounted_at_boot(self):
+        mounted = self.tmp / "omarchy-root.img"
+        mounted.write_bytes(self.raw)
+        with mock.patch.object(phases_impl, "MOUNTED_ROOT_IMAGE", mounted):
+            phases_impl._write_root_image_fallback(self.tmp / "omarchy-root.sfs", str(self.target))
         self.assertEqual(self.target.read_bytes(), self.raw)
 
     def test_truncated_image_is_an_error(self):
@@ -105,13 +117,13 @@ class WriteRootImagePipeTest(unittest.TestCase):
         truncated = self.tmp / "truncated.zst"
         truncated.write_bytes(self.image.read_bytes()[: self.image.stat().st_size // 2])
         with self.assertRaises(subprocess.CalledProcessError) as caught:
-            phases_impl._write_root_image_pipe(truncated, str(self.target))
+            phases_impl._write_root_image_fallback(truncated, str(self.target))
         self.assertEqual(caught.exception.cmd[0], "zstdcat")
         self.assertIn("premature end", caught.exception.stderr)
 
     def test_unwritable_target_is_an_error(self):
         with self.assertRaises(subprocess.CalledProcessError) as caught:
-            phases_impl._write_root_image_pipe(self.image, str(self.tmp / "no" / "such" / "target"))
+            phases_impl._write_root_image_fallback(self.image, str(self.tmp / "no" / "such" / "target"))
         self.assertEqual(caught.exception.cmd[0], "dd")
 
 

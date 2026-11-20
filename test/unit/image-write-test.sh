@@ -305,3 +305,17 @@ run write "$work/zero-altered.zst" "$work/target" 1
 [[ $status == 1 ]] || fail "a zero frame that is not byte-identical is decoded, not skipped" "status $status: $(cat "$work/stderr")"
 grep -q "frame 4:" "$work/stderr" || fail "names the altered zero frame" "$(cat "$work/stderr")"
 pass "a zero frame that is not byte-identical is decoded, not skipped"
+
+# The shared media put this same test image (sparse, compressed and stored
+# blocks, with a short final block) in a mountable SquashFS.
+mkdir "$work/shared"
+cp "$raw" "$work/shared/omarchy-root.img"
+mksquashfs "$work/shared" "$work/shared.sfs" -noappend -comp zstd -b 256K \
+  -no-fragments -no-xattrs -no-progress -quiet
+for threads in 1 4; do
+  target "$work/target" 0
+  run write-squashfs "$work/shared.sfs" "$work/target" "$threads"
+  [[ $status == 0 ]] || fail "write-squashfs failed" "$(cat "$work/stderr")"
+  cmp "$raw" "$work/target" || fail "the shared image changed during installation"
+done
+pass "the SquashFS writer reproduces all raw blocks with one or more workers"

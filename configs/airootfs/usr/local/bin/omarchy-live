@@ -1,0 +1,87 @@
+#!/bin/bash
+# Switch userspace between the installer and the system image it installs.
+set -euo pipefail
+base=/run/omarchy-live
+next=/run/nextroot
+mountpoint -q "$base/system"
+exec 9>"$base/switch.lock"
+flock -n 9 || exit 1
+mkdir -p "$next"
+if [[ -L $next || -n $(ls -A "$next") ]] || mountpoint -q "$next"; then
+  echo 'Another root switch is pending.' >&2
+  exit 1
+fi
+
+# Until systemd accepts the switch, leave the current desktop or installer usable.
+cleanup() {
+  if mountpoint -q "$next"; then umount -R "$next"; fi
+  rmdir "$next" 2>/dev/null || true
+}
+trap cleanup EXIT
+case ${1:-} in
+  --return)
+    [[ -f /etc/omarchy/preview-ready ]]
+    mountpoint -q "$base/installer"
+    mount --bind "$base/installer" "$next"
+    chvt 1
+    ;;
+  '')
+    [[ -f /usr/share/omarchy-iso/live-desktop ]]
+    echo 'Starting the live desktop…'
+    chmod 0700 "$base"
+    # A failed finalizer can leave a partially seeded home. Retry from the
+    # immutable system image; a successful session lasts until power-off.
+    if [[ ! -e "$base/upper/etc/omarchy/preview-ready" ]]; then
+      rm -rf --one-file-system -- "$base/upper" "$base/work"
+    fi
+    mkdir -p "$base"/{installer,upper,work}
+    mountpoint -q "$base/installer" || mount --bind --make-private / "$base/installer"
+    mount -t overlay omarchy-live -o "lowerdir=$base/system,upperdir=$base/upper,workdir=$base/work" "$next"
+    # A Mac may be running the ISO's T2 kernel instead of the target default.
+    modules=/usr/lib/modules/$(uname -r)
+    if [[ ! -d "$next$modules" ]]; then
+      mkdir -p "$next$modules"
+      mount --bind -o ro "$modules" "$next$modules"
+    fi
+    if [[ ! -e "$next/etc/omarchy/preview-ready" ]]; then
+      install -Dm755 /usr/local/bin/omarchy-live "$next/usr/local/bin/omarchy-live"
+      install -Dm755 /usr/local/bin/omarchy-live-session "$next/usr/local/bin/omarchy-live-session"
+      install -Dm644 /etc/polkit-1/rules.d/00-omarchy-live-disks.rules "$next/etc/polkit-1/rules.d/00-omarchy-live-disks.rules"
+      install -m644 /etc/pacman.conf "$next/etc/pacman.conf"
+      # Provision the temporary root with the ordinary installer finalizers.
+      # They can read hardware information and the offline mirror, but have
+      # no raw disks, firmware variables or network access during setup.
+      if ! systemd-run --quiet --wait --pipe --collect --send-sighup --service-type=exec \
+        -p "RootDirectory=$next" -p MountAPIVFS=yes -p PrivateDevices=yes \
+        -p PrivateNetwork=yes -p ProtectKernelTunables=yes -p ProtectControlGroups=yes \
+        -p 'InaccessiblePaths=-/sys/firmware/efi/efivars' -p 'TemporaryFileSystem=/run /tmp:mode=1777' \
+        -p 'BindReadOnlyPaths=/run/udev /var/cache/omarchy/mirror/offline -/opt/packages' \
+        /usr/local/bin/omarchy-live-session --prepare "$(cat /root/omarchy_mirror)" \
+        </dev/null >"$base/prepare.log" 2>&1; then
+        tail -n 15 "$base/prepare.log" >&2
+        exit 1
+      fi
+    fi
+    ;;
+  *) exit 2 ;;
+esac
+
+# Soft reboot normally carries /run without submounts. Both roots need the
+# boot medium, image and installer overlay at the original archiso paths.
+mount --bind --make-private /run "$next/run"
+mount --rbind --make-rprivate /run/archiso "$next/run/archiso"
+mount --rbind --make-rprivate "$base" "$next$base"
+# Keep the original mounts as well as their copies until the root switch.
+# The read-only loop device still holds its SquashFS container open.
+while IFS= read -r path; do
+  case "$path/" in
+    /run/archiso/*|"$base/"*|"$next/"*) ;;
+    *) continue ;;
+  esac
+  unit=$(systemd-escape --path --suffix=mount "$path")
+  mkdir -p "/run/systemd/system/$unit.d"
+  printf '[Unit]\nDefaultDependencies=no\n' >"/run/systemd/system/$unit.d/omarchy-live.conf"
+done < <(findmnt -rn -o TARGET)
+systemctl daemon-reload
+systemctl --no-block soft-reboot
+trap - EXIT

@@ -1,0 +1,4 @@
+polkit.addRule(function(action, subject) {
+    if (subject.user === "omarchy-live" && action.id.indexOf("org.freedesktop.udisks2.") === 0)
+        return polkit.Result.NO;
+});

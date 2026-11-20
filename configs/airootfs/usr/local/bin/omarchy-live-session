@@ -1,0 +1,52 @@
+#!/bin/bash
+set -euo pipefail
+user=omarchy-live
+if [[ ${1:-} != --prepare ]]; then
+  openvt --console=8 --switch --wait -- /usr/bin/login -f "$user" || true
+  exec /usr/local/bin/omarchy-live --return
+fi
+
+export SYSTEMD_OFFLINE=1 SYSTEMD_IN_CHROOT=1 OMARCHY_MIRROR=${2:?}
+export OMARCHY_PATH=/usr/share/omarchy
+export PATH="$OMARCHY_PATH/bin:$PATH"
+id "$user" >/dev/null 2>&1 || useradd --create-home --user-group --shell /bin/bash "$user"
+usermod -aG wheel "$user"
+passwd -d "$user"
+install -Dm440 /dev/stdin /etc/sudoers.d/90-omarchy-live <<<"$user ALL=(ALL:ALL) NOPASSWD: ALL"
+visudo -cf /etc/sudoers
+
+# The system image ships no private pacman key. Generate one in RAM and
+# trust the packaged distribution keys, as on a fresh installation.
+pacman-key --init
+pacman-key --populate
+
+# The writable preview is an overlay on RAM. Snapper cannot create a Btrfs
+# snapshot config for it. Give the finalizer its normal config template.
+install -Dm640 "$OMARCHY_PATH/default/snapper/root" /etc/snapper/configs/root
+omarchy-apply-system --install-user "$user" --first-install
+(cd "/home/$user" && runuser -u "$user" -- env HOME="/home/$user" omarchy-provision-user --first-install)
+
+# The installed system uses SDDM. The live button opens its UWSM session
+# directly and returns to the installer on logout.
+systemctl disable sddm.service
+systemctl mask snapper-cleanup.timer limine-snapper-sync.service
+# A live boot must not discover swap or mount partitions on other disks.
+mkdir -p /etc/systemd/system-generators
+ln -sf /dev/null /etc/systemd/system-generators/systemd-gpt-auto-generator
+cat >/etc/profile.d/omarchy-live-session.sh <<'EOF'
+if [ "$(id -un)" = omarchy-live ] && [ "$(tty 2>/dev/null)" = /dev/tty8 ]; then
+  exec uwsm start -g -1 -e -D Hyprland hyprland.desktop
+fi
+EOF
+cat >/etc/systemd/system/omarchy-live-session.service <<'EOF'
+[Unit]
+Description=Omarchy live desktop
+After=systemd-user-sessions.service getty.target
+[Service]
+ExecStart=/usr/local/bin/omarchy-live-session
+[Install]
+WantedBy=graphical.target
+EOF
+systemctl enable omarchy-live-session.service
+mkdir -p /etc/omarchy
+touch /etc/omarchy/preview-ready

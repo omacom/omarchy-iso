@@ -1,0 +1,23 @@
+#!/usr/bin/ash
+
+run_latehook() {
+    local medium base loop cow
+    medium="/run/archiso/bootmnt/${archisobasedir:-arch}/$(uname -m)"
+    base=/run/omarchy-live
+    cow="/run/archiso/cowspace/${cow_directory}"
+
+    # archiso has located the USB drive and mounted its writable overlay.
+    # The same read-only Btrfs image also supplies the blocks for installation.
+    mkdir -p "$base/container" "$base/system" &&
+        { mount -t squashfs -o ro,loop,threads=multi "$medium/omarchy-root.sfs" "$base/container" ||
+          mount -t squashfs -o ro,loop "$medium/omarchy-root.sfs" "$base/container"; } &&
+        loop=$(losetup --find --show --read-only "$base/container/omarchy-root.img") &&
+        mount -t btrfs -o ro,subvol=omarchy-root "$loop" "$base/system" &&
+        umount /new_root &&
+        mount -t overlay airootfs -o "lowerdir=/run/archiso/airootfs:$base/system,upperdir=$cow/upperdir,workdir=$cow/workdir" /new_root &&
+        return 0
+
+    err "Could not mount the shared Omarchy system. Check the installation medium."
+    launch_interactive_shell
+    reboot -f
+}

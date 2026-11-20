@@ -25,6 +25,16 @@ jobs:
         with:
           submodules: true
 
+      # Exercise the ISO language gate against the real shared form and its
+      # desktop catalogs. Pin the fixture so runtime changes cannot break an
+      # unrelated ISO commit; update this together with shared-form changes.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: omacom/omarchy
+          ref: ac6cb9c712848741f994d7ecbaccdbab90b526e8
+          path: .test-omarchy
+          persist-credentials: false
+
       # The tests run where the code they cover runs: on Arch, the same as
       # the live ISO and an Omarchy workstation. The container boots systemd
       # because the keyboard tests ask the real localectl for its keymaps, and
@@ -44,7 +54,7 @@ jobs:
                 systemd-vconsole-setup.service
               exec /usr/lib/systemd/systemd
             '
-          docker exec -e CI -e GITHUB_ACTIONS unit bash -euo pipefail -c '
+          docker exec -e CI -e GITHUB_ACTIONS -e OMARCHY_PATH=/home/tester/omarchy-iso/.test-omarchy unit bash -euo pipefail -c '
             for i in $(seq 1 60); do
               state=$(systemctl is-system-running 2>/dev/null || true)
               case $state in running | degraded) break ;; esac

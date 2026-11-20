@@ -56,5 +56,9 @@ grep -Fq 'qmp-shutdown-reason.py' "$ROOT/bin/omarchy-iso-boot" \
   || fail "the installed-system relaunch still attaches the installer ISO"
 [[ $(grep -c 'run_aarch64 plain$' "$ROOT/bin/omarchy-iso-boot") == 1 ]] \
   || fail "a disk that is already installed no longer boots with the ISO attached"
+grep -Fq 'serial=/tmp/omarchy-iso-boot-serial.log' "$ROOT/bin/omarchy-iso-boot" \
+  || fail "the install run no longer logs to the serial file"
+grep -Fq 'serial=/tmp/omarchy-iso-boot-installed-serial.log' "$ROOT/bin/omarchy-iso-boot" \
+  || fail "the installed-system boot truncates the installer's serial log"
 bash -n "$ROOT/bin/omarchy-iso-boot" "$ROOT/bin/lib/aarch64-installed-boot.sh"
 echo "aarch64 installed-boot checks passed"

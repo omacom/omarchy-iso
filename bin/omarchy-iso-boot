@@ -223,7 +223,10 @@ if [[ $HOST_ARCH == aarch64 ]]; then
     # The automatic relaunch boots the installed disk only. Leaving the ISO
     # attached lets the firmware's saved boot order walk back into the installer.
     local -a install_media=()
+    # The second QEMU must not truncate the installer's serial log.
+    local serial=/tmp/omarchy-iso-boot-serial.log
     if [[ ${1:-} == --no-iso ]]; then
+      serial=/tmp/omarchy-iso-boot-installed-serial.log
       shift
     else
       install_media=(
@@ -247,7 +250,7 @@ if [[ $HOST_ARCH == aarch64 ]]; then
       "${display_args[@]}" \
       -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-tablet,bus=xhci.0 \
       -device virtio-rng-pci \
-      -serial file:/tmp/omarchy-iso-boot-serial.log \
+      -serial "file:${serial}" \
       "${NET_ARGS[@]}" \
       -boot menu=on \
       "$@" \

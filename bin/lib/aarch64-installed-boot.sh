@@ -24,9 +24,13 @@ aarch64_boot_mode() {
   fi
 }
 
-# Follow the install run with a boot of the installed system only once the
-# disk holds data. A window closed before the installer writes anything has
-# nothing to boot.
+# Follow the install run only when the installer rebooted (QEMU's SHUTDOWN
+# reason is guest-reset) and the disk holds data. Closing the window is
+# host-ui, and a guest poweroff is guest-shutdown: both stop, even if the
+# installer had already written the disk. An empty reason (QMP never
+# answered) stops too; running the launcher again sees the disk and boots
+# the plain device directly.
 aarch64_should_relaunch() {
-  disk_written
+  local reason=$1
+  [[ $reason == guest-reset ]] && disk_written
 }

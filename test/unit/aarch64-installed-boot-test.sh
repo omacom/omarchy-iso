@@ -27,14 +27,17 @@ DISK=$fixture/disk
 printf '%s\n' '{ "data": false }' >"$DISK.map"
 
 [[ $(aarch64_boot_mode) == gl ]] || fail "a fresh disk boots the live ISO on the GL device"
-aarch64_should_relaunch && fail "a fresh disk relaunches after the install QEMU exits"
+aarch64_should_relaunch guest-reset && fail "a fresh disk relaunches after the installer reboots"
 OMARCHY_VM_GL=0
 [[ $(aarch64_boot_mode) == plain ]] || fail "OMARCHY_VM_GL=0 stays on the plain device"
 unset OMARCHY_VM_GL
 
 printf '%s\n' '{ "start": 0, "data": true }' >"$DISK.map"
 [[ $(aarch64_boot_mode) == plain ]] || fail "an installed disk starts on the plain device"
-aarch64_should_relaunch || fail "an installed disk does not relaunch after the install run"
+aarch64_should_relaunch guest-reset || fail "an installer reboot on a written disk does not relaunch"
+aarch64_should_relaunch host-ui && fail "closing the window relaunches the VM"
+aarch64_should_relaunch guest-shutdown && fail "a guest poweroff relaunches the VM"
+aarch64_should_relaunch "" && fail "a missing QMP reason relaunches the VM"
 OMARCHY_VM_GL=0
 [[ $(aarch64_boot_mode) == plain ]] || fail "OMARCHY_VM_GL=0 on an installed disk leaves the plain device"
 
@@ -43,7 +46,11 @@ printf '%s\n' '#!/bin/bash' 'exit 1' >"$fixture/bin/qemu-img"
 chmod +x "$fixture/bin/qemu-img"
 unset OMARCHY_VM_GL
 [[ $(aarch64_boot_mode) == gl ]] || fail "an unreadable disk image boots as a fresh ISO"
-aarch64_should_relaunch && fail "an unreadable disk image relaunches"
+aarch64_should_relaunch guest-reset && fail "an unreadable disk image relaunches"
 
+grep -Fq 'aarch64_should_relaunch "$shutdown_reason"' "$ROOT/bin/omarchy-iso-boot" \
+  || fail "the launcher does not consult the QMP shutdown reason"
+grep -Fq 'qmp-shutdown-reason.py' "$ROOT/bin/omarchy-iso-boot" \
+  || fail "the launcher does not read the QMP shutdown reason"
 bash -n "$ROOT/bin/omarchy-iso-boot" "$ROOT/bin/lib/aarch64-installed-boot.sh"
 echo "aarch64 installed-boot checks passed"

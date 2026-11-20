@@ -247,9 +247,19 @@ if [[ $HOST_ARCH == aarch64 ]]; then
   if [[ $(aarch64_boot_mode) == plain ]]; then
     run_aarch64 plain
   else
-    run_aarch64 gl -no-reboot
-    # Closed before anything was installed: nothing to boot.
-    if aarch64_should_relaunch; then
+    # -no-reboot exits on the installer's reboot and on a closed window.
+    # QMP says which. A non-zero QEMU status must not skip that check.
+    qmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/omarchy-iso-boot-qmp.XXXXXX")
+    qmp_sock=$qmp_dir/qmp.sock
+    python3 "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/qmp-shutdown-reason.py" "$qmp_sock" >"$qmp_dir/reason" &
+    qmp_pid=$!
+    set +e
+    run_aarch64 gl -no-reboot -qmp "unix:${qmp_sock},server=on,wait=off"
+    set -e
+    wait "$qmp_pid" || true
+    shutdown_reason=$(cat "$qmp_dir/reason" 2>/dev/null || true)
+    rm -rf "$qmp_dir"
+    if aarch64_should_relaunch "$shutdown_reason"; then
       echo "Booting the installed system with the plain virtio-gpu"
       run_aarch64 plain
     fi

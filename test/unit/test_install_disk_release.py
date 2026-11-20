@@ -3,7 +3,7 @@
 """Releasing the install disk before archinstall partitions it.
 
 omarchy-iso-cleanup-disk refuses when something still holds the disk, and its
-last line says what. prepare_live has to put that line on the failure screen
+last line says what. The installer has to put that line on the failure screen
 rather than the "returned non-zero exit status 1" a bare check=True gives, and
 has to stop before archinstall is ever loaded. These tests put stand-in
 cleanup scripts on PATH, so the real command capture runs.
@@ -41,9 +41,12 @@ class InstallDiskReleaseTest(unittest.TestCase):
         path.start()
         self.addCleanup(path.stop)
         self.arch = mock.Mock()
+        self.verify = mock.Mock()
         patches = [
             mock.patch.object(phases_impl, "arch", self.arch, create=True),
             mock.patch.object(phases_impl, "_stage_qualcomm_firmware"),
+            mock.patch.object(phases_impl, "verify_install_medium", self.verify),
+            mock.patch.object(phases_impl, "verify_root_image_layout"),
         ]
         for patch in patches:
             patch.start()
@@ -63,6 +66,20 @@ class InstallDiskReleaseTest(unittest.TestCase):
             state={},
         )
 
+    def prepare(self):
+        ctx = self.ctx()
+        phases_impl.prepare_live(ctx)
+        phases_impl.prepare_install_target(ctx)
+
+    def test_bad_media_stops_before_wiping_existing_signatures(self):
+        marker = self.bin_dir / "cleanup-ran"
+        self.cleanup_script(f'touch "{marker}"')
+        self.verify.side_effect = RuntimeError("corrupt install medium")
+        with self.assertRaisesRegex(RuntimeError, "corrupt"):
+            self.prepare()
+        self.assertFalse(marker.exists())
+        self.arch.load_arch_config.assert_not_called()
+
     def test_a_held_disk_stops_with_what_holds_it(self):
         self.cleanup_script(
             'echo "Cleaning up existing holders on install disk: $1"\n'
@@ -71,7 +88,7 @@ class InstallDiskReleaseTest(unittest.TestCase):
         )
 
         with self.assertRaises(RuntimeError) as raised:
-            phases_impl.prepare_live(self.ctx())
+            self.prepare()
 
         self.assertEqual(
             str(raised.exception),
@@ -83,14 +100,14 @@ class InstallDiskReleaseTest(unittest.TestCase):
         self.cleanup_script("exit 1")
 
         with self.assertRaises(RuntimeError) as raised:
-            phases_impl.prepare_live(self.ctx())
+            self.prepare()
 
         self.assertEqual(str(raised.exception), "Could not release /dev/vda")
 
     def test_a_released_disk_goes_on_to_archinstall(self):
         self.cleanup_script('[ "$1" = /dev/vda ] || exit 1\necho "Released $1"')
 
-        phases_impl.prepare_live(self.ctx())
+        self.prepare()
 
         self.arch.load_arch_config.assert_called_once()
 

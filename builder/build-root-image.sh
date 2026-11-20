@@ -7,17 +7,18 @@
 # firmware, Tailscale and the T2 kernel vary per machine. So pacstrap the
 # invariant set once here, at build time, into a btrfs filesystem compressed at
 # a high zstd level (see IMAGE_COMPRESS below), shrink it, and pack the
-# filesystem image as independent 256 KiB zstd frames with a seek table
-# (omarchy-image-write pack). At install time omarchy-image-write decodes the
-# frames on every core and writes them straight onto the target partition;
-# the installer then gives the filesystem a fresh fsid and grows it to fill
+# filesystem image in independent 256 KiB blocks. Omarchy uses a mountable
+# SquashFS container. Installer-only media use seekable zstd frames. At
+# install time omarchy-image-write decodes the blocks in parallel and writes
+# them straight onto the target partition.
+# The installer then gives the filesystem a fresh fsid and grows it to fill
 # the partition. The per-machine delta is a small pacstrap after.
 #
-# Usage: build-root-image.sh <pacman.conf> <output.img.zst> <package>...
+# Usage: build-root-image.sh <pacman.conf> <output.img.zst | output.sfs> <package>...
 #
 #   pacman.conf     Config whose repositories resolve every package; its
 #                   CacheDir must hold the package files so nothing is copied.
-#   output.img.zst  Where to write the packed image.
+#   output          Where to write the packed image.
 #   package...      Packages to pacstrap into the image.
 #
 # Environment:
@@ -212,7 +213,7 @@ shift 2 || true
 packages=("$@")
 
 if [[ -z $pacman_conf || -z $output || ${#packages[@]} -eq 0 ]]; then
-  echo "Usage: build-root-image.sh <pacman.conf> <output.img.zst> <package>..." >&2
+  echo "Usage: build-root-image.sh <pacman.conf> <output.img.zst | output.sfs> <package>..." >&2
   exit 1
 fi
 if [[ ! -r $pacman_conf ]]; then
@@ -639,6 +640,14 @@ truncate -s "${shrink_mb}M" "$backing"
 # omarchy-image-write decode and write it on every core at install time:
 # 0.9 s instead of 2.5 s through zstdcat | dd on a 990 PRO. Framing costs
 # 1.3% (55 MB). It is still one valid .zst; zstd -d reads it unchanged.
-echo "Packing the root image as 256 KiB zstd frames"
-omarchy-image-write pack "$backing" "$output"
+if [[ $output == *.sfs ]]; then
+  # One mountable file for the live desktop and the installer's block writer.
+  mkdir -p "$work/squashfs"
+  ln "$backing" "$work/squashfs/omarchy-root.img"
+  mksquashfs "$work/squashfs" "$output" -comp zstd -Xcompression-level 19 -b 256K \
+    -no-fragments -noappend -no-xattrs -quiet
+else
+  echo "Packing the root image as 256 KiB zstd frames"
+  omarchy-image-write pack "$backing" "$output"
+fi
 echo "Root image: $(du -h "$output" | cut -f1) at $output (from ${shrink_mb}M apparent input)"

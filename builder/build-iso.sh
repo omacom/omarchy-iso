@@ -410,6 +410,23 @@ printf '%s\n' "${arch_packages[@]}" >> "$live_packages_file"
 # Anchored so linux-omarchy, linux-t2 and linux-firmware are untouched.
 sed -i -E '/^(linux|broadcom-wl)$/d' "$live_packages_file"
 
+live_desktop=false
+live_marker="$build_cache_dir/airootfs/usr/share/omarchy-iso/live-desktop"
+rm -f "$live_marker"
+if [[ $OMARCHY_ARCH == x86_64 && ${OMARCHY_OEM_INSTALL:-} != 1 ]]; then
+  live_desktop=true
+  touch "$live_marker"
+  # Switch the root layers before Plymouth attaches to /new_root.
+  live_init_config="$build_cache_dir/airootfs/etc/mkinitcpio.conf.d/archiso.conf"
+  sed -i '/^HOOKS=(/s/ archiso_pxe_nfs / archiso_pxe_nfs omarchy_live_base /' "$live_init_config"
+  grep -q '^HOOKS=(.* archiso_pxe_nfs omarchy_live_base ' "$live_init_config" || {
+    echo "ERROR: cannot place the shared-image hook after archiso in $live_init_config" >&2
+    exit 1
+  }
+  # Only build presets for the kernels shipped on the ISO.
+  rm -f "$build_cache_dir/airootfs/etc/mkinitcpio.d/linux.preset"
+fi
+
 # Build the offline mirror: everything pacstrap might want during the target
 # install. With --local-source, the omarchy* packages we just built are
 # already in the mirror and we filter them out below. Without it, pacman -Syw
@@ -963,6 +980,12 @@ iso_subdir="$(sed -n 's/^install_dir="\(.*\)"$/\1/p' "$build_cache_dir/profilede
 root_image_dir="$build_cache_dir/work/iso/$iso_subdir"
 root_image="$root_image_dir/omarchy-root.img.zst"
 mkdir -p "$root_image_dir"
+if $live_desktop; then
+  rm -f "$root_image" "$root_image.sha256"
+  root_image="$root_image_dir/omarchy-root.sfs"
+else
+  rm -f "$root_image_dir/omarchy-root.sfs"{,.sha256}
+fi
 # Builds from before the raw image left a send stream (and, briefly, its
 # checksum) in the persistent build cache, where they would ship inside the
 # squashfs.
@@ -1194,6 +1217,12 @@ done
 
 # Live ISO uses the same offline pacman.conf.
 cp "$build_cache_dir/pacman-offline.conf" "$build_cache_dir/airootfs/etc/pacman.conf"
+
+# The installer layer shares unchanged files with the full desktop image.
+if $live_desktop; then
+  export OMARCHY_ROOT_SFS="$root_image"
+  export PATH="/builder/live-layer:$PATH"
+fi
 
 # Build the ISO. profiledef.sh reads OMARCHY_ARCH for the archiso arch/bootmodes.
 echo "[timing] mkarchiso start $(date +%s)"

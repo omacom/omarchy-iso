@@ -27,9 +27,9 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 CORRUPT_ISO="${OMARCHY_INTEGRATION_SCRATCH_DIR:-$BASE_DIR}/corrupt.iso"
 # The root image's file name, resolved from the ISO instead of assumed: with
 # a wrong hardcoded name this scenario would silently test nothing.
-IMAGE_PATH=$(xorriso -indev "$ISO" -find /arch/x86_64 -name 'omarchy-root.*.zst' 2>/dev/null |
-  tr -d "'" | sed 's|^/||' | head -n1)
-IMAGE_PATH=${IMAGE_PATH:-arch/x86_64/omarchy-root.img.zst}
+IMAGE_PATH=$(xorriso -indev "$ISO" -find /arch/x86_64 -name 'omarchy-root.*.sha256' 2>/dev/null |
+  tr -d "'" | sed -e 's|^/||' -e 's/\.sha256$//' | head -n1)
+: "${IMAGE_PATH:?missing root image checksum on the ISO}"
 VERIFY_UNIT=omarchy-root-image-verify.service
 STATE=/run/omarchy-install/state.json
 
@@ -83,6 +83,11 @@ corrupt_iso() {
   # Deep enough to model bit-rot in the payload, and provably inside the
   # file's extent; +1 mod 256 so the byte always changes.
   off=$((start + 1048576))
+  if [[ $IMAGE_PATH == *.sfs ]]; then
+    # The installer itself reads the shared filesystem. Alter its creation
+    # timestamp so it can still boot and demonstrate the pre-format hash gate.
+    off=$((start + 8))
+  fi
   ((1048576 < size)) || { echo "image unexpectedly small: $size bytes" >&2; return 1; }
   orig=$(dd if="$CORRUPT_ISO" bs=1 skip="$off" count=1 status=none | od -An -tu1 | tr -d ' ')
   flipped=$(( (orig + 1) % 256 ))

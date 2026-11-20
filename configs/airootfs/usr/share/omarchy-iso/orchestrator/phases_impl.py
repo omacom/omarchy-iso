@@ -165,14 +165,18 @@ def _time_step(label: str):
 
 
 # The root image: the invariant target system as a btrfs filesystem image
-# (build-root-image.sh), packed as independent 256 KiB zstd frames with a seek
-# table and written onto the target partition in place of pacstrapping it.
+# (build-root-image.sh), written onto the target partition in place of
+# pacstrapping it. Omarchy wraps it in SquashFS so the live desktop can
+# also read it. Installer-only media use the seekable zstd format.
 # build-iso.sh ships it as a plain file on the ISO, read straight off the boot
 # medium, with its sha256 next to it. Its one subvolume becomes @.
 # archiso names the directory after the architecture, which is what
 # platform.machine() says on the live system: arch/x86_64 or arch/aarch64.
 ROOT_IMAGE_DIR = Path("/run/archiso/bootmnt/arch") / platform.machine()
-ROOT_IMAGE = ROOT_IMAGE_DIR / "omarchy-root.img.zst"
+ROOT_IMAGE = ROOT_IMAGE_DIR / "omarchy-root.sfs"
+if not ROOT_IMAGE.is_file():
+    ROOT_IMAGE = ROOT_IMAGE_DIR / "omarchy-root.img.zst"
+MOUNTED_ROOT_IMAGE = Path("/run/omarchy-live/container/omarchy-root.img")
 ROOT_IMAGE_SUBVOLUME = "omarchy-root"
 # Writes ROOT_IMAGE in parallel; compiled and installed by build-iso.sh.
 IMAGE_WRITE = Path("/usr/local/bin/omarchy-image-write")
@@ -998,8 +1002,8 @@ def _medium_bytes_read() -> int | None:
 
 def _write_root_image_frames(image: Path, device: str) -> bool:
     """Write the image with omarchy-image-write (builder/omarchy-image-write.c):
-    the ISO packs it as independent 256 KiB zstd frames with a seek table,
-    which N threads decode and pwrite with O_DIRECT, so the drive sees N
+    workers decode independent SquashFS blocks or seekable zstd frames
+    and pwrite with O_DIRECT, so the drive sees N
     requests in flight where zstdcat | dd gives it one (2.5 s -> 0.9 s on a
     990 PRO, stream in RAM). False when the tool is not on the ISO or the
     image is not one it writes (exit 2, nothing written), so the caller can
@@ -1008,19 +1012,30 @@ def _write_root_image_frames(image: Path, device: str) -> bool:
     if not IMAGE_WRITE.is_file():
         return False
     with _time_step("F1.image_write (parallel frames, O_DIRECT)"):
-        proc = subprocess.run([str(IMAGE_WRITE), "write", str(image), device],
+        command = "write-squashfs" if image.suffix == ".sfs" else "write"
+        proc = subprocess.run([str(IMAGE_WRITE), command, str(image), device],
                               stderr=subprocess.PIPE, text=True, check=False)
     for line in proc.stderr.splitlines():
         info(f"› {line}")
     if proc.returncode == 2:
-        info("› image-write refused the image; writing it through zstdcat | dd")
+        info("› image-write declined the image format; using dd")
         return False
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, proc.args, stderr=proc.stderr)
     return True
 
 
-def _write_root_image_pipe(image: Path, device: str) -> None:
+def _write_root_image_fallback(image: Path, device: str) -> None:
+    if image.suffix == ".sfs":
+        # The initramfs has already mounted this container read-only.
+        with _time_step("F1.dd (mounted squashfs)"):
+            result = subprocess.run(
+                ["dd", f"if={MOUNTED_ROOT_IMAGE}", f"of={device}", "bs=2M", "iflag=fullblock",
+                 "oflag=direct", "conv=sparse,fsync", "status=noxfer"],
+                stderr=subprocess.PIPE, text=True, check=True,
+            )
+            _check_dd_full_blocks(result.stderr)
+        return
     with _time_step("F1.dd (zstdcat | dd oflag=direct)"):
         # dd blocks on its writes, so the pipe paces zstd to the disk,
         # and the decoding runs on another core.
@@ -1090,7 +1105,7 @@ def _place_root_image(ctx: InstallContext) -> None:
     # whole image on a machine whose RAM could not hold it.
     medium_before = _medium_bytes_read()
     if not _write_root_image_frames(raw_image, device):
-        _write_root_image_pipe(raw_image, device)
+        _write_root_image_fallback(raw_image, device)
     medium_after = _medium_bytes_read()
     if medium_before is not None and medium_after is not None:
         info(f"› read {(medium_after - medium_before) / 1048576:.0f} MiB of the "

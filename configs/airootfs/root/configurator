@@ -106,27 +106,41 @@ clear_logo() {
   gum style --foreground 2 --padding "1 0 0 $PADDING_LEFT" "$(<"$LOGO_PATH")"
 }
 
-# Vertically-centered welcome shown once before the keyboard step — the same
-# frame the deferred-provisioning first boot opens on, so install and first boot
-# bookend the setup identically. Logo, the Omarchy tagline, and a single button,
-# centered like the boot logo. No animation.
+draw_welcome_buttons() {
+  local row=$1 choice=$2
+  local install='   Install   ' live='   Try live   '
+  local column=$(((TERM_WIDTH - ${#install} - ${#live} - 2) / 2 + 1))
+  (( column > 0 )) || column=1
+
+  # Match the installer’s gum confirm buttons in the console palette.
+  local selected=$'\033[30;42m' unselected=$'\033[37;40m'
+  local install_style=$selected live_style=$unselected
+  if (( choice == 2 )); then
+    install_style=$unselected
+    live_style=$selected
+  fi
+  printf '\033[%d;%dH%s%s\033[0m  %s%s\033[0m' \
+    "$row" "$column" "$install_style" "$install" "$live_style" "$live"
+}
+
 greeter() {
   measure_terminal
 
-  local rows logo_h content_h top cols logo_row tagline_row hint_row
-  local tagline hint tpad hpad anim
+  local rows logo_h content_h top cols logo_row tagline_row action_row
+  local tagline tpad anim key='' choice=0 preview=0
+  [[ ! -f /usr/share/omarchy-iso/live-desktop ]] || preview=1
   cols=$TERM_WIDTH
   rows=$(stty size 2>/dev/null </dev/tty | awk '{print $1}')
   [[ $rows =~ ^[0-9]+$ ]] || rows=${LINES:-24}
   logo_h=$(wc -l <"$LOGO_PATH")
 
-  # logo + blank + tagline + blank + hint
-  content_h=$((logo_h + 4))
+  # Logo, tagline and action row with an extra blank row before the buttons.
+  content_h=$((logo_h + 4 + preview))
   top=$(((rows - content_h) / 2))
   (( top < 0 )) && top=0
   logo_row=$((top + 1))
   tagline_row=$((top + logo_h + 2))
-  hint_row=$((top + logo_h + 4))
+  action_row=$((top + content_h))
 
   printf '\033[?25l\033[H\033[2J'
 
@@ -137,9 +151,14 @@ greeter() {
   tpad=$(((cols - ${#tagline}) / 2)); (( tpad < 0 )) && tpad=0
   printf '\033[%d;%dH%s' "$tagline_row" "$((tpad + 1))" "$tagline"
 
-  hint="Press Return to Start Install"
-  hpad=$(((cols - ${#hint}) / 2)); (( hpad < 0 )) && hpad=0
-  printf '\033[%d;%dH\033[2m%s\033[0m' "$hint_row" "$((hpad + 1))" "$hint"
+  if (( preview )); then
+    draw_welcome_buttons "$action_row" "$choice"
+  else
+    local hint="Press Return to Start Install"
+    local hpad=$(((cols - ${#hint}) / 2))
+    (( hpad >= 0 )) || hpad=0
+    printf '\033[%d;%dH\033[2m%s\033[0m' "$action_row" "$((hpad + 1))" "$hint"
+  fi
 
   # ColorShift the logo: a green base (indexed color 2) with a cyan accent (6)
   # drifting through, settling on green. Indexed ANSI colors, not hex — the
@@ -174,16 +193,38 @@ greeter() {
     </dev/null >/dev/tty 2>/dev/null &
   anim=$!
 
-  IFS= read -r _ </dev/tty || true
+  if (( preview )); then
+    IFS= read -rsn1 key </dev/tty || choice=1
+  else
+    IFS= read -r _ </dev/tty || true
+  fi
   # Tolerate ttfx's kill signal in `wait` so a future `set -e` here can't abort.
   kill "$anim" 2>/dev/null
   wait "$anim" 2>/dev/null || true
   # ttfx leaves the tty in raw/no-echo mode when killed; restore it or the gum
   # prompts in the keyboard step that follows silently die.
   stty sane </dev/tty 2>/dev/null || true
+  # Keep the cursor hidden after ttfx restores it. Enter confirms the selected
+  # button. Escape on its own leaves the selection in place.
+  printf '\033[?25l'
+  while (( preview && choice != 1 )) && [[ -n $key && $key != $'\r' ]]; do
+    if [[ $key == $'\e' ]]; then
+      if IFS= read -rsn2 -t 0.3 key </dev/tty && [[ -z $key || $key == $'\r' ]]; then
+        break
+      fi
+    fi
+    case $key in
+      '[C'|'OC'|'[B'|'OB'|j) choice=2 ;;
+      '[D'|'OD'|'[A'|'OA'|k) choice=0 ;;
+      $'\t'|'[Z') choice=$((2 - choice)) ;;
+    esac
+    draw_welcome_buttons "$action_row" "$choice"
+    IFS= read -rsn1 key </dev/tty || choice=1
+  done
   # Reset the screen so the leftover animation frame doesn't linger under the
   # keyboard step that follows.
   printf '\033[0m\033[H\033[2J\033[?25h'
+  return "$choice"
 }
 
 abort() {
@@ -1260,7 +1301,18 @@ wait_for_stable_terminal
 i18n_console_font "$(tty 2>/dev/null)"
 
 if ! $oem_install; then
-  greeter
+  while true; do
+    if greeter; then
+      break
+    else
+      greeter_status=$?
+    fi
+    (( greeter_status == 2 )) || continue
+    if ! /usr/local/bin/omarchy-live; then
+      printf '%s\n' "The live desktop could not be started. Press Return to go back."
+      IFS= read -r _ </dev/tty || true
+    fi
+  done
   language_form
 fi
 

@@ -1,0 +1,35 @@
+#!/bin/bash
+# Run as root inside a freshly started Try session.
+set -euo pipefail
+export LC_ALL=C
+base=/run/omarchy-live/system
+user=omarchy-live
+home=$(getent passwd "$user" | cut -d: -f6)
+fail() { echo "$*" >&2; exit 1; }
+
+[[ ,$(findmnt -n -o FS-OPTIONS /), == *,lowerdir="$base",* ]] ||
+  fail "The desktop must run directly from the installation image."
+[[ ,$(findmnt -n -o VFS-OPTIONS --mountpoint "$base"), == *,ro,* ]] ||
+  fail "The installation image must be mounted read-only."
+for path in /run/archiso/bootmnt "${base%/*}/container" "$base"; do
+  unit=$(systemd-escape --path --suffix=mount "$path")
+  conflicts=$(systemctl show "$unit" --property=Conflicts --value)
+  [[ " $conflicts " != *" umount.target "* ]] || fail "Logout would try to unmount $path."
+done
+# Per-machine setup may add packages, but every package baked into the
+# image must be present at exactly the version an installation starts with.
+tmp=$(mktemp -d)
+trap 'rm -rf -- "$tmp"' EXIT
+pacman --root "$base" -Q | sort >"$tmp/image"
+pacman -Q | sort >"$tmp/live"
+comm -23 "$tmp/image" "$tmp/live" >"$tmp/missing"
+if [[ -s $tmp/missing ]]; then
+  cat "$tmp/missing" >&2
+  fail "Packages missing or changed in the live session."
+fi
+cmp "$base/etc/skel/.config/hypr/hyprland.lua" "$home/.config/hypr/hyprland.lua"
+[[ -e $home/.local/state/omarchy/done/finalize-user ]] || fail "User provisioning did not finish."
+systemctl is-active --quiet omarchy-live-session.service
+pgrep -xu "$user" Hyprland >/dev/null || fail "Hyprland is not running."
+[[ $(runuser -u "$user" -- sudo -n id -u) == 0 ]] || fail "Passwordless sudo failed."
+echo "Live desktop verified against all $(wc -l <"$tmp/image") image packages."

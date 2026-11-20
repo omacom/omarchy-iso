@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# mkarchiso calls mksquashfs after its final cleanup of the live tree.
+set -euo pipefail
+if [[ -z ${OMARCHY_ROOT_SFS:-} || ${1:-} != */airootfs || ! -d $1 ]]; then
+  exec /usr/bin/mksquashfs "$@"
+fi
+live_root=$(realpath -- "$1")
+shift
+
+work=$(mktemp -d)
+loop=
+cleanup() {
+  if mountpoint -q "$work/system"; then umount "$work/system" || return; fi
+  if [[ -n $loop ]]; then losetup -d "$loop" || return; fi
+  if mountpoint -q "$work/container"; then umount "$work/container" || return; fi
+  rm -rf -- "$work"
+}
+trap cleanup EXIT
+mkdir "$work/container" "$work/system"
+mount -t squashfs -o ro,loop "$OMARCHY_ROOT_SFS" "$work/container"
+loop=$(losetup --find --show --read-only "$work/container/omarchy-root.img")
+mount -t btrfs -o ro,subvol=omarchy-root "$loop" "$work/system"
+python3 "${BASH_SOURCE[0]%/*}/compare.py" "$live_root" "$work/system" "$work/exclude" "$work/whiteouts"
+/usr/bin/mksquashfs "$live_root" "$@" -ef "$work/exclude" -pf "$work/whiteouts"

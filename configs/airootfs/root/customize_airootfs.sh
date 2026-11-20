@@ -46,7 +46,7 @@ fi
 # has this script build before it gets here.
 # The installed system gets its firmware from the root image, not from here.
 fw=/usr/lib/firmware
-if [[ -d $fw ]]; then
+if [[ -d $fw && ! -f /usr/share/omarchy-iso/live-desktop ]]; then
   before=$(du -sm "$fw" | cut -f1)
   rm -rf "$fw"/intel/iwlwifi "$fw"/intel/ibt-* "$fw"/iwlwifi-* \
     "$fw"/mediatek "$fw"/mrvl "$fw"/ath[0-9]* "$fw"/ar3k "$fw"/brcm "$fw"/cypress \

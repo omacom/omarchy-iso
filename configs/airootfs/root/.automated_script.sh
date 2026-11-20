@@ -83,7 +83,8 @@ warm_offline_mirror() {
   local mirror=/var/cache/omarchy/mirror/offline
   local budget_kb spent_kb=0 size_kb path
   # The orchestrator's ROOT_IMAGE.
-  local image=/run/archiso/bootmnt/arch/$(uname -m)/omarchy-root.img.zst
+  local image=/run/archiso/bootmnt/arch/$(uname -m)/omarchy-root
+  if [[ -f $image.sfs ]]; then image+=.sfs; else image+=.img.zst; fi
 
   [[ ${OMARCHY_NO_PREFETCH:-} == 1 ]] && return 0
 

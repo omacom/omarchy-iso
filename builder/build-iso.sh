@@ -1252,20 +1252,22 @@ for live_initramfs in "$build_cache_dir/work/iso/${iso_subdir%/*}/boot/$OMARCHY_
   fi
 done
 
-# The ISO has to fit an 8 GB stick, which exposes about 7.75 GB. Fail over
-# 7.7 GB and warn over 7.5 GB, so an image or mirror that grows shows up in the
-# build that grew it.
+# The x86_64 ISO has to fit an 8 GB stick. Fail over 7.7 GB and warn over
+# 7.5 GB, so an image or mirror that grows shows up in the build that grew it.
+# ARM images are not limited to an 8 GB stick.
 iso_fail_bytes=7700000000
 iso_warn_bytes=7500000000
 for iso in /out/*.iso; do
   [[ -f $iso ]] || continue
   iso_bytes=$(stat -c %s "$iso")
   echo "ISO $(basename "$iso"): $iso_bytes bytes"
-  if (( iso_bytes > iso_fail_bytes )); then
-    echo "ERROR: $(basename "$iso") is $iso_bytes bytes, over the $iso_fail_bytes limit for an 8 GB stick" >&2
-    exit 1
-  elif (( iso_bytes > iso_warn_bytes )); then
-    echo "WARNING: $(basename "$iso") is $iso_bytes bytes, over $iso_warn_bytes; $iso_fail_bytes fails the build" >&2
+  if [[ $OMARCHY_ARCH == "x86_64" ]]; then
+    if (( iso_bytes > iso_fail_bytes )); then
+      echo "ERROR: $(basename "$iso") is $iso_bytes bytes, over the $iso_fail_bytes limit for an 8 GB stick" >&2
+      exit 1
+    elif (( iso_bytes > iso_warn_bytes )); then
+      echo "WARNING: $(basename "$iso") is $iso_bytes bytes, over $iso_warn_bytes; $iso_fail_bytes fails the build" >&2
+    fi
   fi
 done
 

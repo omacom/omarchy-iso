@@ -30,6 +30,11 @@ configure_archiso_aarch64_mkinitcpio() {
     phy-qcom-qmp-pcie? phy-qcom-qmp-combo? phy-qcom-eusb2-repeater? phy-nxp-ptn3222?
     phy-qcom-qmp-usb? phy-qcom-m31-eusb2?
     phy-snps-eusb2? phy-qcom-edp? dwc3-qcom? xhci-plat-hcd? ps883x? pmic_glink?
+    # The chips before the X1 (sc7180, sc8180x, sc8280xp, sdm845, msm8998)
+    # still describe USB the old way, with the controller as a child node,
+    # and only this driver binds that. Without it the image never finds the
+    # stick it started from.
+    dwc3-qcom-legacy?
     pmic_glink_altmode? pci-pwrctrl-pwrseq? pwrseq-qcom-wcn?
     # Boards without retimers (the X13s, the Zenbook 14 UX3480QA) switch their
     # USB-C SBU lines with GPIO muxes. When the early start brings up UCSI,

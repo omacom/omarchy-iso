@@ -269,7 +269,7 @@ if [[ $HOST_ARCH == aarch64 ]]; then
     set +e
     run_aarch64 gl -no-reboot -qmp "unix:${qmp_sock},server=on,wait=off"
     set -e
-    wait "$qmp_pid" || true
+    aarch64_reap_qmp_reader "$qmp_pid"
     shutdown_reason=$(cat "$qmp_dir/reason" 2>/dev/null || true)
     rm -rf "$qmp_dir"
     if aarch64_should_relaunch "$shutdown_reason"; then

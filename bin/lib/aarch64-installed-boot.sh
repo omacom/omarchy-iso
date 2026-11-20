@@ -34,3 +34,27 @@ aarch64_should_relaunch() {
   local reason=$1
   [[ $reason == guest-reset ]] && disk_written
 }
+
+# QEMU has returned. A reader that was connected exits when QEMU closes the
+# socket, which has already happened. A reader that never got a socket is
+# still in its connect loop (30s). Reap the finished one immediately and stop
+# the one that is still waiting, so a QEMU that fails to start does not sit
+# there for the connect timeout.
+aarch64_reap_qmp_reader() {
+  local pid=$1 i state
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" || true
+      return 0
+    fi
+    state=$(ps -o state= -p "$pid" 2>/dev/null || true)
+    state=${state//[[:space:]]/}
+    if [[ -z $state || $state == Z* ]]; then
+      wait "$pid" || true
+      return 0
+    fi
+    sleep 0.1
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" || true
+}

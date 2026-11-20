@@ -52,6 +52,8 @@ grep -Fq 'aarch64_should_relaunch "$shutdown_reason"' "$ROOT/bin/omarchy-iso-boo
   || fail "the launcher does not consult the QMP shutdown reason"
 grep -Fq 'qmp-shutdown-reason.py' "$ROOT/bin/omarchy-iso-boot" \
   || fail "the launcher does not read the QMP shutdown reason"
+grep -Fq 'aarch64_reap_qmp_reader "$qmp_pid"' "$ROOT/bin/omarchy-iso-boot" \
+  || fail "the launcher waits out the QMP connect timeout when QEMU never starts"
 [[ $(grep -c 'run_aarch64 plain --no-iso$' "$ROOT/bin/omarchy-iso-boot") == 1 ]] \
   || fail "the installed-system relaunch still attaches the installer ISO"
 [[ $(grep -c 'run_aarch64 plain$' "$ROOT/bin/omarchy-iso-boot") == 1 ]] \
@@ -60,5 +62,22 @@ grep -Fq 'serial=/tmp/omarchy-iso-boot-serial.log' "$ROOT/bin/omarchy-iso-boot" 
   || fail "the install run no longer logs to the serial file"
 grep -Fq 'serial=/tmp/omarchy-iso-boot-installed-serial.log' "$ROOT/bin/omarchy-iso-boot" \
   || fail "the installed-system boot truncates the installer's serial log"
+# A QEMU that exits without ever opening the socket must not leave the
+# launcher blocked in the reader's 30s connect loop.
+sleep 30 &
+stuck=$!
+started=$(date +%s)
+aarch64_reap_qmp_reader "$stuck"
+elapsed=$(( $(date +%s) - started ))
+(( elapsed < 5 )) || fail "a reader that never connected took ${elapsed}s to reap"
+kill -0 "$stuck" 2>/dev/null && fail "the stuck reader is still running"
+
+(exit 0) &
+done_pid=$!
+started=$(date +%s)
+aarch64_reap_qmp_reader "$done_pid"
+elapsed=$(( $(date +%s) - started ))
+(( elapsed < 2 )) || fail "a reader that had already exited took ${elapsed}s to reap"
+
 bash -n "$ROOT/bin/omarchy-iso-boot" "$ROOT/bin/lib/aarch64-installed-boot.sh"
 echo "aarch64 installed-boot checks passed"

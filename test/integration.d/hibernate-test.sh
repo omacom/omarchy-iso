@@ -7,8 +7,10 @@
 # through the resume offset and restore it. The proof of a real resume is a
 # marker in tmpfs: it cannot survive anything but a restored memory image.
 #
-# The second boot deliberately reuses the run's own disk (which now holds the
-# hibernation image) instead of a fresh overlay of the base image.
+# A fresh install does not set hibernation up, so the test does what an owner
+# would: `omarchy-hibernation-setup`, then a boot of the rebuilt UKI so the
+# resume parameters are on the cmdline. Every boot after the first reuses the
+# run's own disk instead of a fresh overlay of the base image.
 #
 # Runs against the base image: `./test/integration <iso> hibernate`.
 
@@ -18,14 +20,46 @@ base_image_ready || { echo "No base image; run this through ./test/integration" 
 
 vm_powered_off() { ! vm_running; }
 
-verify_hibernate_resume() {
-  log "Booting the installed base image to hibernate it"
+wait_for_power_off() {
+  local waited=0
+  while vm_running && ((waited < 180)); do
+    sleep 1
+    ((waited += 1))
+  done
+  WAITED=$waited
+}
+
+set_up_hibernation() {
+  log "Booting the installed base image to set hibernation up"
   start_vm_from_base
   wait_for_ssh "$BOOT_TIMEOUT"
 
   check "installed system is reachable" ssh_guest "test ! -e /run/archiso"
-  check "a swap device is active (somewhere for the hibernation image)" \
-    ssh_sudo "swapon --show --noheadings | grep -q ."
+  # A released ISO from before this change still sets hibernation up.
+  if [[ $RELEASE_ISO != true ]]; then
+    check "a fresh install has no hibernation swapfile" \
+      ssh_sudo "! grep -q /swap/swapfile /etc/fstab"
+  fi
+  check "omarchy-hibernation-setup sets hibernation up" \
+    ssh_sudo "OMARCHY_PATH=/usr/share/omarchy omarchy-hibernation-setup --force"
+
+  ssh_sudo "systemctl poweroff" >/dev/null 2>&1 || true
+  wait_for_power_off
+  check "machine powered off after hibernation setup (${WAITED}s)" vm_powered_off
+  if vm_running; then
+    stop_vm
+    return 1
+  fi
+}
+
+verify_hibernate_resume() {
+  log "Booting with the resume parameters to hibernate it"
+  start_vm "$RUN_DIR/run.qcow2" "$RUN_DIR/setup-serial.log"
+  wait_for_ssh "$BOOT_TIMEOUT"
+
+  check "the swapfile is active (somewhere for the hibernation image)" \
+    ssh_sudo "swapon --show=NAME --noheadings | grep -qx /swap/swapfile"
+  check "the cmdline names the resume device" ssh_guest "grep -qE '(^| )resume=' /proc/cmdline"
   check "the kernel offers suspend-to-disk" ssh_guest "grep -qw disk /sys/power/state"
 
   ssh_guest 'echo alive >/dev/shm/hib-marker; cut -d. -f1 /proc/uptime >/dev/shm/uptime-before'
@@ -33,12 +67,8 @@ verify_hibernate_resume() {
 
   log "systemctl hibernate; waiting for the machine to power off"
   ssh_sudo "systemctl hibernate" >/dev/null 2>&1 || true
-  local waited=0
-  while vm_running && ((waited < 180)); do
-    sleep 1
-    ((waited += 1))
-  done
-  check "machine powered off after systemctl hibernate (${waited}s)" vm_powered_off
+  wait_for_power_off
+  check "machine powered off after systemctl hibernate (${WAITED}s)" vm_powered_off
   if vm_running; then
     capture_console "failure-hibernate-still-running"
     stop_vm
@@ -64,5 +94,5 @@ verify_hibernate_resume() {
 
 # ---------------------------------------------------------------------- main
 
-verify_hibernate_resume
+set_up_hibernation && verify_hibernate_resume
 finish

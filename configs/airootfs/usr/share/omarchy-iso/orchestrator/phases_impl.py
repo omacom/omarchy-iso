@@ -18,7 +18,6 @@ Phase ordering (full-disk and protected/pre-mounted):
                              per-machine pacman keyring starts as a transient
                              systemd unit before Limine/useradd and joins
                              before any later pacstrap or the factory snapshot
-    configure_hibernation  → root-owned swap/resume drop-ins
     run_system_finalizer   → arch-chroot root omarchy-apply-system, including Snapper
     finalize_limine_boot   → final Limine config/UKI build after hardware drop-ins
     run_chroot_finalizer   → arch-chroot -u user omarchy-provision-user
@@ -2246,27 +2245,6 @@ def _split_partition_device(part_dev: str) -> tuple[str, int]:
     if not part_num:
         raise RuntimeError(f"could not find partition number for {part_dev}")
     return f"/dev/{parent}", int(part_num)
-
-
-def configure_hibernation(ctx: InstallContext) -> None:
-    """Configure swap/resume in the target as root before user setup.
-
-    Hibernation is system boot configuration, not per-user setup. The final
-    Limine UKI build still happens later in finalize_limine_boot after this
-    writes the resume hook and kernel cmdline drop-in.
-    """
-    setup = ctx.target / "usr" / "bin" / "omarchy-hibernation-setup"
-    if not setup.exists():
-        _debug_log(ctx, "skipping hibernation: /usr/bin/omarchy-hibernation-setup is not installed")
-        return
-
-    subprocess.run([
-        "arch-chroot", str(ctx.target),
-        "env",
-        "OMARCHY_PATH=/usr/share/omarchy",
-        "OMARCHY_INSTALL_LOG_FILE=/var/log/omarchy-install.log",
-        "/usr/bin/omarchy-hibernation-setup", "--force", "--no-rebuild",
-    ], check=True)
 
 
 def _install_debug_enabled() -> bool:

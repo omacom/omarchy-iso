@@ -340,6 +340,13 @@ class KmsconLanguageTest(unittest.TestCase):
         self.assertEqual(face("ko"), "Noto Sans Mono CJK KR")
         self.assertEqual(face("zh-CN"), "Noto Sans Mono CJK SC")
 
+    def test_only_the_language_screen_picks_the_language(self):
+        # The language goes to the installed system, so nothing after the
+        # summary the user confirmed (a timezone, say) may change it.
+        configurator = (ROOT / "configs/airootfs/root/configurator").read_text()
+        assignments = re.findall(r"^\s*language=.*$", configurator, re.MULTILINE)
+        self.assertEqual([line.strip() for line in assignments], ['language="en"', "language=$choice"])
+
 
 class ConsoleFontLoadTest(unittest.TestCase):
     def test_a_failing_font_probe_never_stops_a_strict_caller(self):

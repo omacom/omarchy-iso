@@ -416,20 +416,29 @@ class FinishRootImageTest(unittest.TestCase):
         self.ctx = types.SimpleNamespace(target=Path(self.tmp.name) / "mnt")
         self.packages = {"limine", "omarchy-keyring", "omarchy"}
         self.calls = []
+        def fake_run(cmd, **kw):
+            self.calls.append(cmd)
+            return CompletedProcess(cmd, 0, stdout="", stderr="")
+
         for patch in (
             mock.patch.object(phases_impl, "_root_image_required_packages",
                               return_value=["limine", "omarchy-keyring", "omarchy"]),
             mock.patch.object(phases_impl.arch, "target_package_names", create=True,
                               side_effect=lambda target: self.packages),
-            mock.patch.object(phases_impl.subprocess, "run",
-                              side_effect=lambda cmd, **kw: self.calls.append(cmd)),
+            mock.patch.object(phases_impl.subprocess, "run", side_effect=fake_run),
         ):
             patch.start()
             self.addCleanup(patch.stop)
 
     def test_sets_up_the_machine_id(self):
         phases_impl._finish_root_image(self.ctx)
-        self.assertEqual(self.calls, [["systemd-machine-id-setup", f"--root={self.ctx.target}"]])
+        self.assertIn(["systemd-machine-id-setup", f"--root={self.ctx.target}"], self.calls)
+
+    def test_prepares_nocow_journal_directory(self):
+        phases_impl._finish_root_image(self.ctx)
+        journal_dir = self.ctx.target / "var" / "log" / "journal"
+        self.assertTrue(journal_dir.is_dir())
+        self.assertIn(["chattr", "+C", str(journal_dir)], self.calls)
 
     def test_missing_required_package_fails_before_anything_else(self):
         self.packages.discard("omarchy")

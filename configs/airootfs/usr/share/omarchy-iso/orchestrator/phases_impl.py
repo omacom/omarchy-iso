@@ -1241,15 +1241,27 @@ def _apply_platform_layer(ctx: InstallContext, layer: Path | None = None) -> Non
 
 def _finish_root_image(ctx: InstallContext) -> None:
     """What the written image owes the rest of the install: it carries
-    the packages the phases assume, and the target has a machine-id (the
+    the packages the phases assume, the target has a machine-id (the
     image deliberately ships an empty one) before limine-entry-tool and the
-    factory snapshot read it."""
+    factory snapshot read it, and /var/log/journal is pre-created with NOCOW
+    so first-boot journald writes system.journal without btrfs CoW."""
     target = ctx.target
     installed = arch.target_package_names(target)
     missing = [pkg for pkg in _root_image_required_packages() if pkg not in installed]
     if missing:
         raise RuntimeError(f"root image lacks required packages: {', '.join(missing)}")
     subprocess.run(["systemd-machine-id-setup", f"--root={target}"], check=True, capture_output=True)
+    # Arch's systemd defaults to Storage=persistent, so systemd-journal-flush
+    # creates /var/log/journal and system.journal before systemd-tmpfiles-setup
+    # applies journal-nocow.conf. Pre-creating the empty directory with +C lets
+    # initial journal files inherit NOCOW while tmpfiles still owns permissions
+    # and ACLs on first boot.
+    journal_dir = target / "var" / "log" / "journal"
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(["chattr", "+C", str(journal_dir)], check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
+        info(f"› could not set NOCOW on {journal_dir}: {detail}")
 
 
 # Transient systemd unit that initialises the target's pacman keyring.

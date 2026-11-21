@@ -8,6 +8,8 @@
 #   omarchy-iso-kmscon <command...>   run command in kmscon; returns when it exits
 #   omarchy-iso-kmscon --xkb <keymap> print the XKB "layout model variant options"
 #                                     for a keymap, "-" for an empty field
+#   omarchy-iso-kmscon --face <lang>  print the CJK font family kmscon draws a
+#                                     language's Han characters with
 
 STATE=/run/omarchy-iso
 
@@ -49,15 +51,32 @@ font_size() {
   printf '%s' "$size"
 }
 
+# Han characters take a different form in each CJK language, and the bundled
+# collection carries every one of them: draw them as the language writes them.
+face_for_language() {
+  case $1 in
+    ja) printf 'Noto Sans Mono CJK JP' ;;
+    ko) printf 'Noto Sans Mono CJK KR' ;;
+    zh-TW) printf 'Noto Sans Mono CJK TC' ;;
+    *) printf 'Noto Sans Mono CJK SC' ;;
+  esac
+}
+
 if [[ ${1:-} == "--xkb" ]]; then
   xkb_for_keymap "${2:-us}"
   exit 0
 fi
-
-keymap=us
-if [[ -r $STATE/kmscon-resume ]]; then
-  keymap=$(bash -c 'source "$1"; printf "%s" "${keyboard:-us}"' _ "$STATE/kmscon-resume")
+if [[ ${1:-} == "--face" ]]; then
+  face_for_language "${2:-}"
+  exit 0
 fi
+
+keymap=us language=
+if [[ -r $STATE/kmscon-resume ]]; then
+  { read -r keymap; read -r language; } < <(bash -c 'source "$1"; printf "%s\n%s\n" "${keyboard:-us}" "${language:-}"' _ "$STATE/kmscon-resume")
+fi
+
+OMARCHY_ISO_KMSCON_FACE=$(face_for_language "$language")
 OMARCHY_ISO_KMSCON_XKB=$(xkb_for_keymap "$keymap")
 read -r layout model variant options <<<"$OMARCHY_ISO_KMSCON_XKB"
 [[ $model == "-" ]] && model=""
@@ -65,7 +84,7 @@ read -r layout model variant options <<<"$OMARCHY_ISO_KMSCON_XKB"
 [[ $options == "-" ]] && options=""
 
 export OMARCHY_ISO_KMSCON=1
-export OMARCHY_ISO_KMSCON_XKB
+export OMARCHY_ISO_KMSCON_XKB OMARCHY_ISO_KMSCON_FACE
 # C.UTF-8 like the live system: bash string lengths count characters, and gum's
 # width tables stay on narrow ambiguous-width glyphs, as libtsm draws them.
 export LANG=C.UTF-8
@@ -89,7 +108,7 @@ exec kmscon \
   --no-mouse \
   --dpms-timeout=0 \
   --font-engine=pango \
-  --font-name="${OMARCHY_ISO_KMSCON_FONT:-monospace}" \
+  --font-name="${OMARCHY_ISO_KMSCON_FONT:-Adwaita Mono,$OMARCHY_ISO_KMSCON_FACE,monospace}" \
   --font-size="${OMARCHY_ISO_KMSCON_FONT_SIZE:-$(font_size)}" \
   --xkb-layout="$layout" \
   ${model:+--xkb-model="$model"} \

@@ -331,10 +331,13 @@ keyboard_form() {
     loadkeys "$keyboard" 2>/dev/null
   fi
 
-  # kmscon reads keys through XKB, fixed at its start: relaunch it with the
-  # layout just picked so the password is typed under the layout it will be
-  # entered with at boot.
-  if [[ ${OMARCHY_ISO_KMSCON:-} == 1 && $(omarchy-iso-kmscon --xkb "$keyboard") != "${OMARCHY_ISO_KMSCON_XKB:-}" ]]; then
+  # kmscon reads keys through XKB and picks its font once, at its start:
+  # relaunch it with the layout just picked so the password is typed under the
+  # layout it will be entered with at boot, and with the Han forms of a
+  # language picked again on the way back (Chinese, then Japanese).
+  if [[ ${OMARCHY_ISO_KMSCON:-} == 1 ]] &&
+    [[ $(omarchy-iso-kmscon --xkb "$keyboard") != "${OMARCHY_ISO_KMSCON_XKB:-}" ||
+      $(omarchy-iso-kmscon --face "$language") != "${OMARCHY_ISO_KMSCON_FACE:-}" ]]; then
     switch_to_kmscon user
   fi
 }

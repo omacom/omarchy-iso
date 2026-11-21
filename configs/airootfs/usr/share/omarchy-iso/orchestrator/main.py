@@ -45,6 +45,7 @@ def build_phases(ctx: InstallContext):
         configure_tailscale,
         oem_scripts,
         run_oem_setup,
+        run_custom_commands,
         validate_boot,
         create_factory_snapshot,
     )
@@ -72,6 +73,8 @@ def build_phases(ctx: InstallContext):
         # the checks, so they run in the finished system and it is still
         # validated, and snapshotted, with what they did to it.
         *([("Running OEM setup", run_oem_setup)] if oem_scripts(ctx) else []),
+        # After the OEM's setup, so a drive's commands have the last word.
+        ("Running custom commands",    run_custom_commands),
         ("Validating boot setup",      validate_boot),
         ("Creating factory snapshot",  create_factory_snapshot),
     ]

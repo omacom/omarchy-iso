@@ -24,6 +24,9 @@ Phase ordering (full-disk and protected/pre-mounted):
     configure_login        → sddm state + encrypted-install autologin
     configure_ssh_access   → authorized_keys for autoinstall; no-op otherwise
     configure_tailscale    → tailnet join staged for first boot; no-op otherwise
+    run_custom_commands    → the config's custom_commands, as root under
+                             arch-chroot, with the drive bind-mounted
+                             read-only; no-op when the list is empty
     validate_boot          → assert UKI / limine.conf / kernel cmdline are sane,
                              that at least one UEFI boot route exists, and
                              that the target keyring trusts its packages
@@ -3274,6 +3277,47 @@ def _authorized_keys(path: Path) -> list[str]:
         raise RuntimeError(f"{path} contains no SSH keys")
 
     return keys
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# run_custom_commands: run the commands an autoinstall drive asked for in the
+# new system. The drive is bind-mounted, not copied, so its files, credentials
+# included, do not stay there.
+# ─────────────────────────────────────────────────────────────────────────────
+
+CIDATA_IN_TARGET = Path("/root/cidata")
+
+
+def run_custom_commands(ctx: InstallContext) -> None:
+    commands = ctx.user_configuration.get("custom_commands") or []
+    if not isinstance(commands, list) or not all(isinstance(command, str) for command in commands):
+        raise RuntimeError("custom_commands must be a list of strings")
+    if not commands:
+        return
+
+    # A command may install packages, which reads the keyring the unit writes.
+    _join_target_keyring_init(ctx)
+
+    drive = ctx.cidata_dir if ctx.cidata_dir is not None and os.path.ismount(ctx.cidata_dir) else None
+    mountpoint = ctx.target / CIDATA_IN_TARGET.relative_to("/")
+    if drive is not None:
+        mountpoint.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["mount", "--bind", "-o", "ro", str(drive), str(mountpoint)], check=True)
+    try:
+        for number, command in enumerate(commands, 1):
+            info(f"› custom command {number} of {len(commands)}")
+            # MISE_OFFLINE keeps Omarchy's own setup fast offline; a drive's
+            # commands may need mise to download a runtime.
+            try:
+                _run_target_setup_command(
+                    ctx, ["env", "-u", "MISE_OFFLINE", f"CIDATA={CIDATA_IN_TARGET}", "/bin/bash", "-c", command]
+                )
+            except subprocess.CalledProcessError as exc:
+                raise RuntimeError(f"custom command {number} exited with status {exc.returncode}") from exc
+    finally:
+        if drive is not None:
+            subprocess.run(["umount", str(mountpoint)], check=True)
+            mountpoint.rmdir()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

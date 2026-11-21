@@ -227,7 +227,7 @@ if [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]]; then
   touch "$build_cache_dir/airootfs/usr/share/omarchy-iso/oem-install"
   sed -i 's/^TIMEOUT .*/TIMEOUT 1/' "$build_cache_dir/syslinux/archiso_sys.cfg"
 fi
-# The China ISO (--china): the configurator opens on Chinese and sets Asia/Shanghai,
+# The China ISO (--china): the configurator sets Chinese, Pinyin and Asia/Shanghai,
 # and the orchestrator marks the target's region cn for the China mirrors.
 if [[ ${OMARCHY_CHINA:-} == "1" ]]; then
   touch "$build_cache_dir/airootfs/usr/share/omarchy-iso/china"

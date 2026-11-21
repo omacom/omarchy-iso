@@ -425,7 +425,7 @@ Use `--dev` or `--rc` to build against those package channels. Both `--dev` and 
 
 ### The China ISO
 
-`--china` builds `omarchy-china-*.iso` for mainland China. Its installer opens on Chinese (Simplified), which preselects the Pinyin keyboard and with it fcitx5 Pinyin input, and installs in Asia/Shanghai without asking for a timezone. The language and keyboard can still be changed. The install writes `cn` to the target's `/etc/omarchy/region`. The runtime's pacman finalizer (`omarchy-apply-pacman`) then puts Omarchy's China mirrors (`*.omarchy.cn`) ahead of the `.org` ones, which stay as the fallback. This works on every channel and is combined with the channel flags (`--china --edge`), not with `--oem`. The China mirrors are x86 only so far, so an aarch64 China ISO keeps the global mirrors.
+`--china` builds `omarchy-china-*.iso` for mainland China. Its installer asks for no language, keyboard or timezone: it installs in Chinese (Simplified), with fcitx5 Pinyin input on a US layout, in Asia/Shanghai. The install writes `cn` to the target's `/etc/omarchy/region`. The runtime's pacman finalizer (`omarchy-apply-pacman`) then puts Omarchy's China mirrors (`*.omarchy.cn`) ahead of the `.org` ones, which stay as the fallback. This works on every channel and is combined with the channel flags (`--china --edge`), not with `--oem`. The China mirrors are x86 only so far, so an aarch64 China ISO keeps the global mirrors.
 
 ### aarch64
 

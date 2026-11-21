@@ -221,8 +221,8 @@ notice() {
 LANGUAGES_JSON="${LANGUAGES_JSON:-$OMARCHY_PATH/default/i18n/locales.json}"
 language="en"
 
-# The China ISO (--china) opens on Chinese, which brings its Pinyin keyboard,
-# and installs in Asia/Shanghai without asking for a timezone.
+# The China ISO (--china) installs in Chinese, with Pinyin input on a US
+# layout, in Asia/Shanghai, and asks for none of them.
 china_iso=false
 if [[ -f $OMARCHY_ISO_SHARE/china ]]; then
   china_iso=true
@@ -280,7 +280,7 @@ language_rows() {
 language_form() {
   local choice status
 
-  if [[ -r $LANGUAGES_JSON ]]; then
+  if ! $china_iso && [[ -r $LANGUAGES_JSON ]]; then
     while true; do
       clear_logo
       echo
@@ -308,6 +308,14 @@ language_form() {
 
 keyboard_form() {
   local status
+
+  if $china_iso; then
+    keyboard_label="Chinese (Simplified, Pinyin)"
+    keyboard="us"
+    keyboard_input_method="pinyin"
+    keyboard_xkb_layout=""
+    return 0
+  fi
 
   while true; do
     clear_logo

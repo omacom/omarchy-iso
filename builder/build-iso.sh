@@ -7,7 +7,7 @@ OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
 OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
 OMARCHY_KERNEL="${OMARCHY_KERNEL:-linux-omarchy}"
 # profiledef.sh reads these in the mkarchiso environment.
-export OMARCHY_ARCH OMARCHY_KERNEL OMARCHY_OEM_INSTALL OMARCHY_REGION
+export OMARCHY_ARCH OMARCHY_KERNEL OMARCHY_OEM_INSTALL OMARCHY_PRESET
 
 source /builder/node-release.sh
 source /builder/arm64-kernel-image.sh
@@ -227,10 +227,10 @@ if [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]]; then
   touch "$build_cache_dir/airootfs/usr/share/omarchy-iso/oem-install"
   sed -i 's/^TIMEOUT .*/TIMEOUT 1/' "$build_cache_dir/syslinux/archiso_sys.cfg"
 fi
-# A region ISO (--region): the configurator takes what regions/<code>.json
-# presets instead of asking, and the orchestrator hands its mirrors to the target.
-if [[ -f /region.json ]]; then
-  cp /region.json "$build_cache_dir/airootfs/usr/share/omarchy-iso/region.json"
+# A preset ISO (--preset): the configurator takes the answers presets/<code>.json
+# gives instead of asking, and the orchestrator hands its region to the target.
+if [[ -f /preset.json ]]; then
+  cp /preset.json "$build_cache_dir/airootfs/usr/share/omarchy-iso/preset.json"
 fi
 # The OEM's own bundle (--oem-config, --oem-script), as builder/oem-bundle.py
 # checked and laid it out: the installer hands its branding and agreement to

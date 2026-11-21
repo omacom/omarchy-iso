@@ -343,7 +343,7 @@ class KmsconLanguageTest(unittest.TestCase):
     def test_only_the_language_screen_picks_the_language(self):
         # The language goes to the installed system, so nothing after the
         # summary the user confirmed (a timezone, say) may change it. It starts
-        # as English, or as the language a region ISO presets.
+        # as English, or as the language a preset ISO names.
         configurator = (ROOT / "configs/airootfs/root/configurator").read_text()
         assignments = re.findall(r"^\s*language=.*$", configurator, re.MULTILINE)
         self.assertEqual([line.strip() for line in assignments], ["language=${preset_language:-en}", "language=$choice"])
@@ -396,37 +396,37 @@ class ConsoleFontLoadTest(unittest.TestCase):
 class RegionMarkerTest(unittest.TestCase):
     def marker(self, preset):
         with tempfile.TemporaryDirectory() as target, tempfile.TemporaryDirectory() as share:
-            region = Path(share) / "region.json"
+            path = Path(share) / "preset.json"
             if preset is not None:
-                region.write_text(json.dumps(preset))
+                path.write_text(json.dumps(preset))
             ctx = types.SimpleNamespace(target=Path(target), omarchy_install={})
-            phases_impl._write_region_marker(ctx, region)
+            phases_impl._write_region_marker(ctx, path)
             marker = Path(target) / "etc/omarchy/region"
             return (marker.read_text(), oct(marker.stat().st_mode & 0o777)) if marker.exists() else None
 
-    def test_a_region_isos_mirrors_reach_the_target_and_nothing_else_writes_one(self):
-        self.assertEqual(self.marker({"language": "zh-CN", "mirrors": "cn"}), ("cn\n", "0o644"))
+    def test_a_presets_region_reaches_the_target_and_nothing_else_writes_one(self):
+        self.assertEqual(self.marker({"language": "zh-CN", "region": "cn"}), ("cn\n", "0o644"))
         self.assertIsNone(self.marker({"language": "da", "timezone": "Europe/Copenhagen"}))
         self.assertIsNone(self.marker(None))
 
 
-class RegionPresetTest(unittest.TestCase):
-    """Every regions/<code>.json presets only what the installer can take: a
+class PresetTest(unittest.TestCase):
+    """Every presets/<code>.json answers only what the installer can take: a
     language of the registry, a keyboard of the setup form's list, a timezone
-    the list offers, and mirrors the runtime has a region profile for."""
+    the list offers, and a region the runtime has a profile for."""
 
     def setUp(self):
-        self.presets = {path.stem: json.loads(path.read_text()) for path in sorted((ROOT / "regions").glob("*.json"))}
+        self.presets = {path.stem: json.loads(path.read_text()) for path in sorted((ROOT / "presets").glob("*.json"))}
 
     def each(self, field):
         return [(code, preset[field]) for code, preset in self.presets.items() if field in preset]
 
-    def test_a_region_sets_only_what_the_installer_presets(self):
+    def test_a_preset_sets_only_what_the_installer_takes(self):
         self.assertIn("cn", self.presets)
         for code, preset in self.presets.items():
             with self.subTest(code=code):
                 self.assertRegex(code, r"^[a-z]{2}$")
-                self.assertLessEqual(set(preset), {"language", "keyboard", "timezone", "mirrors"})
+                self.assertLessEqual(set(preset), {"language", "keyboard", "timezone", "region"})
 
     def test_the_language_is_one_the_installer_offers(self):
         languages = set(json.loads((SHARE / "language-defaults.json").read_text()))
@@ -449,13 +449,13 @@ class RegionPresetTest(unittest.TestCase):
             with self.subTest(code=code):
                 self.assertTrue(Path("/usr/share/zoneinfo", timezone).is_file(), timezone)
 
-    def test_the_mirrors_are_a_region_profile_of_the_runtime(self):
+    def test_the_region_is_a_profile_of_the_runtime(self):
         apply = omarchy_file("bin/omarchy-apply-pacman")
         if apply is None:
             self.skipTest("no Omarchy runtime with region profiles")
-        for code, mirrors in self.each("mirrors"):
+        for code, region in self.each("region"):
             with self.subTest(code=code):
-                self.assertTrue((apply.parents[1] / "default/regions" / mirrors / "pacman").is_dir(), mirrors)
+                self.assertTrue((apply.parents[1] / "default/regions" / region / "pacman").is_dir(), region)
 
 
 class LanguageMarkerTest(unittest.TestCase):

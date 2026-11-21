@@ -13,7 +13,7 @@ OEM_CONFIG=""
 OEM_SCRIPTS=()
 OEM_BUNDLE_DIR=""
 REHEARSAL=""
-REGION=""
+PRESET=""
 while [[ $# -gt 0 ]]; do
   case $1 in
   --arch)
@@ -52,13 +52,13 @@ while [[ $# -gt 0 ]]; do
     OMARCHY_OEM_INSTALL=1
     shift
     ;;
-  --region)
-    # An ISO for one country: regions/<code>.json presets its language,
-    # keyboard and timezone, which the installer then does not ask for, and
-    # the mirrors the installed system downloads from first.
-    REGION="${2:-}"
-    if [[ -z $REGION ]]; then
-      echo "Error: --region requires a region code" >&2
+  --preset)
+    # presets/<code>.json answers the installer's language, keyboard and
+    # timezone questions ahead of time, so it does not ask them, and can name
+    # the Omarchy region whose mirrors the installed system downloads from.
+    PRESET="${2:-}"
+    if [[ -z $PRESET ]]; then
+      echo "Error: --preset requires a preset code" >&2
       exit 1
     fi
     shift 2
@@ -141,7 +141,7 @@ while [[ $# -gt 0 ]]; do
     ;;
   *)
     echo "Unknown option: $1"
-    echo "Usage: $0 [--oem [--oem-config FILE] [--oem-script FILE]...] [--region CODE] [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout> [--rehearsal]]"
+    echo "Usage: $0 [--oem [--oem-config FILE] [--oem-script FILE]...] [--preset CODE] [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout> [--rehearsal]]"
     echo "       $0 --arch aarch64 [--edge|--rc] [--package-dir DIR] [--dev-ssh <pubkey>] [--local-source <omarchy-checkout> <pkgs-checkout>] [...]"
     exit 1
     ;;
@@ -164,19 +164,19 @@ if [[ -n $LOCAL_OMARCHY_PATH ]]; then
   LOCAL_PKGS_PATH=$(realpath "$LOCAL_PKGS_PATH")
 fi
 
-# A region file presets what the installer would ask: language, keyboard
-# (a label of the setup form's list), timezone, and mirrors (an Omarchy region
+# A preset answers what the installer would ask: language, keyboard (a label
+# of the setup form's list) and timezone, plus region (an Omarchy region
 # profile, written to the target's /etc/omarchy/region). Each is optional.
-REGION_FILE=""
-if [[ -n $REGION ]]; then
-  REGION_FILE="$(realpath "${BASH_SOURCE[0]%/*}/..")/regions/$REGION.json"
-  if [[ ! $REGION =~ ^[a-z]{2}$ || ! -f $REGION_FILE ]]; then
-    echo "Error: no region $REGION; the regions are: $(cd "${REGION_FILE%/*}" && ls *.json | sed 's/\.json$//' | xargs)" >&2
+PRESET_FILE=""
+if [[ -n $PRESET ]]; then
+  PRESET_FILE="$(realpath "${BASH_SOURCE[0]%/*}/..")/presets/$PRESET.json"
+  if [[ ! $PRESET =~ ^[a-z]{2}$ || ! -f $PRESET_FILE ]]; then
+    echo "Error: no preset $PRESET; the presets are: $(cd "${PRESET_FILE%/*}" && ls *.json | sed 's/\.json$//' | xargs)" >&2
     exit 1
   fi
-  if ! jq -e 'type == "object" and all(to_entries[]; (.key | IN("language", "keyboard", "timezone", "mirrors")) and (.value | type == "string" and . != ""))' \
-    "$REGION_FILE" >/dev/null 2>&1; then
-    echo "Error: $REGION_FILE may only set language, keyboard, timezone and mirrors, each to a string" >&2
+  if ! jq -e 'type == "object" and all(to_entries[]; (.key | IN("language", "keyboard", "timezone", "region")) and (.value | type == "string" and . != ""))' \
+    "$PRESET_FILE" >/dev/null 2>&1; then
+    echo "Error: $PRESET_FILE may only set language, keyboard, timezone and region, each to a string" >&2
     exit 1
   fi
 fi
@@ -296,7 +296,7 @@ DOCKER_ARGS=(
   -e "OMARCHY_ISO_REF=$OMARCHY_ISO_REF"
   -e "OMARCHY_MIRROR=$OMARCHY_MIRROR"
   -e "OMARCHY_OEM_INSTALL=${OMARCHY_OEM_INSTALL:-}"
-  -e "OMARCHY_REGION=$REGION"
+  -e "OMARCHY_PRESET=$PRESET"
   -e "OMARCHY_INSTALL_DEBUG=${OMARCHY_INSTALL_DEBUG:-}"
   -e "OMARCHY_ARCH=$OMARCHY_ARCH"
   -e "OMARCHY_KERNEL=$OMARCHY_KERNEL"
@@ -336,8 +336,8 @@ if [[ -n $OEM_BUNDLE_DIR ]]; then
   DOCKER_ARGS+=(-v "$OEM_BUNDLE_DIR:/oem:ro")
 fi
 
-if [[ -n $REGION_FILE ]]; then
-  DOCKER_ARGS+=(-v "$REGION_FILE:/region.json:ro")
+if [[ -n $PRESET_FILE ]]; then
+  DOCKER_ARGS+=(-v "$PRESET_FILE:/preset.json:ro")
 fi
 
 # The host pacman cache belongs to the host architecture; sharing it with an
@@ -374,7 +374,7 @@ fi
 
 iso_name=omarchy
 [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]] && iso_name=omarchy-oem
-[[ -n $REGION ]] && iso_name=$iso_name-$REGION
+[[ -n $PRESET ]] && iso_name=$iso_name-$PRESET
 latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/"$iso_name"-*.iso | head -n1)
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   iso_ref="${latest_iso%.*}${N1X_DEV_SSH_KEY:+-devssh}-$OMARCHY_ISO_REF.iso"

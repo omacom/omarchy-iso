@@ -220,15 +220,15 @@ notice() {
 
 LANGUAGES_JSON="${LANGUAGES_JSON:-$OMARCHY_PATH/default/i18n/locales.json}"
 
-# A region ISO (--region) presets any of the language, the keyboard (a label
+# A preset ISO (--preset) answers any of the language, the keyboard (a label
 # of the setup form's list) and the timezone, and does not ask for those.
-REGION_PRESET="${REGION_PRESET:-$OMARCHY_ISO_SHARE/region.json}"
-region_preset() {
-  jq -r --arg field "$1" '.[$field] // empty' "$REGION_PRESET" 2>/dev/null || true
+PRESET_FILE="${PRESET_FILE:-$OMARCHY_ISO_SHARE/preset.json}"
+preset() {
+  jq -r --arg field "$1" '.[$field] // empty' "$PRESET_FILE" 2>/dev/null || true
 }
-preset_language=$(region_preset language)
-preset_keyboard=$(region_preset keyboard)
-preset_timezone=$(region_preset timezone)
+preset_language=$(preset language)
+preset_keyboard=$(preset keyboard)
+preset_timezone=$(preset timezone)
 language=${preset_language:-en}
 
 # The setup form takes its language and defaults from the language picked here:
@@ -1383,7 +1383,7 @@ if $defer_provisioning; then
   username=""
   password=""
   password_hash=""
-  # Neutral defaults for the install, or the region ISO's timezone; the owner
+  # Neutral defaults for the install, or the preset's timezone; the owner
   # overwrites both in the first-boot OOBE (omarchy-provision-owner), which
   # opens in the preset language.
   hostname="omarchy"

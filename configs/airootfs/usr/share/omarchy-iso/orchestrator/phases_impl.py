@@ -1928,17 +1928,17 @@ def _write_language_marker(ctx: InstallContext) -> None:
     marker.chmod(0o644)
 
 
-def _write_region_marker(ctx: InstallContext, preset: Path = Path("/usr/share/omarchy-iso/region.json")) -> None:
-    """A region ISO (--region) whose file names mirrors, an Omarchy region
-    profile such as cn, hands it to the target's /etc/omarchy/region, where
-    the runtime's pacman finalizer (omarchy-apply-pacman) puts that region's
-    mirrors first. Every other ISO writes nothing, which means global."""
-    mirrors = json.loads(preset.read_text()).get("mirrors") if preset.is_file() else None
-    if not mirrors:
+def _write_region_marker(ctx: InstallContext, preset: Path = Path("/usr/share/omarchy-iso/preset.json")) -> None:
+    """A preset ISO (--preset) that names an Omarchy region, such as cn, hands
+    it to the target's /etc/omarchy/region, where the runtime's pacman
+    finalizer (omarchy-apply-pacman) puts that region's mirrors first. Every
+    other ISO writes nothing, which means global."""
+    region = json.loads(preset.read_text()).get("region") if preset.is_file() else None
+    if not region:
         return
     marker = ctx.target / "etc/omarchy/region"
     marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(mirrors + "\n")
+    marker.write_text(region + "\n")
     marker.chmod(0o644)
 
 

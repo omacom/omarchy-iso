@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 STATE = Path("/run/omarchy-luks-calibration/result.json")
 UNIT = "omarchy-luks-calibrate.service"
@@ -84,11 +85,31 @@ def calibrate() -> None:
     print(output.strip())
 
 
-def stop_calibration() -> None:
-    # Cancel a still-running (or queued) benchmark before format's own PBKDF
-    # allocates memory. Never wait for calibration to finish. The unit keeps
-    # completed state on stop, and systemd kills the benchmark's whole cgroup.
+def _calibration_pending() -> bool:
+    """Whether the unit's benchmark is running, or queued to run."""
+    output = subprocess.run(["systemctl", "show", UNIT, "--property=ActiveState,Job"],
+                            check=False, capture_output=True, text=True, timeout=5).stdout
+    state = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+    return state.get("ActiveState") in ("active", "activating") or bool(state.get("Job"))
+
+
+def stop_calibration(wait: float = 20) -> None:
+    """Before the format: let a benchmark that is under way finish, then stop
+    the unit, so the format's own PBKDF never allocates memory beside it.
+
+    The unit starts when the hashes of the medium end, which is also when an
+    install that was waiting for them begins: an unattended one, or a wizard
+    answered before the stick was read. Cancelling the benchmark there threw
+    its work away and had the format run the same search from the start (a
+    7.6 s format against 1.5 s with the costs known, where the benchmark
+    itself takes 5 s). The wait is bounded: a benchmark that outlasts it is
+    stopped, and the format calibrates as it always could. The unit keeps
+    completed state on stop, and systemd kills the benchmark's whole cgroup.
+    """
     try:
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline and _calibration_pending():
+            time.sleep(0.2)
         subprocess.run(["systemctl", "stop", UNIT], check=False,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
     except (OSError, subprocess.TimeoutExpired):

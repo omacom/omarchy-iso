@@ -146,6 +146,40 @@ class Calibration(unittest.TestCase):
             with mock.patch.object(luks.subprocess, 'run', side_effect=failure):
                 luks.stop_calibration()
 
+    def stop(self, states, wait=20):
+        """stop_calibration against a unit that reports each of states in
+        turn (the last one from then on), on a clock that only sleep moves."""
+        calls, clock = [], [0.0]
+        def run(command, **_kwargs):
+            calls.append(command[1])
+            state = states[min(calls.count('show') - 1, len(states) - 1)] if command[1] == 'show' else ''
+            return types.SimpleNamespace(stdout=state)
+        with mock.patch.object(luks.subprocess, 'run', side_effect=run), \
+                mock.patch.object(luks.time, 'monotonic', side_effect=lambda: clock[0]), \
+                mock.patch.object(luks.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            luks.stop_calibration(wait)
+        return calls, clock[0]
+
+    def test_a_benchmark_under_way_is_waited_for_then_the_unit_is_stopped(self):
+        running, done = 'ActiveState=active\nJob=\n', 'ActiveState=inactive\nJob=\n'
+        calls, waited = self.stop([running, running, running, done])
+        self.assertEqual(calls, ['show', 'show', 'show', 'show', 'stop'])
+        self.assertAlmostEqual(waited, 0.6)
+
+    def test_a_queued_benchmark_counts_as_under_way(self):
+        calls, _ = self.stop(['ActiveState=inactive\nJob=42\n', 'ActiveState=activating\nJob=42\n', 'ActiveState=inactive\nJob=\n'])
+        self.assertEqual(calls, ['show', 'show', 'show', 'stop'])
+
+    def test_a_finished_or_absent_benchmark_costs_no_wait(self):
+        for state in ('ActiveState=inactive\nJob=\n', 'ActiveState=failed\nJob=\n', ''):
+            calls, waited = self.stop([state])
+            self.assertEqual((calls, waited), (['show', 'stop'], 0.0))
+
+    def test_a_benchmark_that_outlasts_the_wait_is_stopped(self):
+        calls, waited = self.stop(['ActiveState=active\nJob=\n'], wait=2)
+        self.assertEqual(calls[-1], 'stop')
+        self.assertTrue(2.0 <= waited < 2.5, waited)
+
 
 class ArchinstallBoundary(unittest.TestCase):
     def test_original_encrypt_keeps_input_return_and_restores_runner_on_error(self):

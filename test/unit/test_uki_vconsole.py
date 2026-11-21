@@ -141,8 +141,7 @@ class ImageBuildTest(unittest.TestCase):
         built = subprocess.run(
             ["mkinitcpio", "-c", str(directory / "conf"), "-D", str(directory / "hooks"), "-D", "/usr/lib/initcpio",
              "-k", "none", "-g", str(image)], capture_output=True, text=True)
-        if not image.is_file():
-            self.skipTest(f"mkinitcpio could not build here: {built.stderr.strip()[-200:]}")
+        self.assertTrue(image.is_file(), f"mkinitcpio built no image with the hook: {built.stdout[-400:]}{built.stderr[-400:]}")
         self.assertEqual(image.read_bytes().count(placeholder()), 1, "the room is not in the image as written")
 
         vconsole = directory / "vconsole.conf"

@@ -1204,6 +1204,18 @@ done
 # Live ISO uses the same offline pacman.conf.
 cp "$build_cache_dir/pacman-offline.conf" "$build_cache_dir/airootfs/etc/pacman.conf"
 
+# mkarchiso pacstraps the live root from the profile's copy of it. With
+# CacheDir on the mirror itself, as for the root image, pacman takes each
+# package file where the mirror's db describes it. With pacman's default
+# cache, /var/cache/pacman/pkg, it copied them there first, and a file of the
+# same name already in that directory won: the host's cache is mounted there,
+# and what the container's own pacman fetches lands there too. A
+# --local-source build of the commit edge had published names its packages
+# exactly as edge's are, so the published omarchy-settings-dev was taken for
+# the local one and failed the mirror's checksum ("invalid or corrupted
+# package"), ending the build.
+sed -i "/^\[options\]/a CacheDir = /var/cache/omarchy/mirror/offline/" "$build_cache_dir/pacman-offline.conf"
+
 # Build the ISO. profiledef.sh reads OMARCHY_ARCH for the archiso arch/bootmodes.
 echo "[timing] mkarchiso start $(date +%s)"
 "$mkarchiso_command" -v -w "$build_cache_dir/work/" -o /out/ "$build_cache_dir/"

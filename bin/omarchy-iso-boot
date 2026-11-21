@@ -240,7 +240,7 @@ if [[ $HOST_ARCH == aarch64 ]]; then
       "${display_args[@]}" \
       -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-tablet,bus=xhci.0 \
       -device virtio-rng-pci \
-      -serial file:/tmp/omarchy-iso-boot-serial.log \
+      -serial "file:${serial_log:-/tmp/omarchy-iso-boot-serial.log}" \
       "${NET_ARGS[@]}" \
       -boot menu=on \
       "$@" \
@@ -257,7 +257,8 @@ if [[ $HOST_ARCH == aarch64 ]]; then
       -chardev file,id=qmp,path="$qmp_dir/out",input-path="$qmp_dir/in" -mon chardev=qmp,mode=control
     if grep -q '"reason": "guest-reset"' "$qmp_dir/out" && disk_written; then
       echo "Booting the installed system with the plain virtio-gpu"
-      run_aarch64 plain
+      # A file chardev truncates on open: keep the installer's serial log.
+      serial_log=/tmp/omarchy-iso-boot-installed-serial.log run_aarch64 plain
     fi
   fi
 else

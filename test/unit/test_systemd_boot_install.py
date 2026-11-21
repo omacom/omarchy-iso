@@ -184,6 +184,12 @@ class SystemdBootInstallTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "no boot image"):
             self.validate()
 
+    def test_a_damaged_boot_image_fails_validation_next_to_a_good_one(self):
+        self.installed()
+        self.write(f"boot/EFI/Linux/omarchy-{MACHINE_ID[:8]}-linux-omarchy-zzz999.efi", b"not a PE image")
+        with self.assertRaisesRegex(RuntimeError, "no readable cmdline"):
+            self.validate()
+
     def test_validation_wants_the_boot_store_mounted_at_boot(self):
         self.installed()
         self.write("etc/fstab", "UUID=x / btrfs subvol=/@ 0 0\n")

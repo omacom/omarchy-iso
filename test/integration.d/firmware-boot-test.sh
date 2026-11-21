@@ -41,7 +41,19 @@ verify_firmware_boot() {
   else
     check "booted in UEFI mode (EFI runtime present)" \
       ssh_guest "test -d /sys/firmware/efi"
-    # UEFI installs boot through systemd-boot, the loader Secure Boot needs.
+    # UEFI installs boot through systemd-boot, the loader Secure Boot needs,
+    # unless the ISO had no omarchy-boot-systemd or was told to keep Limine
+    # (OMARCHY_ISO_BOOT_LOADER=limine), as a shipped release ISO may be.
+    local loader
+    loader=$(ssh_guest "omarchy-boot-backend" | tr -d '\r\n')
+    if [[ $loader == "limine" ]]; then
+      check "a Limine EFI binary is on the ESP" \
+        ssh_sudo "test -e /boot/EFI/limine/limine_x64.efi -o -e /boot/EFI/BOOT/BOOTX64.EFI"
+      check "efibootmgr has a Limine entry" \
+        ssh_sudo "efibootmgr | grep -qi limine"
+      capture_console "success-firmware-$FIRMWARE"
+      return
+    fi
     check "systemd-boot is on the ESP" \
       ssh_sudo "test -s /boot/EFI/systemd/systemd-bootx64.efi -a -s /boot/EFI/BOOT/BOOTX64.EFI"
     check "efibootmgr has an Omarchy Boot entry, first in the boot order" \

@@ -3602,8 +3602,16 @@ def _systemd_boot_ukis(ctx: InstallContext, esp_mount: Path) -> list[Path]:
 
 
 def _systemd_boot_uki_cmdlines(ctx: InstallContext, esp_mount: Path) -> list[str]:
+    """Every boot image's embedded cmdline. An image whose cmdline cannot be
+    read is a damaged one, and refused rather than skipped."""
     from .uki_cmdline import read_cmdline
-    return [cmdline for uki in _systemd_boot_ukis(ctx, esp_mount) if (cmdline := read_cmdline(uki))]
+    cmdlines = []
+    for uki in _systemd_boot_ukis(ctx, esp_mount):
+        cmdline = read_cmdline(uki) if uki.stat().st_size else None
+        if not cmdline:
+            raise RuntimeError(f"{uki} is empty or has no readable cmdline")
+        cmdlines.append(cmdline)
+    return cmdlines
 
 
 def _validate_systemd_boot(ctx: InstallContext, boot: dict, storage: dict, esp_mount: Path) -> None:

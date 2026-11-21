@@ -1250,10 +1250,16 @@ install_mode_form() {
 
 confirm_disk_overwrite() {
   local mode="encrypted"
-  local affirmative confirm_status
+  local affirmative confirm_status disk_details
+
+  # The disk as the disk list describes it (size, model, partitions), which a
+  # machine with one disk now reaches without seeing that list.
+  disk_details=$(get_disk_info "$disk")
 
   while true; do
     clear_logo
+    echo
+    say "$disk_details"
     echo
     say "$(t overwrite.warning)"
 

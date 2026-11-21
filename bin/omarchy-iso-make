@@ -13,6 +13,7 @@ OEM_CONFIG=""
 OEM_SCRIPTS=()
 OEM_BUNDLE_DIR=""
 REHEARSAL=""
+REGION=""
 while [[ $# -gt 0 ]]; do
   case $1 in
   --arch)
@@ -51,12 +52,16 @@ while [[ $# -gt 0 ]]; do
     OMARCHY_OEM_INSTALL=1
     shift
     ;;
-  --china)
-    # The ISO for mainland China: the installer asks for no language,
-    # keyboard or timezone and installs Chinese, Pinyin and Asia/Shanghai, and the installed system downloads from
-    # Omarchy's China mirrors (omarchy.cn) first.
-    OMARCHY_CHINA=1
-    shift
+  --region)
+    # An ISO for one country: regions/<code>.json presets its language,
+    # keyboard and timezone, which the installer then does not ask for, and
+    # the mirrors the installed system downloads from first.
+    REGION="${2:-}"
+    if [[ -z $REGION ]]; then
+      echo "Error: --region requires a region code" >&2
+      exit 1
+    fi
+    shift 2
     ;;
   --oem-config)
     # What first-boot setup shows the owner of a machine this OEM ISO
@@ -136,7 +141,7 @@ while [[ $# -gt 0 ]]; do
     ;;
   *)
     echo "Unknown option: $1"
-    echo "Usage: $0 [--oem [--oem-config FILE] [--oem-script FILE]...] [--china] [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout> [--rehearsal]]"
+    echo "Usage: $0 [--oem [--oem-config FILE] [--oem-script FILE]...] [--region CODE] [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout> [--rehearsal]]"
     echo "       $0 --arch aarch64 [--edge|--rc] [--package-dir DIR] [--dev-ssh <pubkey>] [--local-source <omarchy-checkout> <pkgs-checkout>] [...]"
     exit 1
     ;;
@@ -159,9 +164,25 @@ if [[ -n $LOCAL_OMARCHY_PATH ]]; then
   LOCAL_PKGS_PATH=$(realpath "$LOCAL_PKGS_PATH")
 fi
 
-if [[ ${OMARCHY_CHINA:-} == "1" && ${OMARCHY_OEM_INSTALL:-} == "1" ]]; then
-  echo "Error: --china and --oem make different ISOs; pick one" >&2
-  exit 1
+# A region file presets what the installer would ask: language, keyboard
+# (a label of the setup form's list), timezone, and mirrors (an Omarchy region
+# profile, written to the target's /etc/omarchy/region). Each is optional.
+REGION_FILE=""
+if [[ -n $REGION ]]; then
+  if [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]]; then
+    echo "Error: --region and --oem make different ISOs; pick one" >&2
+    exit 1
+  fi
+  REGION_FILE="$(realpath "${BASH_SOURCE[0]%/*}/..")/regions/$REGION.json"
+  if [[ ! $REGION =~ ^[a-z]{2}$ || ! -f $REGION_FILE ]]; then
+    echo "Error: no region $REGION; the regions are: $(cd "${REGION_FILE%/*}" && ls *.json | sed 's/\.json$//' | xargs)" >&2
+    exit 1
+  fi
+  if ! jq -e 'type == "object" and all(to_entries[]; (.key | IN("language", "keyboard", "timezone", "mirrors")) and (.value | type == "string" and . != ""))' \
+    "$REGION_FILE" >/dev/null 2>&1; then
+    echo "Error: $REGION_FILE may only set language, keyboard, timezone and mirrors, each to a string" >&2
+    exit 1
+  fi
 fi
 
 # An OEM's bundle is checked and laid out here, before anything is built, so a
@@ -279,7 +300,7 @@ DOCKER_ARGS=(
   -e "OMARCHY_ISO_REF=$OMARCHY_ISO_REF"
   -e "OMARCHY_MIRROR=$OMARCHY_MIRROR"
   -e "OMARCHY_OEM_INSTALL=${OMARCHY_OEM_INSTALL:-}"
-  -e "OMARCHY_CHINA=${OMARCHY_CHINA:-}"
+  -e "OMARCHY_REGION=$REGION"
   -e "OMARCHY_INSTALL_DEBUG=${OMARCHY_INSTALL_DEBUG:-}"
   -e "OMARCHY_ARCH=$OMARCHY_ARCH"
   -e "OMARCHY_KERNEL=$OMARCHY_KERNEL"
@@ -319,6 +340,10 @@ if [[ -n $OEM_BUNDLE_DIR ]]; then
   DOCKER_ARGS+=(-v "$OEM_BUNDLE_DIR:/oem:ro")
 fi
 
+if [[ -n $REGION_FILE ]]; then
+  DOCKER_ARGS+=(-v "$REGION_FILE:/region.json:ro")
+fi
+
 # The host pacman cache belongs to the host architecture; sharing it with an
 # aarch64 container would leak foreign packages into the offline mirror.
 if [[ $OMARCHY_ARCH == x86_64 && -d /var/cache/pacman/pkg ]]; then
@@ -353,7 +378,7 @@ fi
 
 iso_name=omarchy
 [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]] && iso_name=omarchy-oem
-[[ ${OMARCHY_CHINA:-} == "1" ]] && iso_name=omarchy-china
+[[ -n $REGION ]] && iso_name=omarchy-$REGION
 latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/"$iso_name"-*.iso | head -n1)
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   iso_ref="${latest_iso%.*}${N1X_DEV_SSH_KEY:+-devssh}-$OMARCHY_ISO_REF.iso"

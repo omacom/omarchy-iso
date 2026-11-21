@@ -423,9 +423,20 @@ Despite the local folder name, the first argument is the Omarchy source checkout
 
 Use `--dev` or `--rc` to build against those package channels. Both `--dev` and `--edge` select the dev packages from the edge mirror.
 
-### The China ISO
+### Region ISOs
 
-`--china` builds `omarchy-china-*.iso` for mainland China. Its installer asks for no language, keyboard or timezone: it installs in Chinese (Simplified), with fcitx5 Pinyin input on a US layout, in Asia/Shanghai. The install writes `cn` to the target's `/etc/omarchy/region`. The runtime's pacman finalizer (`omarchy-apply-pacman`) then puts Omarchy's China mirrors (`*.omarchy.cn`) ahead of the `.org` ones, which stay as the fallback. This works on every channel and is combined with the channel flags (`--china --edge`), not with `--oem`. The China mirrors are x86 only so far, so an aarch64 China ISO keeps the global mirrors.
+`--region <code>` builds `omarchy-<code>-*.iso` from `regions/<code>.json`, where the code is the country's ISO 3166-1 alpha-2 code. The file can preset four things, and each one is optional:
+
+| Key | Value | Effect |
+| --- | --- | --- |
+| `language` | an Omarchy language code, such as `zh-CN` or `da` | The installer skips the language screen and runs in that language. |
+| `keyboard` | a label from the setup form's keyboard list, such as `Chinese (Simplified, Pinyin)` or `Danish` | The installer skips the keyboard screen, and loads that layout for the disk password. |
+| `timezone` | a tzdata zone, such as `Asia/Shanghai` | The installer skips the timezone question. |
+| `mirrors` | an Omarchy region profile (`default/regions/<code>/` in the runtime; only `cn` so far) | The install writes it to the target's `/etc/omarchy/region`. The runtime's pacman finalizer (`omarchy-apply-pacman`) then puts that region's mirrors ahead of the `.org` ones, which stay as the fallback. |
+
+`regions/cn.json` is the China ISO: Chinese, Pinyin input (fcitx5) on a US layout, Asia/Shanghai, and Omarchy's China mirrors (`*.omarchy.cn`). The China mirrors are x86 only so far, so an aarch64 China ISO keeps the global mirrors. `test/unit/test_installer_i18n.py` checks every region file against the language list, the setup form's keyboards, tzdata and the runtime's region profiles.
+
+A region ISO goes with the channel flags (`--region cn --edge`), not with `--oem`. A preset language also removes the language screen's Ctrl+C entry into preparing the machine for another owner. `omarchy-iso-release` publishes only `omarchy-[0-9]*`, so a region ISO is never released as the global one.
 
 ### aarch64
 

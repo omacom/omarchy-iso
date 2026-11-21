@@ -7,7 +7,7 @@ OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
 OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
 OMARCHY_KERNEL="${OMARCHY_KERNEL:-linux-omarchy}"
 # profiledef.sh reads these in the mkarchiso environment.
-export OMARCHY_ARCH OMARCHY_KERNEL OMARCHY_OEM_INSTALL OMARCHY_CHINA
+export OMARCHY_ARCH OMARCHY_KERNEL OMARCHY_OEM_INSTALL OMARCHY_REGION
 
 source /builder/node-release.sh
 source /builder/arm64-kernel-image.sh
@@ -227,10 +227,10 @@ if [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]]; then
   touch "$build_cache_dir/airootfs/usr/share/omarchy-iso/oem-install"
   sed -i 's/^TIMEOUT .*/TIMEOUT 1/' "$build_cache_dir/syslinux/archiso_sys.cfg"
 fi
-# The China ISO (--china): the configurator sets Chinese, Pinyin and Asia/Shanghai,
-# and the orchestrator marks the target's region cn for the China mirrors.
-if [[ ${OMARCHY_CHINA:-} == "1" ]]; then
-  touch "$build_cache_dir/airootfs/usr/share/omarchy-iso/china"
+# A region ISO (--region): the configurator takes what regions/<code>.json
+# presets instead of asking, and the orchestrator hands its mirrors to the target.
+if [[ -f /region.json ]]; then
+  cp /region.json "$build_cache_dir/airootfs/usr/share/omarchy-iso/region.json"
 fi
 # The OEM's own bundle (--oem-config, --oem-script), as builder/oem-bundle.py
 # checked and laid it out: the installer hands its branding and agreement to

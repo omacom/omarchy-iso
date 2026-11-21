@@ -343,10 +343,10 @@ class KmsconLanguageTest(unittest.TestCase):
     def test_only_the_language_screen_picks_the_language(self):
         # The language goes to the installed system, so nothing after the
         # summary the user confirmed (a timezone, say) may change it. It starts
-        # as English, or as Chinese on the China ISO.
+        # as English, or as the language a region ISO presets.
         configurator = (ROOT / "configs/airootfs/root/configurator").read_text()
         assignments = re.findall(r"^\s*language=.*$", configurator, re.MULTILINE)
-        self.assertEqual([line.strip() for line in assignments], ['language="en"', 'language="zh-CN"', "language=$choice"])
+        self.assertEqual([line.strip() for line in assignments], ["language=${preset_language:-en}", "language=$choice"])
 
 
 class ConsoleFontLoadTest(unittest.TestCase):
@@ -394,18 +394,67 @@ class ConsoleFontLoadTest(unittest.TestCase):
 
 
 class RegionMarkerTest(unittest.TestCase):
-    def marker(self, china_iso):
+    def marker(self, preset):
         with tempfile.TemporaryDirectory() as target, tempfile.TemporaryDirectory() as share:
-            if china_iso:
-                (Path(share) / "china").touch()
+            region = Path(share) / "region.json"
+            if preset is not None:
+                region.write_text(json.dumps(preset))
             ctx = types.SimpleNamespace(target=Path(target), omarchy_install={})
-            phases_impl._write_region_marker(ctx, Path(share))
+            phases_impl._write_region_marker(ctx, region)
             marker = Path(target) / "etc/omarchy/region"
             return (marker.read_text(), oct(marker.stat().st_mode & 0o777)) if marker.exists() else None
 
-    def test_a_china_iso_marks_the_target_cn_and_every_other_iso_writes_nothing(self):
-        self.assertEqual(self.marker(True), ("cn\n", "0o644"))
-        self.assertIsNone(self.marker(False))
+    def test_a_region_isos_mirrors_reach_the_target_and_nothing_else_writes_one(self):
+        self.assertEqual(self.marker({"language": "zh-CN", "mirrors": "cn"}), ("cn\n", "0o644"))
+        self.assertIsNone(self.marker({"language": "da", "timezone": "Europe/Copenhagen"}))
+        self.assertIsNone(self.marker(None))
+
+
+class RegionPresetTest(unittest.TestCase):
+    """Every regions/<code>.json presets only what the installer can take: a
+    language of the registry, a keyboard of the setup form's list, a timezone
+    the list offers, and mirrors the runtime has a region profile for."""
+
+    def setUp(self):
+        self.presets = {path.stem: json.loads(path.read_text()) for path in sorted((ROOT / "regions").glob("*.json"))}
+
+    def each(self, field):
+        for code, preset in self.presets.items():
+            if field in preset:
+                with self.subTest(code=code):
+                    yield preset[field]
+
+    def test_a_region_sets_only_what_the_installer_presets(self):
+        self.assertIn("cn", self.presets)
+        for code, preset in self.presets.items():
+            with self.subTest(code=code):
+                self.assertRegex(code, r"^[a-z]{2}$")
+                self.assertLessEqual(set(preset), {"language", "keyboard", "timezone", "mirrors"})
+
+    def test_the_language_is_one_the_installer_offers(self):
+        languages = set(json.loads((SHARE / "language-defaults.json").read_text()))
+        for language in self.each("language"):
+            self.assertIn(language, languages)
+
+    def test_the_keyboard_is_a_row_of_the_setup_form(self):
+        form = omarchy_file("install/provisioning/setup-form.sh")
+        if form is None:
+            self.skipTest("no Omarchy runtime to read the setup form from")
+        rows = re.search(r"OMARCHY_KEYBOARD_LAYOUTS=\$'(.*?)'\n", form.read_text(), re.DOTALL).group(1).splitlines()
+        labels = {row.split("|")[0] for row in rows}
+        for keyboard in self.each("keyboard"):
+            self.assertIn(keyboard, labels)
+
+    def test_the_timezone_is_a_zone(self):
+        for timezone in self.each("timezone"):
+            self.assertTrue(Path("/usr/share/zoneinfo", timezone).is_file(), timezone)
+
+    def test_the_mirrors_are_a_region_profile_of_the_runtime(self):
+        for mirrors in self.each("mirrors"):
+            profile = omarchy_file(f"default/regions/{mirrors}/timezones")
+            if profile is None:
+                self.skipTest("no Omarchy runtime with region profiles")
+            self.assertTrue(profile.is_file())
 
 
 class LanguageMarkerTest(unittest.TestCase):

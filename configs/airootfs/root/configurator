@@ -219,15 +219,17 @@ notice() {
 # their English name and only set the installed system's language.
 
 LANGUAGES_JSON="${LANGUAGES_JSON:-$OMARCHY_PATH/default/i18n/locales.json}"
-language="en"
 
-# The China ISO (--china) installs in Chinese, with Pinyin input on a US
-# layout, in Asia/Shanghai, and asks for none of them.
-china_iso=false
-if [[ -f $OMARCHY_ISO_SHARE/china ]]; then
-  china_iso=true
-  language="zh-CN"
-fi
+# A region ISO (--region) presets any of the language, the keyboard (a label
+# of the setup form's list) and the timezone, and does not ask for those.
+REGION_PRESET="${REGION_PRESET:-$OMARCHY_ISO_SHARE/region.json}"
+region_preset() {
+  jq -r --arg field "$1" '.[$field] // empty' "$REGION_PRESET" 2>/dev/null || true
+}
+preset_language=$(region_preset language)
+preset_keyboard=$(region_preset keyboard)
+preset_timezone=$(region_preset timezone)
+language=${preset_language:-en}
 
 # The setup form takes its language and defaults from the language picked here:
 # the layout that goes with it, and its country's capital for when the network
@@ -280,7 +282,7 @@ language_rows() {
 language_form() {
   local choice status
 
-  if ! $china_iso && [[ -r $LANGUAGES_JSON ]]; then
+  if [[ -z $preset_language && -r $LANGUAGES_JSON ]]; then
     while true; do
       clear_logo
       echo
@@ -309,15 +311,16 @@ language_form() {
 keyboard_form() {
   local status
 
-  if $china_iso; then
-    keyboard_label="Chinese (Simplified, Pinyin)"
-    keyboard="us"
-    keyboard_input_method="pinyin"
-    keyboard_xkb_layout=""
-    return 0
-  fi
-
   while true; do
+    # A preset keyboard is the setup form's row of that label, loaded below
+    # like a picked one, so the disk password is typed under it.
+    if [[ -n $preset_keyboard ]]; then
+      IFS='|' read -r keyboard_label keyboard keyboard_input_method keyboard_xkb_layout < <(
+        printf '%s\n' "$OMARCHY_KEYBOARD_LAYOUTS" | awk -F'|' -v c="$preset_keyboard" '$1==c{print; exit}')
+      keyboard_input_method=${keyboard_input_method:-none}
+      break
+    fi
+
     clear_logo
     echo
     if ! i18n_translated "$language"; then
@@ -414,8 +417,8 @@ user_form() {
   # Each prompt reports 0 (set), OMARCHY_FORM_BACK (Esc), or OMARCHY_FORM_SIGNAL
   # (Ctrl+C). Both non-zero cases unwind to user_step, which decides what they
   # mean here; the form itself never aborts.
-  if $china_iso; then
-    timezone="Asia/Shanghai"
+  if [[ -n $preset_timezone ]]; then
+    timezone=$preset_timezone
   else
     omarchy_prompt_timezone || return $?
   fi

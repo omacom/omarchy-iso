@@ -43,13 +43,25 @@ printf 'upload %s\n' "$*" >>"$TEST_LOG"
 STUB
 
 # Log one argument per field rather than "$*": the point of several cases below
-# is that a path survives as a single argument, which "$*" cannot show.
+# is that a path survives as a single argument, which "$*" cannot show. The
+# uploader names each file through --files-from, so the stub logs the name in
+# the list in place of the list's path.
 cat >"$work/stubs/rclone" <<'STUB'
 #!/bin/bash
+args=()
+while (($#)); do
+  if [[ $1 == --files-from ]]; then
+    args+=("--files-from=$(<"$2")")
+    shift 2
+  else
+    args+=("$1")
+    shift
+  fi
+done
 printf 'rclone'
-printf '|%s' "$@"
+printf '|%s' "${args[@]}"
 printf '\n'
-[[ -n ${RCLONE_FAIL_ON:-} && $* == *"$RCLONE_FAIL_ON"* ]] && exit 1
+[[ -n ${RCLONE_FAIL_ON:-} && ${args[*]} == *"$RCLONE_FAIL_ON"* ]] && exit 1
 exit 0
 STUB
 
@@ -129,7 +141,7 @@ printf 'checksum\n' >"$upload_iso.sha256"
 run_upload "$upload_iso"
 
 for suffix in "" ".sig" ".sha256"; do
-  grep -qxF "rclone|copy|$upload_iso$suffix|Omarchy:omarchy/|-P" "$work/rclone-log" ||
+  grep -qF "rclone|copy|$work/release builds|Omarchy:omarchy/|-P|--files-from=omarchy-9.9.9.iso$suffix|" "$work/rclone-log" ||
     fail "upload ships the ISO, its signature and its checksum, path spaces intact" \
       "$(cat "$work/rclone-log")"
 done
@@ -141,7 +153,7 @@ run_upload "$upload_iso"
 if grep -qF ".sig" "$work/rclone-log"; then
   fail "upload skips a sidecar that is not there" "$(cat "$work/rclone-log")"
 fi
-grep -qF "$upload_iso.sha256" "$work/rclone-log" ||
+grep -qF -- "--files-from=omarchy-9.9.9.iso.sha256|" "$work/rclone-log" ||
   fail "upload still ships the checksum without a signature" "$(cat "$work/rclone-log")"
 pass "upload skips a sidecar that is not there"
 
@@ -154,7 +166,7 @@ upload_status=$?
 set -e
 (( upload_status != 0 )) ||
   fail "a failed sidecar copy fails the upload" "$(cat "$work/rclone-log")"
-grep -qF "$upload_iso.sha256" "$work/rclone-log" ||
+grep -qF -- "--files-from=omarchy-9.9.9.iso.sha256|" "$work/rclone-log" ||
   fail "a failed sidecar copy still attempts the rest" "$(cat "$work/rclone-log")"
 pass "a failed sidecar copy fails the upload without skipping the rest"
 

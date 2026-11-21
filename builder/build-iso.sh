@@ -66,12 +66,16 @@ export OMARCHY_RUNTIME_PACKAGE OMARCHY_SETTINGS_PACKAGE OMARCHY_NVIM_PACKAGE
 # OMARCHY_LOCAL_PACKAGES names fewer; the others come from the channel. The
 # release rehearsal (--rehearsal) builds only the pinned omarchy and
 # omarchy-settings, and takes omarchy-nvim as published, as a release does.
-# x86_64 boots through a boot stack package: omarchy-boot (Limine), which the
-# image holds, or omarchy-boot-systemd, which UEFI installs swap it for. A pkgs
-# checkout that has them builds them with the runtime that depends on them.
+# The image boots through Limine's stack: on x86_64 the omarchy-boot package,
+# on aarch64 its packages by name. UEFI installs swap it for
+# omarchy-boot-systemd. A pkgs checkout that has them builds them with the
+# runtime that depends on them.
 boot_stack_packages=""
-if [[ $OMARCHY_ARCH == x86_64 && -d /omarchy-pkgs/pkgbuilds/omarchy-boot-systemd ]]; then
-  boot_stack_packages=" omarchy-boot omarchy-boot-systemd"
+if [[ -d /omarchy-pkgs/pkgbuilds/omarchy-boot-systemd ]]; then
+  case $OMARCHY_ARCH in
+    x86_64) boot_stack_packages=" omarchy-boot omarchy-boot-systemd" ;;
+    aarch64) boot_stack_packages=" omarchy-boot-systemd" ;;
+  esac
 fi
 read -ra local_packages <<<"${OMARCHY_LOCAL_PACKAGES:-$OMARCHY_SETTINGS_PACKAGE $OMARCHY_RUNTIME_PACKAGE $OMARCHY_NVIM_PACKAGE$boot_stack_packages}"
 export OMARCHY_LOCAL_PACKAGES="${local_packages[*]}"
@@ -85,7 +89,7 @@ done
 for local_package_name in "${local_packages[@]}"; do
   case $local_package_name in
     "$OMARCHY_RUNTIME_PACKAGE" | "$OMARCHY_SETTINGS_PACKAGE" | "$OMARCHY_NVIM_PACKAGE") ;;
-    omarchy-boot | omarchy-boot-systemd) [[ -n $boot_stack_packages ]] || { echo "ERROR: $local_package_name is built only for x86_64, from a pkgs checkout that has it" >&2; exit 1; } ;;
+    omarchy-boot | omarchy-boot-systemd) [[ " $boot_stack_packages " == *" $local_package_name "* ]] || { echo "ERROR: this $OMARCHY_ARCH build can't build $local_package_name" >&2; exit 1; } ;;
     *) echo "ERROR: OMARCHY_LOCAL_PACKAGES names $local_package_name, which this build does not install" >&2; exit 1 ;;
   esac
 done
@@ -879,26 +883,23 @@ if ! resolved_package_files="$(
 fi
 mapfile -t required_package_files <<< "$resolved_package_files"
 
-# UEFI installs swap the image's Limine stack (omarchy-boot) for
-# omarchy-boot-systemd, which conflicts with it, so it is resolved in a
-# transaction of its own and kept in the mirror next to it. Built locally, it
-# is kept with the other local builds below and its dependencies came in with
-# theirs.
+# UEFI installs swap the image's Limine stack for omarchy-boot-systemd, which
+# conflicts with it, so it is resolved in a transaction of its own and kept in
+# the mirror next to it. Built locally, it is kept with the other local builds
+# below and its dependencies came in with theirs.
 boot_swap_package=""
-if [[ $OMARCHY_ARCH == x86_64 ]]; then
-  if [[ " ${local_packages[*]} " == *" omarchy-boot-systemd "* && -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
-    boot_swap_package=omarchy-boot-systemd
-  elif pacman --config "$online_pacman_conf" --dbpath /tmp/offlinedb -Sp omarchy-boot-systemd >/dev/null 2>&1; then
-    boot_swap_package=omarchy-boot-systemd
-    pacman --config "$online_pacman_conf" --noconfirm -Sw omarchy-boot-systemd \
-      --cachedir "$offline_mirror_dir/" --dbpath /tmp/offlinedb --needed
-    mapfile -t -O "${#required_package_files[@]}" required_package_files < <(
-      pacman --config "$online_pacman_conf" --noconfirm \
-        --dbpath /tmp/offlinedb -S --print --print-format '%f' omarchy-boot-systemd
-    )
-  else
-    echo "x86_64: no repository offers omarchy-boot-systemd; UEFI installs will boot Limine" >&2
-  fi
+if [[ " ${local_packages[*]} " == *" omarchy-boot-systemd "* && -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
+  boot_swap_package=omarchy-boot-systemd
+elif pacman --config "$online_pacman_conf" --dbpath /tmp/offlinedb -Sp omarchy-boot-systemd >/dev/null 2>&1; then
+  boot_swap_package=omarchy-boot-systemd
+  pacman --config "$online_pacman_conf" --noconfirm -Sw omarchy-boot-systemd \
+    --cachedir "$offline_mirror_dir/" --dbpath /tmp/offlinedb --needed
+  mapfile -t -O "${#required_package_files[@]}" required_package_files < <(
+    pacman --config "$online_pacman_conf" --noconfirm \
+      --dbpath /tmp/offlinedb -S --print --print-format '%f' omarchy-boot-systemd
+  )
+else
+  echo "$OMARCHY_ARCH: no repository offers omarchy-boot-systemd; UEFI installs will boot Limine" >&2
 fi
 
 # The online transaction intentionally excludes packages built from the local

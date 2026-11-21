@@ -100,6 +100,25 @@ class SystemdBootInstallTest(unittest.TestCase):
                 setup()
                 self.assertEqual(phases._boot_loader(self.ctx), "limine")
 
+    def test_aarch64_uefi_installs_get_systemd_boot_with_the_console_on_screen(self):
+        luks_tuning = types.ModuleType("orchestrator.luks_tuning")
+        luks_tuning.with_cmdline_options = lambda cmdline: f"{cmdline} rd.luks.name=p=root"
+        with mock.patch.object(phases.platform, "machine", return_value="aarch64"), \
+                mock.patch.dict(sys.modules, {"orchestrator.luks_tuning": luks_tuning}):
+            self.assertEqual(phases._boot_loader(self.ctx), "systemd-boot")
+            phases._write_limine_defaults(self.ctx, CMDLINE, esp_mount="/boot")
+        self.assertEqual((self.root / "etc/cmdline.d/00-omarchy-console.conf").read_text(), "console=tty0 acpi=nospcr\n")
+        self.assertFalse((self.root / "etc/limine-entry-tool.d").exists())
+
+    def test_an_n1x_boot_image_keeps_the_console_off_the_serial_port(self):
+        self.installed()
+        with mock.patch.object(phases, "_installed_arm_platform", return_value="n1x"):
+            with self.assertRaisesRegex(RuntimeError, "console=tty0 acpi=nospcr"):
+                self.validate()
+            (self.root / f"boot/EFI/Linux/omarchy-{MACHINE_ID[:8]}-linux-omarchy-abc123.efi").write_bytes(
+                uki(f"{CMDLINE} console=tty0 acpi=nospcr".encode()))
+            self.validate()
+
     def test_the_stack_swap_replaces_limine_s_packages(self):
         phases._install_systemd_boot_stack(self.ctx)
         swap = self.commands[0]

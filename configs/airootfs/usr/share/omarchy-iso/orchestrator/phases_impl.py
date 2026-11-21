@@ -1360,8 +1360,8 @@ SYSTEMD_BOOT_STACK = "omarchy-boot-systemd"
 
 def _boot_loader(ctx: InstallContext) -> str:
     """The boot loader this install sets up: systemd-boot, the one Secure Boot
-    needs, on UEFI x86_64 machines; Limine on BIOS firmware, which systemd-boot
-    cannot start, and on aarch64 until its platforms are moved over.
+    needs, on UEFI machines; Limine on BIOS firmware, which systemd-boot cannot
+    start. (Apple Silicon is never installed from this image.)
     OMARCHY_ISO_BOOT_LOADER=limine keeps a UEFI install on Limine, and an ISO
     whose mirror has no omarchy-boot-systemd has no other choice. Decided once
     per install."""
@@ -1371,7 +1371,7 @@ def _boot_loader(ctx: InstallContext) -> str:
         loader = "limine"
         if (
             os.environ.get("OMARCHY_ISO_BOOT_LOADER", "systemd-boot") != "limine"
-            and platform.machine() == "x86_64"
+            and platform.machine() in ("x86_64", "aarch64")
             and any(not p.name.endswith(".sig") for p in OFFLINE_MIRROR.glob(f"{SYSTEMD_BOOT_STACK}-[0-9]*.pkg.tar.*"))
             and arch.has_uefi()
         ):
@@ -3628,6 +3628,12 @@ def _validate_systemd_boot(ctx: InstallContext, boot: dict, storage: dict, esp_m
     cmdlines = _systemd_boot_uki_cmdlines(ctx, esp_mount)
     if not cmdlines or not all("root=" in cmdline for cmdline in cmdlines):
         raise RuntimeError("a boot image carries no cmdline with root=")
+    # As on Limine: every N1x entry keeps the console off the SPCR serial port.
+    if _installed_arm_platform(ctx) == "n1x":
+        for cmdline in cmdlines:
+            missing = [param for param in N1X_REQUIRED_CMDLINE if param not in cmdline.split()]
+            if missing:
+                raise RuntimeError(f"a boot image's cmdline lacks {' '.join(missing)}; its console would go to the SPCR serial port")
     if ctx.encrypt and not all("cryptdevice=" in cmdline for cmdline in cmdlines):
         raise RuntimeError("encrypted install but a boot image's cmdline has no cryptdevice=")
 

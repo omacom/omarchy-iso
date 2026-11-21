@@ -61,6 +61,14 @@ class WriteRootImageFramesTest(unittest.TestCase):
         self.assertEqual(self.calls.read_text(), "write /medium/image.zst /dev/mapper/root\n")
         self.assertIn("› omarchy-image-write: wrote 4.67 of 6.37 GiB", self.logged)
 
+    def test_the_tools_progress_reaches_the_caller_while_it_writes(self):
+        self.tool.write_text('#!/bin/bash\necho "5 10" >"$OMARCHY_IMAGE_WRITE_PROGRESS"\nsleep 0.8\n')
+        self.tool.chmod(0o755)
+        seen = []
+        self.assertTrue(phases_impl._write_root_image_frames(
+            Path("/medium/image.zst"), "/dev/mapper/root", seen.append))
+        self.assertEqual(set(seen), {0.5})
+
     def test_refused_image_falls_back_to_the_pipe(self):
         self.stub(2, "omarchy-image-write: frame 0 at byte 0: not a framed image\\n")
         self.assertFalse(self.write())

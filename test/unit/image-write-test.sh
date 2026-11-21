@@ -118,6 +118,13 @@ grep -q "(11 frames, 2 zero, 11 cached, 8 threads)" "$work/stderr" ||
   fail "write reports what it did" "$(cat "$work/stderr")"
 pass "write reports what it did"
 
+# The installer's progress bar reads the frames taken while the tool writes.
+target "$work/target" 0
+OMARCHY_IMAGE_WRITE_PROGRESS="$work/progress" run write "$image" "$work/target" 2
+[[ $status == 0 && $(cat "$work/progress" 2>/dev/null) == "11 11" ]] ||
+  fail "write reports its progress to OMARCHY_IMAGE_WRITE_PROGRESS" "status $status, progress '$(cat "$work/progress" 2>/dev/null)'"
+pass "write reports its progress to OMARCHY_IMAGE_WRITE_PROGRESS"
+
 # The split the installer log keeps: wall time by stage, and the workers'
 # thread-seconds by activity, which cannot add up to more than the threads had.
 python3 - "$work/stderr" <<'PY' || fail "write reports where its time went" "$(cat "$work/stderr")"

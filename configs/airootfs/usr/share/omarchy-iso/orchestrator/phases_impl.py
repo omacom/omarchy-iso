@@ -42,9 +42,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -997,7 +999,8 @@ def _medium_bytes_read() -> int | None:
         return None
 
 
-def _write_root_image_frames(image: Path, device: str) -> bool:
+def _write_root_image_frames(image: Path, device: str,
+                              on_progress: Callable[[float], None] | None = None) -> bool:
     """Write the image with omarchy-image-write (builder/omarchy-image-write.c):
     the ISO packs it as independent 256 KiB zstd frames with a seek table,
     which N threads decode and pwrite with O_DIRECT, so the drive sees N
@@ -1008,16 +1011,33 @@ def _write_root_image_frames(image: Path, device: str) -> bool:
     (in use, too small) or the write failed partway."""
     if not IMAGE_WRITE.is_file():
         return False
+    # The tool reports the frames it has taken to a file while it writes,
+    # which goes on to the progress bar: from a slow USB stick the write is
+    # minutes of the install.
+    progress = Path(tempfile.mkdtemp(prefix="omarchy-image-write-")) / "progress"
+    env = {**os.environ, "OMARCHY_IMAGE_WRITE_PROGRESS": str(progress)}
     with _time_step("F1.image_write (parallel frames, O_DIRECT)"):
-        proc = subprocess.run([str(IMAGE_WRITE), "write", str(image), device],
-                              stderr=subprocess.PIPE, text=True, check=False)
-    for line in proc.stderr.splitlines():
+        proc = subprocess.Popen([str(IMAGE_WRITE), "write", str(image), device],
+                                stderr=subprocess.PIPE, text=True, env=env)
+        while True:
+            try:
+                _, stderr = proc.communicate(timeout=0.5)
+                break
+            except subprocess.TimeoutExpired:
+                if on_progress:
+                    try:
+                        done, total = (int(n) for n in progress.read_text().split())
+                        on_progress(done / total)
+                    except (OSError, ValueError, ZeroDivisionError):
+                        pass  # not written yet, or caught between two samples
+    shutil.rmtree(progress.parent, ignore_errors=True)
+    for line in stderr.splitlines():
         info(f"› {line}")
     if proc.returncode == 2:
         info("› image-write refused the image; writing it through zstdcat | dd")
         return False
     if proc.returncode != 0:
-        raise subprocess.CalledProcessError(proc.returncode, proc.args, stderr=proc.stderr)
+        raise subprocess.CalledProcessError(proc.returncode, proc.args, stderr=stderr)
     return True
 
 
@@ -1090,7 +1110,10 @@ def _place_root_image(ctx: InstallContext) -> None:
     # the page cache: near zero when the verify left it all cached, up to the
     # whole image on a machine whose RAM could not hold it.
     medium_before = _medium_bytes_read()
-    if not _write_root_image_frames(raw_image, device):
+    # The rest of the placement after the write takes moments; it gets the
+    # last few percent.
+    if not _write_root_image_frames(raw_image, device,
+                                    lambda done: _write_phase_progress(ctx, 0.95 * done)):
         _write_root_image_pipe(raw_image, device)
     medium_after = _medium_bytes_read()
     if medium_before is not None and medium_after is not None:

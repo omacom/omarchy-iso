@@ -74,7 +74,7 @@ static int target_fd;
 static uint8_t *zero_frame;
 static size_t zero_frame_size;
 static atomic_size_t next_frame, bytes_written, zero_frames;
-static atomic_int failed;
+static atomic_int failed, workers_done;
 /* Thread-nanoseconds, summed over the workers: decoding (including the page
  * faults on the image), in pwrite, and checking for zeros (the compressed
  * bytes against the zero frame, or a decoded frame for all zeros). */
@@ -367,6 +367,7 @@ static void *worker(void *arg)
 		atomic_fetch_add(&bytes_written, n);
 	}
 out:
+	atomic_fetch_add(&workers_done, 1);
 	atomic_fetch_add(&decode_ns, decode);
 	atomic_fetch_add(&write_ns, write);
 	atomic_fetch_add(&skip_ns, skip);
@@ -447,6 +448,33 @@ static void plan_order(size_t size, unsigned char *vec)
 	free(vec);
 }
 
+/*
+ * With OMARCHY_IMAGE_WRITE_PROGRESS set to a file, "<frames taken> <frames>"
+ * goes there four times a second and once more when the workers are done, for the
+ * installer's progress bar. Best effort: a sample that cannot be written is
+ * skipped, and a reader may see the file empty between two samples.
+ */
+static void report_progress(const char *path, int workers)
+{
+	const struct timespec quarter = { 0, 250000000 };
+	char line[64];
+	size_t k;
+	int fd, n, done;
+
+	do {
+		done = atomic_load(&workers_done) >= workers;
+		k = atomic_load(&next_frame);
+		n = snprintf(line, sizeof(line), "%zu %zu\n", k < nframes ? k : nframes, nframes);
+		fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+		if (fd >= 0) {
+			if (write(fd, line, n) != n) {
+				/* a skipped sample */
+			}
+			close(fd);
+		}
+	} while (!done && !nanosleep(&quarter, NULL));
+}
+
 static int write_image(const char *path, const char *target, int threads)
 {
 	pthread_t tid[MAX_THREADS];
@@ -482,6 +510,8 @@ static int write_image(const char *path, const char *target, int threads)
 	if (i == 0)
 		die(FAILED, "cannot start a thread");
 	started = i;
+	if (getenv("OMARCHY_IMAGE_WRITE_PROGRESS"))
+		report_progress(getenv("OMARCHY_IMAGE_WRITE_PROGRESS"), started);
 	while (i--)
 		pthread_join(tid[i], NULL);
 	t2 = now_ns();

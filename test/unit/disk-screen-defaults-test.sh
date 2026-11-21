@@ -92,6 +92,35 @@ check "free space on offer: full disk still first" \
 check "no free-space mode on offer (BIOS, or no room)" \
   "full_disk|other_disk" \
   "$(install_mode_choices false | paste -sd'|' -)"
+check "the only disk: no other disk to choose" \
+  "full_disk|free_space" \
+  "$(install_mode_choices true false | paste -sd'|' -)"
+check "the only disk, and no free-space mode: a single choice the picker skips" \
+  "full_disk" \
+  "$(install_mode_choices false false | paste -sd'|' -)"
+
+echo "==> one disk is no choice"
+# disk_form as the configurator defines it, with the screen it would draw
+# recorded instead of shown.
+eval "$(awk '/^disk_form\(\) \{/,/^\}/' "$CONFIGURATOR")"
+step() { shown=true; }
+gum() { shown=true; printf '%s\n' "$CHOSEN"; }
+t() { printf '%s' "$1"; }
+get_disk_info() { printf '%s 1TB\n' "$1"; }
+findmnt() { :; }
+get_root_disk() { :; }
+
+LSBLK_DISKS='/dev/nvme0n1 disk 1000204886016 0 nvme'
+disk="" only_disk=false shown=false
+disk_form
+check "the only disk is taken without a disk list" "/dev/nvme0n1 true false" "$disk $only_disk $shown"
+
+# A second disk plugged in after the first call: the list is back, and the
+# mode picker offers another disk again.
+LSBLK_DISKS=$'/dev/nvme0n1 disk 1000204886016 0 nvme\n/dev/sda disk 512110190592 0 sata'
+disk="" shown=false CHOSEN="/dev/sda 512GB"
+disk_form
+check "two disks show the list again" "/dev/sda false true" "$disk $only_disk $shown"
 
 echo "==> the configurator calls them"
 check "disk list from install_disk_candidates" "1" \

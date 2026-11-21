@@ -900,11 +900,12 @@ drive_configurator() {
     capture_console "success-installer-02-prepare-confirm"
     press ret # "Yes, prepare for another owner" is the affirmative default
 
-    # Jumps straight to disk selection, then the overwrite confirm.
-    wait_for_screen "install disk" 60
-    capture_console "success-installer-03-prepare-install-disk"
-    press ret
-
+    # Jumps to the overwrite confirm. The VM's one disk is no choice, but an
+    # ISO from before that (a stable release) lists it first.
+    wait_for_screen "install disk\|recovery possible" 60
+    if ocr_screen | grep -qi "install disk"; then
+      press ret
+    fi
     wait_for_screen "recovery possible" 60
     capture_console "success-installer-04-prepare-disk-warning-encrypted"
     if ! $ENCRYPT; then
@@ -964,19 +965,16 @@ drive_configurator() {
   capture_console "success-installer-09-review"
   press ret
 
-  wait_for_screen "install disk" 60
-  capture_console "success-installer-10-install-disk"
-  press ret # the single virtio disk
-
+  # The VM's one virtio disk is taken without a disk list, except by an ISO
+  # from before that (a stable release), which lists it first.
+  wait_for_screen "install disk\|installation mode\|recovery possible" 60
+  if ocr_screen | grep -qi "install disk"; then
+    press ret
+  fi
   if $FREE_SPACE; then
     # The picker only appears when the disk has usable free space on UEFI.
     wait_for_screen "installation mode" 60
     capture_console "success-installer-11-install-mode"
-    # Esc goes back to the disk list rather than ending the install.
-    press esc
-    wait_for_screen "install disk" 60
-    press ret
-    wait_for_screen "installation mode" 60
     # "Full disk install" comes first; free space is the next entry.
     press home
     press down

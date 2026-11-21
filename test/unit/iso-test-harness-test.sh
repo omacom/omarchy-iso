@@ -357,7 +357,7 @@ echo "ok - an OEM install is held to its config's bundle and to a record of its 
 (
   take drive_configurator
   source "$ROOT/configs/airootfs/usr/share/omarchy-iso/disk-partitioning.sh"
-  mapfile -t modes < <(install_mode_choices true 2)
+  mapfile -t modes < <(install_mode_choices true false)
   FREE_SPACE=true PROVISION=false ENCRYPT=true
   KEYBOARD_LABEL="English (US)" GUEST_USER=omarchy GUEST_PASSWORD=omarchy
   picking=false selected=0 choice=""

@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Kaunis, hauska ja agenttinen Linux, tekijänä DHH",
+  "greeter.hint": "Aloita asennus painamalla Enter",
   "common.yes": "Kyllä",
   "common.back": "Takaisin",
   "common.change": "Ei, muuta",

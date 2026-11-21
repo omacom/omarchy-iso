@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Ilus, lõbus ja agentne Linux DHH-lt",
+  "greeter.hint": "Paigaldamise alustamiseks vajuta Enter",
   "common.yes": "Jah",
   "common.back": "Tagasi",
   "common.change": "Ei, muuda",

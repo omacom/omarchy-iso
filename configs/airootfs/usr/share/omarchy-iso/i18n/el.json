@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Όμορφο, διασκεδαστικό & agentic Linux από τον DHH",
+  "greeter.hint": "Πάτα Enter για να ξεκινήσει η εγκατάσταση",
   "common.yes": "Ναι",
   "common.back": "Πίσω",
   "common.change": "Όχι, αλλαγή",

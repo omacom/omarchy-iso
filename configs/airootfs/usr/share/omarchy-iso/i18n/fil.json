@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Maganda, Masaya at Agentic na Linux mula kay DHH",
+  "greeter.hint": "Pindutin ang Enter para simulan ang pag-install",
   "common.yes": "Oo",
   "common.back": "Bumalik",
   "common.change": "Hindi, baguhin",

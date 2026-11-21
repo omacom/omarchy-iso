@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Linux bonic, divertit i agèntic, de DHH",
+  "greeter.hint": "Prem Retorn per començar la instal·lació",
   "common.yes": "Sí",
   "common.back": "Enrere",
   "common.change": "No, canvia-ho",

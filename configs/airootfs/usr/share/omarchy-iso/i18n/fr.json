@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Un Linux beau, ludique et agentique, par DHH",
+  "greeter.hint": "Appuyez sur Entrée pour lancer l'installation",
   "common.yes": "Oui",
   "common.back": "Retour",
   "common.change": "Non, modifier",

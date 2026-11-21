@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "美观、有趣、智能体驱动的 Linux，由 DHH 打造",
+  "greeter.hint": "按 Enter 开始安装",
   "common.yes": "是",
   "common.back": "返回",
   "common.change": "否，重新修改",

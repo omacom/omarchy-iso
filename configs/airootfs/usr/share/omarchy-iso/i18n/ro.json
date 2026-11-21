@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Linux frumos, distractiv și agentic, de la DHH",
+  "greeter.hint": "Apasă Enter ca să începi instalarea",
   "common.yes": "Da",
   "common.back": "Înapoi",
   "common.change": "Nu, modific",

@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Lep, zabaven in agentni Linux, avtor DHH",
+  "greeter.hint": "Za začetek namestitve pritisnite Enter",
   "common.yes": "Da",
   "common.back": "Nazaj",
   "common.change": "Ne, spremeni",

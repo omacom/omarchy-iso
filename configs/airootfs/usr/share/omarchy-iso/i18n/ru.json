@@ -17,7 +17,6 @@
   "summary.value": "Значение",
   "summary.username": "Имя пользователя",
   "summary.password": "Пароль",
-  "summary.hostname": "Имя компьютера",
   "summary.timezone": "Часовой пояс",
   "summary.keyboard": "Клавиатура",
   "summary.language": "Язык",

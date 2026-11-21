@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import subprocess
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -137,9 +138,10 @@ PARTITION_NODES_TIMEOUT = 10.0
 
 @contextmanager
 def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
-    """Time the pieces of archinstall's filesystem step, and keep mkfs.btrfs
-    from discarding the whole device when the filesystem it makes is thrown
-    away.
+    """Time the pieces of archinstall's filesystem step, discard the new root
+    partition before anything is written to it, and keep mkfs.btrfs from
+    discarding the whole device again through dm-crypt when the filesystem it
+    makes is thrown away.
 
     The step is one number in the log (2.0 s in a VM, 4.4 s on an XPS 16,
     22.2 s on a ThinkPad E14), which cannot say which piece cost what, so
@@ -147,11 +149,13 @@ def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
 
     mkfs.btrfs TRIMs the entire device before it formats (mkfs.btrfs(8), -K
     to skip). On a virtual disk that is instant; on a 1 TB laptop SSD behind
-    dm-crypt it takes seconds, and much longer on a DRAM-less drive. When a
-    root image is about to be written over that filesystem the TRIM only
-    delays the install: the image lands two seconds later, the installed
-    system keeps fstrim.timer enabled, and btrfs discards freed space on its
-    own. Nothing else about the step changes.
+    dm-crypt it takes seconds, and much longer on a DRAM-less drive. That
+    TRIM is the only one the drive would ever get for its free space: the
+    installed system's btrfs only discards what it frees after mount. So once
+    partition() has created and wiped the root partition, it is discarded raw
+    (omarchy-discard-partition: 0.33 s for 327 GB on a 990 PRO, bounded,
+    never fatal), and the throwaway btrfs is made with -K. Nothing else about
+    the step changes.
 
     archinstall's partition() runs wipefs on each new partition the moment
     parted's commit returns. parted closing the disk after writing the table
@@ -236,8 +240,23 @@ def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
             return result
         return wrapper
 
+    def partition_wrapper(original):
+        def wrapper(modification, *args, **kwargs):
+            with _time_step("FS.partition"):
+                result = original(modification, *args, **kwargs)
+            for part in getattr(modification, "partitions", None) or []:
+                if _is_new_root_partition(part):
+                    with _time_step("FS.discard_root"):
+                        discard_partition(part.dev_path)
+            return result
+        return wrapper
+
     try:
-        for name, label in (("partition", "FS.partition"), ("create_btrfs_volumes", "FS.create_btrfs_subvolumes")):
+        original_partition = getattr(device_handler, "partition", None)
+        if callable(original_partition):
+            device_handler.partition = partition_wrapper(original_partition)
+            instance_patches.append("partition")
+        for name, label in (("create_btrfs_volumes", "FS.create_btrfs_subvolumes"),):
             original = getattr(device_handler, name, None)
             if callable(original):
                 setattr(device_handler, name, timed(original, label))  # instance attribute shadows the method
@@ -273,6 +292,33 @@ def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
             module.udev_sync = function
         if settle["seconds"] >= 0.05:
             info(f"[step] FS.udevadm settle ({settle['calls']} calls): {settle['seconds']:.6f}s")
+
+
+def _is_new_root_partition(part) -> bool:
+    """A partition archinstall has just created for /, never the ESP or one
+    that existed before the install."""
+    try:
+        status = getattr(part.status, "value", part.status)
+        return status == "create" and part.dev_path is not None and part.is_root() and not part.is_efi()
+    except Exception:
+        return False
+
+
+def discard_partition(path) -> None:
+    """omarchy-discard-partition on a new partition, its lines in the install
+    log. Best effort: it never raises, and the helper never fails.
+
+    No timeout here: the helper bounds the discard itself and waits for
+    blkdiscard to exit. A timeout would kill the helper's shell but not
+    blkdiscard, and format() would then write while a discard is in flight."""
+    try:
+        result = subprocess.run(["omarchy-discard-partition", str(path)], stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True)
+        output = (result.stdout + result.stderr).strip()
+    except Exception as exc:
+        output = f"omarchy-discard-partition: could not run for {path} ({exc}); continuing without the discard"
+    for line in output.splitlines():
+        info(f"› {line}")
 
 
 def _write_locale_conf_for_prebuilt(installer, locale_config) -> None:

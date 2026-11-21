@@ -63,6 +63,7 @@
   "partitions.espUnmounted": "ESP is not mounted at %1",
   "disk.intro": "Let's select where to install Omarchy...",
   "disk.header": "Select install disk",
+  "disk.none": "No disk to install Omarchy on was found.",
   "tool.title": "Partition tool for %1",
   "tool.hint": "Create unallocated free space for Omarchy, then write changes and quit.",
   "tool.warning": "Do not create an Omarchy partition here — leave the target area as Free space.",

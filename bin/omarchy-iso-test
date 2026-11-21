@@ -95,7 +95,9 @@ NO_NETWORK=false
 
 GUEST_USER="omarchy"
 GUEST_PASSWORD="omarchy"
-GUEST_HOSTNAME="omarchy-test"
+# Not asked: the setup form makes it from the user and the machine, which a
+# QEMU guest reports as a virtual machine.
+GUEST_HOSTNAME="omarchy-vm"
 
 while (($#)); do
   case "$1" in
@@ -958,11 +960,6 @@ drive_configurator() {
   capture_console "success-installer-05-password-confirmation"
   press ret
 
-  wait_for_screen "Hostname" 60
-  type_text "$GUEST_HOSTNAME"
-  capture_console "success-installer-07-hostname"
-  press ret
-
   wait_for_screen "look right" 60
   capture_console "success-installer-09-review"
   press ret
@@ -1131,8 +1128,6 @@ drive_provision_owner() {
       prompt=password
     elif grep -qi "Username" <<<"$screen"; then
       prompt=username
-    elif grep -qi "Hostname" <<<"$screen"; then
-      prompt=hostname
     elif grep -q "[A-Z][a-z]\+/[A-Z][a-z]" <<<"$screen"; then
       # The picker's list of zones, not a heading that names the step while
       # the guess is still being fetched: a Return sent then is lost.
@@ -1145,7 +1140,6 @@ drive_provision_owner() {
       case $prompt in
         username) type_text "$GUEST_USER" ;;
         password | confirmation) type_text "$GUEST_PASSWORD" ;;
-        hostname) type_text "$GUEST_HOSTNAME" ;;
         timezone) ;; # accept the guess that leads the list
       esac
       capture_console "success-provision-02-$prompt"
@@ -1563,8 +1557,8 @@ install_phase() {
 
     # The owner's hostname and timezone are set at first boot now, not baked
     # into the install — confirm they actually landed on the running system.
-    # Hostname is deterministic (we typed it), so a mismatch is a hard failure;
-    # timezone is geo-guessed, so just report what landed.
+    # Hostname is deterministic (made from the owner and the VM), so a mismatch
+    # is a hard failure; timezone is geo-guessed, so just report what landed.
     local got_host="" got_tz=""
     got_host=$(ssh_guest "cat /etc/hostname" 2>/dev/null | tr -d '\r\n') || got_host=""
     got_tz=$(ssh_guest "timedatectl show -p Timezone --value" 2>/dev/null | tr -d '\r\n') || got_tz=""

@@ -68,6 +68,18 @@ statements=$(awk '{ if (sub(/\\$/, "")) { line = line $0; next } print line $0; 
 check "both LUKS commands are in the free-space path" "2" "$(grep -c . <<<"$statements")"
 check "no LUKS command writes to the terminal" "0" "$(grep -cvE '^[[:space:]]*disk_step ' <<<"$statements")"
 
+# The open after the format is given the volume key in a file. A format or an
+# open that fails ends in disk_abort_hook, which must not leave that key behind.
+check "both LUKS commands take the key the abort removes" "2" "$(grep -c '"\$luks_volume_key"' <<<"$statements")"
+eval "$(awk '/^disk_abort_hook\(\) \{/,/^\}/' "$configurator")"
+umount() { :; }; rmdir() { :; }; cryptsetup() { :; }; rollback_created_parts() { :; }
+abort() { exit 1; }
+disk=/dev/null luks_volume_key="$WORK/volume-key"
+echo secret >"$luks_volume_key"
+(disk_step "Opening the encrypted root" false) >/dev/null 2>&1
+check "a failed LUKS step removes the volume key" "gone" "$([[ -e $WORK/volume-key ]] && echo left || echo gone)"
+unset -f umount rmdir cryptsetup rollback_created_parts abort disk_abort_hook
+
 unset OMARCHY_INSTALL_LOG_FILE
 screen=$(disk_step "no log file" echo visible)
 check "without a log file the output is not lost" "visible" "$screen"

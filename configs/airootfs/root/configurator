@@ -701,6 +701,8 @@ fi
 # disk_step and create_partition fail through this rather than abort() so a
 # half-built layout is undone before the user is handed back their disk.
 disk_abort_hook() {
+  # A format or an open that failed leaves the volume key it was given.
+  [[ -z ${luks_volume_key:-} ]] || rm -f "$luks_volume_key"
   # Release the target before reclaiming its partitions: a mounted filesystem
   # or an open LUKS mapping would keep parted from removing them.
   umount -R /mnt 2>/dev/null || true
@@ -1015,15 +1017,16 @@ run_partition_execute() {
       # so that tuning does not reach it.
       # The open uses the volume key the format was given, in a root-only
       # file on tmpfs, so it does not derive the passphrase's key a second
-      # time (2 s).
-      local volume_key
-      volume_key=$(omarchy-luks-calibrate volume-key)
+      # time (2 s). The file goes once the volume is open, or when either
+      # step fails (disk_abort_hook).
+      luks_volume_key=$(omarchy-luks-calibrate volume-key)
       disk_step "Formatting LUKS2 on $root_partition_device" \
-        omarchy-luks-calibrate format "$root_partition_device" "$volume_key" < <(printf "%s" "$password")
+        omarchy-luks-calibrate format "$root_partition_device" "$luks_volume_key" < <(printf "%s" "$password")
       disk_step "Opening the encrypted root on $root_partition_device" \
         cryptsetup open --persistent --allow-discards --perf-no_read_workqueue \
-          --volume-key-file "$volume_key" "$root_partition_device" omarchy_root
-      rm -f "$volume_key"
+          --volume-key-file "$luks_volume_key" "$root_partition_device" omarchy_root
+      rm -f "$luks_volume_key"
+      luks_volume_key=""
       root_mapper="/dev/mapper/omarchy_root"
     else
       root_mapper="$root_partition_device"

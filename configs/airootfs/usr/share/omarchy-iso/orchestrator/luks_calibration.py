@@ -110,6 +110,9 @@ def stop_calibration(wait: float = 20) -> None:
         deadline = time.monotonic() + wait
         while time.monotonic() < deadline and _calibration_pending():
             time.sleep(0.2)
+    except (OSError, subprocess.TimeoutExpired):
+        pass  # a poll that fails ends the wait, not the stop
+    try:
         subprocess.run(["systemctl", "stop", UNIT], check=False,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
     except (OSError, subprocess.TimeoutExpired):

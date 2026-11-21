@@ -146,6 +146,18 @@ class Calibration(unittest.TestCase):
             with mock.patch.object(luks.subprocess, 'run', side_effect=failure):
                 luks.stop_calibration()
 
+    def test_a_poll_that_fails_still_stops_the_unit(self):
+        for failure in (OSError(), subprocess.TimeoutExpired('systemctl', 5)):
+            calls = []
+            def run(command, **_kwargs):
+                calls.append(command[1])
+                if command[1] == 'show':
+                    raise failure
+                return types.SimpleNamespace(stdout='')
+            with mock.patch.object(luks.subprocess, 'run', side_effect=run):
+                luks.stop_calibration()
+            self.assertEqual(calls, ['show', 'stop'])
+
     def stop(self, states, wait=20):
         """stop_calibration against a unit that reports each of states in
         turn (the last one from then on), on a clock that only sleep moves."""

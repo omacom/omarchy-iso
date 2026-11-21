@@ -1,0 +1,11 @@
+#!/bin/bash
+# mksquashfs for mkarchiso's run (builder/build-iso.sh puts this first on its
+# PATH): squashing the live tree, it first makes the tree a layer over the
+# root image (builder/dedup-airootfs.sh) and adds the layer's opaque marks.
+# Every other call is mksquashfs's own.
+if [[ -n ${OMARCHY_ROOT_IMAGE:-} && ${1:-} == */airootfs && -d $1 ]]; then
+  pseudo=$(mktemp /tmp/omarchy-airootfs.XXXXXX.pseudo)
+  bash /builder/dedup-airootfs.sh "$OMARCHY_ROOT_IMAGE" "$1" "$pseudo" || exit 1
+  exec /usr/bin/mksquashfs "$@" -pf "$pseudo"
+fi
+exec /usr/bin/mksquashfs "$@"

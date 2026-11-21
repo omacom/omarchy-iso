@@ -1,11 +1,14 @@
 """Unit tests for how the orchestrator writes the root image to the target.
 
-_write_root_image_frames runs omarchy-image-write and decides from its exit
-status whether the image is on the target (0), whether the pipe should write it
-instead because the tool refused it untouched (2), or whether the install has
+_mount_root_image mounts the ISO's omarchy-root.sfs for dd, with threads=multi,
+and without it on a kernel that refuses the option; subprocess.run is stubbed.
+
+_write_root_image_parallel runs omarchy-image-write write-squashfs and decides from
+its exit status whether the image is on the target (0), whether dd should write
+it instead because the tool refused it untouched (2), or whether the install has
 failed (1). A stub stands in for the tool; image-write-test.sh tests the tool.
 
-_write_root_image_pipe is run for real, zstdcat and dd against a temp file.
+_write_root_image_dd is run for real, dd against temp files.
 """
 
 import os
@@ -26,7 +29,50 @@ sys.modules.setdefault(
 from orchestrator import phases_impl  # noqa: E402
 
 
-class WriteRootImageFramesTest(unittest.TestCase):
+class MountRootImageTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.tmp)], check=False))
+        self.mnt = self.tmp / "root-image"
+        for name, value in (("ROOT_IMAGE_MOUNT", self.mnt), ("info", lambda _message: None)):
+            patcher = mock.patch.object(phases_impl, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.calls = []
+
+    def mount(self, refuse_threads=False):
+        def run(argv, **kwargs):
+            self.calls.append(list(argv))
+            if refuse_threads and "ro,loop,threads=multi" in argv:
+                return subprocess.CompletedProcess(argv, 32, "", "bad option")
+            (self.mnt / phases_impl.ROOT_IMAGE_FILE).write_bytes(b"\0" * 4096)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with mock.patch.object(phases_impl.subprocess, "run", side_effect=run), \
+             mock.patch.object(phases_impl.os.path, "ismount", return_value=False):
+            return phases_impl._mount_root_image(Path("/medium/omarchy-root.sfs"))
+
+    def test_mounts_multithreaded_and_returns_the_image_inside(self):
+        image = self.mount()
+        self.assertEqual(image, self.mnt / "omarchy-root.img")
+        self.assertEqual(self.calls, [["mount", "-t", "squashfs", "-o", "ro,loop,threads=multi",
+                                       "/medium/omarchy-root.sfs", str(self.mnt)]])
+
+    def test_a_kernel_without_threads_still_mounts_it(self):
+        self.mount(refuse_threads=True)
+        self.assertEqual([c[4] for c in self.calls], ["ro,loop,threads=multi", "ro,loop"])
+
+    def test_a_squashfs_without_the_image_is_an_error(self):
+        def run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with mock.patch.object(phases_impl.subprocess, "run", side_effect=run), \
+             mock.patch.object(phases_impl.os.path, "ismount", return_value=False), \
+             self.assertRaisesRegex(RuntimeError, "holds no omarchy-root.img"):
+            phases_impl._mount_root_image(Path("/medium/omarchy-root.sfs"))
+
+
+class WriteRootImageParallelTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.tmp)], check=False))
@@ -50,21 +96,23 @@ class WriteRootImageFramesTest(unittest.TestCase):
         self.tool.chmod(0o755)
 
     def write(self):
-        return phases_impl._write_root_image_frames(Path("/medium/image.zst"), "/dev/mapper/root")
+        return phases_impl._write_root_image_parallel(Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.sfs"),
+                                                      "/dev/mapper/root")
 
-    def test_missing_tool_leaves_the_image_to_the_pipe(self):
+    def test_missing_tool_leaves_the_image_to_dd(self):
         self.assertFalse(self.write())
 
     def test_success_writes_the_image_and_logs_the_tool(self):
-        self.stub(0, "omarchy-image-write: wrote 4.67 of 6.37 GiB\\n")
+        self.stub(0, "omarchy-image-write: wrote 4.67 of 6.17 GiB\\n")
         self.assertTrue(self.write())
-        self.assertEqual(self.calls.read_text(), "write /medium/image.zst /dev/mapper/root\n")
-        self.assertIn("› omarchy-image-write: wrote 4.67 of 6.37 GiB", self.logged)
+        self.assertEqual(self.calls.read_text(),
+                         "write-squashfs /run/archiso/bootmnt/arch/x86_64/omarchy-root.sfs /dev/mapper/root\n")
+        self.assertIn("› omarchy-image-write: wrote 4.67 of 6.17 GiB", self.logged)
 
-    def test_refused_image_falls_back_to_the_pipe(self):
-        self.stub(2, "omarchy-image-write: frame 0 at byte 0: not a framed image\\n")
+    def test_refused_image_falls_back_to_dd(self):
+        self.stub(2, "omarchy-image-write: squashfs: the file ends in a fragment\\n")
         self.assertFalse(self.write())
-        self.assertTrue(any("not a framed image" in line for line in self.logged))
+        self.assertTrue(any("ends in a fragment" in line for line in self.logged))
 
     def test_failure_partway_is_an_error(self):
         self.stub(1, "omarchy-image-write: write at byte 4096: Input/output error\\n")
@@ -80,7 +128,7 @@ class WriteRootImageFramesTest(unittest.TestCase):
             self.write()
 
 
-class WriteRootImagePipeTest(unittest.TestCase):
+class WriteRootImageDdTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.tmp)], check=False))
@@ -90,28 +138,23 @@ class WriteRootImagePipeTest(unittest.TestCase):
         # 5 MiB: two full 2 MiB dd blocks and a partial one, with a run of
         # zeros that conv=sparse skips.
         self.raw = os.urandom(3 << 20) + bytes(1 << 20) + os.urandom(1 << 20)
-        self.image = self.tmp / "image.zst"
-        subprocess.run(["zstd", "-q", "-o", str(self.image)], input=self.raw, check=True)
+        self.image = self.tmp / "omarchy-root.img"
+        self.image.write_bytes(self.raw)
         self.target = self.tmp / "target"
         self.target.write_bytes(bytes(len(self.raw)))
 
     def test_writes_the_image(self):
-        phases_impl._write_root_image_pipe(self.image, str(self.target))
+        phases_impl._write_root_image_dd(self.image, str(self.target))
         self.assertEqual(self.target.read_bytes(), self.raw)
 
-    def test_truncated_image_is_an_error(self):
-        # A shell pipeline reported dd's status alone: zstd stopping partway
-        # left a short image written "successfully".
-        truncated = self.tmp / "truncated.zst"
-        truncated.write_bytes(self.image.read_bytes()[: self.image.stat().st_size // 2])
+    def test_unreadable_image_is_an_error(self):
         with self.assertRaises(subprocess.CalledProcessError) as caught:
-            phases_impl._write_root_image_pipe(truncated, str(self.target))
-        self.assertEqual(caught.exception.cmd[0], "zstdcat")
-        self.assertIn("premature end", caught.exception.stderr)
+            phases_impl._write_root_image_dd(self.tmp / "missing.img", str(self.target))
+        self.assertEqual(caught.exception.cmd[0], "dd")
 
     def test_unwritable_target_is_an_error(self):
         with self.assertRaises(subprocess.CalledProcessError) as caught:
-            phases_impl._write_root_image_pipe(self.image, str(self.tmp / "no" / "such" / "target"))
+            phases_impl._write_root_image_dd(self.image, str(self.tmp / "no" / "such" / "target"))
         self.assertEqual(caught.exception.cmd[0], "dd")
 
 

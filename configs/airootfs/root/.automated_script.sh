@@ -14,6 +14,15 @@ set -euo pipefail
 # continuation of the tty1 installer in a language the console cannot draw.
 [[ $(tty) == /dev/tty1 || ${OMARCHY_ISO_KMSCON:-} == 1 ]] || exit 0
 
+# Try Omarchy never installs. Its initramfs hook boots the root image instead of
+# this live system; if this script runs under omarchy.try=1 at all, that hook
+# failed, and an install (an unattended one, with a cidata drive present) is the
+# last thing the person who picked Try wants.
+if grep -qw 'omarchy.try=1' /proc/cmdline; then
+  echo "Try Omarchy could not start, so nothing is installed. Reboot and pick Install to install."
+  exit 0
+fi
+
 # The N1x recovery boot entry is a diagnostic shell, never the installer: record
 # the hardware probe, show how to reach the machine, and leave tty1 at a prompt.
 if grep -qw 'omarchy.n1x_recovery=1' /proc/cmdline; then
@@ -85,7 +94,7 @@ warm_offline_mirror() {
   local mirror=/var/cache/omarchy/mirror/offline
   local budget_kb spent_kb=0 size_kb path
   # The orchestrator's ROOT_IMAGE.
-  local image=/run/archiso/bootmnt/arch/$(uname -m)/omarchy-root.img.zst
+  local image=/run/archiso/bootmnt/arch/$(uname -m)/omarchy-root.sfs
 
   [[ ${OMARCHY_NO_PREFETCH:-} == 1 ]] && return 0
 

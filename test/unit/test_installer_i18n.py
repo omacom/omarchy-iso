@@ -87,8 +87,6 @@ class CatalogTest(unittest.TestCase):
                     self.assertTrue(text.strip(), "empty")
                     self.assertNotRegex(text, r"[\t\n\\]", "tabs, newlines and backslashes do not survive @tsv")
                     self.assertLessEqual(len(text), max(80, len(self.english[key]) + 10))
-                    if key.startswith("summary.") and key != "summary.prompt":
-                        self.assertNotIn(",", text, "the summary is a comma-separated gum table")
 
     def test_tips_fit_the_progress_screen_without_truncation(self):
         # The dashboard cuts the tip line at the logo's 81 columns.
@@ -471,22 +469,24 @@ class PresetTest(unittest.TestCase):
         configurator = SOURCES[0].read_text()
         block = re.search(r"^ +# The answers the user gave.*?\| gum table[^\n]*\n", configurator, re.MULTILINE | re.DOTALL).group(0)
 
-        def rows(**preset):
-            setup = "".join(f"preset_{name}={value!r}; " for name, value in preset.items())
+        def rows(set="", **preset):
+            setup = set + "".join(f"preset_{name}={value!r}; " for name, value in preset.items())
             return subprocess.run(
                 ["bash", "-c", f"source {SHARE / 'i18n.sh'}; i18n_load en; gum() {{ cat; }}; language_label() {{ printf %s \"$1\"; }}\n"
                  f"language=da keyboard=dk-latin1 timezone=Europe/Copenhagen username=u password=p hostname=h {setup}\n"
                  f"while true; do\n{block}\nbreak\ndone"],
                 capture_output=True, text=True, check=True,
-            ).stdout.split()
+            ).stdout.splitlines()
 
         everything = rows()
-        self.assertEqual([row.split(",")[0] for row in everything],
+        self.assertEqual([row.split("\t")[0] for row in everything],
                          ["Field", "Language", "Keyboard", "Timezone", "Username", "Password"])
+        self.assertIn("Keyboard\tChinese (Simplified, Pinyin)",
+                      rows(set="keyboard_label='Chinese (Simplified, Pinyin)'; "), "a layout keeps its comma")
         self.assertEqual(rows(language="da", keyboard="Danish", timezone="Europe/Copenhagen"), [],
                          "a username and password alone are not reviewed")
         preset = rows(language="da", keyboard="Danish")
-        self.assertEqual([row.split(",")[0] for row in preset], ["Field", "Timezone", "Username", "Password"])
+        self.assertEqual([row.split("\t")[0] for row in preset], ["Field", "Timezone", "Username", "Password"])
 
 
 class LanguageMarkerTest(unittest.TestCase):

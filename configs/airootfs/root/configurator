@@ -454,15 +454,16 @@ user_step() {
     # and a username and password alone need no second look.
     [[ -n $preset_language && -n $preset_keyboard && -n $preset_timezone ]] && break
 
+    # Tab-separated, as layouts have commas ("Chinese (Simplified, Pinyin)").
     # Add manual padding since gum table -p doesn't respect padding
     {
-      echo "$(t summary.field),$(t summary.value)"
-      [[ -n $preset_language ]] || echo "$(t summary.language),$(language_label "$language")"
-      [[ -n $preset_keyboard ]] || echo "$(t summary.keyboard),${keyboard_label:-$keyboard}"
-      [[ -n $preset_timezone ]] || echo "$(t summary.timezone),$timezone"
-      echo "$(t summary.username),$username"
-      echo "$(t summary.password),$(printf "%${#password}s" | tr ' ' '*')"
-    } | gum table -s "," -p | sed "s/^/${PADDING_LEFT_SPACES}/"
+      printf '%s\t%s\n' "$(t summary.field)" "$(t summary.value)"
+      [[ -n $preset_language ]] || printf '%s\t%s\n' "$(t summary.language)" "$(language_label "$language")"
+      [[ -n $preset_keyboard ]] || printf '%s\t%s\n' "$(t summary.keyboard)" "${keyboard_label:-$keyboard}"
+      [[ -n $preset_timezone ]] || printf '%s\t%s\n' "$(t summary.timezone)" "$timezone"
+      printf '%s\t%s\n' "$(t summary.username)" "$username"
+      printf '%s\t%s\n' "$(t summary.password)" "$(printf "%${#password}s" | tr ' ' '*')"
+    } | gum table -s $'\t' -p | sed "s/^/${PADDING_LEFT_SPACES}/"
 
     echo
     if gum confirm --affirmative "$(t common.yes)" --negative "$(t common.change)" "$(t summary.prompt)"; then

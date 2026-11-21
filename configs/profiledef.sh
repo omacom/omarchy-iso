@@ -3,6 +3,7 @@
 
 iso_name="omarchy"
 [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]] && iso_name="omarchy-oem"
+[[ -n ${OMARCHY_PRESET:-} ]] && iso_name="$iso_name-$OMARCHY_PRESET"
 iso_label="OMARCHY_$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y%m)"
 iso_publisher="Omarchy <https://omarchy.org>"
 iso_application="Omarchy Installer"
@@ -55,6 +56,7 @@ file_permissions=(
   ["/usr/local/bin/omarchy-install-diagnose-media"]="0:0:755"
   ["/usr/local/bin/omarchy-luks-calibrate"]="0:0:755"
   ["/usr/local/bin/omarchy-iso-install"]="0:0:755"
+  ["/usr/local/bin/omarchy-iso-kmscon"]="0:0:755"
   ["/usr/local/bin/omarchy-upload-log"]="0:0:755"
   ["/usr/local/sbin/omarchy-n1x-live-probe"]="0:0:755"
   ["/var/cache/omarchy/mirror/offline/"]="0:0:775"

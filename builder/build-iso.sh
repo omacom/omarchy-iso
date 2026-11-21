@@ -6,13 +6,14 @@ OMARCHY_ISO_REF="${OMARCHY_ISO_REF:-quattro}"
 OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
 OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
 OMARCHY_KERNEL="${OMARCHY_KERNEL:-linux-omarchy}"
-# profiledef.sh reads both in the mkarchiso environment.
-export OMARCHY_ARCH OMARCHY_KERNEL OMARCHY_OEM_INSTALL
+# profiledef.sh reads these in the mkarchiso environment.
+export OMARCHY_ARCH OMARCHY_KERNEL OMARCHY_OEM_INSTALL OMARCHY_PRESET
 
 source /builder/node-release.sh
 source /builder/arm64-kernel-image.sh
 source /builder/archiso-aarch64-mkinitcpio.sh
 source /builder/grub-platform.sh
+source /builder/required-packages.sh
 
 # The online pacman configuration drives every package download below: one per
 # architecture and channel. On aarch64 it points at Omarchy's aarch64
@@ -160,10 +161,9 @@ else
   core_server=$(channel_core_server "$online_pacman_conf") || exit 1
   sed -i "1i $core_server" /etc/pacman.d/mirrorlist
   pacman --noconfirm -Sy archlinux-keyring
-  # Full upgrade, not just -Sy: docker never re-pulls :latest once it's cached,
-  # so this container can be months behind the mirror it installs from. A plain
-  # -Sy install is then a partial upgrade — new packages linked against a glibc
-  # the container doesn't have yet.
+  # Full upgrade, not just -Sy: the pinned container can fall behind the mirror
+  # it installs from. A plain -Sy install is then a partial upgrade — new packages
+  # can link against a glibc the container doesn't have yet.
   pacman --noconfirm -Syu archiso git sudo base-devel jq grub imagemagick neovim nodejs npm tree-sitter-cli btrfs-progs
   mkarchiso_command=mkarchiso
 fi
@@ -226,6 +226,11 @@ echo "$OMARCHY_ARCH" > "$build_cache_dir/airootfs/root/omarchy_arch"
 if [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]]; then
   touch "$build_cache_dir/airootfs/usr/share/omarchy-iso/oem-install"
   sed -i 's/^TIMEOUT .*/TIMEOUT 1/' "$build_cache_dir/syslinux/archiso_sys.cfg"
+fi
+# A preset ISO (--preset): the configurator takes the answers presets/<code>.json
+# gives instead of asking, and the orchestrator hands its region to the target.
+if [[ -f /preset.json ]]; then
+  cp /preset.json "$build_cache_dir/airootfs/usr/share/omarchy-iso/preset.json"
 fi
 # The OEM's own bundle (--oem-config, --oem-script), as builder/oem-bundle.py
 # checked and laid it out: the installer hands its branding and agreement to
@@ -387,12 +392,17 @@ fi
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # Plymouth stays out of the live initramfs (archiso-aarch64-mkinitcpio.sh);
   # openssh and pciutils serve the recovery entry and remote debugging.
-  # For the Snapdragon laptops: ukify builds the live UKI, and the installer
+  # For the Snapdragon laptops: ukify builds the live UKI on systemd-stub-omarchy's
+  # stub, whose header holds every device tree, and the installer
   # saves a laptop's signed firmware from Windows with qcom-firmware-extract.
-  arch_packages=("$OMARCHY_KERNEL" archlinuxarm-keyring git gum jq openssl openssh pciutils plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted systemd-ukify linux-firmware-qcom qcom-firmware-extract python)
+  arch_packages=("$OMARCHY_KERNEL" archlinuxarm-keyring git gum jq openssl openssh pciutils plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted systemd-ukify systemd-stub-omarchy linux-firmware-qcom qcom-firmware-extract python)
 else
-  # linux-t2 is the live kernel on a Mac (configs/grub/grub.cfg).
-  arch_packages=("$OMARCHY_KERNEL" linux-t2 git gum jq openssl plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
+  # linux-t2 is the live kernel on a Mac (configs/grub/grub.cfg). kmscon and
+  # the CJK font carry the installer in the languages the Linux console cannot
+  # draw (usr/local/bin/omarchy-iso-kmscon); customize_airootfs.sh trims the
+  # font to the one face kmscon uses. aarch64 goes without until Arch Linux ARM
+  # builds kmscon, and stays in English for those languages.
+  arch_packages=("$OMARCHY_KERNEL" linux-t2 git gum jq openssl plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted kmscon noto-fonts-cjk)
 fi
 live_packages_file="$build_cache_dir/packages.$OMARCHY_ARCH"
 printf '%s\n' "${arch_packages[@]}" >> "$live_packages_file"
@@ -765,6 +775,11 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   mapfile -t target_packages < <(printf '%s\n' "${target_packages[@]}" "${qcom_oem_firmware[@]}" | sort -u)
 fi
 mapfile -t offered < <(pacman --config "$online_pacman_conf" --dbpath /tmp/offlinedb -Slq | sort -u)
+mapfile -t missing_required < <(printf '%s\n' "${offered[@]}" | missing_required_packages "$OMARCHY_ARCH")
+if (( ${#missing_required[@]} )); then
+  echo "ERROR: no configured repository offers ${missing_required[*]}, which every $OMARCHY_ARCH image must carry" >&2
+  exit 1
+fi
 mapfile -t unresolved < <(comm -23 <(printf '%s\n' "${all_packages[@]}" | sort -u) <(printf '%s\n' "${offered[@]}"))
 if (( ${#unresolved[@]} )); then
   # Groups and virtual names (base-devel, ttfx, ...) are not in -Slq; keep

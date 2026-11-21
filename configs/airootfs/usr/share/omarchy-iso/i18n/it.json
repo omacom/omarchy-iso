@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Linux bello, divertente e agentico, di DHH",
+  "greeter.hint": "Premi Invio per avviare l'installazione",
   "common.yes": "Sì",
   "common.back": "Indietro",
   "common.change": "No, modifica",

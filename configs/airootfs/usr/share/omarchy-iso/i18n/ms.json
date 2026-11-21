@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Linux yang cantik, seronok & agentik oleh DHH",
+  "greeter.hint": "Tekan Enter untuk memulakan pemasangan",
   "common.yes": "Ya",
   "common.back": "Kembali",
   "common.change": "Tidak, ubah",

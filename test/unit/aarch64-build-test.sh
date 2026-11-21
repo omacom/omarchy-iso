@@ -278,7 +278,7 @@ make_refuses 'Unknown option: --platform' --arch aarch64 --platform n1x --edge
 # firmware provides none. Every image tries to build one from its own kernel.
 uki="$ROOT/builder/qualcomm/live-uki.sh"
 bash -n "$uki"
-grep -Fq 'parted systemd-ukify linux-firmware-qcom qcom-firmware-extract python)' "$ROOT/builder/build-iso.sh" \
+grep -Fq 'parted systemd-ukify systemd-stub-omarchy linux-firmware-qcom qcom-firmware-extract python)' "$ROOT/builder/build-iso.sh" \
   || fail "the live image lacks ukify or the Snapdragon firmware tools"
 # The UKI is built in the image's customize step, once pacstrap has made the
 # kernel and initramfs it wraps: the builder's own lines, run against the live
@@ -434,7 +434,7 @@ grep -q '^MODULES=(loop i2c_mt65xx i2c_tegra i2c_hid i2c_hid_acpi hid_generic hi
 # A Snapdragon laptop's platform drivers, for a kernel that builds them as
 # modules. Each is optional, so a kernel without one still gets its image.
 live_modules=$(sed -n 's/^MODULES=(\(.*\))$/\1/p' "$fixture/archiso.conf")
-for module in gcc-x1e80100 pinctrl-x1e80100 qnoc-x1e80100 gcc-glymur tcsrcc-glymur dispcc-glymur gpucc-glymur pinctrl-glymur qnoc-glymur thunderbolt phy-qcom-qmp-usb phy-qcom-m31-eusb2 spmi-pmic-arb i2c-qcom-geni i2c-hid-of dwc3-qcom phy-qcom-qmp-combo phy-nxp-ptn3222 gpio-sbu-mux; do
+for module in gcc-x1e80100 pinctrl-x1e80100 qnoc-x1e80100 gcc-glymur tcsrcc-glymur dispcc-glymur gpucc-glymur pinctrl-glymur qnoc-glymur thunderbolt phy-qcom-qmp-usb phy-qcom-m31-eusb2 spmi-pmic-arb i2c-qcom-geni i2c-hid-of dwc3-qcom dwc3-qcom-legacy phy-qcom-qmp-combo phy-nxp-ptn3222 gpio-sbu-mux; do
   [[ " $live_modules " == *" $module? "* ]] || fail "the live initramfs lacks the Snapdragon platform driver $module"
 done
 [[ " $live_modules " != *" qcom_q6v5_pas"* ]] || fail "the live initramfs loads the DSP driver"

@@ -10,7 +10,9 @@
 #   - COLUMNS/LINES so gum picks up real terminal size
 set -euo pipefail
 
-[[ $(tty) == /dev/tty1 ]] || exit 0
+# Inside kmscon (omarchy-iso-kmscon) this runs again on kmscon's pty, as the
+# continuation of the tty1 installer in a language the console cannot draw.
+[[ $(tty) == /dev/tty1 || ${OMARCHY_ISO_KMSCON:-} == 1 ]] || exit 0
 
 # The N1x recovery boot entry is a diagnostic shell, never the installer: record
 # the hardware probe, show how to reach the machine, and leave tty1 at a prompt.
@@ -50,7 +52,7 @@ set_tokyo_night_colors() {
   echo -en "\033[0m"
   clear
 }
-set_tokyo_night_colors
+[[ ${OMARCHY_ISO_KMSCON:-} == 1 ]] || set_tokyo_night_colors
 
 mkdir -p /var/log
 touch "$OMARCHY_INSTALL_LOG_FILE"
@@ -126,9 +128,12 @@ warm_offline_mirror() {
   done < <(du -k "$mirror"/*.pkg.tar.zst 2>/dev/null | sort -rn)
 }
 
-warm_offline_mirror &
-warm_pid=$!
-trap 'kill "$warm_pid" 2>/dev/null' EXIT
+# Inside kmscon the tty1 run is still warming the cache.
+if [[ ${OMARCHY_ISO_KMSCON:-} != 1 ]]; then
+  warm_offline_mirror &
+  warm_pid=$!
+  trap 'kill "$warm_pid" 2>/dev/null' EXIT
+fi
 
 cd /root
 # Autoinstall: a cidata drive carrying the configurator's own output files
@@ -137,11 +142,34 @@ cd /root
 if [[ -f /usr/share/omarchy-iso/oem-install ]]; then
   export OMARCHY_UI_INTERACTIVE=no
   ./configurator --oem
+elif [[ ${OMARCHY_ISO_KMSCON:-} == 1 ]]; then
+  # The tty1 run already looked for cidata.
+  ./configurator && status=0 || status=$?
+  # A retry from the shell left after an abort: that shell, not the kmscon
+  # wrapper, gets the relaunch request, so end it to end kmscon.
+  if ((status == 75)) && [[ -n ${OMARCHY_ISO_KMSCON_SHELL:-} ]]; then
+    kill -HUP "$OMARCHY_ISO_KMSCON_SHELL" 2>/dev/null || true
+  fi
+  ((status == 0)) || exit "$status"
 elif /usr/local/bin/omarchy-cidata-load; then
   echo "Autoinstall configuration found on cidata drive; skipping the configurator."
   export OMARCHY_UI_INTERACTIVE=no
 else
-  ./configurator
+  ./configurator && status=0 || status=$?
+  # 75: the configurator saved its answers and wants kmscon (a CJK language).
+  # kmscon runs this script again and the whole rest of the install in there;
+  # it is relaunched when the layout changes. If the configurator in kmscon
+  # never picked the answers up, the answers resume here in English.
+  while ((status == 75)); do
+    rm -f /run/omarchy-iso/kmscon-started
+    omarchy-iso-kmscon /root/.automated_script.sh || true
+    if [[ ! -e /run/omarchy-iso/kmscon-resume ]]; then
+      exit 0
+    elif [[ ! -e /run/omarchy-iso/kmscon-started ]]; then
+      OMARCHY_ISO_NO_KMSCON=1 ./configurator && status=0 || status=$?
+    fi
+  done
+  ((status == 0)) || exit "$status"
 fi
 
 # Deferred-provisioning installs skip the celebration/reboot prompt and reboot on

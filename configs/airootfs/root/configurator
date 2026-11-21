@@ -458,7 +458,7 @@ user_step() {
     {
       echo "$(t summary.field),$(t summary.value)"
       [[ -n $preset_language ]] || echo "$(t summary.language),$(language_label "$language")"
-      [[ -n $preset_keyboard ]] || echo "$(t summary.keyboard),$keyboard"
+      [[ -n $preset_keyboard ]] || echo "$(t summary.keyboard),${keyboard_label:-$keyboard}"
       [[ -n $preset_timezone ]] || echo "$(t summary.timezone),$timezone"
       echo "$(t summary.username),$username"
       echo "$(t summary.password),$(printf "%${#password}s" | tr ' ' '*')"
@@ -1153,6 +1153,7 @@ disk_form() {
   # Installable disks, internal ones first, without the boot device
   local available_disks
   available_disks=$(install_disk_candidates "$exclude_disk")
+  [[ -n $available_disks ]] || abort "$(t disk.none)"
 
   # One disk is no choice: go on to what to do with it, which names the disk.
   # Counted on every call, as a disk plugged in since changes it.
@@ -1241,10 +1242,12 @@ install_mode_form() {
   done < <(install_mode_choices "$free_space_offered" "$other_disk_offered")
 
   # A single choice is no choice: the overwrite confirmation names the disk.
+  install_mode_asked=false
   if (( ${#choices[@]} == 1 )); then
     install_mode=${choices[0]#*$'\t'}
     return 0
   fi
+  install_mode_asked=true
 
   step "$(t mode.intro)"
   install_mode=$(gum choose --label-delimiter $'\t' --header "$(t mode.header "$disk")" "${choices[@]}")
@@ -1307,6 +1310,7 @@ select_installation() {
     # mode, so skip the picker and go straight to the overwrite confirm.
     if $full_disk_only; then
       install_mode="full_disk"
+      install_mode_asked=false
     else
       # Esc goes back to the disk list, as "Choose a different disk" does. Ctrl+C
       # still ends the install.
@@ -1324,8 +1328,12 @@ select_installation() {
           return 0
         fi
         # When the picker was skipped, declining the overwrite means the user
-        # wants a different disk.
-        $full_disk_only && disk_form
+        # wants a different disk; with only the one disk, there is nothing
+        # left to choose, and the installer ends.
+        if ! $install_mode_asked; then
+          $only_disk && abort
+          disk_form
+        fi
         ;;
       free_space)
         if run_partition_decide; then
@@ -1431,6 +1439,7 @@ if $defer_provisioning; then
     disk_form
     stage_qualcomm_firmware
     until confirm_disk_overwrite; do
+      $only_disk && abort
       disk_form
     done
   fi

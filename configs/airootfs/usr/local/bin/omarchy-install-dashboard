@@ -178,13 +178,14 @@ FINISH_TOP_ROW=2
 #   floor  lo + (span-1) * t / (t+tau), on time since this process saw the
 #          phase. Asymptotic, so it approaches the band end without reaching it.
 #          tau is a shape constant, not a duration prediction.
-#   work   packages installed / PKG_TOTAL, for the package phase only (~85% of
-#          the install). libalpm makes one directory per package under
-#          <target>/var/lib/pacman/local; the denominator comes from
-#          build-iso.sh, so there is no second package list to drift.
-#          The root image unpack that precedes the package delta publishes
-#          phase_progress (stream bytes consumed) in the state file; it drives
-#          the same band until the local db fills in when the unpack lands.
+#   work   phase_progress from the state file where a phase publishes one:
+#          the boot-time hash of the medium in "Preparing install target",
+#          and the root image landing in "Installing Arch + Omarchy". That
+#          phase also counts packages installed / PKG_TOTAL: libalpm makes
+#          one directory per package under <target>/var/lib/pacman/local,
+#          and the denominator comes from build-iso.sh. The image brings
+#          almost all of them at once, so the count marks the image landing
+#          rather than moving package by package.
 #
 # Per-mille because a whole-percent asymptote over a 2-point band has two
 # reachable values and stops moving. No give-up predicate: two discontinuous
@@ -212,8 +213,6 @@ fi
 
 PKG_BONUS_MAX_PM=100   # cap on how far progress may run ahead of the count
 PKG_TAIL_PM=40         # band held back so stalled progress has somewhere to go
-PKG_FLOOR_TAU=900      # with a work signal, time is only a backstop until the
-                       # first package, so slow it until it cannot outrun data
 
 POS=10                 # position, per-mille, monotonic
 PROGRESS_PM=10
@@ -344,21 +343,26 @@ install_progress() {
     PKG_LAST_CHANGE=$NOW
   fi
 
-  # Bands in per-mille, plus tau. The tail bands are wide relative to what they
-  # cost on NVMe: run_system_finalizer can DKMS-build a driver and
-  # finalize_limine_boot rebuilds every UKI, so they vary most on real hardware.
-  # Over-allotting costs a step at a boundary; under-allotting costs a stall.
+  # Bands in per-mille, plus tau, sized to where an install spends its time.
+  # An encrypted install measured 34 s in the VM test: preparing the target
+  # (waiting out the boot-time hash of the medium) 7.7 s, installing 17.2 s
+  # (LUKS format and open 11.7 s, the image write 3.7 s), finalizing boot and
+  # user 5.7 s. On a USB stick the hash wait is longer still. tau is a little
+  # under the time a phase takes, so the floor keeps moving through steps that
+  # publish nothing, like the LUKS format, and is well along its band when the
+  # next signal lands. Over-allotting costs a step at a boundary;
+  # under-allotting costs a stall.
   case "$phase" in
-    "Starting installation")      lo=10  hi=25   tau=5   ;;
-    "Preparing live environment") lo=25  hi=50   tau=25  ;;
-    "Preparing install target")   lo=50  hi=65   tau=20  ;;
-    "Installing Arch + Omarchy")  lo=65  hi=700  tau=150 pkg_signal=1 ;;
-    "Configuring hibernation")    lo=700 hi=720  tau=10  ;;
-    "Configuring system")         lo=720 hi=850  tau=120 ;;
-    "Staging provisioning")          lo=850 hi=855  tau=5   ;;
-    "Finalizing Limine boot")     lo=855 hi=950  tau=90  ;;
-    "Finalizing user")            lo=950 hi=978  tau=30  ;;
-    "Finalizing boot and user")   lo=855 hi=978  tau=90  ;;
+    "Starting installation")      lo=10  hi=20   tau=2   ;;
+    "Preparing live environment") lo=20  hi=40   tau=2   ;;
+    "Preparing install target")   lo=40  hi=260  tau=8   ;;
+    "Installing Arch + Omarchy")  lo=260 hi=760  tau=6   pkg_signal=1 ;;
+    "Configuring hibernation")    lo=760 hi=765  tau=2   ;;
+    "Configuring system")         lo=765 hi=830  tau=3   ;;
+    "Staging provisioning")       lo=830 hi=835  tau=2   ;;
+    "Finalizing Limine boot")     lo=835 hi=935  tau=3   ;;
+    "Finalizing user")            lo=935 hi=978  tau=2   ;;
+    "Finalizing boot and user")   lo=835 hi=978  tau=3   ;;
     "Configuring login")          lo=978 hi=988  tau=5   ;;
     "Configuring DNS resolver")   lo=988 hi=994  tau=5   ;;
     "Running OEM setup")          lo=994 hi=997  tau=60  ;;
@@ -380,7 +384,6 @@ install_progress() {
   esac
 
   (( pkg_signal && PKG_TOTAL > 0 )) || pkg_signal=0
-  (( pkg_signal )) && tau=$PKG_FLOOR_TAU
 
   t=$(( NOW - PHASE_T0 ))
   (( t < 0 )) && t=0

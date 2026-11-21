@@ -820,7 +820,7 @@ run_partition_decide() {
 
   step "$(t space.analyzing "$disk")"
   partprobe "$disk" 2>/dev/null || true
-  sleep 1
+  settle_devices
 
   # An unlabeled disk has no partition table for parted to scan, so we
   # synthesize a whole-disk free region and mklabel gpt before mkpart.
@@ -968,7 +968,7 @@ run_partition_execute() {
     if $needs_mklabel; then
       disk_step "initializing GPT on $disk" parted --script "$disk" mklabel gpt
       partprobe "$disk" 2>/dev/null || true
-      sleep 1
+      settle_devices
     fi
 
     # create_partition reports the number parted actually used; nothing here
@@ -992,7 +992,7 @@ run_partition_execute() {
     # the log.
     partprobe "$disk" 2>>"${OMARCHY_INSTALL_LOG_FILE:-/dev/null}"
     sync
-    sleep 2
+    settle_devices
 
     wait_for_device "$efi_dev" || disk_abort_hook "$(t partitions.efiMissing "$efi_dev")"
     wait_for_device "$root_partition_device" ||
@@ -1196,6 +1196,14 @@ disk_form() {
   disk=$(echo "$selected_display" | awk '{print $1}')
 }
 
+# After a partition table changed: wait until udev has handled what the kernel
+# reported, which is when the device nodes and their properties are current.
+# The fixed sleeps that stood here (1-2 s each) waited longer than that on
+# every machine and not long enough on a slow one.
+settle_devices() {
+  udevadm settle --timeout=10 2>/dev/null || true
+}
+
 # STEP 4: INSTALL MODE
 
 open_partition_tool() {
@@ -1210,7 +1218,7 @@ open_partition_tool() {
   cfdisk "$disk" || true
   partprobe "$disk" 2>/dev/null || true
   sync
-  sleep 1
+  settle_devices
 }
 
 # If the disk has no partition table or no unallocated free space, the only

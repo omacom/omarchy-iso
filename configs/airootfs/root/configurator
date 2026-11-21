@@ -103,8 +103,19 @@ wait_for_stable_terminal() {
 
 clear_logo() {
   measure_terminal
-  printf "\033[H\033[2J"
-  gum style --foreground 2 --padding "1 0 0 $PADDING_LEFT" "$(<"$LOGO_PATH")"
+  draw_screen
+}
+
+# The logo, and the line a step puts under it, in one write over the screen
+# before. Clearing first and then starting gum to draw showed a blank screen
+# between questions, so everything is rendered before the screen is touched:
+# then the cursor goes home, each line overwrites the old one and erases what
+# is left of it, and only what lies below the new lines is cleared.
+draw_screen() {
+  local screen
+  screen=$(gum style --foreground 2 --padding "1 0 0 $PADDING_LEFT" "$(<"$LOGO_PATH")")
+  [[ -z ${1:-} ]] || screen+=$'\n\n'$(gum style --padding "0 0 0 $PADDING_LEFT" "$1")
+  printf '\033[H%s\033[K\n\033[J' "${screen//$'\n'/$'\033[K\n'}"
 }
 
 # Vertically-centered welcome shown once before the keyboard step — the same
@@ -195,9 +206,8 @@ abort() {
 }
 
 step() {
-  clear_logo
-  echo
-  gum style --padding "0 0 0 $PADDING_LEFT" "$1"
+  measure_terminal
+  draw_screen "$1"
   echo
 }
 

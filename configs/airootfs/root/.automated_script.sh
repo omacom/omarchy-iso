@@ -102,13 +102,23 @@ warm_offline_mirror() {
     sleep 1
   done
 
+  # A failed verify means the cached bytes are suspect (first-touch reads can
+  # hash wrong while the medium is fine): do not re-touch them here. The
+  # retrying verifier owns the cache from here; warming it again would only
+  # keep poison hot through the install. One is-active check: milliseconds,
+  # and the image warms only when its own unit passed.
+  image_ok=no
+  if [[ $(systemctl is-active omarchy-root-image-verify.service 2>/dev/null) == active ]]; then
+    image_ok=yes
+  fi
+
   # The image first, and only when all of it fits: a second read of pages
   # the verify just cached keeps them cached through the install. When it does
   # not fit, leave the cache alone. omarchy-image-write writes whatever part
   # of the image is still cached first and reads the rest once; re-reading
   # the head here, or the mirror after it, would only evict the part the
   # verify left behind (on a 4 GB machine, most of what was cached).
-  if [[ -f $image ]]; then
+  if [[ $image_ok == yes && -f $image ]]; then
     size_kb=$(du -k -- "$image" | cut -f1)
     ((size_kb > budget_kb)) && return 0
     cat -- "$image" >/dev/null 2>&1 || true
@@ -116,6 +126,11 @@ warm_offline_mirror() {
   fi
 
   [[ -d $mirror ]] || return 0
+
+  # Same for the mirror: only verified bytes are worth keeping warm.
+  if [[ $(systemctl is-active omarchy-mirror-verify.service 2>/dev/null) != active ]]; then
+    return 0
+  fi
 
   # Then the mirror, largest first: when the budget cannot cover all of it
   # this still front-loads the bytes that dominate.

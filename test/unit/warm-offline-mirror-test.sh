@@ -43,6 +43,9 @@ case "\$1 \$phase" in
   "is-active mirror")   [[ \$* == *omarchy-mirror-verify* ]] && echo activating || echo inactive ;;
   "is-active image")    [[ \$* == *omarchy-mirror-verify* ]] && echo active || echo activating ;;
   "is-active finished") echo active ;;
+  "is-active image-failed") [[ \$* == *omarchy-mirror-verify* ]] && echo active || echo failed ;;
+  "is-active mirror-failed") [[ \$* == *omarchy-mirror-verify* ]] && echo failed || echo active ;;
+  "list-jobs image-failed"|"list-jobs mirror-failed") ;;
   "list-jobs mirror")
     echo "1 omarchy-mirror-verify.service     start running"
     echo "2 omarchy-root-image-verify.service start waiting" ;;
@@ -67,12 +70,23 @@ warm_reads() { # the boot's phases, one per systemctl call -> the reads, one per
   command cat "$fixture/reads" 2>/dev/null || true
 }
 
-reads=$(warm_reads mirror mirror image image finished)
+reads=$(warm_reads mirror mirror image image finished finished finished)
 [[ $reads == $'finished omarchy-root.img.zst\nfinished linux-firmware-1-1-any.pkg.tar.zst' ]] \
   || fail "the warm-up read the medium before both checks had finished: $(paste -sd, <<<"$reads")"
 
-reads=$(warm_reads finished)
+reads=$(warm_reads finished finished finished)
 [[ $reads == $'finished omarchy-root.img.zst\nfinished linux-firmware-1-1-any.pkg.tar.zst' ]] \
   || fail "the warm-up does not read the medium once the checks are done: $(paste -sd, <<<"$reads")"
+
+# A failed image verify leaves its cache alone (first-touch reads can hash
+# wrong while the medium is fine): the mirror still warms.
+reads=$(warm_reads image-failed image-failed)
+[[ $reads == *linux-firmware-1-1-any.pkg.tar.zst && $reads != *omarchy-root.img.zst* ]] \
+  || fail "a failed image verify still warmed the image: $(paste -sd, <<<"$reads")"
+
+# A failed mirror verify leaves its cache alone: the image still warms.
+reads=$(warm_reads mirror-failed mirror-failed)
+[[ $reads == *omarchy-root.img.zst && $reads != *linux-firmware* ]] \
+  || fail "a failed mirror verify still warmed the mirror: $(paste -sd, <<<"$reads")"
 
 echo "warm offline mirror tests passed"

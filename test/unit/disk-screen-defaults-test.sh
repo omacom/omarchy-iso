@@ -115,10 +115,12 @@ disk="" only_disk=false shown=false
 disk_form
 check "the only disk is taken without a disk list" "/dev/nvme0n1 true false" "$disk $only_disk $shown"
 
+# A second disk plugged in after the first call: the list is back, and the
+# mode picker offers another disk again.
 LSBLK_DISKS=$'/dev/nvme0n1 disk 1000204886016 0 nvme\n/dev/sda disk 512110190592 0 sata'
-disk="" only_disk=false shown=false CHOSEN="/dev/sda 512GB"
+disk="" shown=false CHOSEN="/dev/sda 512GB"
 disk_form
-check "two disks still show the list" "/dev/sda false true" "$disk $only_disk $shown"
+check "two disks show the list again" "/dev/sda false true" "$disk $only_disk $shown"
 
 echo "==> the configurator calls them"
 check "disk list from install_disk_candidates" "1" \

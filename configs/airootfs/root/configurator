@@ -1153,6 +1153,8 @@ disk_form() {
   available_disks=$(install_disk_candidates "$exclude_disk")
 
   # One disk is no choice: go on to what to do with it, which names the disk.
+  # Counted on every call, as a disk plugged in since changes it.
+  only_disk=false
   if [[ -n $available_disks && $available_disks != *$'\n'* ]]; then
     disk=$available_disks
     only_disk=true

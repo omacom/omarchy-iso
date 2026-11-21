@@ -900,7 +900,12 @@ drive_configurator() {
     capture_console "success-installer-02-prepare-confirm"
     press ret # "Yes, prepare for another owner" is the affirmative default
 
-    # Jumps straight to the overwrite confirm: the VM's one disk is no choice.
+    # Jumps to the overwrite confirm. The VM's one disk is no choice, but an
+    # ISO from before that (a stable release) lists it first.
+    wait_for_screen "install disk\|recovery possible" 60
+    if ocr_screen | grep -qi "install disk"; then
+      press ret
+    fi
     wait_for_screen "recovery possible" 60
     capture_console "success-installer-04-prepare-disk-warning-encrypted"
     if ! $ENCRYPT; then
@@ -960,7 +965,12 @@ drive_configurator() {
   capture_console "success-installer-09-review"
   press ret
 
-  # The VM's one virtio disk is taken without a disk list.
+  # The VM's one virtio disk is taken without a disk list, except by an ISO
+  # from before that (a stable release), which lists it first.
+  wait_for_screen "install disk\|installation mode\|recovery possible" 60
+  if ocr_screen | grep -qi "install disk"; then
+    press ret
+  fi
   if $FREE_SPACE; then
     # The picker only appears when the disk has usable free space on UEFI.
     wait_for_screen "installation mode" 60

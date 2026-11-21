@@ -1,9 +1,10 @@
 [Unit]
 Description=Calibrate LUKS Argon2id while the installer wizard is open
-# Keep CPU/RAM calibration out of the boot-time hashing work. No installer
-# unit depends on this optional result; a quick install cancels it and uses
-# cryptsetup's ordinary calibration instead.
-After=omarchy-mirror-verify.service omarchy-root-image-verify.service
+# No installer unit depends on this optional result; an install that starts
+# before it is done cancels it and uses cryptsetup's ordinary calibration
+# instead. On a machine with fewer than 6 cores the benchmark must not share
+# them with the boot-time hashes of the medium: there
+# system-generators/omarchy-luks-calibrate-order orders this unit after them.
 ConditionPathExists=/run/archiso/bootmnt
 
 [Service]

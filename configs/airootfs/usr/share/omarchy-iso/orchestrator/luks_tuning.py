@@ -13,6 +13,9 @@ initramfs flavours.
 
 The format itself is archinstall's. For the configurator's 2 s Argon2id
 policy, a completed calibration from this live boot can replace the search.
+The format is given the volume key in a file, and that first open uses the
+same file, so it derives nothing: the passphrase's key was derived a moment
+before, by the format.
 """
 
 from __future__ import annotations
@@ -44,13 +47,22 @@ def _unlock(self: Luks2, key_file: Path | None = None) -> None:
     if self.is_unlocked():
         debug(f"{self.mapper_name} is already open; not deriving the key again")
         return
-    key_file_arg, passphrase = self._get_passphrase_args(key_file)
+    # The volume key the format just used, when this is the open after it.
+    volume_key = getattr(self, "omarchy_volume_key", None)
+    self.omarchy_volume_key = None
+    if volume_key is not None:
+        key_file_arg, passphrase = ["--volume-key-file", str(volume_key)], None
+    else:
+        key_file_arg, passphrase = self._get_passphrase_args(key_file)
     cmd = ["cryptsetup", "open", str(self.luks_dev_path), str(self.mapper_name),
            *key_file_arg, "--type", "luks2", *OPEN_FLAGS]
     try:
         result = run(cmd, input_data=passphrase)
     except CalledProcessError as err:
         raise DiskError(f'Could not unlock luks2 device "{self.luks_dev_path}": {err.stdout.decode().rstrip()}')
+    finally:
+        if volume_key is not None:
+            volume_key.unlink(missing_ok=True)
     debug(f"cryptsetup open output: {result.stdout.decode().rstrip()}")
     if not self.is_unlocked():
         raise DiskError(f"Failed to unlock luks2 device: {self.luks_dev_path}")
@@ -112,18 +124,25 @@ def _run_command(self, cmd: str, peek_output: bool = False):
 def _with_calibration(original_encrypt):
     def encrypt(self, *args, **kwargs):
         from archinstall.lib.disk import luks
-        from .luks_calibration import format_command, stop_calibration
+        from .luks_calibration import format_command, new_volume_key, stop_calibration
         stop_calibration()
         original_run = luks.run
+        volume_key = new_volume_key()
         # Keep archinstall's passphrase/key-file handling, return value and
         # error handling intact. Only adjust its format argv, for this call.
         def calibrated_run(command, *run_args, **run_kwargs):
-            return original_run(format_command(command), *run_args, **run_kwargs)
+            return original_run(format_command(command, volume_key), *run_args, **run_kwargs)
         luks.run = calibrated_run
         try:
-            return original_encrypt(self, *args, **kwargs)
+            result = original_encrypt(self, *args, **kwargs)
+        except BaseException:
+            volume_key.unlink(missing_ok=True)
+            raise
         finally:
             luks.run = original_run
+        # For the unlock that follows on this handler, which removes it.
+        self.omarchy_volume_key = volume_key
+        return result
     return encrypt
 
 

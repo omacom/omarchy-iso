@@ -14,6 +14,7 @@ import pty
 import re
 import select
 import struct
+import tempfile
 import termios
 import time
 import unittest
@@ -32,7 +33,7 @@ def function(name: str) -> str:
 # to, and an animation that only waits to be killed.
 SCRIPT = f"""
 source {SHARE / 'i18n.sh'}; i18n_load en
-LOGO_WIDTH=10 LOGO_PATH=$(mktemp); printf 'LOGO-LOGO-\\n' >"$LOGO_PATH"
+LOGO_WIDTH=10
 gum() {{ echo "LOGO-PADDED-$PADDING_LEFT"; }}
 ttfx() {{ sleep 30; }}
 {function('measure_terminal')}
@@ -60,9 +61,12 @@ class GreeterResizeTest(unittest.TestCase):
         return seen
 
     def test_a_console_that_grows_is_drawn_again_and_return_still_ends_it(self):
+        logo = Path(self.enterContext(tempfile.TemporaryDirectory())) / "logo.txt"
+        logo.write_text("LOGO-LOGO-\n")
         pid, fd = pty.fork()
         if pid == 0:
             set_size(0, 24, 80)
+            os.environ["LOGO_PATH"] = str(logo)
             os.execvp("bash", ["bash", "-c", SCRIPT])
         try:
             # 80 columns: the 10-column logo is padded to (80 - 10) / 2.

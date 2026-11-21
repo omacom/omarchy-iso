@@ -217,6 +217,19 @@ PKG_FLOOR_TAU=900      # with a work signal, time is only a backstop until the
 
 POS=10                 # position, per-mille, monotonic
 PROGRESS_PM=10
+# The pre-flight verify gate. Its phase is subsecond once the boot-time hash
+# has finished, so it gets a sliver of the bar. When install is pressed while
+# the hash is still running, the phase instead takes up to VERIFY_BAND_PM,
+# scaled by the share of the hash left at first sight, and everything after it
+# is drawn compressed into the rest. Fixed on first sight, so the mapping
+# never changes under a drawn position.
+VERIFY_PHASE="Preparing install target"
+VERIFY_LO=50           # the phase's band in install_progress
+VERIFY_HI=65
+VERIFY_BAND_PM=250
+VERIFY_W=0             # per-mille the verify was given, 0 when not waited on
+VERIFY_P0=-1           # hash progress at first sight, per-mille
+VERIFY_PM=-1           # latest hash progress, per-mille
 NOW=0                  # monotonic seconds, refreshed once per frame
 DASH_T0=0
 PHASE_NAME=""          # last phase this process observed
@@ -308,7 +321,7 @@ install_progress() {
   local lo hi tau span t pos work gap n pkg_signal=0 progress_pm
   local -a state
 
-  PROGRESS_PM=$POS
+  show_progress
   [[ -f $STATE_FILE ]] || return 0
 
   mapfile -t state < <(jq -r '
@@ -334,6 +347,15 @@ install_progress() {
 
   # Transitions are observed here rather than read from the state file, which
   # keeps wall clock out of the dashboard entirely.
+  if [[ $phase == "$VERIFY_PHASE" ]] && (( progress_pm >= 0 )); then
+    (( progress_pm > 1000 )) && progress_pm=1000
+    if (( VERIFY_P0 < 0 )); then
+      VERIFY_P0=$progress_pm
+      VERIFY_W=$(( VERIFY_BAND_PM * (1000 - progress_pm) / 1000 ))
+    fi
+    (( progress_pm > VERIFY_PM )) && VERIFY_PM=$progress_pm
+  fi
+
   if [[ $phase != "$PHASE_NAME" ]]; then
     PHASE_NAME="$phase"
     PHASE_T0=$NOW
@@ -351,7 +373,7 @@ install_progress() {
   case "$phase" in
     "Starting installation")      lo=10  hi=25   tau=5   ;;
     "Preparing live environment") lo=25  hi=50   tau=25  ;;
-    "Preparing install target")   lo=50  hi=65   tau=20  ;;
+    "$VERIFY_PHASE")              lo=$VERIFY_LO hi=$VERIFY_HI tau=20 ;;
     "Installing Arch + Omarchy")  lo=65  hi=700  tau=150 pkg_signal=1 ;;
     "Configuring hibernation")    lo=700 hi=720  tau=10  ;;
     "Configuring system")         lo=720 hi=850  tau=120 ;;
@@ -419,8 +441,20 @@ install_progress() {
   (( pos > hi - 1 )) && pos=$(( hi - 1 ))
   (( pos > POS )) && POS=$pos
   (( POS > 1000 )) && POS=1000
-  PROGRESS_PM=$POS
+  show_progress
   return 0
+}
+
+# Sets PROGRESS_PM from POS, widening the verify phase's band when the install
+# waited on the hash (see VERIFY_BAND_PM).
+show_progress() {
+  PROGRESS_PM=$POS
+  (( VERIFY_W > 0 && POS >= VERIFY_LO )) || return 0
+  if (( POS < VERIFY_HI )); then
+    PROGRESS_PM=$(( VERIFY_LO + VERIFY_W * (VERIFY_PM - VERIFY_P0) / (1000 - VERIFY_P0) ))
+  else
+    PROGRESS_PM=$(( VERIFY_LO + VERIFY_W + (POS - VERIFY_HI) * (1000 - VERIFY_LO - VERIFY_W) / (1000 - VERIFY_HI) ))
+  fi
 }
 
 # One tip per 8 seconds, in order. Use elapsed time, since rendering can stretch

@@ -439,8 +439,9 @@ else
   # practice nothing, so mkinitcpio falls back to us. The installer writes the
   # user's choice into the target's /etc/vconsole.conf afterwards, which cannot
   # reach an initramfs that is only copied, so an install picking another
-  # layout has to build its own UKI exactly as one adding modules does.
-  # Recording the value is what lets the installer tell the difference.
+  # layout writes it into the room reserved below, or builds its own UKI
+  # where an image has none. Recording the value is what lets the installer
+  # tell the difference.
   #
   # The LUKS passphrase prompt runs from this initramfs, so a stale `us` makes
   # a passphrase enrolled under another layout untypeable and locks the owner
@@ -536,11 +537,32 @@ UNIT
   # (omacom/omarchy#5980), as a 241 MiB initramfs does GRUB (#128). Without
   # kms, Plymouth's LUKS prompt draws on the firmware framebuffer (simpledrm);
   # the installed system's own rebuilds autodetect and keep kms.
+  # Room for the installer to write the install's keyboard layout into the
+  # UKI in place (orchestrator/uki_vconsole.py), as for the cmdline below: an
+  # install on another layout than us then has no UKI to build, 4.7 s of the
+  # install. The initramfs gets every console keymap (1.3 MB), since
+  # sd-vconsole adds only the one vconsole.conf names at build time, and an
+  # /etc/vconsole.conf of one 512-byte comment line. add_file_early puts that
+  # file in the early cpio, the uncompressed archive at the start of the
+  # initramfs, where the installer finds its bytes and overwrites them. Until
+  # then it is a comment, and the initramfs comes up in us as before.
+  cat >"$root/usr/lib/initcpio/install/omarchy-vconsole-room" <<'INSTALL'
+#!/usr/bin/env bash
+build() {
+    add_full_dir /usr/share/kbd/keymaps
+    add_file_early /etc/vconsole.conf.prebuilt-uki /etc/vconsole.conf 644
+}
+INSTALL
+  chmod 0755 "$root/usr/lib/initcpio/install/omarchy-vconsole-room"
+  vconsole_room="# omarchy.vconsole_room "
+  printf '%s%s\n' "$vconsole_room" "$(printf '%*s' $((512 - ${#vconsole_room} - 1)) '' | tr ' ' '#')" \
+    >"$root/etc/vconsole.conf.prebuilt-uki"
+
   cat >"$root/etc/mkinitcpio-prebuilt-uki.conf" <<'CONF'
 MODULES=(thunderbolt)
 BINARIES=()
 FILES=()
-HOOKS=(base systemd plymouth autodetect microcode modconf keyboard sd-vconsole block sd-encrypt filesystems fsck sd-btrfs-overlayfs)
+HOOKS=(base systemd plymouth autodetect microcode modconf keyboard sd-vconsole omarchy-vconsole-room block sd-encrypt filesystems fsck sd-btrfs-overlayfs)
 COMPRESSION="zstd"
 CONF
 
@@ -595,7 +617,8 @@ CONF
   fi
 
   # Only this build uses these; the installed system has no use for them.
-  rm -f "$root/etc/mkinitcpio-prebuilt-uki.conf" "$root/etc/kernel/cmdline.prebuilt-uki"
+  rm -f "$root/etc/mkinitcpio-prebuilt-uki.conf" "$root/etc/kernel/cmdline.prebuilt-uki" \
+    "$root/etc/vconsole.conf.prebuilt-uki" "$root/usr/lib/initcpio/install/omarchy-vconsole-room"
 fi
 
 # The image is the loop backing file itself: the same on-disk bytes, written

@@ -2759,7 +2759,8 @@ def _prebuilt_uki_keymap_stale(target: Path) -> str:
     UKI that is only copied. The LUKS passphrase prompt runs from that
     initramfs: leaving it stale is upstream omarchy#8196, where a passphrase
     enrolled under AZERTY cannot be typed at a QWERTY prompt and the owner is
-    locked out of a fresh install with no recovery but reinstalling.
+    locked out of a fresh install with no recovery but reinstalling. The
+    caller writes the choice into the UKI (uki_vconsole.py), or builds one.
 
     An image that records nothing is assumed to have built in "us", and that
     covers two cases:
@@ -2949,19 +2950,25 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
         info(f"› hardware setup added initramfs modules ({'; '.join(added_modules)}); "
              "building the UKI on this machine instead of using the pre-built one")
 
-    # Same reasoning for the console keymap: the pre-built initramfs has the
-    # image's, and the LUKS prompt types with it.
+    # The console keymap is the image's too, and the LUKS prompt types with
+    # it. An image that reserved room for it takes this install's keyboard
+    # settings in place (uki_vconsole.py); one that did not is built here.
     stale_keymap = _prebuilt_uki_keymap_stale(ctx.target)
+    vconsole = ctx.target / "etc" / "vconsole.conf"
+    keymap_fits = False
     if prebuilt_uki.is_file() and stale_keymap:
-        info(f"› keyboard layout {stale_keymap} differs from the pre-built UKI's; "
-             "building the UKI on this machine so the LUKS prompt uses it")
+        from .uki_vconsole import vconsole_fits
+        keymap_fits = vconsole_fits(prebuilt_uki, vconsole)
+        if not keymap_fits:
+            info(f"› keyboard layout {stale_keymap} differs from the pre-built UKI's, which has no room for it; "
+                 "building the UKI on this machine so the LUKS prompt uses it")
     # And for an encrypted deferred install: its first boot unlocks with the
     # provisioning key, which only an initramfs built here carries.
     provisioning_key = _initramfs_carries_provisioning_key(ctx.target)
     if prebuilt_uki.is_file() and provisioning_key:
         info("› the first boot unlocks with the provisioning key; "
              "building the UKI on this machine so its initramfs carries it")
-    skip_prebuilt = bool(added_modules) or bool(stale_keymap) or provisioning_key
+    skip_prebuilt = bool(added_modules) or (bool(stale_keymap) and not keymap_fits) or provisioning_key
 
     # A selected kernel other than the image's boots first, as in omarchy's own
     # kernel migration. Written before any UKI is built so the entries sort by it.
@@ -2991,6 +2998,14 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
             shutil.copy2(prebuilt_uki, esp_uki)
             info(f"› deployed pre-built UKI ({prebuilt_uki.stat().st_size >> 20} MiB)")
         # Before --add-uki: the Limine entry pins the UKI's BLAKE2B hash.
+        if stale_keymap:
+            with _time_step("LIMINE.embed_vconsole (keyboard layout into the pre-built UKI)"):
+                from .uki_vconsole import embed_vconsole
+                # It fit a moment ago, in the copy's source. A prompt in the
+                # wrong layout locks the owner out, so nothing boots without it.
+                if not embed_vconsole(esp_uki, vconsole):
+                    raise RuntimeError(f"could not write keyboard layout {stale_keymap} into {esp_uki}")
+                info(f"› UKI carries keyboard layout {stale_keymap} for the console and the LUKS prompt")
         with _time_step("LIMINE.embed_cmdline (pre-built UKI boots without a loader)"):
             from .uki_cmdline import embed_cmdline
             if embed_cmdline(esp_uki, cmdline):

@@ -9,9 +9,10 @@ OMARCHY_SETTINGS_PACKAGE="${OMARCHY_SETTINGS_PACKAGE:-omarchy-settings}"
 
 LOGO_PATH="$OMARCHY_PATH/logo.txt"
 
-# The setup form — keyboard, timezone, account, and hostname questions, plus the
-# rules their answers are checked against — shared verbatim with the first-boot
-# owner setup that finishes a deferred install. build-iso.sh vendors it out of
+# The setup form — keyboard, timezone, and account questions, the hostname made
+# from the account and the machine, and the rules the answers are checked
+# against — shared verbatim with the first-boot owner setup that finishes a
+# deferred install. build-iso.sh vendors it out of
 # the runtime package this ISO bundles, so the two can never offer different
 # layouts or accept different usernames. On the ISO that vendored copy is what
 # loads; a dry run outside the ISO falls back to the omarchy checkout
@@ -428,7 +429,7 @@ user_form() {
   # Hash the password with SHA-512 crypt ($6$), which is what openssl passwd offers
   password_hash=$(printf '%s' "$password" | openssl passwd -6 -stdin)
 
-  omarchy_prompt_hostname || return $?
+  omarchy_generate_hostname
 }
 
 # Returns 0 on confirmed account details, or as soon as the keyboard screen

@@ -488,7 +488,10 @@ press() {
     json+="{\"type\":\"qcode\",\"data\":\"$part\"},"
   done
 
-  qmp "\"send-key\", \"arguments\": {\"keys\": [${json%,}]}" >/dev/null
+  qmp "\"send-key\", \"arguments\": {\"keys\": [${json%,}], \"hold-time\": 50}" >/dev/null
+  # QMP acknowledges before releasing the chord. Wait for release so the next
+  # shortcut cannot inherit Ctrl/Shift/Super from the previous one.
+  sleep 0.1
 }
 
 type_text() {
@@ -953,7 +956,7 @@ drive_configurator() {
 
   # The same cursor, the other phase: while it covers the placeholder's first
   # letter, OCR misreads "Must match"; "you just typed" reads either way.
-  wait_for_screen_any "Must match" "you just typed" 60
+  wait_for_screen_any "match the password" "you just typed" 60
   type_text "$GUEST_PASSWORD"
   capture_console "success-installer-05-password-confirmation"
   press ret

@@ -1371,7 +1371,7 @@ if [[ -z $resume_stage || $resume_stage == greeter ]]; then
   $defer_provisioning || kmscon_for_language
 fi
 
-if [[ -z $resume_stage || $resume_stage == keyboard ]]; then
+if [[ -z $resume_stage || $resume_stage == greeter || $resume_stage == keyboard ]]; then
   $defer_provisioning || keyboard_form
 fi
 

@@ -340,6 +340,14 @@ class KmsconLanguageTest(unittest.TestCase):
         self.assertEqual(face("ko"), "Noto Sans Mono CJK KR")
         self.assertEqual(face("zh-CN"), "Noto Sans Mono CJK SC")
 
+    def test_kmscon_resumes_before_the_keyboard_step_still_reach_it(self):
+        # A preset in Chinese moves to kmscon at the welcome screen; the
+        # resumed run must still set the preset keyboard after it.
+        configurator = (ROOT / "configs/airootfs/root/configurator").read_text()
+        keyboard_step = re.search(r"^if (.*) then\n\s+\$defer_provisioning \|\| keyboard_form$", configurator, re.MULTILINE).group(1)
+        for stage in ("greeter", "keyboard"):
+            self.assertIn(f"$resume_stage == {stage}", keyboard_step)
+
     def test_only_the_language_screen_picks_the_language(self):
         # The language goes to the installed system, so nothing after the
         # summary the user confirmed (a timezone, say) may change it. It starts

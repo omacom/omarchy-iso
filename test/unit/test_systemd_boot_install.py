@@ -156,9 +156,19 @@ class SystemdBootInstallTest(unittest.TestCase):
                 mock.patch.object(phases, "_is_apple_t2_hardware", return_value=False):
             phases.finalize_boot(self.ctx)
         self.assertIn(
-            ["arch-chroot", str(self.root), "omarchy-boot-switch", "install", "--no-efi-register", "--no-fallback"],
+            ["arch-chroot", str(self.root), "env", "OMARCHY_BOOT_ESP=/boot",
+             "omarchy-boot-switch", "install", "--no-efi-register", "--no-fallback"],
             self.commands,
         )
+
+    def test_a_free_space_install_s_esp_at_efi_reaches_the_install(self):
+        self.write("etc/snapper/configs/root", "")
+        self.write("etc/kernel/cmdline", CMDLINE + "\n")
+        self.ctx.omarchy_install["boot"] = {"esp_mount": "/efi"}
+        with mock.patch.object(phases, "_drop_initramfs_modules_the_kernel_lacks"), \
+                mock.patch.object(phases, "_is_apple_t2_hardware", return_value=False):
+            phases.finalize_boot(self.ctx)
+        self.assertTrue(any("OMARCHY_BOOT_ESP=/efi" in command for command in self.commands))
         self.assertFalse(any("limine" in " ".join(command) for command in self.commands))
 
     def test_a_complete_install_validates(self):

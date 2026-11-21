@@ -2983,7 +2983,11 @@ def finalize_systemd_boot(ctx: InstallContext) -> None:
 
     _drop_initramfs_modules_the_kernel_lacks(ctx)
 
-    command = ["arch-chroot", str(ctx.target), "omarchy-boot-switch", "install", "--no-efi-register"]
+    # The ESP where this install mounted it: /efi for an unencrypted install
+    # into free space. The runtime finds it there itself from then on.
+    esp_mount = _boot_intent(ctx)["esp_mount"]
+    command = ["arch-chroot", str(ctx.target), "env", f"OMARCHY_BOOT_ESP={esp_mount}",
+               "omarchy-boot-switch", "install", "--no-efi-register"]
     if not ctx.state.get("boot_fallback", True):
         command.append("--no-fallback")
     # A selected kernel other than the image's boots first, as on Limine.

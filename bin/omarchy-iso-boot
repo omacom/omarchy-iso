@@ -213,6 +213,7 @@ if [[ $HOST_ARCH == aarch64 ]]; then
   # as in test/arm64-install, shows it. One QEMU keeps its devices across a
   # reboot, so the install run exits at the installer's reboot (-no-reboot)
   # and the installed system starts in a fresh QEMU with the plain device.
+  # QMP events tell that reboot apart from closing the window.
   # OMARCHY_VM_GL=0 uses the plain device throughout.
   run_aarch64() { # gl|plain, then extra QEMU arguments
     local display_args
@@ -249,9 +250,12 @@ if [[ $HOST_ARCH == aarch64 ]]; then
   if [[ ${OMARCHY_VM_GL:-1} == "0" ]] || disk_written; then
     run_aarch64 plain
   else
-    run_aarch64 gl -no-reboot
-    # Closed before anything was installed: nothing to boot.
-    if disk_written; then
+    qmp_dir=$(mktemp -d)
+    trap 'rm -rf "$qmp_dir"' EXIT
+    echo '{"execute":"qmp_capabilities"}' >"$qmp_dir/in"
+    run_aarch64 gl -no-reboot \
+      -chardev file,id=qmp,path="$qmp_dir/out",input-path="$qmp_dir/in" -mon chardev=qmp,mode=control
+    if grep -q '"reason": "guest-reset"' "$qmp_dir/out" && disk_written; then
       echo "Booting the installed system with the plain virtio-gpu"
       run_aarch64 plain
     fi

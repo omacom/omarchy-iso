@@ -35,6 +35,10 @@ printf 'if true; then\n' >broken.sh
 ! bash "$make" --oem-script broken.sh --oem 2>"$work/err" || fail "a script that does not parse was accepted"
 grep -q "not a bash script that parses" "$work/err" || fail "a script that does not parse was not named: $(cat "$work/err")"
 
+# The China ISO opens on a language and region; an OEM ISO leaves both to the owner.
+! bash "$make" --china --oem 2>"$work/err" || fail "--china was accepted with --oem"
+grep -q -- "--china and --oem" "$work/err" || fail "--china with --oem was refused without saying why: $(cat "$work/err")"
+
 [[ ! -e $work/reached ]] || fail "a refused bundle got as far as: $(cat "$work/reached")"
 
 echo "ok - an OEM bundle that is refused stops omarchy-iso-make before it builds anything"

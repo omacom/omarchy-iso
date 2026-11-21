@@ -342,10 +342,11 @@ class KmsconLanguageTest(unittest.TestCase):
 
     def test_only_the_language_screen_picks_the_language(self):
         # The language goes to the installed system, so nothing after the
-        # summary the user confirmed (a timezone, say) may change it.
+        # summary the user confirmed (a timezone, say) may change it. It starts
+        # as English, or as Chinese on the China ISO.
         configurator = (ROOT / "configs/airootfs/root/configurator").read_text()
         assignments = re.findall(r"^\s*language=.*$", configurator, re.MULTILINE)
-        self.assertEqual([line.strip() for line in assignments], ['language="en"', "language=$choice"])
+        self.assertEqual([line.strip() for line in assignments], ['language="en"', 'language="zh-CN"', "language=$choice"])
 
 
 class ConsoleFontLoadTest(unittest.TestCase):
@@ -390,6 +391,21 @@ class ConsoleFontLoadTest(unittest.TestCase):
         result, _, own_path = self.run_with_runtime_font("return 1")
         self.assertEqual(result.stdout, "survived\n", result.stderr)
         self.assertFalse(own_path)
+
+
+class RegionMarkerTest(unittest.TestCase):
+    def marker(self, china_iso):
+        with tempfile.TemporaryDirectory() as target, tempfile.TemporaryDirectory() as share:
+            if china_iso:
+                (Path(share) / "china").touch()
+            ctx = types.SimpleNamespace(target=Path(target), omarchy_install={})
+            phases_impl._write_region_marker(ctx, Path(share))
+            marker = Path(target) / "etc/omarchy/region"
+            return (marker.read_text(), oct(marker.stat().st_mode & 0o777)) if marker.exists() else None
+
+    def test_a_china_iso_marks_the_target_cn_and_every_other_iso_writes_nothing(self):
+        self.assertEqual(self.marker(True), ("cn\n", "0o644"))
+        self.assertIsNone(self.marker(False))
 
 
 class LanguageMarkerTest(unittest.TestCase):

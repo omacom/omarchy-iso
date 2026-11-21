@@ -716,6 +716,7 @@ def arch_install_system(ctx: InstallContext) -> None:
                 arch.install_applications(installer, config)
 
             _write_language_marker(ctx)
+            _write_region_marker(ctx)
 
             # Tailscale is bundled in the offline mirror but only installed
             # when an autoinstall drive staged an auth key; must happen here,
@@ -1924,6 +1925,18 @@ def _write_language_marker(ctx: InstallContext) -> None:
     marker = ctx.target / "etc/omarchy/language"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(language + "\n")
+    marker.chmod(0o644)
+
+
+def _write_region_marker(ctx: InstallContext, iso_share: Path = Path("/usr/share/omarchy-iso")) -> None:
+    """A China ISO (--china) marks the target's region cn, which the runtime's
+    pacman finalizer (omarchy-apply-pacman) reads to put Omarchy's China
+    mirrors first. Every other ISO writes nothing, which means global."""
+    if not (iso_share / "china").exists():
+        return
+    marker = ctx.target / "etc/omarchy/region"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("cn\n")
     marker.chmod(0o644)
 
 

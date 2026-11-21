@@ -221,6 +221,13 @@ notice() {
 LANGUAGES_JSON="${LANGUAGES_JSON:-$OMARCHY_PATH/default/i18n/locales.json}"
 language="en"
 
+# The China ISO (--china) opens on Chinese, which brings its Pinyin keyboard,
+# and on Asia/Shanghai, without asking geo.omarchy.org. Each stays a choice.
+if [[ -f $OMARCHY_ISO_SHARE/china ]]; then
+  language="zh-CN"
+  export OMARCHY_FORM_TIMEZONE_DEFAULT=Asia/Shanghai
+fi
+
 # The setup form takes its language and defaults from the language picked here:
 # the layout that goes with it, and its country's capital for when the network
 # cannot guess a timezone. A language with no single country (English, Arabic,

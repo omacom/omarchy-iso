@@ -51,6 +51,13 @@ while [[ $# -gt 0 ]]; do
     OMARCHY_OEM_INSTALL=1
     shift
     ;;
+  --china)
+    # The ISO for mainland China: the installer opens on Chinese, with its
+    # Pinyin input and Asia/Shanghai, and the installed system downloads from
+    # Omarchy's China mirrors (omarchy.cn) first.
+    OMARCHY_CHINA=1
+    shift
+    ;;
   --oem-config)
     # What first-boot setup shows the owner of a machine this OEM ISO
     # installs: the OEM's name, logo, tagline and colour, and an agreement to
@@ -129,7 +136,7 @@ while [[ $# -gt 0 ]]; do
     ;;
   *)
     echo "Unknown option: $1"
-    echo "Usage: $0 [--oem [--oem-config FILE] [--oem-script FILE]...] [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout> [--rehearsal]]"
+    echo "Usage: $0 [--oem [--oem-config FILE] [--oem-script FILE]...] [--china] [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout> [--rehearsal]]"
     echo "       $0 --arch aarch64 [--edge|--rc] [--package-dir DIR] [--dev-ssh <pubkey>] [--local-source <omarchy-checkout> <pkgs-checkout>] [...]"
     exit 1
     ;;
@@ -150,6 +157,11 @@ if [[ -n $LOCAL_OMARCHY_PATH ]]; then
   [[ -d $LOCAL_PKGS_PATH ]]    || { echo "Error: pkgs checkout not found at $LOCAL_PKGS_PATH" >&2; exit 1; }
   LOCAL_OMARCHY_PATH=$(realpath "$LOCAL_OMARCHY_PATH")
   LOCAL_PKGS_PATH=$(realpath "$LOCAL_PKGS_PATH")
+fi
+
+if [[ ${OMARCHY_CHINA:-} == "1" && ${OMARCHY_OEM_INSTALL:-} == "1" ]]; then
+  echo "Error: --china and --oem make different ISOs; pick one" >&2
+  exit 1
 fi
 
 # An OEM's bundle is checked and laid out here, before anything is built, so a
@@ -267,6 +279,7 @@ DOCKER_ARGS=(
   -e "OMARCHY_ISO_REF=$OMARCHY_ISO_REF"
   -e "OMARCHY_MIRROR=$OMARCHY_MIRROR"
   -e "OMARCHY_OEM_INSTALL=${OMARCHY_OEM_INSTALL:-}"
+  -e "OMARCHY_CHINA=${OMARCHY_CHINA:-}"
   -e "OMARCHY_INSTALL_DEBUG=${OMARCHY_INSTALL_DEBUG:-}"
   -e "OMARCHY_ARCH=$OMARCHY_ARCH"
   -e "OMARCHY_KERNEL=$OMARCHY_KERNEL"
@@ -340,6 +353,7 @@ fi
 
 iso_name=omarchy
 [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]] && iso_name=omarchy-oem
+[[ ${OMARCHY_CHINA:-} == "1" ]] && iso_name=omarchy-china
 latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/"$iso_name"-*.iso | head -n1)
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   iso_ref="${latest_iso%.*}${N1X_DEV_SSH_KEY:+-devssh}-$OMARCHY_ISO_REF.iso"

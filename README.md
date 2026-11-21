@@ -423,6 +423,10 @@ Despite the local folder name, the first argument is the Omarchy source checkout
 
 Use `--dev` or `--rc` to build against those package channels. Both `--dev` and `--edge` select the dev packages from the edge mirror.
 
+### The China ISO
+
+`--china` builds `omarchy-china-*.iso` for mainland China. Its installer opens on Chinese (Simplified), which preselects the Pinyin keyboard and with it fcitx5 Pinyin input, and offers Asia/Shanghai first without asking geo.omarchy.org. The user can still change each one. The install writes `cn` to the target's `/etc/omarchy/region`. The runtime's pacman finalizer (`omarchy-apply-pacman`) then puts Omarchy's China mirrors (`*.omarchy.cn`) ahead of the `.org` ones, which stay as the fallback. This works on every channel and is combined with the channel flags (`--china --edge`), not with `--oem`. The China mirrors are x86 only so far, so an aarch64 China ISO keeps the global mirrors.
+
 ### aarch64
 
 ```bash

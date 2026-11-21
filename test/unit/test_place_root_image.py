@@ -82,7 +82,7 @@ class InstallRootImageDdTest(unittest.TestCase):
              mock.patch.object(phases_impl, "_umount_tree",
                                side_effect=lambda t: self.calls.append(["umount-tree", str(t)])), \
              mock.patch.object(phases_impl, "_write_root_image_frames",
-                               side_effect=lambda i, d: self.calls.append(["frames", str(i), d]) or frames_written), \
+                               side_effect=lambda i, d, *_: self.calls.append(["frames", str(i), d]) or frames_written), \
              mock.patch.object(phases_impl, "_write_root_image_pipe",
                                side_effect=lambda i, d: self.calls.append(["pipe", str(i), d])), \
              mock.patch.object(phases_impl, "_wait_for_blkid_uuid",

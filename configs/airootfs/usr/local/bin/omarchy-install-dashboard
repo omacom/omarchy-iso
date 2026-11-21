@@ -227,6 +227,7 @@ PKG_BASE=-1            # package count when the phase started
 PKG_SEEN=0             # running max of packages since PKG_BASE
 PKG_LAST_CHANGE=0
 PKG_BONUS=0
+SIGNAL_BASE=-1         # POS when this phase's phase_progress first arrived
 
 # Monotonic clock: tzupdate and systemd-timesyncd can step the wall clock
 # mid-install, which would jump every time-driven band to its ceiling.
@@ -304,7 +305,7 @@ count_packages() {
 # here would land on the TTY between the cursor escape and the drawing.
 install_progress() {
   local phase finished index total target
-  local lo hi tau span t pos work gap n pkg_signal=0 progress_pm
+  local lo hi tau span t pos work top gap n pkg_signal=0 progress_pm
   local -a state
 
   PROGRESS_PM=$POS
@@ -341,22 +342,23 @@ install_progress() {
     PKG_SEEN=0
     PKG_BONUS=0
     PKG_LAST_CHANGE=$NOW
+    SIGNAL_BASE=-1
   fi
 
   # Bands in per-mille, plus tau, sized to where an install spends its time.
   # An encrypted install measured 34 s in the VM test: preparing the target
   # (waiting out the boot-time hash of the medium) 7.7 s, installing 17.2 s
   # (LUKS format and open 11.7 s, the image write 3.7 s), finalizing boot and
-  # user 5.7 s. On a USB stick the hash wait is longer still. tau is a little
-  # under the time a phase takes, so the floor keeps moving through steps that
-  # publish nothing, like the LUKS format, and is well along its band when the
-  # next signal lands. Over-allotting costs a step at a boundary;
-  # under-allotting costs a stall.
+  # user 5.7 s. On a USB stick the hash wait and the image write are longer
+  # still. tau is about the time a phase takes, so the floor keeps moving
+  # through steps that publish nothing, like the LUKS format; where a phase
+  # publishes progress, that leads (see below). Over-allotting costs a step at
+  # a boundary; under-allotting costs a stall.
   case "$phase" in
     "Starting installation")      lo=10  hi=20   tau=2   ;;
     "Preparing live environment") lo=20  hi=40   tau=2   ;;
     "Preparing install target")   lo=40  hi=260  tau=8   ;;
-    "Installing Arch + Omarchy")  lo=260 hi=760  tau=6   pkg_signal=1 ;;
+    "Installing Arch + Omarchy")  lo=260 hi=760  tau=18  pkg_signal=1 ;;
     "Configuring hibernation")    lo=760 hi=765  tau=2   ;;
     "Configuring system")         lo=765 hi=830  tau=3   ;;
     "Staging provisioning")       lo=830 hi=835  tau=2   ;;
@@ -383,7 +385,6 @@ install_progress() {
       ;;
   esac
 
-  (( pkg_signal && PKG_TOTAL > 0 )) || pkg_signal=0
 
   t=$(( NOW - PHASE_T0 ))
   (( t < 0 )) && t=0
@@ -392,6 +393,28 @@ install_progress() {
   (( tau < 1 )) && tau=1
 
   pos=$(( lo + (span - 1) * t / (t + tau) ))
+
+  # Until the install phase publishes anything (the LUKS format comes before
+  # the image write does), the clock covers at most 40% of its band, so the
+  # write still has most of it to move through, however long it takes.
+  (( pkg_signal && progress_pm < 0 && pos > lo + span * 2 / 5 )) && pos=$(( lo + span * 2 / 5 ))
+
+  (( pkg_signal && PKG_TOTAL > 0 )) || pkg_signal=0
+
+  # A phase's published progress drives the rest of its band from where the
+  # bar stood when it first arrived (the LUKS format before the image write
+  # publishes nothing), and the clock may run at most the tail ahead of it:
+  # from a slow USB stick a hash or a write takes minutes, and the floor's
+  # few-second tau would otherwise reach the band's end and stand there.
+  if (( progress_pm >= 0 )); then
+    (( progress_pm > 1000 )) && progress_pm=1000
+    (( SIGNAL_BASE < 0 )) && SIGNAL_BASE=$POS
+    top=$(( hi - 1 - PKG_TAIL_PM ))
+    (( top < SIGNAL_BASE )) && top=$SIGNAL_BASE
+    work=$(( SIGNAL_BASE + (top - SIGNAL_BASE) * progress_pm / 1000 ))
+    (( pos > work + PKG_TAIL_PM )) && pos=$(( work + PKG_TAIL_PM ))
+    (( work > pos )) && pos=$work
+  fi
 
   if (( pkg_signal )); then
     PKG_DB_DIR="$target/var/lib/pacman/local"
@@ -413,12 +436,6 @@ install_progress() {
     work=$(( lo + (span - 1 - PKG_TAIL_PM) * PKG_SEEN / PKG_TOTAL + PKG_BONUS ))
     (( work > pos )) && pos=$work
   fi
-  if (( progress_pm >= 0 )); then
-    (( progress_pm > 1000 )) && progress_pm=1000
-    work=$(( lo + (span - 1 - PKG_TAIL_PM) * progress_pm / 1000 ))
-    (( work > pos )) && pos=$work
-  fi
-
   (( pos > hi - 1 )) && pos=$(( hi - 1 ))
   (( pos > POS )) && POS=$pos
   (( POS > 1000 )) && POS=1000

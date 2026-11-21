@@ -107,9 +107,9 @@ fi
 ssh_sudo "cat /var/log/omarchy-install.log" >"$RUN_DIR/omarchy-install.log" 2>/dev/null || true
 ssh_sudo "efibootmgr" >"$RUN_DIR/efibootmgr.txt" 2>/dev/null || true
 
-check "the installer was refused a boot entry" grep -q "would not register a 'Limine' UEFI boot entry" "$RUN_DIR/omarchy-install.log"
+check "the installer was refused a boot entry" grep -qE "would not register a '(Omarchy Boot|Limine)' UEFI boot entry" "$RUN_DIR/omarchy-install.log"
 check "efibootmgr answered" grep -q "^BootOrder" "$RUN_DIR/efibootmgr.txt"
-check "no Limine entry is in NVRAM" bash -c '! grep -q "Limine" "$1"' _ "$RUN_DIR/efibootmgr.txt"
+check "no Omarchy boot entry is in NVRAM" bash -c '! grep -qE "Omarchy Boot|Limine" "$1"' _ "$RUN_DIR/efibootmgr.txt"
 check "the fallback loader is installed" ssh_sudo "test -s /boot/EFI/BOOT/BOOTX64.EFI"
 capture_console "success-full-nvram"
 

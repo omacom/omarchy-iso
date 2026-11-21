@@ -41,10 +41,15 @@ verify_firmware_boot() {
   else
     check "booted in UEFI mode (EFI runtime present)" \
       ssh_guest "test -d /sys/firmware/efi"
-    check "a Limine EFI binary is on the ESP" \
-      ssh_sudo "test -e /boot/EFI/limine/limine_x64.efi -o -e /boot/EFI/BOOT/BOOTX64.EFI"
-    check "efibootmgr has a Limine entry" \
-      ssh_sudo "efibootmgr | grep -qi limine"
+    # UEFI installs boot through systemd-boot, the loader Secure Boot needs.
+    check "systemd-boot is on the ESP" \
+      ssh_sudo "test -s /boot/EFI/systemd/systemd-bootx64.efi -a -s /boot/EFI/BOOT/BOOTX64.EFI"
+    check "efibootmgr has an Omarchy Boot entry, first in the boot order" \
+      ssh_sudo "efibootmgr | awk '/^BootOrder:/ { split(\$2, order, \",\") } /Omarchy Boot/ { sub(/^Boot/, \"\", \$1); sub(/\\*\$/, \"\", \$1); entry = \$1 } END { exit !(entry != \"\" && order[1] == entry) }'"
+    check "systemd-boot started this boot" \
+      ssh_sudo "bootctl status 2>/dev/null | grep -q 'Product: systemd-boot'"
+    check "the boot store is mounted and the switch state is active" \
+      ssh_sudo "findmnt -n /var/lib/omarchy/boot >/dev/null && grep -qx phase=active /var/lib/omarchy/boot/state"
   fi
 
   capture_console "success-firmware-$FIRMWARE"

@@ -53,7 +53,7 @@ while [[ $# -gt 0 ]]; do
     ;;
   --china)
     # The ISO for mainland China: the installer opens on Chinese, with its
-    # Pinyin input and Asia/Shanghai, and the installed system downloads from
+    # Pinyin input, installs in Asia/Shanghai without asking, and the installed system downloads from
     # Omarchy's China mirrors (omarchy.cn) first.
     OMARCHY_CHINA=1
     shift

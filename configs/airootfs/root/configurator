@@ -222,10 +222,11 @@ LANGUAGES_JSON="${LANGUAGES_JSON:-$OMARCHY_PATH/default/i18n/locales.json}"
 language="en"
 
 # The China ISO (--china) opens on Chinese, which brings its Pinyin keyboard,
-# and on Asia/Shanghai, without asking geo.omarchy.org. Each stays a choice.
+# and installs in Asia/Shanghai without asking for a timezone.
+china_iso=false
 if [[ -f $OMARCHY_ISO_SHARE/china ]]; then
+  china_iso=true
   language="zh-CN"
-  export OMARCHY_FORM_TIMEZONE_DEFAULT=Asia/Shanghai
 fi
 
 # The setup form takes its language and defaults from the language picked here:
@@ -405,7 +406,11 @@ user_form() {
   # Each prompt reports 0 (set), OMARCHY_FORM_BACK (Esc), or OMARCHY_FORM_SIGNAL
   # (Ctrl+C). Both non-zero cases unwind to user_step, which decides what they
   # mean here; the form itself never aborts.
-  omarchy_prompt_timezone || return $?
+  if $china_iso; then
+    timezone="Asia/Shanghai"
+  else
+    omarchy_prompt_timezone || return $?
+  fi
   omarchy_prompt_username || return $?
   omarchy_prompt_password || return $?
 

@@ -126,6 +126,62 @@ def exercise_formats(calibration, Luks2, report, expect_no_cache=False):
             state.write_bytes(saved)
 
 
+def exercise_volume_key(Luks2, report):
+    """Both callers open the volume they just formatted with the volume key
+    the format was given: no second key derivation, the open flags stored in
+    the header, the key file gone afterwards, and the passphrase still
+    opening the volume, as it must at every boot."""
+    flags = ['--persistent', '--allow-discards', '--perf-no_read_workqueue']
+    with tempfile.TemporaryDirectory(prefix='luks-volume-key-', dir='/var/tmp') as tmp:
+        tmp = Path(tmp)
+        password = b'only-a-disposable-vm-test'
+        key = tmp / 'test-key'
+        key.write_bytes(password)
+        key.chmod(0o600)
+
+        def image(name):
+            path = tmp / f'{name}.img'
+            with path.open('xb') as stream:
+                stream.truncate(64 * 1024 * 1024)
+            return path
+
+        def archinstall(path, name):
+            handler = Luks2(path, mapper_name=name, password=password)
+            handler.encrypt(iter_time=2000)
+            volume_key = handler.omarchy_volume_key
+            assert volume_key.stat().st_mode & 0o777 == 0o600 and volume_key.stat().st_size == 64, volume_key
+            start = time.monotonic()
+            handler.unlock()
+            return volume_key, time.monotonic() - start
+
+        def free_space(path, name):
+            result, _ = command(['omarchy-luks-calibrate', 'volume-key'], text=True)
+            volume_key = Path(result.stdout.strip())
+            assert volume_key.stat().st_mode & 0o777 == 0o600 and volume_key.stat().st_size == 64, volume_key
+            command(['omarchy-luks-calibrate', 'format', str(path), str(volume_key)], input=password)
+            _, seconds = command(['cryptsetup', 'open', *flags, '--volume-key-file', str(volume_key), str(path), name])
+            volume_key.unlink()
+            return volume_key, seconds
+
+        report['volume_key'] = {}
+        for caller in (archinstall, free_space):
+            name = f'omarchy-test-{caller.__name__.replace("_", "-")}'
+            path = image(caller.__name__)
+            volume_key, opened = caller(path, name)
+            try:
+                assert not volume_key.exists(), f'{caller.__name__} left {volume_key} behind'
+                status, _ = command(['cryptsetup', 'status', name], text=True)
+                assert 'discards' in status.stdout and 'no_read_workqueue' in status.stdout, status.stdout
+            finally:
+                command(['cryptsetup', 'close', name])
+            result, _ = command(['cryptsetup', 'luksDump', '--dump-json-metadata', str(path)])
+            stored = json.loads(result.stdout)['config'].get('flags', [])
+            assert {'allow-discards', 'no-read-workqueue'} <= set(stored), stored
+            _, by_passphrase = command(['cryptsetup', 'open', '--test-passphrase', '--key-file', str(key), str(path)])
+            report['volume_key'][caller.__name__] = dict(open_seconds=opened, passphrase_seconds=by_passphrase, flags=stored)
+            assert opened < by_passphrase / 2, report['volume_key']
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--expect-no-cache', action='store_true')
@@ -141,6 +197,7 @@ def main():
         from orchestrator import luks_tuning
         luks_tuning.apply()
         exercise_formats(calibration, Luks2, report, args.expect_no_cache)
+        exercise_volume_key(Luks2, report)
     finally:
         print(json.dumps(report, indent=2))
 

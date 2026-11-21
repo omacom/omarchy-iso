@@ -436,7 +436,7 @@ Use `--dev` or `--rc` to build against those package channels. Both `--dev` and 
 
 `regions/cn.json` is the China ISO: Chinese, Pinyin input (fcitx5) on a US layout, Asia/Shanghai, and Omarchy's China mirrors (`*.omarchy.cn`). The China mirrors are x86 only so far, so an aarch64 China ISO keeps the global mirrors. `test/unit/test_installer_i18n.py` checks every region file against the language list, the setup form's keyboards, tzdata and the runtime's region profiles.
 
-A region ISO goes with the channel flags (`--region cn --edge`), not with `--oem`. A preset language also removes the language screen's Ctrl+C entry into preparing the machine for another owner. `omarchy-iso-release` publishes only `omarchy-[0-9]*`, so a region ISO is never released as the global one.
+A region ISO goes with the channel flags (`--region cn --edge`) and with `--oem`. `--oem --region cn` builds `omarchy-oem-cn-*.iso`, which installs with the China mirrors and Asia/Shanghai. The owner's first-boot setup opens in Chinese and asks for the language, keyboard and timezone as on every OEM install. A preset language also removes the language screen's Ctrl+C entry into preparing the machine for another owner. `omarchy-iso-release` publishes only `omarchy-[0-9]*`, so a region ISO is never released as the global one.
 
 ### aarch64
 

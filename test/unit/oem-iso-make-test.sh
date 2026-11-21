@@ -35,9 +35,6 @@ printf 'if true; then\n' >broken.sh
 ! bash "$make" --oem-script broken.sh --oem 2>"$work/err" || fail "a script that does not parse was accepted"
 grep -q "not a bash script that parses" "$work/err" || fail "a script that does not parse was not named: $(cat "$work/err")"
 
-# A region ISO presets a language and keyboard; an OEM ISO leaves both to the owner.
-! bash "$make" --region cn --oem 2>"$work/err" || fail "--region was accepted with --oem"
-grep -q -- "--region and --oem" "$work/err" || fail "--region with --oem was refused without saying why: $(cat "$work/err")"
 ! bash "$make" --region xx 2>"$work/err" || fail "a region with no file was accepted"
 grep -q "no region xx; the regions are: cn" "$work/err" || fail "an unknown region was refused without naming the regions: $(cat "$work/err")"
 

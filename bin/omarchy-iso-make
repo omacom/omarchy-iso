@@ -169,10 +169,6 @@ fi
 # profile, written to the target's /etc/omarchy/region). Each is optional.
 REGION_FILE=""
 if [[ -n $REGION ]]; then
-  if [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]]; then
-    echo "Error: --region and --oem make different ISOs; pick one" >&2
-    exit 1
-  fi
   REGION_FILE="$(realpath "${BASH_SOURCE[0]%/*}/..")/regions/$REGION.json"
   if [[ ! $REGION =~ ^[a-z]{2}$ || ! -f $REGION_FILE ]]; then
     echo "Error: no region $REGION; the regions are: $(cd "${REGION_FILE%/*}" && ls *.json | sed 's/\.json$//' | xargs)" >&2
@@ -378,7 +374,7 @@ fi
 
 iso_name=omarchy
 [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]] && iso_name=omarchy-oem
-[[ -n $REGION ]] && iso_name=omarchy-$REGION
+[[ -n $REGION ]] && iso_name=$iso_name-$REGION
 latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/"$iso_name"-*.iso | head -n1)
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   iso_ref="${latest_iso%.*}${N1X_DEV_SSH_KEY:+-devssh}-$OMARCHY_ISO_REF.iso"

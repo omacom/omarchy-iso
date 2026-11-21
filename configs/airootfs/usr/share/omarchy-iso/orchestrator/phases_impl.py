@@ -16,7 +16,8 @@ Phase ordering (full-disk and protected/pre-mounted):
                              root image write, per-machine
                              package delta, Limine setup, useradd, fstab; the
                              per-machine pacman keyring starts as a transient
-                             systemd unit after the last pacstrap
+                             systemd unit before Limine/useradd and joins
+                             before any later pacstrap or the factory snapshot
     configure_hibernation  → root-owned swap/resume drop-ins
     run_system_finalizer   → arch-chroot root omarchy-apply-system, including Snapper
     finalize_limine_boot   → final Limine config/UKI build after hardware drop-ins
@@ -702,6 +703,13 @@ def arch_install_system(ctx: InstallContext) -> None:
                     arch.setup_zram_swap(installer)
                     _drop_archinstall_zram_conf(ctx)
 
+            # Start initializing the target's per-machine pacman keyring now so
+            # it overlaps Limine setup and user creation. setup_zram_swap can
+            # pacstrap zram-generator if missing, so this starts after it; any
+            # later pacstrap (missing app firmware or staged tailscale) joins
+            # the unit first so two pacman-key runs never race on gnupg.
+            _start_target_keyring_init(ctx)
+
             with _time_step("STEP.configure_limine_boot (mkinitcpio + ukify + limine-install)"):
                 _configure_limine_boot(ctx, installer, config)
 
@@ -715,7 +723,11 @@ def arch_install_system(ctx: InstallContext) -> None:
                 # firmware archinstall's hardware detection asks for and wires
                 # the per-user PipeWire units.
                 info("› applying archinstall application selections")
-                arch.install_applications(installer, config)
+                arch.install_applications(
+                    installer,
+                    config,
+                    before_strap=lambda: _join_target_keyring_init(ctx),
+                )
 
             _write_language_marker(ctx)
             _write_region_marker(ctx)
@@ -725,16 +737,12 @@ def arch_install_system(ctx: InstallContext) -> None:
             # while the mirror is still bind-mounted, not in the phase that
             # configures the join.
             if ctx.tailscale_authkey_path is not None:
+                _join_target_keyring_init(ctx)
                 info("› installing tailscale (auth key staged for first boot)")
                 installer.add_additional_packages(["tailscale"])
         finally:
             _unmask_mkinitcpio_pacman_hooks(ctx)
             _unmount_offline_package_cache(ctx)
-
-        # After the last pacstrap: each one runs its own pacman-key --init on
-        # the target's gnupg dir. Runs on while the phases below configure the
-        # target; create_factory_snapshot joins it.
-        _start_target_keyring_init(ctx)
 
         # Standard arch finishers.
         if config.timezone:
@@ -1271,10 +1279,11 @@ def _start_target_keyring_init(ctx: InstallContext) -> None:
     --gpgdir and --populate-from address the target directly, so no API
     mounts are held.
 
-    Started after the last pacstrap (each runs its own --init on this dir)
-    and joined by create_factory_snapshot: on x86_64 nothing in between
-    reads the keyring (the offline repo is SigLevel = Never) or writes it,
-    and the snapshot must not capture it half-written. Where the runtime's
+    Started after setup_zram_swap (before Limine setup and user creation) and
+    joined before any later pacstrap (missing app firmware or staged tailscale)
+    or by create_factory_snapshot: on x86_64 nothing in between reads the
+    keyring (the offline repo is SigLevel = Never) or writes it, and the
+    snapshot must not capture it half-written. Where the runtime's
     post-install inits and populates it itself, no unit starts: the
     finalizer had to wait for it before doing the same work again. Apple
     Silicon, whose image brings its keyrings, keeps it, and
@@ -1330,7 +1339,8 @@ def _join_target_keyring_init(ctx: InstallContext, *, raise_on_error: bool = Tru
     proc = ctx.state.pop("target_keyring_proc", None)
     if proc is None:
         return
-    out, _ = proc.communicate()
+    with _time_step("STEP.join_target_keyring"):
+        out, _ = proc.communicate()
     if raise_on_error and proc.returncode != 0:
         raise RuntimeError(
             f"per-machine pacman keyring init failed (exit {proc.returncode}):\n"

@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "DHH'den güzel, eğlenceli ve ajan destekli Linux",
+  "greeter.hint": "Kurulumu başlatmak için Enter'a basın",
   "common.yes": "Evet",
   "common.back": "Geri",
   "common.change": "Hayır, değiştir",

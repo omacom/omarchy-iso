@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Linux álainn, spraíúil agus gníomhaireach ó DHH",
+  "greeter.hint": "Brúigh Enter chun an tsuiteáil a thosú",
   "common.yes": "Tá",
   "common.back": "Siar",
   "common.change": "Níl, athraigh é",

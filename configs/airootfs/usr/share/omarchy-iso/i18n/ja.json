@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "美しく、楽しく、エージェント対応の Linux（DHH 作）",
+  "greeter.hint": "Enter キーでインストールを開始",
   "common.yes": "はい",
   "common.back": "戻る",
   "common.change": "いいえ、変更する",

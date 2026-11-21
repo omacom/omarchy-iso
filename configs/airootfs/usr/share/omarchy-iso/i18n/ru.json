@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Красивый, весёлый и агентный Linux от DHH",
+  "greeter.hint": "Нажмите Enter, чтобы начать установку",
   "common.yes": "Да",
   "common.back": "Назад",
   "common.change": "Нет, изменить",

@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Леп, забаван и агентски Linux од DHH-а",
+  "greeter.hint": "Притисните Enter за почетак инсталације",
   "common.yes": "Да",
   "common.back": "Назад",
   "common.change": "Не, промени",

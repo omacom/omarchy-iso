@@ -457,6 +457,26 @@ class PresetTest(unittest.TestCase):
             with self.subTest(code=code):
                 self.assertTrue((apply.parents[1] / "default/regions" / region / "pacman").is_dir(), region)
 
+    def test_the_summary_leaves_out_what_the_preset_answered(self):
+        # The block that prints the summary, run as the configurator runs it,
+        # with gum table standing in as cat.
+        configurator = SOURCES[0].read_text()
+        block = re.search(r"^ +# The answers the user gave.*?\| gum table[^\n]*\n", configurator, re.MULTILINE | re.DOTALL).group(0)
+
+        def rows(**preset):
+            setup = "".join(f"preset_{name}={value!r}; " for name, value in preset.items())
+            return subprocess.run(
+                ["bash", "-c", f"source {SHARE / 'i18n.sh'}; i18n_load en; gum() {{ cat; }}; language_label() {{ printf %s \"$1\"; }}\n"
+                 f"language=da keyboard=dk-latin1 timezone=Europe/Copenhagen username=u password=p hostname=h {setup}\n{block}"],
+                capture_output=True, text=True, check=True,
+            ).stdout.split()
+
+        everything = rows()
+        self.assertEqual([row.split(",")[0] for row in everything],
+                         ["Field", "Language", "Keyboard", "Timezone", "Username", "Password", "Hostname"])
+        preset = rows(language="da", keyboard="Danish", timezone="Europe/Copenhagen")
+        self.assertEqual([row.split(",")[0] for row in preset], ["Field", "Username", "Password", "Hostname"])
+
 
 class LanguageMarkerTest(unittest.TestCase):
     def marker(self, language):

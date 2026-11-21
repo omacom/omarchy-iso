@@ -1142,8 +1142,6 @@ _EOF_
 }
 
 disk_form() {
-  step "$(t disk.intro)"
-
   # Don't offer the install media as an option (Arch ISO mounts it here)
   local boot_source
   local exclude_disk
@@ -1153,6 +1151,15 @@ disk_form() {
   # Installable disks, internal ones first, without the boot device
   local available_disks
   available_disks=$(install_disk_candidates "$exclude_disk")
+
+  # One disk is no choice: go on to what to do with it, which names the disk.
+  if [[ -n $available_disks && $available_disks != *$'\n'* ]]; then
+    disk=$available_disks
+    only_disk=true
+    return 0
+  fi
+
+  step "$(t disk.intro)"
 
   # Get available disks and format them with info
   local disk_options=""
@@ -1216,17 +1223,24 @@ requires_full_disk_install() {
 # Returns gum's status: OMARCHY_FORM_BACK for Esc, OMARCHY_FORM_SIGNAL for
 # Ctrl+C.
 install_mode_form() {
-  local free_space_offered=false choice choices=()
+  local free_space_offered=false other_disk_offered=true choice choices=()
 
   # The free-space/protected path registers an EFI boot entry and is UEFI-only.
   # Full-disk installs still support BIOS through the orchestrator's BIOS branch.
   if [[ -d /sys/firmware/efi ]] && ! $full_disk_only; then
     free_space_offered=true
   fi
+  $only_disk && other_disk_offered=false
   local -A labels=([full_disk]="$(t mode.fullDisk)" [free_space]="$(t mode.freeSpace)" [other_disk]="$(t mode.otherDisk)")
   while read -r choice; do
     choices+=("${labels[$choice]}"$'\t'"$choice")
-  done < <(install_mode_choices "$free_space_offered")
+  done < <(install_mode_choices "$free_space_offered" "$other_disk_offered")
+
+  # A single choice is no choice: the overwrite confirmation names the disk.
+  if (( ${#choices[@]} == 1 )); then
+    install_mode=${choices[0]#*$'\t'}
+    return 0
+  fi
 
   step "$(t mode.intro)"
   install_mode=$(gum choose --label-delimiter $'\t' --header "$(t mode.header "$disk")" "${choices[@]}")
@@ -1325,6 +1339,7 @@ select_installation() {
 # STEP 1: KEYBOARD (Ctrl+C here arms deferred provisioning and jumps to disk selection)
 
 defer_provisioning=false
+only_disk=false
 install_target="full_disk"
 oem_install=false
 if [[ ${1:-} == "--oem" ]]; then

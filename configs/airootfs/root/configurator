@@ -450,7 +450,10 @@ user_step() {
       continue
     fi
 
-    # The answers the user gave; what the ISO presets is not theirs to check.
+    # The answers the user gave; what the ISO presets is not theirs to check,
+    # and a username and password alone need no second look.
+    [[ -n $preset_language && -n $preset_keyboard && -n $preset_timezone ]] && break
+
     # Add manual padding since gum table -p doesn't respect padding
     {
       echo "$(t summary.field),$(t summary.value)"
@@ -459,7 +462,6 @@ user_step() {
       [[ -n $preset_timezone ]] || echo "$(t summary.timezone),$timezone"
       echo "$(t summary.username),$username"
       echo "$(t summary.password),$(printf "%${#password}s" | tr ' ' '*')"
-      echo "$(t summary.hostname),$hostname"
     } | gum table -s "," -p | sed "s/^/${PADDING_LEFT_SPACES}/"
 
     echo

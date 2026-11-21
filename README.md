@@ -434,6 +434,8 @@ Use `--dev` or `--rc` to build against those package channels. Both `--dev` and 
 | `timezone` | a tzdata zone, such as `Asia/Shanghai` | The installer skips the timezone question. |
 | `region` | an Omarchy region (`default/regions/<code>/` in the runtime; only `cn` so far) | The install writes it to the target's `/etc/omarchy/region`. The runtime's pacman finalizer (`omarchy-apply-pacman`) then puts that region's mirrors ahead of the `.org` ones, which stay as the fallback. A preset without it stays global. |
 
+The summary the installer shows before the disk step lists only what the user answered. A preset that sets the language, keyboard and timezone leaves only the username and password to ask, so it shows no summary.
+
 `presets/cn.json` is the China ISO: Chinese, Pinyin input (fcitx5) on a US layout, Asia/Shanghai, and Omarchy's China mirrors (`*.omarchy.cn`). The China mirrors are x86 only so far, so an aarch64 China ISO keeps the global mirrors. `test/unit/test_installer_i18n.py` checks every preset against the language list, the setup form's keyboards, tzdata and the runtime's regions.
 
 A preset goes with the channel flags (`--preset cn --edge`) and with `--oem`. `--oem --preset cn` builds `omarchy-oem-cn-*.iso`, which installs with the China mirrors and Asia/Shanghai. The owner's first-boot setup opens in Chinese and asks for the language, keyboard and timezone as on every OEM install. A preset language also removes the language screen's Ctrl+C entry into preparing the machine for another owner. `omarchy-iso-release` publishes only `omarchy-[0-9]*`, so a preset ISO is never released as the global one.

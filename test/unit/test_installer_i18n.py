@@ -324,6 +324,13 @@ class KmsconLanguageTest(unittest.TestCase):
         self.assertIn("grp:shifts_toggle", xkb("ru")[3])
         self.assertEqual(xkb("jp106")[:2], ["jp", "jp106"])
 
+    def test_only_the_language_screen_picks_the_language(self):
+        # The language goes to the installed system, so nothing after the
+        # summary the user confirmed (a timezone, say) may change it.
+        configurator = (ROOT / "configs/airootfs/root/configurator").read_text()
+        assignments = re.findall(r"^\s*language=.*$", configurator, re.MULTILINE)
+        self.assertEqual([line.strip() for line in assignments], ['language="en"', "language=$choice"])
+
 
 class ConsoleFontLoadTest(unittest.TestCase):
     def test_a_failing_font_probe_never_stops_a_strict_caller(self):

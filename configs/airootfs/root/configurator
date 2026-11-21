@@ -373,11 +373,6 @@ kmscon_for_language() {
   fi
 }
 
-china_timezone() {
-  local zones=$OMARCHY_PATH/default/regions/cn/timezones
-  [[ -r $zones ]] && grep -qxF -- "$1" <(grep -v '^#' "$zones")
-}
-
 # Ctrl+C on the first screen offers to prepare the machine for another owner.
 # Confirm it before committing, so an accidental Ctrl+C doesn't silently switch
 # the whole install.
@@ -1347,19 +1342,8 @@ fi
 # Normal install: keyboard (loaded above, so the LUKS passphrase is typed under
 # the right layout) → user → disk → install mode. The user step can unwind to
 # the language screen and arm deferral there, hence the second check.
-if ! $defer_provisioning && [[ $resume_stage != disk ]]; then
+if ! $defer_provisioning; then
   user_step
-
-  # A China timezone brings Chinese defaults, so the disk and encryption
-  # confirmations ahead are shown in Chinese too.
-  if [[ $language == "en" ]] && china_timezone "$timezone"; then
-    language="zh-CN"
-    i18n_load "$language"
-    set_form_language
-    if kmscon_available; then
-      switch_to_kmscon disk
-    fi
-  fi
 fi
 
 if $defer_provisioning; then

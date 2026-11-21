@@ -1341,8 +1341,8 @@ select_installation() {
 # STEP 1: KEYBOARD (Ctrl+C here arms deferred provisioning and jumps to disk selection)
 
 defer_provisioning=false
-only_disk=false
 install_target="full_disk"
+only_disk=false
 oem_install=false
 if [[ ${1:-} == "--oem" ]]; then
   [[ -f /usr/share/omarchy-iso/oem-install ]] || { echo "OEM install requires an OEM ISO" >&2; exit 1; }

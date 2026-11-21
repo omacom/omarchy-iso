@@ -6,9 +6,9 @@
 # before offering the install medium's removal, and the orchestrator's
 # protected-failure cleanup runs it naming the mapper it may have opened.
 #
-# The swapoff comes first because active swap is an invisible holder: a
-# swapon in the chroot lands in the shared kernel, fuser
-# then shows no process and the submounts unmount fine, yet the filesystem
+# The swapoff comes first because active swap is an invisible holder. The
+# installer no longer enables any, so it is defensive: a swapon in the chroot
+# lands in the shared kernel, fuser then shows no process and the submounts unmount fine, yet the filesystem
 # reports busy until the swap is off. The mappers to close are read off the
 # mount table before the unmount empties it, and each one's device-mapper
 # UUID must carry the CRYPT- prefix before the close is attempted —

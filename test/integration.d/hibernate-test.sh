@@ -40,13 +40,20 @@ set_up_hibernation() {
     check "a fresh install has no hibernation swapfile" \
       ssh_sudo "! grep -q /swap/swapfile /etc/fstab"
   fi
-  check "omarchy-hibernation-setup sets hibernation up" \
-    ssh_sudo "OMARCHY_PATH=/usr/share/omarchy omarchy-hibernation-setup --force"
+  local setup_status=0
+  ssh_sudo "OMARCHY_PATH=/usr/share/omarchy omarchy-hibernation-setup --force" \
+    >"$RUN_DIR/hibernation-setup.log" 2>&1 || setup_status=$?
+  check "omarchy-hibernation-setup sets hibernation up (see hibernation-setup.log)" test "$setup_status" -eq 0
+  if ((setup_status != 0)); then
+    stop_vm
+    return 1
+  fi
 
   ssh_sudo "systemctl poweroff" >/dev/null 2>&1 || true
   wait_for_power_off
   check "machine powered off after hibernation setup (${WAITED}s)" vm_powered_off
   if vm_running; then
+    capture_console "failure-setup-poweroff-still-running"
     stop_vm
     return 1
   fi

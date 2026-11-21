@@ -123,12 +123,19 @@ draw_screen() {
 # bookend the setup identically. Logo, the Omarchy tagline, and a single button,
 # centered like the boot logo. No animation.
 greeter() {
-  measure_terminal
-
   local rows logo_h content_h top cols logo_row tagline_row hint_row
-  local tagline hint tpad hpad anim
+  local tagline hint tpad hpad anim size status resized
+
+  # Drawn again whenever the console changes size while it waits: the screen
+  # is laid out for the size it had, and a console that grows afterwards (KMS
+  # taking over later than wait_for_stable_terminal allows for, a VM window
+  # resized) would leave the logo clipped at the left edge with its animation
+  # beside it. Every later screen measures as it draws.
+  while true; do
+  size=$(stty size 2>/dev/null </dev/tty)
+  measure_terminal
   cols=$TERM_WIDTH
-  rows=$(stty size 2>/dev/null </dev/tty | awk '{print $1}')
+  rows=${size% *}
   [[ $rows =~ ^[0-9]+$ ]] || rows=${LINES:-24}
   logo_h=$(wc -l <"$LOGO_PATH")
 
@@ -186,13 +193,23 @@ greeter() {
     </dev/null >/dev/tty 2>/dev/null &
   anim=$!
 
-  IFS= read -r _ </dev/tty || true
+  # Return ends the wait, as does a tty that cannot be read; twice a second
+  # the size is looked at again.
+  resized=false
+  while true; do
+    status=0
+    IFS= read -r -t 0.5 _ </dev/tty || status=$?
+    (( status > 128 )) || break
+    [[ $(stty size 2>/dev/null </dev/tty) == "$size" ]] || { resized=true; break; }
+  done
   # Tolerate ttfx's kill signal in `wait` so a future `set -e` here can't abort.
   kill "$anim" 2>/dev/null
   wait "$anim" 2>/dev/null || true
   # ttfx leaves the tty in raw/no-echo mode when killed; restore it or the gum
   # prompts in the keyboard step that follows silently die.
   stty sane </dev/tty 2>/dev/null || true
+  $resized || break
+  done
   # Reset the screen so the leftover animation frame doesn't linger under the
   # keyboard step that follows.
   printf '\033[0m\033[H\033[2J\033[?25h'
@@ -492,7 +509,7 @@ get_disk_info() {
   local size vendor model label
 
   # Get basic disk information
-  size=$(lsblk -dno SIZE "$device" 2>/dev/null)
+  size=$(lsblk -dno SIZE "$device" 2>/dev/null | tr -d ' ')
   vendor=$(lsblk -dno VENDOR "$device" 2>/dev/null | sed 's/ *$//')
   model=$(lsblk -dno MODEL "$device" 2>/dev/null | sed 's/ *$//')
 
@@ -1286,13 +1303,12 @@ confirm_disk_overwrite() {
   local affirmative confirm_status disk_details
 
   # The disk as the disk list describes it (size, model, partitions), which a
-  # machine with one disk now reaches without seeing that list.
+  # machine with one disk now reaches without seeing that list. It is what the
+  # confirmation names.
   disk_details=$(get_disk_info "$disk")
 
   while true; do
     clear_logo
-    echo
-    say "$disk_details"
     echo
     say "$(t overwrite.warning)"
 
@@ -1304,7 +1320,7 @@ confirm_disk_overwrite() {
     fi
 
     echo
-    gum confirm --affirmative "$affirmative" --negative "$(t common.change)" "$(t overwrite.prompt "$disk")"
+    gum confirm --affirmative "$affirmative" --negative "$(t common.change)" "$(t overwrite.prompt "$disk_details")"
     confirm_status=$?
 
     case $confirm_status in

@@ -79,5 +79,28 @@ aarch64_reap_qmp_reader "$done_pid"
 elapsed=$(( $(date +%s) - started ))
 (( elapsed < 2 )) || fail "a reader that had already exited took ${elapsed}s to reap"
 
+python3 -I - "$ROOT" "$fixture" <<'PY'
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+root, fixture = map(Path, sys.argv[1:])
+launcher = fixture / "bin" / "launcher"
+(fixture / "bin" / "lib").symlink_to(root / "bin" / "lib", target_is_directory=True)
+source = (root / "bin" / "omarchy-iso-boot").read_text()
+launcher.write_text("set -e\nHOST_ARCH=aarch64\nfastest_cores() { printf '0\\n'; }\n"
+                    "ISO=unused DISK=unused OVMF_VARS=unused UEFI_CODE=unused\n"
+                    "NET_ARGS=() EXTRA_QEMU_ARGS=()\n"
+                    + source[source.index("# Boot from ISO before"):])
+(fake := fixture / "bin" / "taskset").write_text("#!/bin/bash\nexit \"$QEMU_STATUS\"\n")
+fake.chmod(0o755)
+for expected in (42, 0):
+    result = subprocess.run(["bash", str(launcher)], env={**os.environ, "QEMU_STATUS": str(expected)},
+                            capture_output=True, text=True, timeout=10)
+    if result.returncode != expected:
+        raise AssertionError(f"QEMU exit {expected}: launcher returned {result.returncode}: {result.stderr}")
+PY
+
 bash -n "$ROOT/bin/omarchy-iso-boot" "$ROOT/bin/lib/aarch64-installed-boot.sh"
 echo "aarch64 installed-boot checks passed"

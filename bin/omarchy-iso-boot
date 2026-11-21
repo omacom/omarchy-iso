@@ -268,6 +268,7 @@ if [[ $HOST_ARCH == aarch64 ]]; then
     qmp_pid=$!
     set +e
     run_aarch64 gl -no-reboot -qmp "unix:${qmp_sock},server=on,wait=off"
+    qemu_status=$?
     set -e
     aarch64_reap_qmp_reader "$qmp_pid"
     shutdown_reason=$(cat "$qmp_dir/reason" 2>/dev/null || true)
@@ -275,6 +276,8 @@ if [[ $HOST_ARCH == aarch64 ]]; then
     if aarch64_should_relaunch "$shutdown_reason"; then
       echo "Booting the installed system with the plain virtio-gpu"
       run_aarch64 plain --no-iso
+    else
+      exit "$qemu_status"
     fi
   fi
 else

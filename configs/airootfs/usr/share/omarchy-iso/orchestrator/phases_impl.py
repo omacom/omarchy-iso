@@ -716,6 +716,7 @@ def arch_install_system(ctx: InstallContext) -> None:
                 arch.install_applications(installer, config)
 
             _write_language_marker(ctx)
+            _write_region_marker(ctx)
 
             # Tailscale is bundled in the offline mirror but only installed
             # when an autoinstall drive staged an auth key; must happen here,
@@ -1924,6 +1925,20 @@ def _write_language_marker(ctx: InstallContext) -> None:
     marker = ctx.target / "etc/omarchy/language"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(language + "\n")
+    marker.chmod(0o644)
+
+
+def _write_region_marker(ctx: InstallContext, preset: Path = Path("/usr/share/omarchy-iso/preset.json")) -> None:
+    """A preset ISO (--preset) that names an Omarchy region, such as cn, hands
+    it to the target's /etc/omarchy/region, where the runtime's pacman
+    finalizer (omarchy-apply-pacman) puts that region's mirrors first. Every
+    other ISO writes nothing, which means global."""
+    region = json.loads(preset.read_text()).get("region") if preset.is_file() else None
+    if not region:
+        return
+    marker = ctx.target / "etc/omarchy/region"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(region + "\n")
     marker.chmod(0o644)
 
 

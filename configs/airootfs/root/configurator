@@ -219,7 +219,17 @@ notice() {
 # their English name and only set the installed system's language.
 
 LANGUAGES_JSON="${LANGUAGES_JSON:-$OMARCHY_PATH/default/i18n/locales.json}"
-language="en"
+
+# A preset ISO (--preset) answers any of the language, the keyboard (a label
+# of the setup form's list) and the timezone, and does not ask for those.
+PRESET_FILE="${PRESET_FILE:-$OMARCHY_ISO_SHARE/preset.json}"
+preset() {
+  jq -r --arg field "$1" '.[$field] // empty' "$PRESET_FILE" 2>/dev/null || true
+}
+preset_language=$(preset language)
+preset_keyboard=$(preset keyboard)
+preset_timezone=$(preset timezone)
+language=${preset_language:-en}
 
 # The setup form takes its language and defaults from the language picked here:
 # the layout that goes with it, and its country's capital for when the network
@@ -272,7 +282,7 @@ language_rows() {
 language_form() {
   local choice status
 
-  if [[ -r $LANGUAGES_JSON ]]; then
+  if [[ -z $preset_language && -r $LANGUAGES_JSON ]]; then
     while true; do
       clear_logo
       echo
@@ -302,6 +312,15 @@ keyboard_form() {
   local status
 
   while true; do
+    # A preset keyboard is the setup form's row of that label, loaded below
+    # like a picked one, so the disk password is typed under it.
+    if [[ -n $preset_keyboard ]]; then
+      IFS='|' read -r keyboard_label keyboard keyboard_input_method keyboard_xkb_layout < <(
+        printf '%s\n' "$OMARCHY_KEYBOARD_LAYOUTS" | awk -F'|' -v c="$preset_keyboard" '$1==c{print; exit}')
+      keyboard_input_method=${keyboard_input_method:-none}
+      break
+    fi
+
     clear_logo
     echo
     if ! i18n_translated "$language"; then
@@ -398,7 +417,11 @@ user_form() {
   # Each prompt reports 0 (set), OMARCHY_FORM_BACK (Esc), or OMARCHY_FORM_SIGNAL
   # (Ctrl+C). Both non-zero cases unwind to user_step, which decides what they
   # mean here; the form itself never aborts.
-  omarchy_prompt_timezone || return $?
+  if [[ -n $preset_timezone ]]; then
+    timezone=$preset_timezone
+  else
+    omarchy_prompt_timezone || return $?
+  fi
   omarchy_prompt_username || return $?
   omarchy_prompt_password || return $?
 
@@ -1360,10 +1383,11 @@ if $defer_provisioning; then
   username=""
   password=""
   password_hash=""
-  # Neutral defaults for the install; the owner overwrites both in the
-  # first-boot OOBE (omarchy-provision-owner).
+  # Neutral defaults for the install, or the preset's timezone; the owner
+  # overwrites both in the first-boot OOBE (omarchy-provision-owner), which
+  # opens in the preset language.
   hostname="omarchy"
-  timezone="UTC"
+  timezone=${preset_timezone:-UTC}
 
   # Jump straight to disk selection + overwrite confirmation (encrypted by
   # default, Ctrl+C toggles unencrypted). deferred provisioning is always a full-disk install.

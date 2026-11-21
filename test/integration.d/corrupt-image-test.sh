@@ -98,7 +98,13 @@ install_from_corrupt_medium() {
   detect_packages
   build_cidata
 
-  qemu-img create -f qcow2 "$RUN_DIR/disk.qcow2" 40G >/dev/null
+  # A blank disk hides an early wipefs. Give the target a real filesystem
+  # signature and retain a byte-for-byte reference outside the VM.
+  truncate -s 32M "$RUN_DIR/existing.raw"
+  mkfs.vfat -n KEEP_DATA "$RUN_DIR/existing.raw" >/dev/null
+  qemu-img convert -f raw -O qcow2 "$RUN_DIR/existing.raw" "$RUN_DIR/pristine.qcow2"
+  qemu-img resize -q "$RUN_DIR/pristine.qcow2" 40G
+  qemu-img create -q -f qcow2 -F qcow2 -b "$RUN_DIR/pristine.qcow2" "$RUN_DIR/disk.qcow2"
   if [[ $FIRMWARE == uefi ]]; then
     cp "$OVMF_VARS_TEMPLATE" "$RUN_DIR/OVMF_VARS.4m.fd"
     ACTIVE_OVMF="$RUN_DIR/OVMF_VARS.4m.fd"
@@ -162,8 +168,8 @@ assert_refused() {
     ssh_live_root "jq -r '.phases[] | select(.status == \"failed\") | .error' $STATE | grep -q 'did NOT match'"
   check "nothing ran after the pre-flight phase" \
     ssh_live_root "jq -e '[.phases[] | select(.status == \"ok\") | .name] == [\"Preparing live environment\"]' $STATE"
-  check "target disk has no partition table" \
-    ssh_live_root "! lsblk -rno TYPE /dev/vda | grep -qx part && ! blkid /dev/vda"
+  check "target filesystem label is still readable" \
+    ssh_live_root 'test "$(blkid -p -s LABEL -o value /dev/vda)" = KEEP_DATA'
   check "dashboard shows the installation stopped" \
     screen_shows "installation stopped"
   check "dashboard shows the re-flash advice" \
@@ -184,5 +190,7 @@ trap corrupt_cleanup EXIT
 corrupt_iso
 install_from_corrupt_medium
 assert_refused
+stop_vm
+check "corrupt media left every target sector unchanged" qemu-img compare -q "$RUN_DIR/pristine.qcow2" "$RUN_DIR/disk.qcow2"
 rm -f "$CORRUPT_ISO"
 finish

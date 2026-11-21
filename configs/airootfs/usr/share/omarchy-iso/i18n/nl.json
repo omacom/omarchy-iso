@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Mooie, leuke & agentische Linux van DHH",
+  "greeter.hint": "Druk op Enter om de installatie te starten",
   "common.yes": "Ja",
   "common.back": "Terug",
   "common.change": "Nee, wijzigen",

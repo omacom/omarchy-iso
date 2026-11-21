@@ -133,12 +133,12 @@ greeter() {
   printf '\033[%d;1H' "$logo_row"
   gum style --foreground 2 --padding "0 0 0 $PADDING_LEFT" "$(<"$LOGO_PATH")"
 
-  tagline="Beautiful, Fun & Agentic Linux by DHH"
-  tpad=$(((cols - ${#tagline}) / 2)); (( tpad < 0 )) && tpad=0
+  tagline=$(t greeter.tagline)
+  tpad=$(((cols - $(display_width "$tagline")) / 2)); (( tpad < 0 )) && tpad=0
   printf '\033[%d;%dH%s' "$tagline_row" "$((tpad + 1))" "$tagline"
 
-  hint="Press Return to Start Install"
-  hpad=$(((cols - ${#hint}) / 2)); (( hpad < 0 )) && hpad=0
+  hint=$(t greeter.hint)
+  hpad=$(((cols - $(display_width "$hint")) / 2)); (( hpad < 0 )) && hpad=0
   printf '\033[%d;%dH\033[2m%s\033[0m' "$hint_row" "$((hpad + 1))" "$hint"
 
   # ColorShift the logo: a green base (indexed color 2) with a cyan accent (6)
@@ -388,10 +388,11 @@ switch_to_kmscon() {
   exit $KMSCON_SWITCH
 }
 
-# A language the console cannot draw: carry on in kmscon from the keyboard step.
+# A language the console cannot draw: carry on in kmscon from the keyboard
+# step, or from the welcome screen when a preset names the language.
 kmscon_for_language() {
   if i18n_needs_kmscon "$language" && kmscon_available; then
-    switch_to_kmscon keyboard
+    switch_to_kmscon "${1:-keyboard}"
   fi
 }
 
@@ -448,15 +449,17 @@ user_step() {
       continue
     fi
 
+    # The answers the user gave; what the ISO presets is not theirs to check.
     # Add manual padding since gum table -p doesn't respect padding
-    echo -e "$(t summary.field),$(t summary.value)
-$(t summary.language),$(language_label "$language")
-$(t summary.keyboard),$keyboard
-$(t summary.timezone),$timezone
-$(t summary.username),$username
-$(t summary.password),$(printf "%${#password}s" | tr ' ' '*')
-$(t summary.hostname),$hostname" |
-      gum table -s "," -p | sed "s/^/${PADDING_LEFT_SPACES}/"
+    {
+      echo "$(t summary.field),$(t summary.value)"
+      [[ -n $preset_language ]] || echo "$(t summary.language),$(language_label "$language")"
+      [[ -n $preset_keyboard ]] || echo "$(t summary.keyboard),$keyboard"
+      [[ -n $preset_timezone ]] || echo "$(t summary.timezone),$timezone"
+      echo "$(t summary.username),$username"
+      echo "$(t summary.password),$(printf "%${#password}s" | tr ' ' '*')"
+      echo "$(t summary.hostname),$hostname"
+    } | gum table -s "," -p | sed "s/^/${PADDING_LEFT_SPACES}/"
 
     echo
     if gum confirm --affirmative "$(t common.yes)" --negative "$(t common.change)" "$(t summary.prompt)"; then
@@ -1353,6 +1356,13 @@ if [[ -z $resume_stage ]]; then
   wait_for_stable_terminal
   i18n_console_font "$(tty 2>/dev/null)"
 
+  # A preset language greets in that language, in kmscon if the console
+  # cannot draw it.
+  i18n_load "$language"
+  [[ -z $preset_language ]] || $oem_install || kmscon_for_language greeter
+fi
+
+if [[ -z $resume_stage || $resume_stage == greeter ]]; then
   if ! $oem_install; then
     greeter
     language_form

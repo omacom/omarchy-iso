@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Vackert, roligt och agentiskt Linux av DHH",
+  "greeter.hint": "Tryck Enter för att starta installationen",
   "common.yes": "Ja",
   "common.back": "Tillbaka",
   "common.change": "Nej, ändra",

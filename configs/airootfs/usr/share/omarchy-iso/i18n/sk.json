@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Krásny, zábavný a agentový Linux od DHH",
+  "greeter.hint": "Inštaláciu spustíte stlačením Enter",
   "common.yes": "Áno",
   "common.back": "Späť",
   "common.change": "Nie, zmeniť",

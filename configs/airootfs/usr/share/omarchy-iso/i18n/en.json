@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Beautiful, Fun & Agentic Linux by DHH",
+  "greeter.hint": "Press Return to Start Install",
   "common.yes": "Yes",
   "common.back": "Back",
   "common.change": "No, change it",

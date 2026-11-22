@@ -401,7 +401,8 @@ ocr_screen_once() {
   [[ -s $shot ]] || return 0
   # Black on white: the negated grays alone read the focused button on the
   # finished install, dark text on a light bar, as "Reboot Nou".
-  # OCR_KMSCON=1 for a screen kmscon draws, first-boot setup's form: it draws
+  # OCR_KMSCON=1 for a screen kmscon draws, the installer's welcome and
+  # first-boot setup: at its text size luminance reads "DHH" as "OHH", and it draws
   # the purple headings and prompts as dark as gum asks, where the console
   # brightened them to its palette, so there the gray is the brightest channel,
   # not luminance, and the screen is read as a column of lines, since as one

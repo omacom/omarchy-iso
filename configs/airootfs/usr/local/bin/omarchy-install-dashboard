@@ -359,8 +359,7 @@ install_progress() {
     "Preparing live environment") lo=20  hi=40   tau=2   ;;
     "Preparing install target")   lo=40  hi=260  tau=8   ;;
     "Installing Arch + Omarchy")  lo=260 hi=760  tau=18  pkg_signal=1 ;;
-    "Configuring hibernation")    lo=760 hi=765  tau=2   ;;
-    "Configuring system")         lo=765 hi=830  tau=3   ;;
+    "Configuring system")         lo=760 hi=830  tau=3   ;;
     "Staging provisioning")       lo=830 hi=835  tau=2   ;;
     "Finalizing Limine boot")     lo=835 hi=935  tau=3   ;;
     "Finalizing user")            lo=935 hi=978  tau=2   ;;

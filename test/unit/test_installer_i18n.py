@@ -317,6 +317,37 @@ class KmsconLanguageTest(unittest.TestCase):
         self.assertEqual(re.findall(r"^\s*switch_to_kmscon (\S+)$", configurator, re.MULTILINE), ["user"])
         self.assertRegex(configurator, r"if \[\[ -z \$resume_stage \]\]; then\n(?:.*\n)*?\s+\$defer_provisioning \|\| keyboard_form\nfi")
 
+    def test_declining_the_summary_starts_over_from_the_language(self):
+        # The summary lists the language, so "No, change it" has to offer it
+        # again, ahead of the keyboard and the account. user_step as the
+        # configurator defines it, with each screen stubbed to record its turn
+        # and gum declining the summary once. The table itself must not print
+        # its first row, the language, in bold.
+        configurator = (ROOT / "configs/airootfs/root/configurator").read_text()
+        user_step = re.search(r"^user_step\(\) \{\n.*?^\}$", configurator, re.MULTILINE | re.DOTALL).group(0)
+        with tempfile.TemporaryDirectory() as directory:
+            stubs = Path(directory)
+            (stubs / "gum").write_text(
+                "#!/bin/bash\n"
+                'if [[ $1 == table ]]; then cat >/dev/null; printf "\\e[1;38;5;7mLanguage\\e[m\\n"; exit 0; fi\n'
+                f'[[ -e {stubs}/declined ]] && exit 0; touch {stubs}/declined; exit 1\n'
+            )
+            (stubs / "gum").chmod(0o755)
+            script = f"""
+                set -euo pipefail
+                PATH={stubs}:$PATH
+                preset_language="" preset_keyboard="" preset_timezone="" PADDING_LEFT_SPACES=""
+                language=en keyboard=us keyboard_label="" timezone=UTC username=dhh password=secret
+                defer_provisioning=false OMARCHY_FORM_BACK=1
+                t() {{ :; }}; language_label() {{ :; }}; abort() {{ exit 9; }}
+                language_form() {{ echo language; }}; keyboard_form() {{ echo keyboard; }}; user_form() {{ echo account; }}
+                {user_step}
+                user_step | cat -v
+            """
+            result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), ["account", "^[[38;5;7mLanguage^[[m", "language", "keyboard", "account", "^[[38;5;7mLanguage^[[m"])
+
     def test_only_the_language_screen_picks_the_language(self):
         # The language goes to the installed system, so nothing after the
         # summary the user confirmed (a timezone, say) may change it. It starts

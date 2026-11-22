@@ -481,7 +481,9 @@ user_step() {
     [[ -n $preset_language && -n $preset_keyboard && -n $preset_timezone ]] && break
 
     # Tab-separated, as layouts have commas ("Chinese (Simplified, Pinyin)").
-    # Add manual padding since gum table -p doesn't respect padding
+    # Add manual padding since gum table -p doesn't respect padding. It also
+    # prints its first row, the language, in bold, as the selected one: no
+    # row is selected in a table that is only shown, so the bold is dropped.
     {
       printf '%s\t%s\n' "$(t summary.field)" "$(t summary.value)"
       [[ -n $preset_language ]] || printf '%s\t%s\n' "$(t summary.language)" "$(language_label "$language")"
@@ -489,7 +491,7 @@ user_step() {
       [[ -n $preset_timezone ]] || printf '%s\t%s\n' "$(t summary.timezone)" "$timezone"
       printf '%s\t%s\n' "$(t summary.username)" "$username"
       printf '%s\t%s\n' "$(t summary.password)" "$(printf "%${#password}s" | tr ' ' '*')"
-    } | gum table -s $'\t' -p | sed "s/^/${PADDING_LEFT_SPACES}/"
+    } | gum table -s $'\t' -p | sed -e 's/\x1b\[1;/\x1b[/g' -e "s/^/${PADDING_LEFT_SPACES}/"
 
     echo
     if gum confirm --affirmative "$(t common.yes)" --negative "$(t common.change)" "$(t summary.prompt)"; then

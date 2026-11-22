@@ -171,6 +171,13 @@ greeter() {
   # what flashed. The effect reads from /dev/null so it never swallows the
   # Return; --reuse-canvas paints upward from the saved cursor, anchored one row
   # below the logo.
+  #
+  # kmscon draws 256-colour codes as xterm's own colours, not the palette's,
+  # and 24-bit ones as given: there the stops are the palette's green and cyan.
+  local colors=(--xterm-colors) green=2 bright_green=10 cyan=6
+  if [[ ${OMARCHY_ISO_KMSCON:-} == 1 ]]; then
+    colors=() green=9ece6a bright_green=9ece6a cyan=7dcfff
+  fi
   printf '\033[%d;1H\0337' "$((logo_row + logo_h))"
   # Run ttfx directly (not inside a `while` subshell) so $anim is ttfx's own
   # PID: killing a wrapping subshell would orphan ttfx, which then keeps
@@ -184,12 +191,12 @@ greeter() {
     --anchor-text c \
     --frame-rate 60 \
     --reuse-canvas \
-    --xterm-colors \
+    "${colors[@]}" \
     colorshift \
-    --gradient-stops 2 10 6 10 \
+    --gradient-stops "$green" "$bright_green" "$cyan" "$bright_green" \
     --gradient-frames 3 \
     --cycles 1000 \
-    --final-gradient-stops 2 \
+    --final-gradient-stops "$green" \
     </dev/null >/dev/tty 2>/dev/null &
   anim=$!
 

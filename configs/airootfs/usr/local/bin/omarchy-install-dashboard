@@ -558,14 +558,20 @@ render_finish() {
     # the way the greeter does, since the console reduces indexed codes well and
     # truecolor ones badly. It settles on indexed 2, the Tokyo Night green used
     # throughout the installer. The laser and sparks keep their own hot palette.
+    # kmscon draws indexed codes as xterm's own colours and 24-bit ones as
+    # given, so there the effect settles on that green by its value.
+    local colors=(--xterm-colors) green=2
+    if [[ ${OMARCHY_ISO_KMSCON:-} == 1 ]]; then
+      colors=() green=9ece6a
+    fi
     timeout 8s ttfx -i "$LOGO_PATH" \
       --canvas-width "$effect_canvas_width" \
       --anchor-text c \
       --frame-rate 260 \
       --reuse-canvas \
-      --xterm-colors \
+      "${colors[@]}" \
       laseretch \
-      --final-gradient-stops 2 \
+      --final-gradient-stops "$green" \
       >"$TTY_PATH" 2>/dev/null || {
         dashboard_log "logo effect skipped (ttfx exited $?)"
         { printf '%s%d;1H' "$CSI" "$FINISH_TOP_ROW"; render_logo; } >"$TTY_PATH"

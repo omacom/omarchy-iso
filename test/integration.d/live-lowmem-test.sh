@@ -18,8 +18,8 @@ verify_live_lowmem() {
   MEMORY=512 start_vm "$disk" "$RUN_DIR/serial.log" \
     -drive "file=$ISO,media=cdrom,if=none,format=raw,id=cdrom0" \
     -device ide-cd,drive=cdrom0,bootindex=2
-  check "the live ISO reaches the installer greeter with 512 MB of RAM" \
-    OCR_KMSCON=1 wait_for_screen "Linux by DHH" 300
+  OCR_KMSCON=1 check "the live ISO reaches the installer greeter with 512 MB of RAM" \
+    wait_for_screen "Linux by DHH" 300
   capture_console "success-live-512mb"
   stop_vm
 }

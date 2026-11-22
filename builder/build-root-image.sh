@@ -558,25 +558,24 @@ INSTALL
   printf '%s%s\n' "$vconsole_room" "$(printf '%*s' $((512 - ${#vconsole_room} - 1)) '' | tr ' ' '#')" \
     >"$root/etc/vconsole.conf.prebuilt-uki"
 
+  cat >"$root/etc/mkinitcpio-prebuilt-uki.conf" <<'CONF'
+MODULES=(thunderbolt)
+BINARIES=()
+FILES=()
+HOOKS=(base systemd plymouth autodetect microcode modconf keyboard sd-vconsole omarchy-vconsole-room block sd-encrypt filesystems fsck sd-btrfs-overlayfs)
+COMPRESSION="zstd"
+CONF
+
   # Bundle the mount-event burst override into the pre-built systemd initramfs:
   # mkinitcpio's systemd hook does not copy /etc/systemd/system.conf.d/, so PID 1
   # in the initrd otherwise hits the default 5/s mount-monitor-dispatch rate
   # limit and stalls sysroot.mount for 1.0 s (systemd/systemd#28264). The N1x
   # UKI derives its config from this file and inherits FILES automatically.
-  prebuilt_files=()
   if [[ -f $root/etc/systemd/system.conf.d/20-mount-events.conf ]]; then
-    prebuilt_files+=(/etc/systemd/system.conf.d/20-mount-events.conf)
+    echo 'FILES+=(/etc/systemd/system.conf.d/20-mount-events.conf)' >>"$root/etc/mkinitcpio-prebuilt-uki.conf"
   else
     echo "WARNING: /etc/systemd/system.conf.d/20-mount-events.conf missing from image; initrd mount rate limit override skipped"
   fi
-
-  cat >"$root/etc/mkinitcpio-prebuilt-uki.conf" <<CONF
-MODULES=(thunderbolt)
-BINARIES=()
-FILES=(${prebuilt_files[*]})
-HOOKS=(base systemd plymouth autodetect microcode modconf keyboard sd-vconsole omarchy-vconsole-room block sd-encrypt filesystems fsck sd-btrfs-overlayfs)
-COMPRESSION="zstd"
-CONF
 
   # Room for the installer to write the real cmdline into the UKI in place
   # (orchestrator/uki_cmdline.py): one placeholder parameter pads .cmdline to

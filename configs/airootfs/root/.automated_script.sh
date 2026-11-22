@@ -146,9 +146,10 @@ fi
 # has one bitmap font and cannot draw Chinese, Japanese or Korean at all.
 # Not when it is turned off (OMARCHY_ISO_NO_KMSCON=1, or omarchy.kmscon=0 on
 # the kernel command line, for a machine whose display kmscon gets wrong),
-# and not without a DRM device for it to draw on.
+# not under the speakup boot entries (accessibility=on), whose screen reader
+# reads the console and not kmscon, and not without a DRM device to draw on.
 kmscon_wanted() {
-  [[ ${OMARCHY_ISO_NO_KMSCON:-} != 1 ]] && ! grep -qw 'omarchy.kmscon=0' /proc/cmdline &&
+  [[ ${OMARCHY_ISO_NO_KMSCON:-} != 1 ]] && ! grep -qwE 'omarchy\.kmscon=0|accessibility=on' /proc/cmdline &&
     command -v kmscon >/dev/null && compgen -G '/dev/dri/card*' >/dev/null
 }
 

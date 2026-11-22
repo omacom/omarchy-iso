@@ -270,7 +270,7 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # etc/initcpio/hooks/udev); the aarch64 boards keep the full settle, which
   # the Qualcomm firmware staging before media discovery was proven with.
   rm -f "$build_cache_dir/airootfs/etc/initcpio/hooks/udev"
-  boot_splash_kernel_options="quiet splash "
+  boot_splash_kernel_options="quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 disablehooks=plymouth plymouth.enable=0 "
   # The N1x firmware's SPCR serial console would take the console from the
   # panel, hence console=tty0 acpi=nospcr.
   kernel_options="console=tty0 acpi=nospcr initramfs_async=0"
@@ -296,9 +296,13 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   install -Dm0755 /builder/qualcomm/quiet-efivars-install "$build_cache_dir/airootfs/usr/lib/initcpio/install/omarchy_quiet_efivars"
   rm -rf "$build_cache_dir/syslinux" "$build_cache_dir/efiboot"
 else
-  boot_splash_kernel_options="quiet splash "
+  boot_splash_kernel_options="quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 disablehooks=plymouth plymouth.enable=0 "
   kernel_options="xe.enable_panel_replay=0 initramfs_async=0 intel_idle.states_off=0x3fc"
 fi
+# The live boot is black until the installer draws its first screen: no
+# splash, whose logo would only be replaced by the installer's a moment later
+# (and without one Plymouth would show the boot log, so it is off), no boot
+# messages, and no console cursor blinking in the corner.
 for grub_config in "$build_cache_dir/grub/grub.cfg" "$build_cache_dir/grub/loopback.cfg"; do
   configure_grub_platform "$grub_config" "$OMARCHY_ARCH"
   sed -i \

@@ -56,7 +56,7 @@ if grep -Fq -- '--config "/configs/pacman-online-' "$ROOT/builder/build-iso.sh";
 fi
 grep -Fq 'configure_archiso_aarch64_mkinitcpio' "$ROOT/builder/build-iso.sh" || fail "live initramfs is not adapted for aarch64"
 grep -Fq 'kernel_options="console=tty0 acpi=nospcr initramfs_async=0"' "$ROOT/builder/build-iso.sh" || fail "aarch64 live boot does not pin the panel console"
-grep -Fq 'boot_splash_kernel_options="quiet splash "' "$ROOT/builder/build-iso.sh" || fail "aarch64 live boot does not show the splash"
+grep -Fq 'boot_splash_kernel_options="quiet loglevel=3 ' "$ROOT/builder/build-iso.sh" || fail "aarch64 live boot is not quiet"
 grep -Fq 'plymouth.enable=0 console=tty0' "$ROOT/builder/build-iso.sh" && fail "aarch64 live boot still turns Plymouth off"
 grep -Fq '"$mkarchiso_command" -v -w' "$ROOT/builder/build-iso.sh" || fail "builder does not use the patched mkarchiso on aarch64"
 # pacman takes the first repository carrying a name: the platform bundle, then

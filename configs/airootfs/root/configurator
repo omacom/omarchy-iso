@@ -1420,8 +1420,10 @@ fi
 
 if [[ -z $resume_stage ]]; then
   # Let the live VT reach its settled width before the first screen so the logo
-  # isn't measured against the transient 80-column boot console.
-  wait_for_stable_terminal
+  # isn't measured against the transient 80-column boot console. kmscon's
+  # grid is settled from its first frame, and waiting would only hold an empty
+  # screen up before the welcome.
+  [[ ${OMARCHY_KMSCON:-} == 1 ]] || wait_for_stable_terminal
   i18n_console_font "$(tty 2>/dev/null)"
 
   # A preset language greets in that language.

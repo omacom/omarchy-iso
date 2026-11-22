@@ -14,6 +14,11 @@ set -euo pipefail
 # are shown there, in real fonts, and tty1 waits.
 [[ $(tty) == /dev/tty1 || ${OMARCHY_KMSCON:-} == 1 ]] || exit 0
 
+# The live boot hides the console's cursor (vt.global_cursor_default=0), so
+# nothing blinks on the black screen before the installer draws. A shell left
+# here after this script needs it back.
+[[ ${OMARCHY_KMSCON:-} == 1 ]] || trap 'printf "\e[?25h" >/dev/tty1 2>/dev/null' EXIT
+
 # The N1x recovery boot entry is a diagnostic shell, never the installer: record
 # the hardware probe, show how to reach the machine, and leave tty1 at a prompt.
 if grep -qw 'omarchy.n1x_recovery=1' /proc/cmdline; then
@@ -41,7 +46,9 @@ fi
 # prompts that already say what to do, so every widget leaves them off.
 export GUM_CHOOSE_SHOW_HELP=false GUM_CONFIRM_SHOW_HELP=false GUM_FILTER_SHOW_HELP=false GUM_INPUT_SHOW_HELP=false
 
-# Tokyo Night palette so the live VT matches the installed look.
+# Tokyo Night palette so the live VT matches the installed look, for the
+# installs drawn on it (OEM and cidata). The console stays black, untouched,
+# under an install kmscon draws.
 set_tokyo_night_colors() {
   echo -en "\e]P01a1b26"; echo -en "\e]P1f7768e"; echo -en "\e]P29ece6a"
   echo -en "\e]P3e0af68"; echo -en "\e]P47aa2f7"; echo -en "\e]P5bb9af7"
@@ -51,8 +58,7 @@ set_tokyo_night_colors() {
   echo -en "\e]PFc0caf5"
   echo -en "\033[0m"
   clear
-}
-[[ ${OMARCHY_KMSCON:-} == 1 ]] || set_tokyo_night_colors
+} >/dev/tty # not into the install log, which stdout is copied to by then
 
 mkdir -p /var/log
 touch "$OMARCHY_INSTALL_LOG_FILE"
@@ -132,7 +138,7 @@ warm_offline_mirror() {
 if [[ ${OMARCHY_KMSCON:-} != 1 ]]; then
   warm_offline_mirror &
   warm_pid=$!
-  trap 'kill "$warm_pid" 2>/dev/null' EXIT
+  trap 'kill "$warm_pid" 2>/dev/null; printf "\e[?25h" >/dev/tty1 2>/dev/null' EXIT
 fi
 
 cd /root
@@ -141,6 +147,7 @@ cd /root
 # everything downstream runs the ordinary path against ordinary inputs.
 if [[ -f /usr/share/omarchy-iso/oem-install ]]; then
   export OMARCHY_UI_INTERACTIVE=no
+  set_tokyo_night_colors
   ./configurator --oem
 elif [[ ${OMARCHY_KMSCON:-} == 1 ]]; then
   # The tty1 run already looked for cidata.
@@ -152,6 +159,7 @@ elif [[ ${OMARCHY_KMSCON:-} == 1 ]]; then
   fi
   ((status == 0)) || exit "$status"
 elif /usr/local/bin/omarchy-cidata-load; then
+  set_tokyo_night_colors
   echo "Autoinstall configuration found on cidata drive; skipping the configurator."
   export OMARCHY_UI_INTERACTIVE=no
 else

@@ -356,13 +356,14 @@ keyboard_form() {
       break
     fi
 
-    clear_logo
-    echo
+    # Under the heading of the steps that follow, so the screen does not
+    # shift when the keyboard gives way to them.
+    step "$(t user.intro)"
     if ! i18n_translated "$language"; then
       # English on purpose: there is no catalog for this language to say it in.
       say --foreground 8 "The installer stays in English. Omarchy will be in $(language_label "$language") once installed."
+      echo
     fi
-    echo
 
     omarchy_prompt_keyboard && status=0 || status=$?
     ((status == 0)) && break
@@ -494,6 +495,9 @@ user_step() {
     if gum confirm --affirmative "$(t common.yes)" --negative "$(t common.change)" "$(t summary.prompt)"; then
       break
     else
+      # Every answer on the summary can be changed, the language first.
+      language_form
+      $defer_provisioning && return 0
       keyboard_form
       $defer_provisioning && return 0
     fi

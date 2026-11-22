@@ -171,6 +171,13 @@ greeter() {
   # what flashed. The effect reads from /dev/null so it never swallows the
   # Return; --reuse-canvas paints upward from the saved cursor, anchored one row
   # below the logo.
+  #
+  # kmscon draws 256-colour codes as xterm's own colours, not the palette's,
+  # and 24-bit ones as given: there the stops are the palette's green and cyan.
+  local colors=(--xterm-colors) green=2 bright_green=10 cyan=6
+  if [[ ${OMARCHY_KMSCON:-} == 1 ]]; then
+    colors=() green=9ece6a bright_green=9ece6a cyan=7dcfff
+  fi
   printf '\033[%d;1H\0337' "$((logo_row + logo_h))"
   # Run ttfx directly (not inside a `while` subshell) so $anim is ttfx's own
   # PID: killing a wrapping subshell would orphan ttfx, which then keeps
@@ -184,12 +191,12 @@ greeter() {
     --anchor-text c \
     --frame-rate 60 \
     --reuse-canvas \
-    --xterm-colors \
+    "${colors[@]}" \
     colorshift \
-    --gradient-stops 2 10 6 10 \
+    --gradient-stops "$green" "$bright_green" "$cyan" "$bright_green" \
     --gradient-frames 3 \
     --cycles 1000 \
-    --final-gradient-stops 2 \
+    --final-gradient-stops "$green" \
     </dev/null >/dev/tty 2>/dev/null &
   anim=$!
 
@@ -292,7 +299,7 @@ language_label() {
 language_rows() {
   local translated code
   # Native names only for catalogs this console can draw: a CJK name would be
-  # boxes here, so Chinese is listed by its English name until kmscon takes over.
+  # boxes on the plain console, so there Chinese is listed by its English name.
   translated=$(for code in $(cd "$OMARCHY_ISO_I18N_DIR" && printf '%s\n' *.json | sed 's/\.json$//'); do
     i18n_translated "$code" && printf '%s\n' "$code"
   done | jq -R . | jq -sc .)
@@ -364,7 +371,6 @@ keyboard_form() {
     if ((status == OMARCHY_FORM_BACK)); then
       language_form
       $defer_provisioning && return 0
-      kmscon_for_language
       continue
     fi
 
@@ -382,27 +388,27 @@ keyboard_form() {
   # relaunch it with the layout just picked so the password is typed under the
   # layout it will be entered with at boot, and with the Han forms of a
   # language picked again on the way back (Chinese, then Japanese).
-  if [[ ${OMARCHY_ISO_KMSCON:-} == 1 ]] &&
-    [[ $(omarchy-iso-kmscon --xkb "$keyboard") != "${OMARCHY_ISO_KMSCON_XKB:-}" ||
-      $(omarchy-iso-kmscon --face "$language") != "${OMARCHY_ISO_KMSCON_FACE:-}" ]]; then
+  if [[ ${OMARCHY_KMSCON:-} == 1 ]] &&
+    [[ $(omarchy_keymap_xkb "$keyboard") != "${OMARCHY_KMSCON_XKB:-}" ||
+      $(omarchy_kmscon_face "$language") != "${OMARCHY_KMSCON_FACE:-}" ]]; then
     switch_to_kmscon user
   fi
 }
 
 # ── kmscon handoff ──────────────────────────────────────────────────────────
 #
-# The configurator cannot move its own terminal, so a switch saves the answers
-# so far and exits 75; .automated_script.sh starts kmscon, which runs the
-# installer again from the saved stage. If kmscon cannot start, the same
-# answers resume on this console in English.
+# .automated_script.sh runs the configurator inside kmscon, which takes its
+# keyboard layout and font once, at its start. To change either, the
+# configurator saves the answers so far and exits 75; .automated_script.sh
+# starts kmscon again, which runs the installer from the saved stage.
 
 KMSCON_RESUME=${KMSCON_RESUME:-/run/omarchy-iso/kmscon-resume}
 KMSCON_SWITCH=75
-
-kmscon_available() {
-  [[ ${OMARCHY_ISO_NO_KMSCON:-} != 1 && ${OMARCHY_ISO_KMSCON:-} != 1 ]] &&
-    [[ $(tty 2>/dev/null) == /dev/tty[0-9]* ]] && command -v kmscon >/dev/null
-}
+# The runtime's launcher, for the layout and font kmscon would start with.
+KMSCON_LIB="${KMSCON_LIB:-/usr/share/omarchy-iso/kmscon.sh}"
+[[ -r $KMSCON_LIB ]] || KMSCON_LIB="$OMARCHY_PATH/install/provisioning/kmscon.sh"
+# shellcheck disable=SC1090
+source "$KMSCON_LIB"
 
 switch_to_kmscon() {
   local resume_stage=$1
@@ -414,14 +420,6 @@ switch_to_kmscon() {
       2>/dev/null >"$KMSCON_RESUME"
   )
   exit $KMSCON_SWITCH
-}
-
-# A language the console cannot draw: carry on in kmscon from the keyboard
-# step, or from the welcome screen when a preset names the language.
-kmscon_for_language() {
-  if i18n_needs_kmscon "$language" && kmscon_available; then
-    switch_to_kmscon "${1:-keyboard}"
-  fi
 }
 
 # Ctrl+C on the first screen offers to prepare the machine for another owner.
@@ -1410,20 +1408,12 @@ if [[ ${1:-} == "--oem" ]]; then
   defer_provisioning=true
 fi
 
-# Inside kmscon, carry on from where the console run handed over.
+# Carry on from where the run before a kmscon relaunch left off.
 resume_stage=""
 if [[ -r $KMSCON_RESUME ]]; then
   # shellcheck disable=SC1090
   source "$KMSCON_RESUME"
   rm -f "$KMSCON_RESUME"
-  # Tells .automated_script.sh that kmscon got this far; a resume file left
-  # without it means kmscon failed, and the answers carry on in English.
-  touch "$(dirname "$KMSCON_RESUME")/kmscon-started"
-  # Back on the console after kmscon failed: the layout picked in kmscon was
-  # never loaded here, and the password ahead must be typed under it.
-  if [[ ${OMARCHY_ISO_KMSCON:-} != 1 && -n ${keyboard:-} && $(tty 2>/dev/null) == "/dev/tty"* ]]; then
-    loadkeys "$keyboard" 2>/dev/null
-  fi
   i18n_load "$language"
   set_form_language
 fi
@@ -1434,22 +1424,14 @@ if [[ -z $resume_stage ]]; then
   wait_for_stable_terminal
   i18n_console_font "$(tty 2>/dev/null)"
 
-  # A preset language greets in that language, in kmscon if the console
-  # cannot draw it.
+  # A preset language greets in that language.
   i18n_load "$language"
-  [[ -z $preset_language ]] || $oem_install || kmscon_for_language greeter
-fi
 
-if [[ -z $resume_stage || $resume_stage == greeter ]]; then
   if ! $oem_install; then
     greeter
     language_form
   fi
 
-  $defer_provisioning || kmscon_for_language
-fi
-
-if [[ -z $resume_stage || $resume_stage == greeter || $resume_stage == keyboard ]]; then
   $defer_provisioning || keyboard_form
 fi
 

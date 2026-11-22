@@ -298,7 +298,7 @@ class KmsconLanguageTest(unittest.TestCase):
             with self.subTest(code=code):
                 script = f"i18n_load {code}; t finish.reboot"
                 self.assertEqual(self.shell(script), "Reboot Now")
-                self.assertEqual(self.shell(script, OMARCHY_ISO_KMSCON="1"), reboot)
+                self.assertEqual(self.shell(script, OMARCHY_KMSCON="1"), reboot)
         self.assertEqual(self.shell("i18n_load de; t common.yes"), "Ja")
 
     def test_display_width_counts_cjk_as_two_columns(self):
@@ -310,41 +310,12 @@ class KmsconLanguageTest(unittest.TestCase):
         # Icon-font glyphs (private use area) stay one column wide.
         self.assertEqual(self.shell('display_width "\ue900ab"'), "3")
 
-    @unittest.skipUnless(Path("/usr/share/systemd/kbd-model-map").exists(), "needs systemd's kbd-model-map")
-    def test_kmscon_types_like_the_boot_keymap(self):
-        # The disk password typed in kmscon is typed again at boot under the console
-        # keymap: a keymap systemd's table lacks must not quietly become us, and a
-        # two-group layout needs its switch or Latin letters cannot be typed.
-        def xkb(keymap):
-            return subprocess.run(
-                ["bash", str(ROOT / "configs/airootfs/usr/local/bin/omarchy-iso-kmscon"), "--xkb", keymap],
-                capture_output=True, text=True, check=True,
-            ).stdout.split()
-        self.assertEqual(xkb("de_CH-latin1")[0], "ch")
-        self.assertEqual(xkb("colemak")[2], "colemak")
-        self.assertIn("grp:shifts_toggle", xkb("ua")[3])
-        self.assertIn("grp:shifts_toggle", xkb("ru")[3])
-        self.assertEqual(xkb("jp106")[:2], ["jp", "jp106"])
-
-    def test_kmscon_draws_han_in_the_languages_forms(self):
-        # The configurator relaunches kmscon when this changes, so Chinese picked
-        # first and Japanese on the way back ends up in Japanese forms.
-        def face(language):
-            return subprocess.run(
-                ["bash", str(ROOT / "configs/airootfs/usr/local/bin/omarchy-iso-kmscon"), "--face", language],
-                capture_output=True, text=True, check=True,
-            ).stdout
-        self.assertEqual(face("ja"), "Noto Sans Mono CJK JP")
-        self.assertEqual(face("ko"), "Noto Sans Mono CJK KR")
-        self.assertEqual(face("zh-CN"), "Noto Sans Mono CJK SC")
-
-    def test_kmscon_resumes_before_the_keyboard_step_still_reach_it(self):
-        # A preset in Chinese moves to kmscon at the welcome screen; the
-        # resumed run must still set the preset keyboard after it.
+    def test_a_kmscon_relaunch_resumes_after_the_keyboard_step(self):
+        # kmscon is relaunched for the layout and Han forms the keyboard step
+        # ends with, and the stages before it are not run again.
         configurator = (ROOT / "configs/airootfs/root/configurator").read_text()
-        keyboard_step = re.search(r"^if (.*) then\n\s+\$defer_provisioning \|\| keyboard_form$", configurator, re.MULTILINE).group(1)
-        for stage in ("greeter", "keyboard"):
-            self.assertIn(f"$resume_stage == {stage}", keyboard_step)
+        self.assertEqual(re.findall(r"^\s*switch_to_kmscon (\S+)$", configurator, re.MULTILINE), ["user"])
+        self.assertRegex(configurator, r"if \[\[ -z \$resume_stage \]\]; then\n(?:.*\n)*?\s+\$defer_provisioning \|\| keyboard_form\nfi")
 
     def test_only_the_language_screen_picks_the_language(self):
         # The language goes to the installed system, so nothing after the

@@ -37,7 +37,7 @@ fi
 # everything a machine may need to show the installer and speak it: GPU
 # firmware (a GPU driver that fails for want of firmware has already taken the
 # screen from the firmware framebuffer, and nouveau needs nvidia/ for GSP),
-# audio (the accessibility entry speaks), microcode, and wired NICs.
+# audio, microcode, and wired NICs.
 # qcom/ goes too, Adreno's included: msm keeps the display without it and
 # loads the GPU's microcode only when the DRM device is first opened
 # (msm_open -> load_gpu in drivers/gpu/drm/msm/msm_drv.c), which the installer,

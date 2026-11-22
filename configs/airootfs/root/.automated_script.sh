@@ -58,7 +58,7 @@ set_tokyo_night_colors() {
   echo -en "\e]PFc0caf5"
   echo -en "\033[0m"
   clear
-}
+} >/dev/tty # not into the install log, which stdout is copied to by then
 
 mkdir -p /var/log
 touch "$OMARCHY_INSTALL_LOG_FILE"

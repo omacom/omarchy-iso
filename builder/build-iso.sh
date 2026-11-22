@@ -389,19 +389,18 @@ fi
 # The selected omarchy-settings package is needed here so its post_install hook
 # drops Omarchy's plymouthd.conf into /etc/plymouth before mkarchiso builds the
 # live initramfs.
+# kmscon draws the installer (usr/local/bin/omarchy-iso-kmscon), and the CJK
+# font carries it in the languages the Linux console cannot draw;
+# customize_airootfs.sh trims the font to the one face kmscon uses.
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # Plymouth stays out of the live initramfs (archiso-aarch64-mkinitcpio.sh);
   # openssh and pciutils serve the recovery entry and remote debugging.
   # For the Snapdragon laptops: ukify builds the live UKI on systemd-stub-omarchy's
   # stub, whose header holds every device tree, and the installer
   # saves a laptop's signed firmware from Windows with qcom-firmware-extract.
-  arch_packages=("$OMARCHY_KERNEL" archlinuxarm-keyring git gum jq openssl openssh pciutils plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted systemd-ukify systemd-stub-omarchy linux-firmware-qcom qcom-firmware-extract python)
+  arch_packages=("$OMARCHY_KERNEL" archlinuxarm-keyring git gum jq openssl openssh pciutils plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted systemd-ukify systemd-stub-omarchy linux-firmware-qcom qcom-firmware-extract python kmscon noto-fonts-cjk)
 else
-  # linux-t2 is the live kernel on a Mac (configs/grub/grub.cfg). kmscon and
-  # the CJK font carry the installer in the languages the Linux console cannot
-  # draw (usr/local/bin/omarchy-iso-kmscon); customize_airootfs.sh trims the
-  # font to the one face kmscon uses. aarch64 goes without until Arch Linux ARM
-  # builds kmscon, and stays in English for those languages.
+  # linux-t2 is the live kernel on a Mac (configs/grub/grub.cfg).
   arch_packages=("$OMARCHY_KERNEL" linux-t2 git gum jq openssl plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted kmscon noto-fonts-cjk)
 fi
 live_packages_file="$build_cache_dir/packages.$OMARCHY_ARCH"

@@ -231,7 +231,8 @@ drive_first_boot() {
   local waited=0 text step
   local -A answered=()
   while true; do
-    text=$(ocr_screen)
+    # Setup's form is drawn in kmscon.
+    text=$(OCR_KMSCON=1 ocr_screen)
     step=""
 
     if grep -qi "look right" <<<"$text"; then

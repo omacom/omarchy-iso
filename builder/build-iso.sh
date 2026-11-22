@@ -389,7 +389,7 @@ fi
 # The selected omarchy-settings package is needed here so its post_install hook
 # drops Omarchy's plymouthd.conf into /etc/plymouth before mkarchiso builds the
 # live initramfs.
-# kmscon draws the installer (usr/local/bin/omarchy-iso-kmscon), and the CJK
+# kmscon draws the installer, and the CJK
 # font carries it in the languages the Linux console cannot draw;
 # customize_airootfs.sh trims the font to the one face kmscon uses.
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
@@ -426,6 +426,7 @@ if [[ -d /omarchy-source ]]; then
   base_pkg_lists=(/omarchy-source/install/omarchy-base.packages /omarchy-source/install/omarchy-other.packages)
   setup_form=/omarchy-source/install/provisioning/setup-form.sh
   progress_icon=/omarchy-source/install/provisioning/progress-icon.sh
+  kmscon_lib=/omarchy-source/install/provisioning/kmscon.sh
   console_font=/omarchy-source/install/provisioning/console-font
   mise_work=/omarchy-source/install/user/mise-work.sh
 else
@@ -451,6 +452,8 @@ else
   setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/progress-icon.sh 2>/dev/null || true
   progress_icon=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/progress-icon.sh
+  bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/kmscon.sh 2>/dev/null || true
+  kmscon_lib=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/kmscon.sh
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/console-font.sh \
     usr/share/omarchy/install/provisioning/console-font.py 2>/dev/null || true
   console_font=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/console-font
@@ -597,6 +600,25 @@ if [[ ! -f $progress_icon ]]; then
   exit 1
 fi
 cp "$progress_icon" "$build_cache_dir/airootfs/usr/share/omarchy-iso/progress-icon.sh"
+
+# The installer is drawn in kmscon by the runtime's own launcher, the one
+# first-boot owner setup is drawn with, so the two look and type alike. A
+# runtime predating it ships no such file, which would leave the installer
+# with nothing to draw in.
+if [[ ! -f $kmscon_lib ]]; then
+  if [[ -d /omarchy-source ]]; then
+    echo "ERROR: the --local-source checkout ships no install/provisioning/kmscon.sh" >&2
+    remedy="Update the checkout to a revision carrying the kmscon launcher."
+  else
+    echo "ERROR: $OMARCHY_RUNTIME_PACKAGE does not ship install/provisioning/kmscon.sh" >&2
+    remedy="Publish a runtime carrying the kmscon launcher, or build with --local-source against a checkout that has it."
+  fi
+  echo "       The installer starts kmscon with that file, so this ISO would boot" >&2
+  echo "       into no installer at all." >&2
+  echo "       $remedy" >&2
+  exit 1
+fi
+cp "$kmscon_lib" "$build_cache_dir/airootfs/usr/share/omarchy-iso/kmscon.sh"
 
 # The console font comes from the same runtime too, so the installer and
 # first-boot setup are set in one font at one size. A runtime predating the

@@ -175,7 +175,7 @@ greeter() {
   # kmscon draws 256-colour codes as xterm's own colours, not the palette's,
   # and 24-bit ones as given: there the stops are the palette's green and cyan.
   local colors=(--xterm-colors) green=2 bright_green=10 cyan=6
-  if [[ ${OMARCHY_ISO_KMSCON:-} == 1 ]]; then
+  if [[ ${OMARCHY_KMSCON:-} == 1 ]]; then
     colors=() green=9ece6a bright_green=9ece6a cyan=7dcfff
   fi
   printf '\033[%d;1H\0337' "$((logo_row + logo_h))"
@@ -388,9 +388,9 @@ keyboard_form() {
   # relaunch it with the layout just picked so the password is typed under the
   # layout it will be entered with at boot, and with the Han forms of a
   # language picked again on the way back (Chinese, then Japanese).
-  if [[ ${OMARCHY_ISO_KMSCON:-} == 1 ]] &&
-    [[ $(omarchy-iso-kmscon --xkb "$keyboard") != "${OMARCHY_ISO_KMSCON_XKB:-}" ||
-      $(omarchy-iso-kmscon --face "$language") != "${OMARCHY_ISO_KMSCON_FACE:-}" ]]; then
+  if [[ ${OMARCHY_KMSCON:-} == 1 ]] &&
+    [[ $(omarchy_keymap_xkb "$keyboard") != "${OMARCHY_KMSCON_XKB:-}" ||
+      $(omarchy_kmscon_face "$language") != "${OMARCHY_KMSCON_FACE:-}" ]]; then
     switch_to_kmscon user
   fi
 }
@@ -400,11 +400,15 @@ keyboard_form() {
 # .automated_script.sh runs the configurator inside kmscon, which takes its
 # keyboard layout and font once, at its start. To change either, the
 # configurator saves the answers so far and exits 75; .automated_script.sh
-# starts kmscon again, which runs the installer from the saved stage. If kmscon
-# cannot start, the same answers resume on the console.
+# starts kmscon again, which runs the installer from the saved stage.
 
 KMSCON_RESUME=${KMSCON_RESUME:-/run/omarchy-iso/kmscon-resume}
 KMSCON_SWITCH=75
+# The runtime's launcher, for the layout and font kmscon would start with.
+KMSCON_LIB="${KMSCON_LIB:-/usr/share/omarchy-iso/kmscon.sh}"
+[[ -r $KMSCON_LIB ]] || KMSCON_LIB="$OMARCHY_PATH/install/provisioning/kmscon.sh"
+# shellcheck disable=SC1090
+source "$KMSCON_LIB"
 
 switch_to_kmscon() {
   local resume_stage=$1
@@ -1410,11 +1414,6 @@ if [[ -r $KMSCON_RESUME ]]; then
   # shellcheck disable=SC1090
   source "$KMSCON_RESUME"
   rm -f "$KMSCON_RESUME"
-  # Back on the console after kmscon failed: the layout picked in kmscon was
-  # never loaded here, and the password ahead must be typed under it.
-  if [[ ${OMARCHY_ISO_KMSCON:-} != 1 && -n ${keyboard:-} && $(tty 2>/dev/null) == "/dev/tty"* ]]; then
-    loadkeys "$keyboard" 2>/dev/null
-  fi
   i18n_load "$language"
   set_form_language
 fi

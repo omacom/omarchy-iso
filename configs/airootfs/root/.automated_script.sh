@@ -10,15 +10,9 @@
 #   - COLUMNS/LINES so gum picks up real terminal size
 set -euo pipefail
 
-# Inside kmscon (omarchy-iso-kmscon) this runs again on kmscon's pty: the
-# wizard and the install are shown there, in real fonts, and tty1 waits.
-[[ $(tty) == /dev/tty1 || ${OMARCHY_ISO_KMSCON:-} == 1 ]] || exit 0
-
-# Tells the tty1 run that kmscon got as far as running the installer.
-if [[ ${OMARCHY_ISO_KMSCON:-} == 1 ]]; then
-  mkdir -p /run/omarchy-iso
-  touch /run/omarchy-iso/kmscon-started
-fi
+# Inside kmscon this runs again on kmscon's pty: the wizard and the install
+# are shown there, in real fonts, and tty1 waits.
+[[ $(tty) == /dev/tty1 || ${OMARCHY_KMSCON:-} == 1 ]] || exit 0
 
 # The N1x recovery boot entry is a diagnostic shell, never the installer: record
 # the hardware probe, show how to reach the machine, and leave tty1 at a prompt.
@@ -58,7 +52,7 @@ set_tokyo_night_colors() {
   echo -en "\033[0m"
   clear
 }
-[[ ${OMARCHY_ISO_KMSCON:-} == 1 ]] || set_tokyo_night_colors
+[[ ${OMARCHY_KMSCON:-} == 1 ]] || set_tokyo_night_colors
 
 mkdir -p /var/log
 touch "$OMARCHY_INSTALL_LOG_FILE"
@@ -135,39 +129,11 @@ warm_offline_mirror() {
 }
 
 # Inside kmscon the tty1 run is still warming the cache.
-if [[ ${OMARCHY_ISO_KMSCON:-} != 1 ]]; then
+if [[ ${OMARCHY_KMSCON:-} != 1 ]]; then
   warm_offline_mirror &
   warm_pid=$!
   trap 'kill "$warm_pid" 2>/dev/null' EXIT
 fi
-
-# The wizard runs in kmscon wherever kmscon can draw: fonts with every
-# script the installer speaks, the same on every machine, where the console
-# has one bitmap font and cannot draw Chinese, Japanese or Korean at all.
-# Not when it is turned off (OMARCHY_ISO_NO_KMSCON=1, or omarchy.kmscon=0 on
-# the kernel command line, for a machine whose display kmscon gets wrong),
-# not under the speakup boot entries (accessibility=on), whose screen reader
-# reads the console and not kmscon, and not without a DRM device to draw on.
-kmscon_wanted() {
-  [[ ${OMARCHY_ISO_NO_KMSCON:-} != 1 ]] && ! grep -qwE 'omarchy\.kmscon=0|accessibility=on' /proc/cmdline &&
-    command -v kmscon >/dev/null && compgen -G '/dev/dri/card*' >/dev/null
-}
-
-# Run the installer in kmscon and return when kmscon ends: 0 if the installer
-# ran in it. kmscon with no display it can drive waits for one and draws
-# nothing, so one that has not started the installer within 15 s is stopped.
-run_in_kmscon() {
-  local watchdog
-  rm -f /run/omarchy-iso/kmscon-started /run/omarchy-iso/kmscon.pid
-  (
-    sleep 15
-    [[ -e /run/omarchy-iso/kmscon-started ]] || kill "$(</run/omarchy-iso/kmscon.pid)"
-  ) &>/dev/null &
-  watchdog=$!
-  { omarchy-iso-kmscon /root/.automated_script.sh; } 2>/dev/null || true
-  kill "$watchdog" 2>/dev/null || true
-  [[ -e /run/omarchy-iso/kmscon-started ]]
-}
 
 cd /root
 # Autoinstall: a cidata drive carrying the configurator's own output files
@@ -176,35 +142,47 @@ cd /root
 if [[ -f /usr/share/omarchy-iso/oem-install ]]; then
   export OMARCHY_UI_INTERACTIVE=no
   ./configurator --oem
-elif [[ ${OMARCHY_ISO_KMSCON:-} == 1 ]]; then
+elif [[ ${OMARCHY_KMSCON:-} == 1 ]]; then
   # The tty1 run already looked for cidata.
   ./configurator && status=0 || status=$?
-  # A retry from the shell left after an abort: that shell, not the kmscon
-  # wrapper, gets the relaunch request, so end it to end kmscon.
-  if ((status == 75)) && [[ -n ${OMARCHY_ISO_KMSCON_SHELL:-} ]]; then
-    kill -HUP "$OMARCHY_ISO_KMSCON_SHELL" 2>/dev/null || true
+  # A retry from the shell left after an abort: that shell, not kmscon's
+  # command, gets the relaunch request, so end it to end kmscon.
+  if ((status == 75)) && [[ -n ${OMARCHY_KMSCON_SHELL:-} ]]; then
+    kill -HUP "$OMARCHY_KMSCON_SHELL" 2>/dev/null || true
   fi
   ((status == 0)) || exit "$status"
 elif /usr/local/bin/omarchy-cidata-load; then
   echo "Autoinstall configuration found on cidata drive; skipping the configurator."
   export OMARCHY_UI_INTERACTIVE=no
 else
-  # kmscon runs this script again and the wizard and the whole install in
-  # there. The configurator exits 75 with its answers saved to have kmscon
-  # relaunched, when the layout to type in changes. When kmscon cannot show
-  # the installer, it runs here, with those answers if there are any, in the
-  # console's font and in English where that font lacks the language.
-  status=75
-  kmscon_wanted || export OMARCHY_ISO_NO_KMSCON=1
-  while ((status == 75)); do
-    if [[ ${OMARCHY_ISO_NO_KMSCON:-} == 1 ]] || ! run_in_kmscon; then
-      OMARCHY_ISO_NO_KMSCON=1 ./configurator && status=0 || status=$?
-    elif [[ ! -e /run/omarchy-iso/kmscon-resume ]]; then
-      # The installer ran to its end in kmscon.
-      exit 0
+  # The wizard and the whole install run in kmscon, which runs this script
+  # again: fonts with every script the installer speaks, the same on every
+  # machine, where the console has one bitmap font and cannot draw Chinese,
+  # Japanese or Korean at all. The launcher is the runtime's own, the one
+  # first-boot owner setup is drawn with.
+  # shellcheck disable=SC1091
+  source /usr/share/omarchy-iso/kmscon.sh
+
+  # The script exits 75 to ask for a relaunch; anything else that is not
+  # success leaves a shell in kmscon, so an abort's message stays readable and
+  # the installer can be rerun in its language. The shell keeps this PID, so a
+  # retry from it that asks for a relaunch can hang it up, which ends kmscon.
+  inner='"$@"; status=$?; ((status == 0 || status == 75)) && exit $status; export OMARCHY_KMSCON_SHELL=$$; exec bash -l'
+
+  # kmscon takes its layout and font once, at its start: the configurator
+  # exits 75 with its answers saved to have it started again with the layout
+  # and language just picked. Before any are, US and the language an ISO
+  # presets (presets/<code>.json).
+  mkdir -p /run/omarchy-iso
+  while true; do
+    keymap=us language=$(jq -r '.language // empty' /usr/share/omarchy-iso/preset.json 2>/dev/null || true)
+    if [[ -r /run/omarchy-iso/kmscon-resume ]]; then
+      { read -r keymap; read -r language; } < <(bash -c 'source "$1"; printf "%s\n%s\n" "${keyboard:-us}" "${language:-}"' _ /run/omarchy-iso/kmscon-resume)
     fi
+    omarchy_kmscon /run/omarchy-iso/kmscon.log "$keymap" "$language" "" /bin/bash -c "$inner" _ /root/.automated_script.sh
+    # Without a relaunch asked for, the installer ran to its end in kmscon.
+    [[ -e /run/omarchy-iso/kmscon-resume ]] || exit 0
   done
-  ((status == 0)) || exit "$status"
 fi
 
 # Deferred-provisioning installs skip the celebration/reboot prompt and reboot on

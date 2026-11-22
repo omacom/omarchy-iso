@@ -10,9 +10,15 @@
 #   - COLUMNS/LINES so gum picks up real terminal size
 set -euo pipefail
 
-# Inside kmscon (omarchy-iso-kmscon) this runs again on kmscon's pty, as the
-# continuation of the tty1 installer in a language the console cannot draw.
+# Inside kmscon (omarchy-iso-kmscon) this runs again on kmscon's pty: the
+# wizard and the install are shown there, in real fonts, and tty1 waits.
 [[ $(tty) == /dev/tty1 || ${OMARCHY_ISO_KMSCON:-} == 1 ]] || exit 0
+
+# Tells the tty1 run that kmscon got as far as running the installer.
+if [[ ${OMARCHY_ISO_KMSCON:-} == 1 ]]; then
+  mkdir -p /run/omarchy-iso
+  touch /run/omarchy-iso/kmscon-started
+fi
 
 # The N1x recovery boot entry is a diagnostic shell, never the installer: record
 # the hardware probe, show how to reach the machine, and leave tty1 at a prompt.
@@ -135,6 +141,33 @@ if [[ ${OMARCHY_ISO_KMSCON:-} != 1 ]]; then
   trap 'kill "$warm_pid" 2>/dev/null' EXIT
 fi
 
+# The wizard runs in kmscon wherever kmscon can draw: fonts with every
+# script the installer speaks, the same on every machine, where the console
+# has one bitmap font and cannot draw Chinese, Japanese or Korean at all.
+# Not when it is turned off (OMARCHY_ISO_NO_KMSCON=1, or omarchy.kmscon=0 on
+# the kernel command line, for a machine whose display kmscon gets wrong),
+# and not without a DRM device for it to draw on.
+kmscon_wanted() {
+  [[ ${OMARCHY_ISO_NO_KMSCON:-} != 1 ]] && ! grep -qw 'omarchy.kmscon=0' /proc/cmdline &&
+    command -v kmscon >/dev/null && compgen -G '/dev/dri/card*' >/dev/null
+}
+
+# Run the installer in kmscon and return when kmscon ends: 0 if the installer
+# ran in it. kmscon with no display it can drive waits for one and draws
+# nothing, so one that has not started the installer within 15 s is stopped.
+run_in_kmscon() {
+  local watchdog
+  rm -f /run/omarchy-iso/kmscon-started /run/omarchy-iso/kmscon.pid
+  (
+    sleep 15
+    [[ -e /run/omarchy-iso/kmscon-started ]] || kill "$(</run/omarchy-iso/kmscon.pid)"
+  ) &>/dev/null &
+  watchdog=$!
+  { omarchy-iso-kmscon /root/.automated_script.sh; } 2>/dev/null || true
+  kill "$watchdog" 2>/dev/null || true
+  [[ -e /run/omarchy-iso/kmscon-started ]]
+}
+
 cd /root
 # Autoinstall: a cidata drive carrying the configurator's own output files
 # stands in for the wizard. omarchy-cidata-load copies them into /root and
@@ -155,18 +188,19 @@ elif /usr/local/bin/omarchy-cidata-load; then
   echo "Autoinstall configuration found on cidata drive; skipping the configurator."
   export OMARCHY_UI_INTERACTIVE=no
 else
-  ./configurator && status=0 || status=$?
-  # 75: the configurator saved its answers and wants kmscon (a CJK language).
-  # kmscon runs this script again and the whole rest of the install in there;
-  # it is relaunched when the layout changes. If the configurator in kmscon
-  # never picked the answers up, the answers resume here in English.
+  # kmscon runs this script again and the wizard and the whole install in
+  # there. The configurator exits 75 with its answers saved to have kmscon
+  # relaunched, when the layout to type in changes. When kmscon cannot show
+  # the installer, it runs here, with those answers if there are any, in the
+  # console's font and in English where that font lacks the language.
+  status=75
+  kmscon_wanted || export OMARCHY_ISO_NO_KMSCON=1
   while ((status == 75)); do
-    rm -f /run/omarchy-iso/kmscon-started
-    omarchy-iso-kmscon /root/.automated_script.sh || true
-    if [[ ! -e /run/omarchy-iso/kmscon-resume ]]; then
-      exit 0
-    elif [[ ! -e /run/omarchy-iso/kmscon-started ]]; then
+    if [[ ${OMARCHY_ISO_NO_KMSCON:-} == 1 ]] || ! run_in_kmscon; then
       OMARCHY_ISO_NO_KMSCON=1 ./configurator && status=0 || status=$?
+    elif [[ ! -e /run/omarchy-iso/kmscon-resume ]]; then
+      # The installer ran to its end in kmscon.
+      exit 0
     fi
   done
   ((status == 0)) || exit "$status"

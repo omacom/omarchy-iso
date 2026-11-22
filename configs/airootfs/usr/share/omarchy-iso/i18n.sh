@@ -32,8 +32,8 @@ i18n_translated() {
 }
 
 # Languages whose script the Linux console cannot draw and that the ISO has a
-# catalog for; picking one moves the installer into kmscon (omarchy-iso-kmscon).
-# Without a catalog the installer would stay English there too.
+# catalog for: translated only inside kmscon (omarchy-iso-kmscon), where the
+# installer normally runs. Without a catalog it would stay English there too.
 i18n_needs_kmscon() {
   [[ ($1 == zh-* || $1 == ja || $1 == ko) && -r $OMARCHY_ISO_I18N_DIR/$1.json ]]
 }

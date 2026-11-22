@@ -1,9 +1,9 @@
 #!/bin/bash
 #
-# Runs the installer inside kmscon on this VT, for languages the Linux console
-# cannot draw. kmscon renders with fontconfig (the CJK font bundled in the live
-# image) and reads keys through XKB, so loadkeys has no effect in it: the
-# layout is passed here, from the keymap the configurator saved.
+# Runs the installer inside kmscon on this VT. kmscon renders with fontconfig
+# (Adwaita Mono, and the CJK font bundled in the live image, which the Linux
+# console cannot draw) and reads keys through XKB, so loadkeys has no effect
+# in it: the layout is passed here, from the keymap the configurator saved.
 #
 #   omarchy-iso-kmscon <command...>   run command in kmscon; returns when it exits
 #   omarchy-iso-kmscon --xkb <keymap> print the XKB "layout model variant options"
@@ -71,7 +71,8 @@ if [[ ${1:-} == "--face" ]]; then
   exit 0
 fi
 
-keymap=us language=
+# Before a language is picked, the one an ISO presets (presets/<code>.json).
+keymap=us language=$(jq -r '.language // empty' /usr/share/omarchy-iso/preset.json 2>/dev/null)
 if [[ -r $STATE/kmscon-resume ]]; then
   { read -r keymap; read -r language; } < <(bash -c 'source "$1"; printf "%s\n%s\n" "${keyboard:-us}" "${language:-}"' _ "$STATE/kmscon-resume")
 fi
@@ -101,6 +102,8 @@ unset COLUMNS LINES
 inner='"$@"; status=$?; ((status == 0 || status == 75)) && exit $status; export OMARCHY_ISO_KMSCON_SHELL=$$; exec bash -l'
 
 mkdir -p "$STATE"
+# For .automated_script.sh, to stop a kmscon that never shows the installer.
+echo $$ >"$STATE/kmscon.pid"
 exec kmscon \
   --vt="$(tty)" \
   --oneshot \

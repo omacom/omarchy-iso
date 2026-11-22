@@ -401,8 +401,18 @@ ocr_screen_once() {
   [[ -s $shot ]] || return 0
   # Black on white: the negated grays alone read the focused button on the
   # finished install, dark text on a light bar, as "Reboot Nou".
-  magick "$shot" -colorspace gray -negate -resize 150% -threshold 50% "$prepped" 2>/dev/null || return 0
-  tesseract "$prepped" - --psm 6 2>/dev/null || true
+  # OCR_KMSCON=1 for a screen kmscon draws, first-boot setup's form: it draws
+  # the purple headings and prompts as dark as gum asks, where the console
+  # brightened them to its palette, so there the gray is the brightest channel,
+  # not luminance, and the screen is read as a column of lines, since as one
+  # block a lone thin prompt under the logo is dropped. Not for every screen:
+  # read that way, Ventoy's menu loses its footer.
+  local gray=(-colorspace gray) psm=6
+  if [[ -n ${OCR_KMSCON:-} ]]; then
+    gray=(-grayscale Brightness) psm=4
+  fi
+  magick "$shot" "${gray[@]}" -negate -resize 150% -threshold 50% "$prepped" 2>/dev/null || return 0
+  tesseract "$prepped" - --psm "$psm" 2>/dev/null || true
 }
 
 wait_for_screen() {

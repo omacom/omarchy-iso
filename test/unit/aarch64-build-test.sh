@@ -106,8 +106,18 @@ for cfg in grub.cfg loopback.cfg; do
   for platform in x86_64 aarch64; do
     cp "$src" "$fixture/$platform-$cfg"
     configure_grub_platform "$fixture/$platform-$cfg" "$platform"
-    sed -i -e 's|%KERNEL%|linux-omarchy|g' -e 's|%BOOT_SPLASH_KERNEL_OPTIONS%|quiet splash |g' -e 's|%KERNEL_OPTIONS%|console=tty0|g' \
+    # A placeholder nothing fills reaches the kernel's command line as
+    # literal text. mkarchiso fills %INSTALL_DIR%, %ARCH% and %ARCHISO_UUID%;
+    # build-iso.sh's sed fills the rest.
+    for placeholder in $(grep -Eo '%[A-Z_]+%' "$fixture/$platform-$cfg" | sort -u); do
+      case $placeholder in %INSTALL_DIR% | %ARCH% | %ARCHISO_UUID%) continue ;; esac
+      grep -Fq -- "-e \"s|$placeholder|" "$ROOT/builder/build-iso.sh" ||
+        fail "$cfg ($platform) has $placeholder, which build-iso.sh does not fill"
+    done
+    sed -i -e 's|%KERNEL%|linux-omarchy|g' -e 's|%BOOT_SPLASH_KERNEL_OPTIONS%|quiet |g' \
+      -e 's|%TRY_SPLASH_KERNEL_OPTIONS%|quiet splash |g' -e 's|%KERNEL_OPTIONS%|console=tty0|g' \
       -e 's|%INSTALL_DIR%|arch|g' -e "s|%ARCH%|$platform|g" -e 's|%ARCHISO_UUID%|x|g' "$fixture/$platform-$cfg"
+    grep -Eo '%[A-Z_]+%' "$fixture/$platform-$cfg" && fail "$cfg ($platform) keeps a placeholder the fixture does not fill"
     if command -v grub-script-check >/dev/null; then
       grub-script-check "$fixture/$platform-$cfg" || fail "$cfg ($platform) is not valid GRUB script"
     fi

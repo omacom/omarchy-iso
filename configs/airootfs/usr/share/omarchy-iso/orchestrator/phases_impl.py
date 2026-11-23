@@ -716,7 +716,7 @@ def arch_install_system(ctx: InstallContext) -> None:
             # the unit first so two pacman-key runs never race on gnupg.
             _start_target_keyring_init(ctx)
 
-            with _time_step("STEP.configure_limine_boot (mkinitcpio + ukify + limine-install)"):
+            with _time_step("STEP.configure_limine_boot (Limine EFI + config)"):
                 _configure_limine_boot(ctx, installer, config)
 
             info("› creating user (with /etc/skel populated)")
@@ -1656,11 +1656,28 @@ def _register_limine_efi_entry(
     # An efibootmgr that prints no paths matches nothing, and a reinstall
     # onto the same ESP then leaves one duplicate behind, which is harmless.
     esp = _partition_guid(disk, part)
+    live_guids = _existing_partition_guids()
+    stale = [
+        num
+        for num, text in pre_state["entries"].items()
+        if _is_stale_limine_entry(text, live_guids, esp)
+    ]
     identical = [
         num
         for num, text in pre_state["entries"].items()
         if _is_limine_entry_for(text, esp, loader) and num not in pre_state.get("inactive", ())
     ]
+    deleted: list[str] = []
+    if stale:
+        # Remove dead "Limine" entries pointing to wiped/non-existent GPT
+        # partitions before creating a new one: avoids duplicate-label warnings
+        # and frees NVRAM slots without touching any live install's entry.
+        for num in stale:
+            if subprocess.run(
+                ["efibootmgr", "--bootnum", num, "--delete-bootnum"],
+                check=False, capture_output=True,
+            ).returncode == 0:
+                deleted.append(num)
     if identical:
         limine_num = identical[0]
         info(f"› Reusing the 'Limine' boot entry Boot{limine_num}, which already starts this loader")
@@ -1696,7 +1713,7 @@ def _register_limine_efi_entry(
             [
                 num
                 for num in _find_label_entries(post_state["entries"], "Limine")
-                if num not in pre_state["entries"]
+                if num not in pre_state["entries"] or num in deleted
             ],
             key=lambda num: not _is_limine_entry_for(post_state["entries"][num], esp, loader),
         )
@@ -1710,14 +1727,14 @@ def _register_limine_efi_entry(
 
     # Duplicates of the reused entry go, never the reused one. One whose
     # delete fails is still a working copy, and stays in BootOrder.
-    deleted = [
+    deleted.extend(
         num
         for num in identical[1:]
         if subprocess.run(
             ["efibootmgr", "--bootnum", num, "--delete-bootnum"],
             check=False, capture_output=True,
         ).returncode == 0
-    ]
+    )
 
     keep = [
         num
@@ -1872,7 +1889,14 @@ def _write_limine_defaults(
         raise RuntimeError(f"Computed cmdline has no root=: {cmdline!r}")
     # Every variant's cmdline passes through here (archinstall-derived and
     # pre-mounted alike), so this is where the console parameter goes.
-    if CONSOLE_NO_ANSI_QUERY not in cmdline.split():
+    # Avoid duplicating it in /etc/default/limine when a shipped drop-in
+    # under /etc/limine-entry-tool.d/ already adds it, while still keeping
+    # /etc/kernel/cmdline complete.
+    dropin_cmdline = _limine_kernel_cmdline(_limine_combined_config_text(ctx, ""))
+    kernel_cmdline_val = cmdline
+    if CONSOLE_NO_ANSI_QUERY not in kernel_cmdline_val.split():
+        kernel_cmdline_val = f"{kernel_cmdline_val} {CONSOLE_NO_ANSI_QUERY}"
+    if CONSOLE_NO_ANSI_QUERY not in dropin_cmdline.split() and CONSOLE_NO_ANSI_QUERY not in cmdline.split():
         cmdline = f"{cmdline} {CONSOLE_NO_ANSI_QUERY}"
     # And the sd-encrypt spelling of cryptdevice=. Added on the
     # archinstall-derived path only, it would leave an encrypted install into
@@ -1882,6 +1906,7 @@ def _write_limine_defaults(
     # No VM scenario installs into free space.
     from .luks_tuning import with_cmdline_options
     cmdline = with_cmdline_options(cmdline)
+    kernel_cmdline_val = with_cmdline_options(kernel_cmdline_val)
     if "cryptdevice=" in cmdline and "rd.luks.name=" not in cmdline:
         raise RuntimeError(
             f"encrypted cmdline has cryptdevice= but no rd.luks.name=; the "
@@ -1902,7 +1927,7 @@ def _write_limine_defaults(
 
     kernel_cmdline = ctx.target / "etc" / "kernel" / "cmdline"
     kernel_cmdline.parent.mkdir(parents=True, exist_ok=True)
-    kernel_cmdline.write_text(cmdline + "\n")
+    kernel_cmdline.write_text(kernel_cmdline_val + "\n")
 
     if platform.machine() == "aarch64":
         # arm64 firmware commonly publishes an ACPI serial console (SPCR), which
@@ -2319,6 +2344,34 @@ def _is_limine_entry_for(entry: str, guid: str, loader: str) -> bool:
     )
 
 
+def _entry_partition_guid(entry: str) -> str:
+    """The GPT partition GUID named by a `efibootmgr --verbose` entry, lower
+    case, or "" if the entry has no GPT HD(...) device path."""
+    _, _, path = entry.lower().partition("\t")
+    match = re.search(r"hd\(\d+,gpt,([0-9a-f-]+),", path)
+    return match.group(1) if match else ""
+
+
+def _existing_partition_guids() -> set[str]:
+    """Every GPT partition GUID currently present on any disk, lower case."""
+    res = capture(["lsblk", "-nlo", "PARTUUID"])
+    if res.returncode != 0:
+        return set()
+    return {line.strip().lower() for line in res.stdout.splitlines() if line.strip()}
+
+
+def _is_stale_limine_entry(entry: str, live_guids: set[str], current_esp: str) -> bool:
+    """Whether an entry is a "Limine" boot entry pointing to a GPT partition
+    that no longer exists on any attached disk."""
+    if not live_guids:
+        return False
+    label, _, _ = entry.lower().partition("\t")
+    if label.strip() != "limine":
+        return False
+    guid = _entry_partition_guid(entry)
+    return bool(guid) and guid != current_esp and guid not in live_guids
+
+
 def _partition_guid(disk: Path, part: int) -> str:
     """The GPT partition GUID of partition `part` on `disk`, lower case, as
     efibootmgr prints it in a boot entry's device path; "" if unknown."""
@@ -2433,10 +2486,30 @@ def _prepare_target_setup(ctx: InstallContext) -> None:
     ctx.state["target_setup_prepared"] = True
 
 
+def _format_target_time(ctx: InstallContext, epoch: int) -> str:
+    """Format an epoch timestamp in the target system's timezone when known,
+    so the orchestrator's setup header matches the timestamps logged inside
+    the chroot instead of jumping by the UTC offset."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    tz_name = None
+    handler = ctx.state.get("arch_config_handler")
+    if handler is not None and getattr(handler, "config", None) is not None:
+        tz_name = getattr(handler.config, "timezone", None)
+    if tz_name:
+        try:
+            return datetime.fromtimestamp(epoch, tz=ZoneInfo(tz_name)).strftime("%Y-%m-%d %H:%M:%S")
+        except ZoneInfoNotFoundError:
+            pass
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(epoch))
+
+
 def _ensure_finalizer_log_started(ctx: InstallContext) -> tuple[str, int]:
     if "omarchy_start_time" not in ctx.state:
-        ctx.state["omarchy_start_epoch"] = int(time.time())
-        ctx.state["omarchy_start_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        epoch = int(time.time())
+        ctx.state["omarchy_start_epoch"] = epoch
+        ctx.state["omarchy_start_time"] = _format_target_time(ctx, epoch)
 
     ctx.log_path.parent.mkdir(parents=True, exist_ok=True)
     ctx.log_path.touch(exist_ok=True)
@@ -2478,7 +2551,12 @@ def _target_user_env(ctx: InstallContext, user: str) -> list[str]:
 _OMARCHY_SCRIPT_LINE = re.compile(rb"^\[[0-9: -]+\] (Starting|Completed|Failed): (\S+)")
 
 
-def _run_timing_scripts(cmd: list[str]) -> None:
+# Per-thread output buffer used by parallel workers (e.g. finalize_boot_and_user)
+# so chroot setup logs don't interleave on stdout while still timing lines live.
+_THREAD_LOG_BUFFER = threading.local()
+
+
+def _run_timing_scripts(cmd: list[str], *, log_buffer: list[bytes] | None = None) -> None:
     """Run cmd with its output passed through line by line, and after each
     Omarchy install script it runs, add a [step] line with its duration in
     microseconds.
@@ -2487,19 +2565,26 @@ def _run_timing_scripts(cmd: list[str]) -> None:
     for a phase that runs about 50 scripts in 3 s. It prints them unbuffered as
     each script starts and ends, so the time they arrive here is the script's
     own. The output goes where it went before, stderr folded into stdout as
-    the dashboard already merges them.
+    the dashboard already merges them. When log_buffer (or the current thread's
+    buffer) is set, lines and their live-measured [step] lines are collected
+    there so a parallel worker does not interleave with another thread's stdout.
 
     An interrupt or a failed write stops and reaps the child before it
     propagates, as subprocess.run does: the caller unmounts the log and tears
     the target down next, which must not race a setup still running."""
+    if log_buffer is None:
+        log_buffer = getattr(_THREAD_LOG_BUFFER, "chunks", None)
     out = sys.stdout.buffer
     started: dict[bytes, float] = {}
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as proc:
         try:
             for line in proc.stdout:
                 now = time.monotonic()
-                out.write(line)
-                out.flush()
+                if log_buffer is not None:
+                    log_buffer.append(line)
+                else:
+                    out.write(line)
+                    out.flush()
                 match = _OMARCHY_SCRIPT_LINE.match(line)
                 if not match:
                     continue
@@ -2508,7 +2593,11 @@ def _run_timing_scripts(cmd: list[str]) -> None:
                     started[script] = now
                 elif script in started:
                     name = script.decode(errors="replace").removeprefix("/usr/share/omarchy/install/")
-                    info(f"[step] {name}: {now - started.pop(script):.6f}s")
+                    step_msg = f"[step] {name}: {now - started.pop(script):.6f}s"
+                    if log_buffer is not None:
+                        log_buffer.append(f"\n    {step_msg}\n".encode())
+                    else:
+                        info(step_msg)
         except BaseException:
             proc.kill()
             proc.wait()
@@ -2559,6 +2648,7 @@ def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str 
         # declarations; the first real use of a tool installs it later, with a
         # network. MISE_OFFLINE blocks every HTTP request.
         "MISE_OFFLINE=1",
+        "MISE_LOG_LEVEL=error",
     ]
     if _install_debug_enabled():
         env_extras.append("OMARCHY_INSTALL_DEBUG=1")
@@ -3252,15 +3342,27 @@ def finalize_boot_and_user(ctx: InstallContext) -> None:
 
     from concurrent.futures import ThreadPoolExecutor
 
+    user_log: list[bytes] = []
+
+    def _run_user_buffered() -> None:
+        _THREAD_LOG_BUFFER.chunks = user_log
+        try:
+            run_chroot_finalizer(ctx, private_mounts=True)
+        finally:
+            _THREAD_LOG_BUFFER.chunks = None
+
+    errors: list[BaseException] = []
     with ThreadPoolExecutor(max_workers=2) as pool:
         boot = pool.submit(finalize_limine_boot, ctx)
-        user = pool.submit(run_chroot_finalizer, ctx, private_mounts=True)
-        errors: list[BaseException] = []
+        user = pool.submit(_run_user_buffered)
         for future in (boot, user):
             try:
                 future.result()
             except BaseException as exc:  # noqa: BLE001 - re-raised below
                 errors.append(exc)
+    if user_log:
+        sys.stdout.buffer.writelines(user_log)
+        sys.stdout.buffer.flush()
     if errors:
         raise errors[0]
 

@@ -82,6 +82,23 @@ class EncryptedCmdlineTest(unittest.TestCase):
                 self.write_defaults(ENCRYPTED)
         self.assertIn("no rd.luks.name=", str(refused.exception))
 
+    def test_console_no_ansi_query_not_duplicated_when_dropin_sets_it(self):
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (tmp / "default.conf").write_text('ESP_PATH="/boot"\nKERNEL_CMDLINE[default]+="@@CMDLINE@@"\n')
+        (tmp / "limine.conf").write_text("timeout: 3\n")
+        target = tmp / "target"
+        dropin = target / "etc" / "limine-entry-tool.d" / "omarchy-defaults.conf"
+        dropin.parent.mkdir(parents=True)
+        dropin.write_text(f'KERNEL_CMDLINE[default]+=" {phases_impl.CONSOLE_NO_ANSI_QUERY}"\n')
+        ctx = types.SimpleNamespace(target=target)
+        firmware = types.SimpleNamespace(has_uefi=lambda: True)
+        with mock.patch.object(phases_impl, "_limine_template", lambda _ctx, name: tmp / name), \
+             mock.patch.object(phases_impl, "arch", firmware), \
+             mock.patch.object(phases_impl, "info", lambda *_: None):
+            phases_impl._write_limine_defaults(ctx, ENCRYPTED, esp_mount="/boot")
+        self.assertNotIn(phases_impl.CONSOLE_NO_ANSI_QUERY, (target / "etc" / "default" / "limine").read_text())
+        self.assertIn(phases_impl.CONSOLE_NO_ANSI_QUERY, (target / "etc" / "kernel" / "cmdline").read_text())
+
 
 if __name__ == "__main__":
     unittest.main()

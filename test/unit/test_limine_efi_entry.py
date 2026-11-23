@@ -106,13 +106,18 @@ if os.environ.get("FAKE_NON_UTF8"):
 
 FAKE_LSBLK = r'''#!/usr/bin/env python3
 import json, os, sys
+guids = json.loads(os.environ["FAKE_GUIDS"])
 dev = sys.argv[-1]
-for key, guid in json.loads(os.environ["FAKE_GUIDS"]).items():
-    disk, part = key.rsplit(":", 1)
-    if "PARTN,PARTUUID" in sys.argv and disk == dev:
-        print(part, guid)
-    elif "PARTUUID" in sys.argv and dev == f"{disk}p{part}":
+if dev == "PARTUUID":
+    for guid in guids.values():
         print(guid)
+else:
+    for key, guid in guids.items():
+        disk, part = key.rsplit(":", 1)
+        if "PARTN,PARTUUID" in sys.argv and disk == dev:
+            print(part, guid)
+        elif "PARTUUID" in sys.argv and dev == f"{disk}p{part}":
+            print(guid)
 '''
 
 FAKE_FINDMNT = r'''#!/usr/bin/env python3
@@ -434,6 +439,31 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
         self.assertEqual(self.writes(), ["--create"])
         self.assertEqual(len(warnings), 1)
         self.assertIn("No space left on device", warnings[0])
+
+    def test_stale_limine_entries_for_wiped_partitions_are_pruned(self):
+        # A previous install on a wiped disk left a "Limine" entry pointing at
+        # a GPT PARTUUID that no longer exists anywhere. Pruning it before
+        # --create frees the slot (even when NVRAM was full) and leaves live
+        # installs and non-Limine entries untouched.
+        stale = "11111111-2222-3333-4444-555555555555"
+        self.nvram_with(
+            {
+                "0000": self.entry("Windows Boot Manager", WINDOWS),
+                "0002": self.entry("Omarchy", stale, loader="\\EFI\\Linux\\omarchy_linux.efi"),
+                "0003": self.entry("Limine", stale),
+                "0004": self.entry("Limine", OTHER),
+            },
+            ["0003", "0004", "0000", "0002"],
+        )
+        with mock.patch.dict(os.environ, {"FAKE_SLOTS": "4"}):
+            nvram = self.register()
+        self.assertIn("0000", nvram["entries"])
+        self.assertIn("0002", nvram["entries"])
+        self.assertIn("0004", nvram["entries"])
+        ours = next(num for num, (label, dp) in nvram["entries"].items() if label == "Limine" and OURS in dp)
+        self.assertNotIn(stale, str(nvram["entries"][ours]))
+        self.assertEqual(nvram["order"], [ours, "0004", "0000", "0002"])
+        self.assertEqual(nvram.get("next"), ours)
 
 
     def test_boot_check_does_not_count_another_installs_entry(self):

@@ -62,6 +62,18 @@ class RunTimingScriptsTest(unittest.TestCase):
         self.assertIn("stderr line\n", self.output)
         self.assertEqual(self.output.count("Starting:"), 3)
 
+    def test_buffered_run_collects_output_and_steps_without_writing_stdout(self):
+        out = io.BytesIO()
+        buf = []
+        stdout = types.SimpleNamespace(buffer=out)
+        with mock.patch.object(phases_impl.sys, "stdout", stdout):
+            phases_impl._run_timing_scripts(["bash", "-c", f"EXIT=0; {FINALIZER}"], log_buffer=buf)
+        self.assertEqual(out.getvalue(), b"")
+        combined = b"".join(buf).decode()
+        self.assertIn("pacman output inside the script\n", combined)
+        self.assertIn("[step] config/fast.sh:", combined)
+        self.assertIn("[step] hardware/slow.sh:", combined)
+
     def test_a_failing_finalizer_raises(self):
         with self.assertRaises(subprocess.CalledProcessError) as caught:
             self.run_finalizer(exit_code=3)

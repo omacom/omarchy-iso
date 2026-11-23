@@ -1386,16 +1386,23 @@ def _start_luks_keyslot_enroll(ctx: InstallContext) -> None:
 
 def _join_luks_keyslot_enroll(ctx: InstallContext, *, raise_on_error: bool = True) -> None:
     state = getattr(ctx, "state", None)
-    entries = state.pop("luks_deferred_keyslots", None) if state else None
+    entries = state.get("luks_deferred_keyslots") if state else None
     if not entries:
         return
     with _time_step("STEP.join_luks_keyslot"):
         errors: list[Exception] = []
-        for entry in entries:
-            try:
-                entry.join(raise_on_error=raise_on_error)
-            except Exception as exc:  # noqa: BLE001 - finish cleaning up every entry
-                errors.append(exc)
+        try:
+            for entry in entries:
+                try:
+                    entry.join(raise_on_error=raise_on_error)
+                except Exception as exc:  # noqa: BLE001 - finish cleaning up every entry
+                    errors.append(exc)
+        except BaseException:
+            for entry in entries:
+                entry.abort()
+            raise
+        finally:
+            state.pop("luks_deferred_keyslots", None)
         if errors and raise_on_error:
             raise errors[0]
 

@@ -507,5 +507,39 @@ class DeferredArgon2Keyslot(unittest.TestCase):
                 self.assertFalse(vk.exists())
                 self.assertFalse(deferred[0].temp_keyfile.exists())
 
+    def test_real_cryptsetup_deferred_format_enroll_and_unlock(self):
+        import shutil
+        if not shutil.which('cryptsetup'):
+            self.skipTest('cryptsetup not installed')
+        image = self.directory / 'deferred.img'
+        with image.open('wb') as stream:
+            stream.truncate(32 * 1024 * 1024)
+        vk = self.directory / 'vk'
+        tk = self.directory / 'tk'
+        vk.write_bytes(os.urandom(64))
+        tk.write_bytes(os.urandom(32))
+        vk.chmod(0o600)
+        tk.chmod(0o600)
+        command = COMMAND[:-1] + [str(image)]
+        with mock.patch.object(luks, 'cached_options', return_value=[
+            '--pbkdf-force-iterations', '4', '--pbkdf-memory', '65536', '--pbkdf-parallel', '2',
+        ]):
+            split = luks.deferred_format_command(command, vk, tk)
+        self.assertIsNotNone(split)
+        fast_cmd, enroll_cmd, kill_cmd = split
+        subprocess.run(fast_cmd, check=True, capture_output=True)
+        entry = luks.DeferredKeyslot(str(image), vk, tk, enroll_cmd, kill_cmd, b'test-passphrase')
+        entry.start()
+        entry.join()
+        self.assertFalse(vk.exists() or tk.exists())
+        dump = json.loads(subprocess.check_output(
+            ['cryptsetup', 'luksDump', '--dump-json-metadata', str(image)]))
+        self.assertEqual(list(dump['keyslots'].keys()), ['0'])
+        kdf = dump['keyslots']['0']['kdf']
+        self.assertEqual((kdf['type'], kdf['time'], kdf['memory'], kdf['cpus']), ('argon2id', 4, 65536, 2))
+        subprocess.run(
+            ['cryptsetup', 'open', '--test-passphrase', str(image)],
+            input=b'test-passphrase', check=True, capture_output=True)
+
 
 if __name__ == '__main__': unittest.main()

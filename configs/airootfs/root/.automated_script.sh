@@ -152,10 +152,12 @@ if [[ -f /usr/share/omarchy-iso/oem-install ]]; then
 elif [[ ${OMARCHY_KMSCON:-} == 1 ]]; then
   # A rerun from the shell an abort left: the first run's mark that it ended
   # would stand for this one too, and a kmscon that died under it would pass
-  # for an installer that finished. This run leaves its own.
+  # for an installer that finished. This run leaves its own, when it ends by
+  # itself: kmscon dying hangs it up, and that is no ending to record.
   if [[ -n ${OMARCHY_KMSCON_SHELL:-} && -n ${OMARCHY_KMSCON_ENDED:-} ]]; then
     rm -f "$OMARCHY_KMSCON_ENDED"
     trap 'printf "%s\n" "$?" >"$OMARCHY_KMSCON_ENDED"' EXIT
+    trap 'trap - EXIT HUP TERM; kill -HUP $$' HUP TERM
   fi
   # The tty1 run already looked for cidata.
   ./configurator && status=0 || status=$?

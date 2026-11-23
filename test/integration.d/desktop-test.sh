@@ -286,7 +286,7 @@ shortcut_smoke_phase() {
   local name chord namespace apps_namespace=omarchy-menu
   # Super+Alt+Space opens the dock's app picker since omacom/omarchy#15263
   # and the menu before it. Expect whichever the installed Omarchy binds.
-  if ssh_session "grep -q 'omarchy.dock apps' /usr/share/omarchy/default/hypr/bindings/utilities.lua"; then
+  if ssh_session "grep -q 'omarchy\.dock[ .]apps' /usr/share/omarchy/default/hypr/bindings/utilities.lua"; then
     apps_namespace=omarchy-dock-apps
   fi
   local shortcuts="menu|meta_l-spc|omarchy-menu

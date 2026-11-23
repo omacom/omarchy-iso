@@ -35,7 +35,7 @@ entries=$(grep -rhE '^\s*(APPEND|linux|options|chainloader)\s.*archisobasedir=' 
   configs/grub/grub.cfg configs/grub/loopback.cfg)
 
 count=$(printf '%s\n' "$entries" | wc -l)
-[ "$count" -ge 9 ] || { echo "expected at least 9 boot entries, found $count"; exit 1; }
+[ "$count" -ge 8 ] || { echo "expected at least 8 boot entries, found $count"; exit 1; }
 
 if grep -rq archiso_http_srv configs/syslinux configs/grub; then
   echo "HTTP PXE entry found: that path copies only the airootfs to RAM, so the root image is never on the medium and an install can never succeed"

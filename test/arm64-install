@@ -174,7 +174,15 @@ check() { # description, then a command run in the guest that must succeed
 {
   check "the system reaches running or degraded" \
     's=$(timeout 180 systemctl is-system-running --wait); [ "$s" = running ] || [ "$s" = degraded ]'
-  check "no unit failed" '[ -z "$(systemctl --failed --no-legend)" ]'
+  # The N1x run fakes the laptop's PCI IDs in a VM with no GPU behind them, so
+  # nvidia-container-toolkit's CDI refresh, which asks nvidia-smi for the GPU,
+  # can only fail there: it retries until systemd's start limit. On the
+  # hardware it writes the CDI spec Podman hands the GPU to containers with.
+  failed_units='systemctl --failed --no-legend --plain'
+  if [[ ${PLATFORM:-} == aarch64-n1x ]]; then
+    failed_units+=" | grep -v '^nvidia-cdi-refresh\\.'"
+  fi
+  check "no unit failed" "[ -z \"\$($failed_units)\" ]"
   check "the desktop is up: Hyprland is running" 'for i in $(seq 1 60); do pgrep -x Hyprland && exit 0; sleep 1; done; exit 1'
   check "it runs the kernel it was told to install" \
     "pacman -Qo /usr/lib/modules/\$(uname -r) | grep -q ' ${KERNEL:-linux-omarchy} '"
@@ -201,6 +209,12 @@ check() { # description, then a command run in the guest that must succeed
   fi
 } | tee "$out/checks"
 failures=$(grep -c '^not ok' "$out/checks" || true)
+# A failed unit is named nowhere the run uploads, so print each one, with its
+# last log lines, into the job's own log.
+if grep -q '^not ok - no unit failed' "$out/checks"; then
+  guest "echo $GUEST_PASSWORD | sudo -S -p '' systemctl status --state=failed --no-pager --lines=30" 2>&1 |
+    sed 's/^/arm64-install: failed unit: /' >&2 || true
+fi
 guest 'uname -r; cat /proc/cmdline; systemctl --failed --no-legend; grep -E "^Server" /etc/pacman.d/mirrorlist' >"$out/facts" 2>&1 || true
 # What a nightly says it published: the Omarchy package, then the kernel.
 guest 'pacman -Q omarchy-dev omarchy 2>/dev/null; uname -r' >"$out/packages.txt" 2>/dev/null || true

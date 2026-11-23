@@ -16,8 +16,8 @@ Phase ordering (full-disk and protected/pre-mounted):
                              root image write, per-machine
                              package delta, Limine setup, useradd, fstab; the
                              per-machine pacman keyring starts as a transient
-                             systemd unit after the last pacstrap
-    configure_hibernation  → root-owned swap/resume drop-ins
+                             systemd unit before Limine/useradd and joins
+                             before any later pacstrap or the factory snapshot
     run_system_finalizer   → arch-chroot root omarchy-apply-system, including Snapper
     finalize_limine_boot   → final Limine config/UKI build after hardware drop-ins
     run_chroot_finalizer   → arch-chroot -u user omarchy-provision-user
@@ -42,9 +42,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -621,10 +623,13 @@ def arch_install_system(ctx: InstallContext) -> None:
         with _time_step("STEP.perform_filesystem_operations"):
             # The btrfs archinstall makes here is overwritten by the root
             # image a moment later, so it need not TRIM the device first.
-            arch.perform_filesystem_operations(
-                config,
-                throwaway_root_fs=True,
-            )
+            with arch.defer_argon2_keyslot() as deferred_keyslots:
+                arch.perform_filesystem_operations(
+                    config,
+                    throwaway_root_fs=True,
+                )
+            if deferred_keyslots:
+                ctx.state["luks_deferred_keyslots"] = deferred_keyslots
 
     info("› opening installer context")
     with arch.open_installer(config, ctx.target, silent=True) as installer:
@@ -637,6 +642,11 @@ def arch_install_system(ctx: InstallContext) -> None:
 
         with _time_step("STEP.install_root_image"):
             _install_root_image(ctx)
+        # Start Argon2id slot-0 enrollment now, after the 8-thread image write
+        # finishes, so it overlaps single-threaded setup without contending for
+        # CPU or memory bandwidth with omarchy-image-write.
+        _start_luks_keyslot_enroll(ctx)
+        _apply_platform_layer(ctx)
 
         if not pre_mounted and arch.is_encrypted(config):
             installer.generate_key_files()
@@ -678,6 +688,9 @@ def arch_install_system(ctx: InstallContext) -> None:
             if platform_packages:
                 with _time_step(f"STEP.platform_packages ({_base_package_file().name})"):
                     installer.add_additional_packages(platform_packages)
+            elif _base_package_file().name != "omarchy-base.packages":
+                # The platform layer installed the set; still name it in the log.
+                info(f"› {_base_package_file().name}: all installed")
 
             with _time_step("STEP.configure_keyboard"):
                 if not configure_keyboard(
@@ -696,38 +709,46 @@ def arch_install_system(ctx: InstallContext) -> None:
                     arch.setup_zram_swap(installer)
                     _drop_archinstall_zram_conf(ctx)
 
+            # Start initializing the target's per-machine pacman keyring now so
+            # it overlaps Limine setup and user creation. setup_zram_swap can
+            # pacstrap zram-generator if missing, so this starts after it; any
+            # later pacstrap (missing app firmware or staged tailscale) joins
+            # the unit first so two pacman-key runs never race on gnupg.
+            _start_target_keyring_init(ctx)
+
             with _time_step("STEP.configure_limine_boot (mkinitcpio + ukify + limine-install)"):
                 _configure_limine_boot(ctx, installer, config)
 
             info("› creating user (with /etc/skel populated)")
             if config.auth_config and config.auth_config.users:
                 with _time_step("STEP.create_users"):
-                    installer.create_users(config.auth_config.users)
+                    _create_users_with_reflink_skel(ctx, installer, config.auth_config.users)
 
             if config.app_config:
                 # The image carries the PipeWire packages; this adds the audio
                 # firmware archinstall's hardware detection asks for and wires
                 # the per-user PipeWire units.
                 info("› applying archinstall application selections")
-                arch.install_applications(installer, config)
+                arch.install_applications(
+                    installer,
+                    config,
+                    before_strap=lambda: _join_target_keyring_init(ctx),
+                )
 
             _write_language_marker(ctx)
+            _write_region_marker(ctx)
 
             # Tailscale is bundled in the offline mirror but only installed
             # when an autoinstall drive staged an auth key; must happen here,
             # while the mirror is still bind-mounted, not in the phase that
             # configures the join.
             if ctx.tailscale_authkey_path is not None:
+                _join_target_keyring_init(ctx)
                 info("› installing tailscale (auth key staged for first boot)")
                 installer.add_additional_packages(["tailscale"])
         finally:
             _unmask_mkinitcpio_pacman_hooks(ctx)
             _unmount_offline_package_cache(ctx)
-
-        # After the last pacstrap: each one runs its own pacman-key --init on
-        # the target's gnupg dir. Runs on while the phases below configure the
-        # target; create_factory_snapshot joins it.
-        _start_target_keyring_init(ctx)
 
         # Standard arch finishers.
         if config.timezone:
@@ -992,7 +1013,8 @@ def _medium_bytes_read() -> int | None:
         return None
 
 
-def _write_root_image_frames(image: Path, device: str) -> bool:
+def _write_root_image_frames(image: Path, device: str,
+                              on_progress: Callable[[float], None] | None = None) -> bool:
     """Write the image with omarchy-image-write (builder/omarchy-image-write.c):
     the ISO packs it as independent 256 KiB zstd frames with a seek table,
     which N threads decode and pwrite with O_DIRECT, so the drive sees N
@@ -1003,16 +1025,33 @@ def _write_root_image_frames(image: Path, device: str) -> bool:
     (in use, too small) or the write failed partway."""
     if not IMAGE_WRITE.is_file():
         return False
+    # The tool reports the frames it has taken to a file while it writes,
+    # which goes on to the progress bar: from a slow USB stick the write is
+    # minutes of the install.
+    progress = Path(tempfile.mkdtemp(prefix="omarchy-image-write-")) / "progress"
+    env = {**os.environ, "OMARCHY_IMAGE_WRITE_PROGRESS": str(progress)}
     with _time_step("F1.image_write (parallel frames, O_DIRECT)"):
-        proc = subprocess.run([str(IMAGE_WRITE), "write", str(image), device],
-                              stderr=subprocess.PIPE, text=True, check=False)
-    for line in proc.stderr.splitlines():
+        proc = subprocess.Popen([str(IMAGE_WRITE), "write", str(image), device],
+                                stderr=subprocess.PIPE, text=True, env=env)
+        while True:
+            try:
+                _, stderr = proc.communicate(timeout=0.5)
+                break
+            except subprocess.TimeoutExpired:
+                if on_progress:
+                    try:
+                        done, total = (int(n) for n in progress.read_text().split())
+                        on_progress(done / total)
+                    except (OSError, ValueError, ZeroDivisionError):
+                        pass  # not written yet, or caught between two samples
+    shutil.rmtree(progress.parent, ignore_errors=True)
+    for line in stderr.splitlines():
         info(f"› {line}")
     if proc.returncode == 2:
         info("› image-write refused the image; writing it through zstdcat | dd")
         return False
     if proc.returncode != 0:
-        raise subprocess.CalledProcessError(proc.returncode, proc.args, stderr=proc.stderr)
+        raise subprocess.CalledProcessError(proc.returncode, proc.args, stderr=stderr)
     return True
 
 
@@ -1085,7 +1124,10 @@ def _place_root_image(ctx: InstallContext) -> None:
     # the page cache: near zero when the verify left it all cached, up to the
     # whole image on a machine whose RAM could not hold it.
     medium_before = _medium_bytes_read()
-    if not _write_root_image_frames(raw_image, device):
+    # The rest of the placement after the write takes moments; it gets the
+    # last few percent.
+    if not _write_root_image_frames(raw_image, device,
+                                    lambda done: _write_phase_progress(ctx, 0.95 * done)):
         _write_root_image_pipe(raw_image, device)
     medium_after = _medium_bytes_read()
     if medium_before is not None and medium_after is not None:
@@ -1176,17 +1218,64 @@ def _install_root_image(ctx: InstallContext) -> None:
     _finish_root_image(ctx)
 
 
+def _platform_layer(directory: Path = ROOT_IMAGE_DIR) -> Path | None:
+    """The layer build-root-image.sh packed for this machine's platform next to
+    the root image (the N1x's NVIDIA stack), or None. Listed in the image's
+    sha256 file, so omarchy-root-image-verify checked it with the image."""
+    detected = hw_platform()
+    if not detected:
+        return None
+    layer = directory / f"omarchy-layer.{detected}.tar.zst"
+    return layer if layer.is_file() else None
+
+
+def _apply_platform_layer(ctx: InstallContext, layer: Path | None = None) -> None:
+    """Extract the platform layer over the freshly written image: the packages
+    the platform's list adds, their pacman database entries, and the module
+    index, linker cache and system users their hooks left, all made against
+    this same image at build time. _platform_delta_packages then finds nothing
+    missing, so no pacstrap runs: on an N1x that pacstrap took 22.6s, most of
+    it depmod and ldconfig reading the new disk cold.
+
+    Right after the image write, before anything else changes the target, as
+    the layer's /etc/passwd and friends are the image's plus the packages'
+    system users."""
+    layer = layer or _platform_layer()
+    if layer is None:
+        return
+    info(f"› extracting platform layer ({layer.stat().st_size >> 20} MiB from {layer.name})")
+    with _time_step(f"STEP.platform_layer ({layer.name})"):
+        subprocess.run(
+            ["tar", "--zstd", "-xpf", str(layer), "-C", str(ctx.target),
+             "--numeric-owner", "--acls", "--xattrs", "--xattrs-include=*",
+             "--keep-directory-symlink"],
+            check=True,
+        )
+
+
 def _finish_root_image(ctx: InstallContext) -> None:
     """What the written image owes the rest of the install: it carries
-    the packages the phases assume, and the target has a machine-id (the
+    the packages the phases assume, the target has a machine-id (the
     image deliberately ships an empty one) before limine-entry-tool and the
-    factory snapshot read it."""
+    factory snapshot read it, and /var/log/journal is pre-created with NOCOW
+    so first-boot journald writes system.journal without btrfs CoW."""
     target = ctx.target
     installed = arch.target_package_names(target)
     missing = [pkg for pkg in _root_image_required_packages() if pkg not in installed]
     if missing:
         raise RuntimeError(f"root image lacks required packages: {', '.join(missing)}")
     subprocess.run(["systemd-machine-id-setup", f"--root={target}"], check=True, capture_output=True)
+    # Arch's systemd defaults to Storage=persistent, so systemd-journal-flush
+    # creates /var/log/journal and system.journal before systemd-tmpfiles-setup
+    # applies journal-nocow.conf. Pre-creating the empty directory with +C lets
+    # initial journal files inherit NOCOW while tmpfiles still owns permissions
+    # and ACLs on first boot.
+    journal_dir = target / "var" / "log" / "journal"
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(["chattr", "+C", str(journal_dir)], check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
+        info(f"› could not set NOCOW on {journal_dir}: {detail}")
 
 
 # Transient systemd unit that initialises the target's pacman keyring.
@@ -1208,12 +1297,15 @@ def _start_target_keyring_init(ctx: InstallContext) -> None:
     --gpgdir and --populate-from address the target directly, so no API
     mounts are held.
 
-    Started after the last pacstrap (each runs its own --init on this dir)
-    and joined by create_factory_snapshot: on x86_64 nothing in between
-    reads the keyring (the offline repo is SigLevel = Never) or writes it,
-    and the snapshot must not capture it half-written. On aarch64 the
-    runtime's post-install inits and populates it itself, so
-    run_system_finalizer joins it first. A unit rather than a plain
+    Started after setup_zram_swap (before Limine setup and user creation) and
+    joined before any later pacstrap (missing app firmware or staged tailscale)
+    or by create_factory_snapshot: on x86_64 nothing in between reads the
+    keyring (the offline repo is SigLevel = Never) or writes it, and the
+    snapshot must not capture it half-written. Where the runtime's
+    post-install inits and populates it itself, no unit starts: the
+    finalizer had to wait for it before doing the same work again. Apple
+    Silicon, whose image brings its keyrings, keeps it, and
+    run_system_finalizer joins it there first. A unit rather than a plain
     child process: pacman-key leaves a gpg-agent and dirmngr behind, which
     systemd kills with the rest of the unit's cgroup the moment pacman-key
     exits (sockets under the target's gnupg dir would otherwise block the
@@ -1222,6 +1314,8 @@ def _start_target_keyring_init(ctx: InstallContext) -> None:
     is in the journal whatever happens to the orchestrator. --wait --pipe
     give a child to join with the unit's exit status and output.
     """
+    if _runtime_populates_target_keyring():
+        return
     gpgdir = shlex.quote(str(ctx.target / "etc" / "pacman.d" / "gnupg"))
     keyrings = shlex.quote(str(ctx.target / "usr" / "share" / "pacman" / "keyrings"))
     script = (
@@ -1241,6 +1335,13 @@ def _start_target_keyring_init(ctx: InstallContext) -> None:
     )
 
 
+def _runtime_populates_target_keyring() -> bool:
+    """Whether omarchy-apply-system inits and populates the target keyring
+    itself (omarchy's install/post-install/pacman.sh): every aarch64 platform
+    but Apple Silicon."""
+    return platform.machine() == "aarch64" and hw_platform() != "aarch64-apple"
+
+
 def _target_keyrings() -> list[str]:
     """The keyrings the target's pacman must trust. Arch Linux ARM signs every
     package in its repositories, archlinux-keyring included, with its own build
@@ -1256,7 +1357,8 @@ def _join_target_keyring_init(ctx: InstallContext, *, raise_on_error: bool = Tru
     proc = ctx.state.pop("target_keyring_proc", None)
     if proc is None:
         return
-    out, _ = proc.communicate()
+    with _time_step("STEP.join_target_keyring"):
+        out, _ = proc.communicate()
     if raise_on_error and proc.returncode != 0:
         raise RuntimeError(
             f"per-machine pacman keyring init failed (exit {proc.returncode}):\n"
@@ -1272,6 +1374,105 @@ def stop_target_keyring_init(ctx: InstallContext) -> None:
         return
     subprocess.run(["systemctl", "stop", TARGET_KEYRING_UNIT], check=False, capture_output=True)
     _join_target_keyring_init(ctx, raise_on_error=False)
+
+
+def _start_luks_keyslot_enroll(ctx: InstallContext) -> None:
+    state = getattr(ctx, "state", None)
+    if not state:
+        return
+    for entry in state.get("luks_deferred_keyslots") or ():
+        entry.start()
+
+
+def _join_luks_keyslot_enroll(ctx: InstallContext, *, raise_on_error: bool = True) -> None:
+    state = getattr(ctx, "state", None)
+    entries = state.get("luks_deferred_keyslots") if state else None
+    if not entries:
+        return
+    with _time_step("STEP.join_luks_keyslot"):
+        errors: list[Exception] = []
+        try:
+            for entry in entries:
+                try:
+                    entry.join(raise_on_error=raise_on_error)
+                except Exception as exc:  # noqa: BLE001 - finish cleaning up every entry
+                    errors.append(exc)
+        except BaseException:
+            for entry in entries:
+                entry.abort()
+            raise
+        finally:
+            state.pop("luks_deferred_keyslots", None)
+        if errors and raise_on_error:
+            raise errors[0]
+
+
+def stop_luks_keyslot_enroll(ctx: InstallContext) -> None:
+    """Exit path: terminate any in-flight LUKS keyslot thread and delete its
+    temporary key files from /run without masking the install's own error."""
+    state = getattr(ctx, "state", None)
+    entries = state.pop("luks_deferred_keyslots", None) if state else None
+    if not entries:
+        return
+    for entry in entries:
+        entry.abort()
+
+
+def _target_passwd_entry(target: Path, username: str) -> tuple[int, int, str] | None:
+    passwd = target / "etc" / "passwd"
+    if not passwd.is_file():
+        return None
+    for line in passwd.read_text().splitlines():
+        parts = line.split(":")
+        if len(parts) >= 6 and parts[0] == username:
+            return int(parts[2]), int(parts[3]), parts[5]
+    return None
+
+
+def _create_users_with_reflink_skel(ctx: InstallContext, installer, users) -> None:
+    """Create users with an empty skel and reflink-copy /etc/skel from the
+    host across btrfs subvolumes, avoiding useradd's byte-by-byte copy of
+    ~79 MiB / ~10k files."""
+    skel = ctx.target / "etc" / "skel"
+    if (os.environ.get("OMARCHY_LUKS_TUNING", "1") != "1"
+            or not skel.is_dir()
+            or _findmnt_value(ctx.target, "FSTYPE") != "btrfs"):
+        installer.create_users(users)
+        return
+
+    entries = list(skel.iterdir())
+    if not entries:
+        installer.create_users(users)
+        return
+
+    tmp_dir = ctx.target / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    empty_skel = Path(tempfile.mkdtemp(prefix="omarchy-empty-skel-", dir=tmp_dir))
+    try:
+        installer._omarchy_empty_skel = "/" + str(empty_skel.relative_to(ctx.target))
+        installer.create_users(users)
+    finally:
+        if hasattr(installer, "_omarchy_empty_skel"):
+            delattr(installer, "_omarchy_empty_skel")
+        shutil.rmtree(empty_skel, ignore_errors=True)
+
+    for user in users:
+        username = getattr(user, "username", str(user))
+        entry = _target_passwd_entry(ctx.target, username)
+        if entry is None:
+            continue
+        uid, gid, home_dir = entry
+        target_home = ctx.target / home_dir.lstrip("/")
+        if not target_home.is_dir():
+            continue
+        subprocess.run(
+            ["cp", "-a", "--reflink=auto", "--", *(str(p) for p in entries), str(target_home) + "/"],
+            check=True,
+        )
+        subprocess.run(
+            ["chown", "-hR", f"{uid}:{gid}", str(target_home)],
+            check=True,
+        )
 
 
 def _umount_tree(root: Path, attempts: int = 20) -> None:
@@ -1877,6 +2078,20 @@ def _write_language_marker(ctx: InstallContext) -> None:
     marker.chmod(0o644)
 
 
+def _write_region_marker(ctx: InstallContext, preset: Path = Path("/usr/share/omarchy-iso/preset.json")) -> None:
+    """A preset ISO (--preset) that names an Omarchy region, such as cn, hands
+    it to the target's /etc/omarchy/region, where the runtime's pacman
+    finalizer (omarchy-apply-pacman) puts that region's mirrors first. Every
+    other ISO writes nothing, which means global."""
+    region = json.loads(preset.read_text()).get("region") if preset.is_file() else None
+    if not region:
+        return
+    marker = ctx.target / "etc/omarchy/region"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(region + "\n")
+    marker.chmod(0o644)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Install intent helpers: normalize the Omarchy-specific part of the
 # configurator JSON so full-disk and pre-mounted installs feed the same boot
@@ -2136,27 +2351,6 @@ def _split_partition_device(part_dev: str) -> tuple[str, int]:
     if not part_num:
         raise RuntimeError(f"could not find partition number for {part_dev}")
     return f"/dev/{parent}", int(part_num)
-
-
-def configure_hibernation(ctx: InstallContext) -> None:
-    """Configure swap/resume in the target as root before user setup.
-
-    Hibernation is system boot configuration, not per-user setup. The final
-    Limine UKI build still happens later in finalize_limine_boot after this
-    writes the resume hook and kernel cmdline drop-in.
-    """
-    setup = ctx.target / "usr" / "bin" / "omarchy-hibernation-setup"
-    if not setup.exists():
-        _debug_log(ctx, "skipping hibernation: /usr/bin/omarchy-hibernation-setup is not installed")
-        return
-
-    subprocess.run([
-        "arch-chroot", str(ctx.target),
-        "env",
-        "OMARCHY_PATH=/usr/share/omarchy",
-        "OMARCHY_INSTALL_LOG_FILE=/var/log/omarchy-install.log",
-        "/usr/bin/omarchy-hibernation-setup", "--force", "--no-rebuild",
-    ], check=True)
 
 
 def _install_debug_enabled() -> bool:
@@ -2482,6 +2676,70 @@ def stage_provisioning_state(ctx: InstallContext) -> None:
     if _provision_install_encrypted(ctx):
         _stage_provisioning_luks_unlock(ctx, provisioning_dir)
 
+    _stage_oem_bundle(ctx)
+
+
+# An OEM's bundle, checked when the ISO was built (builder/oem-bundle.py). What
+# first-boot setup shows the owner goes to /etc/omarchy/oem, where the
+# runtime's install/provisioning/oem.sh reads it; the scripts run as root in
+# the new system. Both land before the factory snapshot, so a factory reset
+# returns to the machine as the OEM set it up, agreement included.
+OEM_TARGET_DIR = "etc/omarchy/oem"
+OEM_SETUP_FILES = ("oem.json", "logo.txt", "eula.txt")
+OEM_SCRIPTS_TARGET_DIR = "var/lib/omarchy/oem-setup"
+
+
+def _stage_oem_bundle(ctx: InstallContext) -> None:
+    if ctx.oem_dir is None or not (ctx.oem_dir / "oem.json").is_file():
+        return
+
+    runtime = ctx.target / "usr/share/omarchy/install/provisioning/oem.sh"
+    if not runtime.exists():
+        raise RuntimeError(
+            "this ISO carries an OEM's branding and agreement, but the installed Omarchy runtime "
+            "does not ship install/provisioning/oem.sh to show them at first boot. "
+            "Update the runtime package this ISO bundles."
+        )
+
+    info("› laying down the OEM's branding and agreement for first-boot setup")
+    oem_target = ctx.target / OEM_TARGET_DIR
+    # This bundle and nothing else: a logo or an agreement it does not have
+    # must not come from whatever was there.
+    shutil.rmtree(oem_target, ignore_errors=True)
+    oem_target.mkdir(parents=True)
+    oem_target.chmod(0o755)
+    for name in OEM_SETUP_FILES:
+        source = ctx.oem_dir / name
+        if source.is_file():
+            shutil.copyfile(source, oem_target / name)
+            (oem_target / name).chmod(0o644)
+
+
+def oem_scripts(ctx: InstallContext) -> list[Path]:
+    if ctx.oem_dir is None:
+        return []
+    return sorted(path for path in (ctx.oem_dir / "scripts").glob("*") if path.is_file())
+
+
+def run_oem_setup(ctx: InstallContext) -> None:
+    # A script may install packages, which reads the keyring the unit writes.
+    _join_target_keyring_init(ctx)
+
+    staged = ctx.target / OEM_SCRIPTS_TARGET_DIR
+    shutil.rmtree(staged, ignore_errors=True)
+    staged.mkdir(parents=True)
+    staged.chmod(0o700)
+    try:
+        for script in oem_scripts(ctx):
+            info(f"› OEM setup: {script.name}")
+            shutil.copyfile(script, staged / script.name)
+            try:
+                _run_target_setup_command(ctx, ["/bin/bash", f"/{OEM_SCRIPTS_TARGET_DIR}/{script.name}"])
+            except subprocess.CalledProcessError as exc:
+                raise RuntimeError(f"OEM setup script {script.name} exited with status {exc.returncode}") from exc
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
+
 
 # build-iso.sh bundles the build for the CPU the ISO runs on, and only for a
 # runtime whose setup unpacks it; with none bundled there is nothing to keep.
@@ -2571,6 +2829,20 @@ def _prebuilt_module_lines(target: Path) -> set[str]:
     return {line for line in recorded.read_text().splitlines() if line}
 
 
+def _n1x_prebuilt_uki(target: Path, arm_platform: str) -> Path | None:
+    """The image's N1x UKI, for an N1x whose hardware setup wrote exactly the
+    early-loading modules it was built with (build-root-image.sh records them):
+    the image's own and n1x.sh's, the NVIDIA stack and the I2C keyboard. An
+    N1x whose firmware keeps the GPU off, or that adds anything else, builds
+    its own, as every N1x did before."""
+    uki = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-n1x.efi"
+    recorded = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-n1x.modules"
+    if arm_platform != "n1x" or not uki.is_file() or not recorded.is_file():
+        return None
+    lines = {line for line in recorded.read_text().splitlines() if line}
+    return uki if _initramfs_module_lines(target) == lines else None
+
+
 def _keymap_of(vconsole: Path) -> str:
     """KEYMAP= from a vconsole.conf, or "" when unset or unreadable."""
     if not vconsole.is_file():
@@ -2593,7 +2865,8 @@ def _prebuilt_uki_keymap_stale(target: Path) -> str:
     UKI that is only copied. The LUKS passphrase prompt runs from that
     initramfs: leaving it stale is upstream omarchy#8196, where a passphrase
     enrolled under AZERTY cannot be typed at a QWERTY prompt and the owner is
-    locked out of a fresh install with no recovery but reinstalling.
+    locked out of a fresh install with no recovery but reinstalling. The
+    caller writes the choice into the UKI (uki_vconsole.py), or builds one.
 
     An image that records nothing is assumed to have built in "us", and that
     covers two cases:
@@ -2643,7 +2916,11 @@ def _drop_initramfs_modules_the_kernel_lacks(ctx: InstallContext) -> None:
     limine-mkinitcpio-hook then builds the unified kernel image but does not
     install it: Arch Linux ARM's linux-aarch64 has no thunderbolt module, and
     the machine was left with no kernel to boot. A drop-in that sorts last takes
-    the names this kernel lacks back out of MODULES.
+    the names some installed kernel lacks back out of MODULES, but only while
+    mkinitcpio builds for a kernel that lacks them: a T2 Mac carries linux-t2
+    and linux-omarchy, and t2bce_vhci, which the internal keyboard hangs off,
+    is only in linux-t2. Dropping it from every image left the LUKS prompt with
+    no keyboard.
     """
     conf_dir = ctx.target / "etc" / "mkinitcpio.conf.d"
     drop_in = conf_dir / INITRAMFS_MODULES_CONF
@@ -2669,14 +2946,19 @@ def _drop_initramfs_modules_the_kernel_lacks(ctx: InstallContext) -> None:
     if not missing:
         drop_in.unlink(missing_ok=True)
         return
-    info(f"› leaving out of the initramfs, not in this kernel: {' '.join(missing)}")
+    info(f"› leaving out of the initramfs of a kernel without them: {' '.join(missing)}")
     drop_in.write_text(
-        "# Written by the Omarchy installer. The installed kernel has no such\n"
-        "# modules, and mkinitcpio fails on a module it cannot find.\n"
+        "# Written by the Omarchy installer. Not every installed kernel has these\n"
+        "# modules, and mkinitcpio fails on a module it cannot find, so each is\n"
+        "# left out only of the image for a kernel that lacks it.\n"
         f"_omarchy_absent=({' '.join(missing)})\n"
         "_omarchy_kept=()\n"
         'for _omarchy_module in "${MODULES[@]}"; do\n'
-        '  [[ " ${_omarchy_absent[*]} " == *" $_omarchy_module "* ]] || _omarchy_kept+=("$_omarchy_module")\n'
+        '  if [[ " ${_omarchy_absent[*]} " == *" $_omarchy_module "* ]] &&\n'
+        '    ! modinfo -k "${KERNELVERSION:-$(uname -r)}" "$_omarchy_module" &>/dev/null; then\n'
+        "    continue\n"
+        "  fi\n"
+        '  _omarchy_kept+=("$_omarchy_module")\n'
         "done\n"
         'MODULES=("${_omarchy_kept[@]}")\n'
         "unset _omarchy_absent _omarchy_kept _omarchy_module\n"
@@ -2763,23 +3045,36 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     # builds them for everyone; the pre-built one stays the fast path for
     # every machine that adds nothing.
     added_modules = sorted(_initramfs_module_lines(ctx.target) - _prebuilt_module_lines(ctx.target))
+    # An N1x always adds the same ones, and the image carries a UKI built with
+    # them: it takes that one instead.
+    n1x_uki = _n1x_prebuilt_uki(ctx.target, _installed_arm_platform(ctx)) if prebuilt_uki.is_file() else None
+    if n1x_uki:
+        info("› N1x: using the image's N1x UKI, built with this machine's initramfs modules")
+        prebuilt_uki = n1x_uki
+        added_modules = []
     if prebuilt_uki.is_file() and added_modules:
         info(f"› hardware setup added initramfs modules ({'; '.join(added_modules)}); "
              "building the UKI on this machine instead of using the pre-built one")
 
-    # Same reasoning for the console keymap: the pre-built initramfs has the
-    # image's, and the LUKS prompt types with it.
+    # The console keymap is the image's too, and the LUKS prompt types with
+    # it. An image that reserved room for it takes this install's keyboard
+    # settings in place (uki_vconsole.py); one that did not is built here.
     stale_keymap = _prebuilt_uki_keymap_stale(ctx.target)
+    vconsole = ctx.target / "etc" / "vconsole.conf"
+    keymap_fits = False
     if prebuilt_uki.is_file() and stale_keymap:
-        info(f"› keyboard layout {stale_keymap} differs from the pre-built UKI's; "
-             "building the UKI on this machine so the LUKS prompt uses it")
+        from .uki_vconsole import vconsole_fits
+        keymap_fits = vconsole_fits(prebuilt_uki, vconsole)
+        if not keymap_fits:
+            info(f"› keyboard layout {stale_keymap} differs from the pre-built UKI's, which has no room for it; "
+                 "building the UKI on this machine so the LUKS prompt uses it")
     # And for an encrypted deferred install: its first boot unlocks with the
     # provisioning key, which only an initramfs built here carries.
     provisioning_key = _initramfs_carries_provisioning_key(ctx.target)
     if prebuilt_uki.is_file() and provisioning_key:
         info("› the first boot unlocks with the provisioning key; "
              "building the UKI on this machine so its initramfs carries it")
-    skip_prebuilt = bool(added_modules) or bool(stale_keymap) or provisioning_key
+    skip_prebuilt = bool(added_modules) or (bool(stale_keymap) and not keymap_fits) or provisioning_key
 
     # A selected kernel other than the image's boots first, as in omarchy's own
     # kernel migration. Written before any UKI is built so the entries sort by it.
@@ -2796,18 +3091,27 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     if prebuilt_uki.is_file() and not skip_prebuilt and not arch.has_uefi():
         info("› BIOS firmware; the pre-built UKI is UEFI-only, building the boot files on this machine")
 
-    # A board with a platform of its own boots by its hardware scripts' rules
-    # (the N1x: the console on the panel in every entry, a fallback UKI as the
-    # rescue entry; validate_boot checks them), which limine-mkinitcpio applies
-    # and a UKI built in the image cannot know. Every other machine, a generic
-    # aarch64 one included, takes the image's UKI.
-    if prebuilt_uki.is_file() and not skip_prebuilt and arch.has_uefi() and not _arm_platform_boot():
+    # A board with a platform of its own boots by its hardware scripts' rules,
+    # which limine-mkinitcpio applies and a UKI built in the image cannot know.
+    # The N1x's are its modules and its cmdline (the console on the panel, which
+    # validate_boot checks), and the N1x UKI carries the one while Limine's
+    # entry and the embedded cmdline carry the other. Every other machine, a
+    # generic aarch64 one included, takes the image's UKI.
+    if prebuilt_uki.is_file() and not skip_prebuilt and arch.has_uefi() and (n1x_uki or not _arm_platform_boot()):
         used_prebuilt_uki = True
         with _time_step("LIMINE.deploy_prebuilt_uki (copy from image)"):
             esp_uki.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(prebuilt_uki, esp_uki)
             info(f"› deployed pre-built UKI ({prebuilt_uki.stat().st_size >> 20} MiB)")
         # Before --add-uki: the Limine entry pins the UKI's BLAKE2B hash.
+        if stale_keymap:
+            with _time_step("LIMINE.embed_vconsole (keyboard layout into the pre-built UKI)"):
+                from .uki_vconsole import embed_vconsole
+                # It fit a moment ago, in the copy's source. A prompt in the
+                # wrong layout locks the owner out, so nothing boots without it.
+                if not embed_vconsole(esp_uki, vconsole):
+                    raise RuntimeError(f"could not write keyboard layout {stale_keymap} into {esp_uki}")
+                info(f"› UKI carries keyboard layout {stale_keymap} for the console and the LUKS prompt")
         with _time_step("LIMINE.embed_cmdline (pre-built UKI boots without a loader)"):
             from .uki_cmdline import embed_cmdline
             if embed_cmdline(esp_uki, cmdline):
@@ -2845,7 +3149,7 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
             )
 
     subprocess.run(
-        ["arch-chroot", str(ctx.target), "btrfs", "quota", "disable", "/"],
+        ["btrfs", "quota", "disable", str(ctx.target)],
         check=False,
         capture_output=True,
     )
@@ -3314,6 +3618,7 @@ def validate_boot(ctx: InstallContext) -> None:
         _validate_provisioning_state(ctx)
 
     _validate_package_signing(ctx)
+    _join_luks_keyslot_enroll(ctx)
 
 
 OFFLINE_MIRROR = Path("/var/cache/omarchy/mirror/offline")
@@ -3363,9 +3668,8 @@ def _validate_package_signing(ctx: InstallContext, mirror: Path = OFFLINE_MIRROR
 # The N1x firmware publishes an ACPI SPCR serial console the kernel adopts
 # unless told otherwise, and Limine hands each entry's cmdline to the UKI as
 # load options that replace the embedded one. So the contract has to hold in
-# the generated limine.conf itself: every entry keeps the console on the panel,
-# and the rescue entry boots to a text login. Both failures look like a black
-# screen, which is how the first N1x installs went.
+# the generated limine.conf itself: every entry keeps the console on the panel.
+# Losing it looks like a black screen, which is how the first N1x installs went.
 N1X_REQUIRED_CMDLINE = ("console=tty0", "acpi=nospcr")
 
 
@@ -3448,16 +3752,6 @@ def _validate_platform_boot_entries(limine_conf_text: str, arm_platform: str, ke
             raise RuntimeError(
                 f"limine.conf entry {name} lacks {' '.join(missing)}; its console would go to the SPCR serial port"
             )
-
-    # The rescue entry is the kernel's fallback UKI, booted with its own cmdline.
-    rescue_name = f"{kernel}-fallback"
-    rescue = [options for _, options in kernels if f"_{rescue_name}.efi" in options.get("path", "")]
-    if not rescue:
-        raise RuntimeError(f"limine.conf has no {rescue_name} rescue entry")
-    for options in rescue:
-        cmdline = options.get("cmdline", "").split()
-        if "systemd.unit=multi-user.target" not in cmdline or "plymouth.enable=0" not in cmdline:
-            raise RuntimeError(f"{rescue_name} entry does not boot to a text login; its own cmdline was overridden")
 
 
 def _validate_linux_boot_entry(esp_mount: Path, config_text: str, encrypted: bool) -> None:
@@ -3593,6 +3887,18 @@ def _validate_provisioning_state(ctx: InstallContext) -> None:
     provisioning_dir = ctx.target / PROVISION_STATE_DIR
     if not (provisioning_dir / "pending").exists():
         raise RuntimeError(f"deferred-provisioning install but {provisioning_dir / 'pending'} is missing")
+
+    # Checked after the OEM's scripts ran: a machine must not ship without the
+    # agreement its ISO carries, or with one the build never checked.
+    if ctx.oem_dir is not None and (ctx.oem_dir / "oem.json").is_file():
+        for name in OEM_SETUP_FILES:
+            bundled, laid_down = ctx.oem_dir / name, ctx.target / OEM_TARGET_DIR / name
+            if not bundled.is_file():
+                continue
+            if not laid_down.is_file():
+                raise RuntimeError(f"OEM install but {laid_down} is missing")
+            if laid_down.read_bytes() != bundled.read_bytes():
+                raise RuntimeError(f"OEM install but {laid_down} is no longer the {name} this ISO was built with")
 
     link = ctx.target / "etc/systemd/system/multi-user.target.wants/omarchy-provision-owner.service"
     if not link.is_symlink():
@@ -3735,6 +4041,7 @@ def _mark_updates_applied(ctx: InstallContext) -> None:
 def create_factory_snapshot(ctx: InstallContext) -> None:
     # The keyring unit writes into @; the snapshot must not catch it midway.
     _join_target_keyring_init(ctx)
+    _join_luks_keyslot_enroll(ctx)
     _mark_updates_applied(ctx)
 
     fstype = _findmnt_value(ctx.target, "FSTYPE")

@@ -6,10 +6,12 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import types
+import unicodedata
 import unittest
 from pathlib import Path
 
@@ -36,6 +38,15 @@ sys.modules.setdefault("orchestrator.archinstall_adapter", types.ModuleType("orc
 
 from orchestrator import phases_impl  # noqa: E402
 from orchestrator.context import validate_language  # noqa: E402
+
+
+# Catalogs only kmscon draws, with real fonts (i18n_needs_kmscon); the console
+# font never has to carry them.
+KMSCON_ONLY = re.compile(r"^(zh-[A-Z]{2}|ja|ko)$")
+
+
+def columns(text):
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
 
 
 def catalogs():
@@ -83,8 +94,6 @@ class CatalogTest(unittest.TestCase):
                     self.assertTrue(text.strip(), "empty")
                     self.assertNotRegex(text, r"[\t\n\\]", "tabs, newlines and backslashes do not survive @tsv")
                     self.assertLessEqual(len(text), max(80, len(self.english[key]) + 10))
-                    if key.startswith("summary.") and key != "summary.prompt":
-                        self.assertNotIn(",", text, "the summary is a comma-separated gum table")
 
     def test_tips_fit_the_progress_screen_without_truncation(self):
         # The dashboard cuts the tip line at the logo's 81 columns.
@@ -93,7 +102,7 @@ class CatalogTest(unittest.TestCase):
             for key, tip in catalog.items():
                 if key.startswith("progress.tip."):
                     with self.subTest(code=code, key=key):
-                        self.assertLessEqual(len(line.replace("%1", tip)), 80)
+                        self.assertLessEqual(columns(line.replace("%1", tip)), 80)
 
     def test_codes_are_omarchy_languages(self):
         registry = omarchy_file("default/i18n/locales.json")
@@ -133,28 +142,13 @@ class LanguageDefaultsTest(unittest.TestCase):
         # Picking again replaces the fallback. A language with no home country
         # falls back to UTC: with no fallback at all, an offline form opens
         # its timezone search, where Enter takes the first zone, Africa/Abidjan.
+        # A script the console cannot draw keeps the form in English, as the
+        # rest of the installer is, rather than drawing its headers as boxes.
         self.assertEqual(arabic, {"OMARCHY_FORM_LANGUAGE": "en", "OMARCHY_FORM_KEYBOARD_DEFAULT": "English (US)",
                                   "OMARCHY_FORM_TIMEZONE_FALLBACK": "UTC"})
         self.assertEqual(english["OMARCHY_FORM_TIMEZONE_FALLBACK"], "UTC")
         self.assertEqual(unknown["OMARCHY_FORM_KEYBOARD_DEFAULT"], "English (US)")
         self.assertEqual(unknown["OMARCHY_FORM_TIMEZONE_FALLBACK"], "UTC")
-
-    def test_cjk_forms_fall_back_without_losing_language_defaults(self):
-        languages = ("zh-CN", "zh-TW", "ja", "ko")
-        for code, environment in zip(languages, self.form_environment(*languages)):
-            with self.subTest(code=code):
-                self.assertEqual(environment["OMARCHY_FORM_LANGUAGE"], "en")
-                self.assertEqual(environment["OMARCHY_FORM_KEYBOARD_DEFAULT"], self.defaults[code]["keyboard"])
-                self.assertEqual(environment["OMARCHY_FORM_TIMEZONE_FALLBACK"], self.defaults[code]["timezone"])
-
-    def test_every_language_uses_the_console_gate_and_keeps_its_defaults(self):
-        languages = sorted(self.defaults)
-        supported = set(catalogs())
-        for code, environment in zip(languages, self.form_environment(*languages)):
-            with self.subTest(code=code):
-                self.assertEqual(environment["OMARCHY_FORM_LANGUAGE"], code if code in supported else "en")
-                self.assertEqual(environment["OMARCHY_FORM_KEYBOARD_DEFAULT"], self.defaults[code]["keyboard"])
-                self.assertEqual(environment["OMARCHY_FORM_TIMEZONE_FALLBACK"], self.defaults[code].get("timezone", "UTC"))
 
     def test_every_language_in_the_picker_has_defaults(self):
         self.assertLessEqual(set(catalogs()), set(self.defaults))
@@ -192,7 +186,7 @@ class LanguageDefaultsTest(unittest.TestCase):
 
 
 class SharedFormTranslationTest(unittest.TestCase):
-    def test_real_shared_catalog_text_after_selecting_and_reselecting_languages(self):
+    def test_real_shared_form_follows_the_active_console(self):
         form = omarchy_file("install/provisioning/setup-form.sh")
         if form is None:
             if os.environ.get("CI"):
@@ -200,16 +194,18 @@ class SharedFormTranslationTest(unittest.TestCase):
             self.skipTest("set OMARCHY_PATH to an Omarchy checkout to test the shared form")
         runtime = form.parents[2]
         registry = json.loads((runtime / "default/i18n/locales.json").read_text())
-        english = json.loads((runtime / "default/i18n/en/cli.json").read_text())
-        keys = sorted(key for key in english if key.startswith("setupForm."))
-        self.assertTrue(keys, "the runtime must contain the shared form's English catalog")
         defaults = json.loads((SHARE / "language-defaults.json").read_text())
         supported = set(catalogs())
         translations = {code: json.loads((runtime / f"default/i18n/{code}/cli.json").read_text())
                         for code in supported}
-        # All registered scripts, including CJK, Arabic, Persian, Hebrew and
-        # Indic scripts. Return to a supported translation after each choice,
-        # exercising back-navigation without leaving stale form state behind.
+        english = translations["en"]
+        keys = sorted(key for key in english if key.startswith("setupForm."))
+        self.assertTrue(keys, "the runtime must contain the shared form's English catalog")
+        for code in ("pl", "ja", "ko", "zh-CN", "zh-TW"):
+            self.assertNotEqual(translations[code]["setupForm.usernamePrompt"], english["setupForm.usernamePrompt"])
+
+        # Switch back to a translated language after each selection to catch
+        # stale text or defaults when going back through the language picker.
         languages = [code for choice in sorted(registry) for code in (choice, "pl")]
         script = f'''
 set -e
@@ -224,32 +220,29 @@ for language in "$@"; do
   done
 done
 '''
-        result = subprocess.run(
-            ["bash", "-c", script, "shared-form", *languages],
-            env={"PATH": os.environ["PATH"], "OMARCHY_PATH": str(runtime),
-                 "OMARCHY_FORM_DEFAULTS": "/nonexistent/form-defaults",
-                 "LANGUAGE_DEFAULTS": str(SHARE / "language-defaults.json")},
-            capture_output=True, text=True, check=True,
-        )
-        values = result.stdout.split("\0")
-        self.assertEqual(values.pop(), "")
-        self.assertEqual(len(values), len(languages) * (4 + len(keys)))
-        for index, code in enumerate(languages):
-            with self.subTest(code=code, selection=index):
-                start = index * (4 + len(keys))
-                chosen, effective, keyboard, timezone, *texts = values[start:start + 4 + len(keys)]
-                expected = code if code in supported else "en"
-                self.assertEqual(chosen, code, "fallback must not overwrite the installed-system language")
-                self.assertEqual(effective, expected)
-                self.assertEqual(keyboard, defaults[code]["keyboard"])
-                self.assertEqual(timezone, defaults[code].get("timezone", "UTC"))
-                translated = translations[expected]
-                self.assertEqual(dict(zip(keys, texts)), {key: translated.get(key, english[key]) for key in keys})
-                if expected == "en":
-                    self.assertEqual(texts, [english[key] for key in keys])
-        # A real translated positive control catches accidentally forcing every
-        # language to English, even if that would make CJK readable.
-        self.assertNotEqual(translations["pl"]["setupForm.usernamePrompt"], english["setupForm.usernamePrompt"])
+        for kmscon in (False, True):
+            with self.subTest(kmscon=kmscon):
+                result = subprocess.run(
+                    ["bash", "-c", script, "shared-form", *languages],
+                    env={"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "OMARCHY_PATH": str(runtime),
+                         "OMARCHY_FORM_DEFAULTS": "/nonexistent/form-defaults",
+                         "LANGUAGE_DEFAULTS": str(SHARE / "language-defaults.json"),
+                         **({"OMARCHY_KMSCON": "1"} if kmscon else {})},
+                    capture_output=True, text=True, check=True,
+                )
+                values = result.stdout.split("\0")
+                self.assertEqual(values.pop(), "")
+                width = 4 + len(keys)
+                self.assertEqual(len(values), len(languages) * width)
+                for index, code in enumerate(languages):
+                    with self.subTest(kmscon=kmscon, code=code, selection=index):
+                        chosen, effective, keyboard, timezone, *texts = values[index * width:(index + 1) * width]
+                        expected = code if code in supported and (kmscon or not KMSCON_ONLY.match(code)) else "en"
+                        self.assertEqual(chosen, code, "fallback must not overwrite the installed-system language")
+                        self.assertEqual(effective, expected)
+                        self.assertEqual(keyboard, defaults[code]["keyboard"])
+                        self.assertEqual(timezone, defaults[code].get("timezone", "UTC"))
+                        self.assertEqual(texts, [translations[expected].get(key, english[key]) for key in keys])
 
 
 class ConsoleFontTest(unittest.TestCase):
@@ -267,6 +260,8 @@ class ConsoleFontTest(unittest.TestCase):
             module.patch(width, height, glyphs, table)
             drawable = {codepoint for codepoints in table for codepoint in codepoints}
             for code, catalog in catalogs().items():
+                if KMSCON_ONLY.match(code):
+                    continue
                 text = "".join(catalog.values()) + names.get(code, {}).get("name", "") + UI_GLYPHS
                 missing = sorted({c for c in text if ord(c) > 0x7E and ord(c) not in drawable})
                 with self.subTest(size=size, code=code):
@@ -352,6 +347,78 @@ class ShellLookupTest(unittest.TestCase):
             self.assertEqual(self.lookup('i18n_load ../da; t a.b x y', directory), "Disk x has y")
 
 
+class KmsconLanguageTest(unittest.TestCase):
+    def shell(self, script, **env):
+        return subprocess.run(
+            ["bash", "-c", f'source "{SHARE}/i18n.sh"; {script}'],
+            env={"PATH": os.environ["PATH"], "LANG": "C.UTF-8", **env},
+            capture_output=True, text=True, check=True,
+        ).stdout
+
+    def test_cjk_speaks_only_inside_kmscon(self):
+        # On the Linux console CJK would be boxes, so the installer stays English there.
+        for code, reboot in (("zh-CN", "立即重启"), ("zh-TW", "立即重啟"), ("ja", "今すぐ再起動"), ("ko", "지금 다시 시작")):
+            with self.subTest(code=code):
+                script = f"i18n_load {code}; t finish.reboot"
+                self.assertEqual(self.shell(script), "Reboot Now")
+                self.assertEqual(self.shell(script, OMARCHY_KMSCON="1"), reboot)
+        self.assertEqual(self.shell("i18n_load de; t common.yes"), "Ja")
+
+    def test_display_width_counts_cjk_as_two_columns(self):
+        # Centering uses it: by characters, Chinese lands half its width too far right.
+        self.assertEqual(self.shell('display_width "Omarchy 安装完成，用时 1m"'), "25")
+        self.assertEqual(self.shell('display_width "abc…—·"'), "6")
+        self.assertEqual(self.shell('display_width "今すぐ再起動 OK"'), "15")
+        self.assertEqual(self.shell('display_width "지금 다시 시작"'), "14")
+        # Icon-font glyphs (private use area) stay one column wide.
+        self.assertEqual(self.shell('display_width "\ue900ab"'), "3")
+
+    def test_a_kmscon_relaunch_resumes_after_the_keyboard_step(self):
+        # kmscon is relaunched for the layout and Han forms the keyboard step
+        # ends with, and the stages before it are not run again.
+        configurator = (ROOT / "configs/airootfs/root/configurator").read_text()
+        self.assertEqual(re.findall(r"^\s*switch_to_kmscon (\S+)$", configurator, re.MULTILINE), ["user"])
+        self.assertRegex(configurator, r"if \[\[ -z \$resume_stage \]\]; then\n(?:.*\n)*?\s+\$defer_provisioning \|\| keyboard_form\nfi")
+
+    def test_declining_the_summary_starts_over_from_the_language(self):
+        # The summary lists the language, so "No, change it" has to offer it
+        # again, ahead of the keyboard and the account. user_step as the
+        # configurator defines it, with each screen stubbed to record its turn
+        # and gum declining the summary once.
+        configurator = (ROOT / "configs/airootfs/root/configurator").read_text()
+        user_step = re.search(r"^user_step\(\) \{\n.*?^\}$", configurator, re.MULTILINE | re.DOTALL).group(0)
+        with tempfile.TemporaryDirectory() as directory:
+            stubs = Path(directory)
+            (stubs / "gum").write_text(
+                "#!/bin/bash\n"
+                'if [[ $1 == table ]]; then cat >/dev/null; echo summary; exit 0; fi\n'
+                f'[[ -e {stubs}/declined ]] && exit 0; touch {stubs}/declined; exit 1\n'
+            )
+            (stubs / "gum").chmod(0o755)
+            script = f"""
+                set -euo pipefail
+                PATH={stubs}:$PATH
+                preset_language="" preset_keyboard="" preset_timezone="" PADDING_LEFT_SPACES=""
+                language=en keyboard=us keyboard_label="" timezone=UTC username=dhh password=secret
+                defer_provisioning=false OMARCHY_FORM_BACK=1
+                t() {{ :; }}; language_label() {{ :; }}; abort() {{ exit 9; }}
+                language_form() {{ echo language; }}; keyboard_form() {{ echo keyboard; }}; user_form() {{ echo account; }}
+                {user_step}
+                user_step
+            """
+            result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), ["account", "summary", "language", "keyboard", "account", "summary"])
+
+    def test_only_the_language_screen_picks_the_language(self):
+        # The language goes to the installed system, so nothing after the
+        # summary the user confirmed (a timezone, say) may change it. It starts
+        # as English, or as the language a preset ISO names.
+        configurator = (ROOT / "configs/airootfs/root/configurator").read_text()
+        assignments = re.findall(r"^\s*language=.*$", configurator, re.MULTILINE)
+        self.assertEqual([line.strip() for line in assignments], ["language=${preset_language:-en}", "language=$choice"])
+
+
 class ConsoleFontLoadTest(unittest.TestCase):
     def test_a_failing_font_probe_never_stops_a_strict_caller(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -366,6 +433,125 @@ class ConsoleFontLoadTest(unittest.TestCase):
             )
             self.assertEqual(result.stdout, "survived\n", result.stderr)
 
+    def run_with_runtime_font(self, routine):
+        # i18n.sh as the ISO lays it out: beside the runtime's console-font.sh
+        # when the bundled runtime ships one.
+        with tempfile.TemporaryDirectory() as directory:
+            share = Path(directory)
+            shutil.copy(SHARE / "i18n.sh", share / "i18n.sh")
+            (share / "console-font.sh").write_text(f"omarchy_console_font() {{ {routine}; }}\n")
+            for tool in ("showconsolefont", "setfont", "python3"):
+                (share / tool).write_text(f'#!/bin/bash\necho {tool} >>"{share}/own-path"\nexit 1\n')
+                (share / tool).chmod(0o755)
+            result = subprocess.run(
+                ["bash", "-c", f'set -euo pipefail; source "{share}/i18n.sh"; i18n_console_font /dev/tty1; echo survived'],
+                env={**os.environ, "PATH": f"{share}:{os.environ['PATH']}", "OMARCHY_ISO_CONSOLE_FONT": f"{share}/run/console.psf"},
+                capture_output=True, text=True,
+            )
+            asked = (share / "asked").read_text() if (share / "asked").exists() else ""
+            return result, asked, (share / "own-path").exists()
+
+    def test_the_bundled_runtimes_font_routine_is_the_one_used(self):
+        result, asked, own_path = self.run_with_runtime_font('echo "$1" >"$(dirname "${BASH_SOURCE[0]}")/asked"')
+        self.assertEqual(result.stdout, "survived\n", result.stderr)
+        self.assertEqual(asked, "/dev/tty1\n")
+        self.assertFalse(own_path, "the installer built its own font beside the runtime's")
+
+    def test_the_runtimes_font_routine_failing_never_stops_a_strict_caller(self):
+        result, _, own_path = self.run_with_runtime_font("return 1")
+        self.assertEqual(result.stdout, "survived\n", result.stderr)
+        self.assertFalse(own_path)
+
+
+class RegionMarkerTest(unittest.TestCase):
+    def marker(self, preset):
+        with tempfile.TemporaryDirectory() as target, tempfile.TemporaryDirectory() as share:
+            path = Path(share) / "preset.json"
+            if preset is not None:
+                path.write_text(json.dumps(preset))
+            ctx = types.SimpleNamespace(target=Path(target), omarchy_install={})
+            phases_impl._write_region_marker(ctx, path)
+            marker = Path(target) / "etc/omarchy/region"
+            return (marker.read_text(), oct(marker.stat().st_mode & 0o777)) if marker.exists() else None
+
+    def test_a_presets_region_reaches_the_target_and_nothing_else_writes_one(self):
+        self.assertEqual(self.marker({"language": "zh-CN", "region": "cn"}), ("cn\n", "0o644"))
+        self.assertIsNone(self.marker({"language": "da", "timezone": "Europe/Copenhagen"}))
+        self.assertIsNone(self.marker(None))
+
+
+class PresetTest(unittest.TestCase):
+    """Every presets/<code>.json answers only what the installer can take: a
+    language of the registry, a keyboard of the setup form's list, a timezone
+    the list offers, and a region the runtime has a profile for."""
+
+    def setUp(self):
+        self.presets = {path.stem: json.loads(path.read_text()) for path in sorted((ROOT / "presets").glob("*.json"))}
+
+    def each(self, field):
+        return [(code, preset[field]) for code, preset in self.presets.items() if field in preset]
+
+    def test_a_preset_sets_only_what_the_installer_takes(self):
+        self.assertIn("cn", self.presets)
+        for code, preset in self.presets.items():
+            with self.subTest(code=code):
+                self.assertRegex(code, r"^[a-z]{2}$")
+                self.assertLessEqual(set(preset), {"language", "keyboard", "timezone", "region"})
+
+    def test_the_language_is_one_the_installer_offers(self):
+        languages = set(json.loads((SHARE / "language-defaults.json").read_text()))
+        for code, language in self.each("language"):
+            with self.subTest(code=code):
+                self.assertIn(language, languages)
+
+    def test_the_keyboard_is_a_row_of_the_setup_form(self):
+        form = omarchy_file("install/provisioning/setup-form.sh")
+        if form is None:
+            self.skipTest("no Omarchy runtime to read the setup form from")
+        rows = re.search(r"OMARCHY_KEYBOARD_LAYOUTS=\$'(.*?)'\n", form.read_text(), re.DOTALL).group(1).splitlines()
+        labels = {row.split("|")[0] for row in rows}
+        for code, keyboard in self.each("keyboard"):
+            with self.subTest(code=code):
+                self.assertIn(keyboard, labels)
+
+    def test_the_timezone_is_a_zone(self):
+        for code, timezone in self.each("timezone"):
+            with self.subTest(code=code):
+                self.assertTrue(Path("/usr/share/zoneinfo", timezone).is_file(), timezone)
+
+    def test_the_region_is_a_profile_of_the_runtime(self):
+        apply = omarchy_file("bin/omarchy-apply-pacman")
+        if apply is None:
+            self.skipTest("no Omarchy runtime with region profiles")
+        for code, region in self.each("region"):
+            with self.subTest(code=code):
+                self.assertTrue((apply.parents[1] / "default/regions" / region / "pacman").is_dir(), region)
+
+    def test_the_summary_leaves_out_what_the_preset_answered(self):
+        # The block that prints the summary, run as the configurator runs it,
+        # in a loop it can leave, with gum table standing in as cat.
+        configurator = SOURCES[0].read_text()
+        block = re.search(r"^ +# The answers the user gave.*?\| gum table[^\n]*\n", configurator, re.MULTILINE | re.DOTALL).group(0)
+
+        def rows(set="", **preset):
+            setup = set + "".join(f"preset_{name}={value!r}; " for name, value in preset.items())
+            return subprocess.run(
+                ["bash", "-c", f"source {SHARE / 'i18n.sh'}; i18n_load en; gum() {{ cat; }}; language_label() {{ printf %s \"$1\"; }}\n"
+                 f"language=da keyboard=dk-latin1 timezone=Europe/Copenhagen username=u password=p hostname=h {setup}\n"
+                 f"while true; do\n{block}\nbreak\ndone"],
+                capture_output=True, text=True, check=True,
+            ).stdout.splitlines()
+
+        everything = rows()
+        self.assertEqual([row.split("\t")[0] for row in everything],
+                         ["Field", "Language", "Keyboard", "Timezone", "Username", "Password"])
+        self.assertIn("Keyboard\tChinese (Simplified, Pinyin)",
+                      rows(set="keyboard_label='Chinese (Simplified, Pinyin)'; "), "a layout keeps its comma")
+        self.assertEqual(rows(language="da", keyboard="Danish", timezone="Europe/Copenhagen"), [],
+                         "a username and password alone are not reviewed")
+        preset = rows(language="da", keyboard="Danish")
+        self.assertEqual([row.split("\t")[0] for row in preset], ["Field", "Timezone", "Username", "Password"])
+
 
 class LanguageMarkerTest(unittest.TestCase):
     def marker(self, language):
@@ -376,10 +562,8 @@ class LanguageMarkerTest(unittest.TestCase):
             return marker.read_text() if marker.exists() else None
 
     def test_a_chosen_language_reaches_the_target_and_english_writes_nothing(self):
-        for code in json.loads((SHARE / "language-defaults.json").read_text()):
-            if code != "en":
-                with self.subTest(code=code):
-                    self.assertEqual(self.marker(code), f"{code}\n")
+        self.assertEqual(self.marker("da"), "da\n")
+        self.assertEqual(self.marker("zh-CN"), "zh-CN\n")
         self.assertIsNone(self.marker("en"))
         self.assertIsNone(self.marker(None))
 

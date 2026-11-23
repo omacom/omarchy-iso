@@ -37,6 +37,16 @@ run_hook() {
     msg ":: Triggering uevents..."
     udevadm trigger --action=add --type=subsystems
     udevadm trigger --action=add --type=devices
+    # Booted from a Ventoy stick in normal mode, the medium is
+    # /dev/mapper/ventoy, which Ventoy's own script makes after these hooks,
+    # just before archiso mounts it. Waiting for it here can only time out,
+    # and that held every normal-mode Ventoy boot for 50 s. Ventoy's files sit
+    # under /ventoy in this initramfs, and Ventoy tells its modes apart by
+    # rdinit=/vtoy/vtoy, as its own init does: in that one, GRUB2 mode, the
+    # medium comes from the uevents just triggered and is waited for below.
+    if [ -d /ventoy ] && [ "$(getarg rdinit)" != /vtoy/vtoy ]; then
+        return 0
+    fi
     # The live ISO's initramfs needs only its boot medium, which the archiso
     # hook finds by this UUID. Wait for that one device; settling the whole
     # queue also waits for every other USB device to enumerate (seconds for a

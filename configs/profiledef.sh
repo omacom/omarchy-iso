@@ -2,6 +2,8 @@
 # shellcheck disable=SC2034
 
 iso_name="omarchy"
+[[ ${OMARCHY_OEM_INSTALL:-} == "1" ]] && iso_name="omarchy-oem"
+[[ -n ${OMARCHY_PRESET:-} ]] && iso_name="$iso_name-$OMARCHY_PRESET"
 iso_label="OMARCHY_$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y%m)"
 iso_publisher="Omarchy <https://omarchy.org>"
 iso_application="Omarchy Installer"

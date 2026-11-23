@@ -39,7 +39,7 @@ cat >"$work/bin/lsinitcpio" <<'SH'
 #!/bin/sh
 case $1 in
   -l) exec bsdtar -tf "$2" ;;
-  -x) exec bsdtar -xf "$3" ;;
+  -x) exec bsdtar -xf "$2" ;;
 esac
 exit 2
 SH

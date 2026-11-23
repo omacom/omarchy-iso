@@ -56,7 +56,7 @@ if grep -Fq -- '--config "/configs/pacman-online-' "$ROOT/builder/build-iso.sh";
 fi
 grep -Fq 'configure_archiso_aarch64_mkinitcpio' "$ROOT/builder/build-iso.sh" || fail "live initramfs is not adapted for aarch64"
 grep -Fq 'kernel_options="console=tty0 acpi=nospcr initramfs_async=0"' "$ROOT/builder/build-iso.sh" || fail "aarch64 live boot does not pin the panel console"
-grep -Fq 'boot_splash_kernel_options="quiet splash "' "$ROOT/builder/build-iso.sh" || fail "aarch64 live boot does not show the splash"
+grep -Fq 'boot_splash_kernel_options="quiet loglevel=3 ' "$ROOT/builder/build-iso.sh" || fail "aarch64 live boot is not quiet"
 grep -Fq 'plymouth.enable=0 console=tty0' "$ROOT/builder/build-iso.sh" && fail "aarch64 live boot still turns Plymouth off"
 grep -Fq '"$mkarchiso_command" -v -w' "$ROOT/builder/build-iso.sh" || fail "builder does not use the patched mkarchiso on aarch64"
 # pacman takes the first repository carrying a name: the platform bundle, then
@@ -160,7 +160,7 @@ grep -Fq 'smbios --type 4 --get-string 7 --set cpu_maker' "$grub" || fail "GRUB 
 
 # --- manifest filter -----------------------------------------------------------
 source "$ROOT/builder/aarch64-package-filter.sh"
-result=$(filter_aarch64_packages linux-omarchy linux linux-headers linux-omarchy linux-omarchy-headers amd-ucode broadcom-wl-dkms tzupdate lib32-nvidia-utils dell-xps13-sidecar-amps linux-firmware-cirrus-dx13260 apple-bcm-firmware-fetcher superwhisper-bin mise-bin nvim vi obs-studio yay-debug hyprland omarchy-dev 2>/dev/null | tr '\n' ' ')
+result=$(filter_aarch64_packages linux-omarchy linux linux-headers linux-omarchy linux-omarchy-headers amd-ucode broadcom-wl-dkms tzupdate lib32-nvidia-utils dell-xps13-sidecar-amps linux-firmware-cirrus-dx13260 apple-bcm-firmware-fetcher facetimehd-dkms facetimehd-firmware-fetcher superwhisper-bin mise-bin nvim vi obs-studio yay-debug hyprland omarchy-dev 2>/dev/null | tr '\n' ' ')
 [[ $result == "linux-omarchy linux-omarchy-headers linux-omarchy linux-omarchy-headers tzupdate superwhisper-bin mise-bin neovim ex-vi-compat hyprland omarchy-dev " ]] || fail "manifest filter produced: $result"
 # The N1x list names linux-omarchy, and keeps the name.
 result=$(filter_aarch64_packages linux-omarchy linux-omarchy linux-omarchy-headers 2>/dev/null | paste -sd' ')
@@ -272,7 +272,7 @@ make_refuses 'Unknown option: --platform' --arch aarch64 --platform n1x --edge
 # firmware provides none. Every image tries to build one from its own kernel.
 uki="$ROOT/builder/qualcomm/live-uki.sh"
 bash -n "$uki"
-grep -Fq 'parted systemd-ukify linux-firmware-qcom qcom-firmware-extract python)' "$ROOT/builder/build-iso.sh" \
+grep -Fq 'parted systemd-ukify systemd-stub-omarchy linux-firmware-qcom qcom-firmware-extract python ' "$ROOT/builder/build-iso.sh" \
   || fail "the live image lacks ukify or the Snapdragon firmware tools"
 # The UKI is built in the image's customize step, once pacstrap has made the
 # kernel and initramfs it wraps: the builder's own lines, run against the live
@@ -428,9 +428,24 @@ grep -q '^MODULES=(loop i2c_mt65xx i2c_tegra i2c_hid i2c_hid_acpi hid_generic hi
 # A Snapdragon laptop's platform drivers, for a kernel that builds them as
 # modules. Each is optional, so a kernel without one still gets its image.
 live_modules=$(sed -n 's/^MODULES=(\(.*\))$/\1/p' "$fixture/archiso.conf")
-for module in gcc-x1e80100 pinctrl-x1e80100 qnoc-x1e80100 gcc-glymur tcsrcc-glymur dispcc-glymur gpucc-glymur pinctrl-glymur qnoc-glymur thunderbolt phy-qcom-qmp-usb phy-qcom-m31-eusb2 spmi-pmic-arb i2c-qcom-geni i2c-hid-of dwc3-qcom phy-qcom-qmp-combo phy-nxp-ptn3222; do
+for module in gcc-x1e80100 pinctrl-x1e80100 qnoc-x1e80100 gcc-glymur tcsrcc-glymur dispcc-glymur gpucc-glymur pinctrl-glymur qnoc-glymur thunderbolt phy-qcom-qmp-usb phy-qcom-m31-eusb2 spmi-pmic-arb i2c-qcom-geni i2c-hid-of dwc3-qcom dwc3-qcom-legacy phy-qcom-qmp-combo phy-nxp-ptn3222 gpio-sbu-mux; do
   [[ " $live_modules " == *" $module? "* ]] || fail "the live initramfs lacks the Snapdragon platform driver $module"
 done
 [[ " $live_modules " != *" qcom_q6v5_pas"* ]] || fail "the live initramfs loads the DSP driver"
+# The efivarfs mount fails on Snapdragon until the live root loads the EFI
+# variable driver; the hook that quiets it must run after base adds
+# init_functions, and must match the line mkinitcpio actually writes.
+live_hooks=$(sed -n 's/^HOOKS=(\(.*\))$/\1/p' "$fixture/archiso.conf")
+[[ " $live_hooks " == *" base "*" omarchy_quiet_efivars "* ]] || fail "the efivarfs mount is not quieted after base: $live_hooks"
+mkdir -p "$fixture/buildroot"
+if [[ -f /usr/lib/initcpio/init_functions ]]; then
+  cp /usr/lib/initcpio/init_functions "$fixture/buildroot/init_functions"
+else
+  printf '%s\n' '    if [ -e /sys/firmware/efi ]; then' \
+    '        mount -t efivarfs efivarfs /sys/firmware/efi/efivars -o nosuid,nodev,noexec' '    fi' >"$fixture/buildroot/init_functions"
+fi
+(BUILDROOT="$fixture/buildroot" && source "$ROOT/builder/qualcomm/quiet-efivars-install" && build)
+grep -Eq '^[[:space:]]*mount -t efivarfs .* 2>/dev/null$' "$fixture/buildroot/init_functions" || fail "the initramfs efivarfs mount still prints its error"
+grep -Eq '^[[:space:]]*mount -t efivarfs .*noexec$' "$fixture/buildroot/init_functions" && fail "an efivarfs mount was left unquieted"
 
 echo "aarch64 build overlay tests passed"

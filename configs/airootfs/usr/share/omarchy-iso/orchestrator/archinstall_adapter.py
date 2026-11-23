@@ -46,7 +46,7 @@ import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Callable, Iterable, Iterator
 
 # Imports are top-level so a missing/incompatible archinstall surfaces at
 # orchestrator startup, not deep inside a phase.
@@ -102,6 +102,7 @@ check_archinstall_version()
 
 from . import luks_tuning  # noqa: E402 - patches archinstall only after the check
 luks_tuning.apply()
+defer_argon2_keyslot = luks_tuning.defer_argon2_keyslot
 
 
 def load_arch_config(config_path: Path, creds_path: Path) -> ArchConfigHandler:
@@ -659,7 +660,12 @@ def _method_accepts_users(method) -> bool:
     return _method_accepts(method, "users")
 
 
-def install_applications(installer: Installer, arch_config: ArchConfig) -> None:
+def install_applications(
+    installer: Installer,
+    arch_config: ArchConfig,
+    *,
+    before_strap: Callable[[], None] | None = None,
+) -> None:
     """Install archinstall application selections such as PipeWire audio.
 
     The configurator still writes archinstall's audio_config. We own phase
@@ -688,6 +694,8 @@ def install_applications(installer: Installer, arch_config: ArchConfig) -> None:
             packages = [packages]
         missing = target_missing_packages(installer.target, packages)
         if missing:
+            if before_strap is not None:
+                before_strap()
             original_strap(missing)
 
     installer.add_additional_packages = strap_missing  # type: ignore[method-assign]

@@ -46,6 +46,166 @@ prebuilt_uki_size_ok() {
   fi
 }
 
+# The N1x UKI boots a laptop whose kernel alone is 61 MiB (arm64 kernels are
+# not compressed) and whose NVIDIA firmware is most of 100 MiB more. The N1x
+# boots such a UKI on every installed system, so it gets its own ceiling; the
+# 128 MiB one is for the x86 laptops of omacom/omarchy#5980.
+n1x_prebuilt_uki_size_ok() {
+  local bytes limit=$((256 * 1024 * 1024))
+  bytes=$(stat -c %s "$1")
+  if ((bytes > limit)); then
+    echo "ERROR: the N1x pre-built UKI is $bytes bytes, over the $limit limit" >&2
+    return 1
+  fi
+}
+
+# The MODULES+= lines n1x.sh writes on an N1x whose GPU drives the panel,
+# normalized the way the installer reads them (_initramfs_module_lines).
+n1x_module_lines() {
+  grep -hE '^\s*MODULES\s*\+?=' "$1" | sed -E 's/\s+/ /g; s/^ //; s/ $//' | sort -u
+}
+
+# The N1x layer: what an N1x adds to the image on disk, packed next to the
+# image for the installer to extract (phases_impl._apply_platform_layer).
+# Installing the NVIDIA stack at install time took 22.6s on an N1x, 16s of it
+# depmod and ldconfig reading the freshly written disk cold; extracting the
+# same files takes a second or two. The image itself stays generic.
+n1x_layer_path() {
+  printf '%s/omarchy-layer.aarch64-n1x.tar.zst\n' "${output%/*}"
+}
+
+# Pack the overlay's upper directory $1, the files pacstrap and its hooks wrote
+# over the image, as the N1x layer. Paths the target makes or owns for itself
+# are left out: mount points, caches and logs, the sync databases (the image
+# ships its own), and the keyring the installer creates per machine.
+write_n1x_layer() {
+  local upper=$1 layer
+  layer=$(n1x_layer_path)
+
+  # tar has no way to say "delete": an overlay whiteout (a 0:0 character
+  # device) or an opaque directory in the upper layer would be extracted as
+  # junk. A pacstrap of new packages deletes nothing; fail if one did.
+  if [[ -n $(find "$upper" -type c -print -quit) ]] ||
+    getfattr -R --absolute-names -d -m '^trusted\.overlay\.opaque' "$upper" 2>/dev/null | grep -q .; then
+    echo "ERROR: the N1x layer deletes files from the image; it cannot be packed as a tarball" >&2
+    return 1
+  fi
+
+  tar -C "$upper" --numeric-owner --acls --xattrs --xattrs-include='*' \
+    --xattrs-exclude='trusted.overlay.*' \
+    --exclude=./boot --exclude=./dev --exclude=./proc --exclude=./sys \
+    --exclude=./run --exclude=./tmp --exclude=./var/cache --exclude=./var/log \
+    --exclude=./var/tmp --exclude=./var/lib/pacman/sync \
+    --exclude=./etc/pacman.d/gnupg \
+    -cf - . | zstd -q -T0 -15 -o "$layer" || return 1
+  echo "N1x layer: $(du -h "$layer" | cut -f1) at $layer"
+}
+
+# Set up N1x's boot-time state in the overlay at $1 (upper directory $2), pack
+# its packages as the N1x layer, and build its UKI there. Each step returns on
+# failure: set -e does not apply in a function whose status the caller tests.
+build_n1x_uki_in() {
+  local merged=$1 upper=$2 line
+  local -a modules=(thunderbolt) line_modules n1x_packages
+
+  # Every package the N1x list adds to the image, as the installer would
+  # install them (_platform_delta_packages), from the same mirror.
+  mapfile -t n1x_packages < <(grep -hv '^\s*#\|^\s*$' "$merged/usr/share/omarchy/install/omarchy-aarch64-n1x.packages")
+  ((${#n1x_packages[@]})) || return 1
+  pacstrap -C "$pacman_conf" -c -G -M "$merged" --needed "${n1x_packages[@]}" || return 1
+
+  # What the installed system's pacman hooks would have left, whether or not
+  # the building system has those hooks: the module index and linker cache
+  # cover the new modules and libraries, and the packages' system users exist.
+  arch-chroot "$merged" depmod "$image_kver" || return 1
+  arch-chroot "$merged" ldconfig || return 1
+  systemd-sysusers --root="$merged" || return 1
+
+  # Before anything below writes boot-time state into the overlay.
+  write_n1x_layer "$upper" || return 1
+
+  # As n1x.sh sets up an N1x whose GPU drives the panel: nvidia-drm's fbdev
+  # draws the console and Plymouth's LUKS prompt.
+  printf '%s\n' 'options nvidia_drm modeset=1 fbdev=1' >"$merged/etc/modprobe.d/nvidia.conf" || return 1
+
+  # n1x.sh lights the dim power-on panel for the LUKS prompt with a busybox
+  # hook, which a systemd initramfs never runs. A udev rule does the same in
+  # both: write the backlight once nvidia_drm registers it.
+  install -d "$merged/etc/udev/rules.d" "$merged/etc/initcpio/install" || return 1
+  cat >"$merged/etc/udev/rules.d/90-omarchy-n1x-boot-brightness.rules" <<'RULE' || return 1
+ACTION=="add", SUBSYSTEM=="backlight", KERNEL=="nvidia_0", ATTR{brightness}="60"
+RULE
+  cat >"$merged/etc/initcpio/install/sd-omarchy-n1x-boot-brightness" <<'INSTALL' || return 1
+#!/usr/bin/env bash
+build() {
+    add_file /etc/udev/rules.d/90-omarchy-n1x-boot-brightness.rules /usr/lib/udev/rules.d/90-omarchy-n1x-boot-brightness.rules
+}
+help() {
+    cat <<HELPEOF
+Light the NVIDIA N1x panel for Plymouth's LUKS prompt.
+HELPEOF
+}
+INSTALL
+
+  # The generic UKI's config, with the N1x modules and the brightness hook.
+  for line in "${n1x_lines[@]}"; do
+    eval "line_modules=${line#*=}"
+    modules+=("${line_modules[@]}")
+  done
+  sed -E \
+    -e "s/^MODULES=.*/MODULES=(${modules[*]})/" \
+    -e 's/ plymouth / plymouth sd-omarchy-n1x-boot-brightness /' \
+    "$root/etc/mkinitcpio-prebuilt-uki.conf" >"$merged/etc/mkinitcpio-prebuilt-uki-n1x.conf" || return 1
+  grep -q " plymouth sd-omarchy-n1x-boot-brightness " "$merged/etc/mkinitcpio-prebuilt-uki-n1x.conf" || return 1
+
+  echo "Pre-building the N1x UKI (modules: ${modules[*]})"
+  arch-chroot "$merged" mkinitcpio \
+    -k "/usr/lib/modules/${image_kver}/vmlinuz" \
+    -c /etc/mkinitcpio-prebuilt-uki-n1x.conf \
+    --cmdline /etc/kernel/cmdline.prebuilt-uki \
+    -U /var/lib/omarchy-iso/prebuilt-uki-n1x.efi \
+    -S autodetect 2>&1 | tail -25
+  [[ -f "$merged/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" ]] || return 1
+  n1x_prebuilt_uki_size_ok "$merged/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" || return 1
+  install -m 0644 "$merged/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" || return 1
+  echo "Pre-built N1x UKI: $(du -h "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" | cut -f1)"
+  # The lines an N1x install will have: the image's own and n1x.sh's.
+  { cat "$root/var/lib/omarchy-iso/prebuilt-uki.modules"; printf '%s\n' "${n1x_lines[@]}"; } |
+    sort -u >"$root/var/lib/omarchy-iso/prebuilt-uki-n1x.modules"
+}
+
+# Build /var/lib/omarchy-iso/prebuilt-uki-n1x.efi from a throwaway overlay of
+# $root. Runs while the generic UKI's config and cmdline are still in $root.
+build_n1x_prebuilt_uki() {
+  local overlay status=0
+  local -a n1x_lines
+  mapfile -t n1x_lines < <(n1x_module_lines "$1")
+  if ((${#n1x_lines[@]} == 0)); then
+    echo "WARNING: $1 writes no MODULES lines" >&2
+    return 1
+  fi
+
+  overlay=$(mktemp -d)
+  mkdir -p "$overlay/rw" "$overlay/merged"
+  # tmpfs for the upper layer: the image's btrfs has no room to spare, and the
+  # builder's own root is an overlay, which cannot be an upper layer.
+  if ! mount -t tmpfs -o size=6G omarchy-n1x-uki "$overlay/rw"; then
+    rm -rf "$overlay"
+    return 1
+  fi
+  mkdir -p "$overlay/rw/upper" "$overlay/rw/work"
+  if mount -t overlay omarchy-n1x-uki \
+       -o "lowerdir=$root,upperdir=$overlay/rw/upper,workdir=$overlay/rw/work" "$overlay/merged"; then
+    build_n1x_uki_in "$overlay/merged" "$overlay/rw/upper" || status=1
+    umount -R "$overlay/merged" || status=1
+  else
+    status=1
+  fi
+  umount "$overlay/rw" || status=1
+  rm -rf "$overlay"
+  return "$status"
+}
+
 pacman_conf="${1:-}"
 output="${2:-}"
 shift 2 || true
@@ -211,6 +371,17 @@ if grep -q '^#en_US.UTF-8 UTF-8' "$root/etc/locale.gen"; then
   arch-chroot "$root" locale-gen >/dev/null && echo "en_US.UTF-8 compiled into the image's locale archive"
 fi
 
+# Pre-bake the static UFW + ufw-docker rules into the root image while keeping
+# UFW disabled (ENABLED=no in ufw.conf) so chroot ufw calls during install
+# never reload the live ISO's kernel firewall. At install time firewall.sh sees
+# its stamp and only flips ENABLED=yes and enables ufw.service.
+firewall_sh="$root/usr/share/omarchy/install/config/firewall.sh"
+if [[ -f $firewall_sh ]] && grep -q 'OMARCHY_FIREWALL_RULES_ONLY' "$firewall_sh"; then
+  arch-chroot "$root" env OMARCHY_FIREWALL_RULES_ONLY=1 /bin/bash -eE -c 'source /usr/share/omarchy/install/config/firewall.sh'
+  rm -f "$root"/etc/ufw/after*.rules-ufw-docker~*
+  echo "Pre-baked static UFW + ufw-docker firewall rules"
+fi
+
 # The runtime's install log helper forks `date` twice per script it runs
 # (131 forks in a traced install, about 0.5 s). bash formats the same
 # timestamp itself. Same output, no fork; patched here until the runtime
@@ -279,8 +450,9 @@ else
   # practice nothing, so mkinitcpio falls back to us. The installer writes the
   # user's choice into the target's /etc/vconsole.conf afterwards, which cannot
   # reach an initramfs that is only copied, so an install picking another
-  # layout has to build its own UKI exactly as one adding modules does.
-  # Recording the value is what lets the installer tell the difference.
+  # layout writes it into the room reserved below, or builds its own UKI
+  # where an image has none. Recording the value is what lets the installer
+  # tell the difference.
   #
   # The LUKS passphrase prompt runs from this initramfs, so a stale `us` makes
   # a passphrase enrolled under another layout untypeable and locks the owner
@@ -376,13 +548,45 @@ UNIT
   # (omacom/omarchy#5980), as a 241 MiB initramfs does GRUB (#128). Without
   # kms, Plymouth's LUKS prompt draws on the firmware framebuffer (simpledrm);
   # the installed system's own rebuilds autodetect and keep kms.
+  # Room for the installer to write the install's keyboard layout into the
+  # UKI in place (orchestrator/uki_vconsole.py), as for the cmdline below: an
+  # install on another layout than us then has no UKI to build, 4.7 s of the
+  # install. The initramfs gets every console keymap (1.3 MB), since
+  # sd-vconsole adds only the one vconsole.conf names at build time, and an
+  # /etc/vconsole.conf of one 512-byte comment line. add_file_early puts that
+  # file in the early cpio, the uncompressed archive at the start of the
+  # initramfs, where the installer finds its bytes and overwrites them. Until
+  # then it is a comment, and the initramfs comes up in us as before.
+  cat >"$root/usr/lib/initcpio/install/omarchy-vconsole-room" <<'INSTALL'
+#!/usr/bin/env bash
+build() {
+    add_full_dir /usr/share/kbd/keymaps
+    add_file_early /etc/vconsole.conf.prebuilt-uki /etc/vconsole.conf 644
+}
+INSTALL
+  chmod 0755 "$root/usr/lib/initcpio/install/omarchy-vconsole-room"
+  vconsole_room="# omarchy.vconsole_room "
+  printf '%s%s\n' "$vconsole_room" "$(printf '%*s' $((512 - ${#vconsole_room} - 1)) '' | tr ' ' '#')" \
+    >"$root/etc/vconsole.conf.prebuilt-uki"
+
   cat >"$root/etc/mkinitcpio-prebuilt-uki.conf" <<'CONF'
 MODULES=(thunderbolt)
 BINARIES=()
 FILES=()
-HOOKS=(base systemd plymouth autodetect microcode modconf keyboard sd-vconsole block sd-encrypt filesystems fsck sd-btrfs-overlayfs)
+HOOKS=(base systemd plymouth autodetect microcode modconf keyboard sd-vconsole omarchy-vconsole-room block sd-encrypt filesystems fsck sd-btrfs-overlayfs)
 COMPRESSION="zstd"
 CONF
+
+  # Bundle the mount-event burst override into the pre-built systemd initramfs:
+  # mkinitcpio's systemd hook does not copy /etc/systemd/system.conf.d/, so PID 1
+  # in the initrd otherwise hits the default 5/s mount-monitor-dispatch rate
+  # limit and stalls sysroot.mount for 1.0 s (systemd/systemd#28264). The N1x
+  # UKI derives its config from this file and inherits FILES automatically.
+  if [[ -f $root/etc/systemd/system.conf.d/20-mount-events.conf ]]; then
+    echo 'FILES+=(/etc/systemd/system.conf.d/20-mount-events.conf)' >>"$root/etc/mkinitcpio-prebuilt-uki.conf"
+  else
+    echo "WARNING: /etc/systemd/system.conf.d/20-mount-events.conf missing from image; initrd mount rate limit override skipped"
+  fi
 
   # Room for the installer to write the real cmdline into the UKI in place
   # (orchestrator/uki_cmdline.py): one placeholder parameter pads .cmdline to
@@ -413,8 +617,30 @@ CONF
     # Clean up any partial output that would upset btrfs shrink downstream.
     rm -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi"
   fi
+  # N1x: a second pre-built UKI. Its hardware setup always adds the same
+  # early-loading modules, the NVIDIA stack for early KMS and the I2C keyboard
+  # for the LUKS prompt, so the generic UKI never fits it and every N1x built
+  # its own at install, about 20s. This one is built with them, read from the
+  # image's own n1x.sh so the two cannot drift, and recorded the same way; the
+  # installer copies it where the machine's lines match (_n1x_prebuilt_uki).
+  # The NVIDIA packages go into a throwaway overlay of the image, never into
+  # the image itself. What they add is packed from that overlay as the N1x
+  # layer, which the installer extracts on an N1x, so the driver in the UKI is
+  # the one on disk.
+  n1x_script="$root/usr/share/omarchy/install/hardware/n1x.sh"
+  # The output directory persists between builds: no layer from an older one.
+  rm -f "$(n1x_layer_path)"
+  if [[ $(uname -m) == aarch64 && -f $n1x_script && -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
+    build_n1x_prebuilt_uki "$n1x_script" || {
+      echo "WARNING: no N1x pre-built UKI or layer; N1x installs build their own and pacstrap the NVIDIA stack"
+      rm -f "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.modules" \
+        "$(n1x_layer_path)"
+    }
+  fi
+
   # Only this build uses these; the installed system has no use for them.
-  rm -f "$root/etc/mkinitcpio-prebuilt-uki.conf" "$root/etc/kernel/cmdline.prebuilt-uki"
+  rm -f "$root/etc/mkinitcpio-prebuilt-uki.conf" "$root/etc/kernel/cmdline.prebuilt-uki" \
+    "$root/etc/vconsole.conf.prebuilt-uki" "$root/usr/lib/initcpio/install/omarchy-vconsole-room"
 fi
 
 # The image is the loop backing file itself: the same on-disk bytes, written

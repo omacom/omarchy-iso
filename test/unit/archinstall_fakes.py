@@ -83,6 +83,12 @@ def archinstall(names=None):
     finally:
         sys.meta_path.remove(finder)
         for name in set(sys.modules) - set(before):
+            # Off its package too: `from . import name` takes the package's
+            # attribute before it looks in sys.modules, and would hand a later
+            # test the module this one loaded against its own stand-ins.
+            parent, _, child = name.rpartition(".")
+            if getattr(sys.modules.get(parent), child, None) is sys.modules[name]:
+                delattr(sys.modules[parent], child)
             del sys.modules[name]
         sys.modules.update(before)
 

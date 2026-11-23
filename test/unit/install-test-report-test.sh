@@ -23,7 +23,7 @@ step_script() {
       if ($0 !~ /^ *$/) { match($0, /^ */); if (RLENGTH <= indent) exit }
       print
     }
-  ' "$WORKFLOW" | sed -e 's/\${{ matrix\.variant }}/$VARIANT/g' -e "s/\${{ inputs\.channel || 'edge' }}/edge/g"
+  ' "$WORKFLOW" | sed -e 's/\${{ matrix\.variant }}/$VARIANT/g' -e 's/\${{ env\.CHANNEL }}/edge/g'
 }
 
 script=$(step_script)

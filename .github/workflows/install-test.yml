@@ -49,59 +49,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Our Namespace runners are for people we trust, by the rule omarchy-pkgs
-  # builds by: a collaborator with write access, or someone in
-  # .github/VOUCHED.td (read from the default branch, so a pull request cannot
-  # vouch for itself). Whether the pull request comes from a fork does not
-  # matter. Anyone else gets GitHub's runner.
+  # Every job that runs this repository's code runs on the same two Namespace
+  # profiles, whoever wrote the pull request, and so do the merges to quattro
+  # its numbers are compared against. A pull request on another machine than
+  # its baseline has no comparison to make.
   #
-  # This chooses the runner for an honest pull request. It does not stop a
-  # dishonest one: GitHub runs a pull request's own copy of this file, which
-  # can ask for any runner. What stops that is the repository holding outside
-  # contributors' workflow runs until a maintainer approves them (Settings,
-  # Actions, "Approval for running fork pull request workflows").
-  trust:
-    name: "Is the author trusted to use our runners"
-    runs-on: ubuntu-26.04
-    outputs:
-      trusted: ${{ steps.gate.outputs.trusted }}
-    steps:
-      # A lookup that fails must not stop the test: the author is then
-      # untrusted and the test runs on GitHub's runner.
-      - id: vouch
-        if: github.event_name == 'pull_request'
-        continue-on-error: true
-        uses: mitchellh/vouch/action/check-user@d66fa29a64600490892131ad87597c30c91fcac4 # v1
-        with:
-          user: ${{ github.event.pull_request.user.login }}
-          allow-fail: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - id: gate
-        env:
-          # A push to quattro or a manual run is ours already.
-          STATUS: ${{ github.event_name != 'pull_request' && 'ours' || steps.vouch.outputs.status }}
-          AUTHOR: ${{ github.event.pull_request.user.login || github.actor }}
-        run: |
-          case "$STATUS" in
-            ours | collaborator | vouched) trusted=true ;;
-            # Any GitHub App's account counts as a bot, so only the ones that
-            # work in this repository are trusted.
-            bot) case "$AUTHOR" in 'dependabot[bot]' | 'github-actions[bot]') trusted=true ;; *) trusted=false ;; esac ;;
-            *) trusted=false ;;
-          esac
-          echo "trusted=$trusted" >>"$GITHUB_OUTPUT"
-          echo "$AUTHOR: $STATUS, trusted=$trusted" | tee -a "$GITHUB_STEP_SUMMARY"
-
+  # Both profiles are Restricted: a job cannot call Namespace's API, so the
+  # code a pull request brings gets no token for the workspace. They keep no
+  # cache, so one run leaves nothing the next one would trust. GitHub runs a
+  # pull request's own copy of this file, and once its run is approved, it
+  # gets whatever runner that copy asks for. The repository holds every
+  # outside contributor's run until a maintainer approves it (Settings,
+  # Actions, "Approval for running fork pull request workflows"), so a change
+  # to runs-on here is a thing to read before approving.
+  #
   # One build job per architecture, both with the same steps, so that each
   # architecture's install jobs wait for their own ISO only: a job that needs
   # a matrix job waits for every leg, and one architecture's failed build
-  # would skip the other's installs. No cache of build output on either
-  # runner: what one pull request leaves the next run would trust.
+  # would skip the other's installs.
   build-x86_64:
     name: "x86_64: build the ISO"
-    needs: trust
-    runs-on: ${{ needs.trust.outputs.trusted != 'true' && 'ubuntu-26.04' || 'namespace-profile-linux-amd64-16x32' }}
+    runs-on: namespace-profile-untrusted-amd64-16x32
     timeout-minutes: 60
     env:
       ARCH: x86_64
@@ -154,12 +122,10 @@ jobs:
       # the attempt: "Re-run failed jobs" does not run a passed build again,
       # and the install jobs it does rerun fetch the ISO the earlier attempt
       # uploaded. A build that runs again replaces its ISO, as a name is
-      # unique within a run. On Namespace's runners it stays in Namespace's
-      # artifact storage, next to the install jobs that read it; Namespace's
-      # actions only work there, so GitHub's runner keeps GitHub's.
+      # unique within a run. GitHub's artifact storage, as a Restricted
+      # runner cannot reach Namespace's.
       - name: Hand the ISO to the install jobs
-        if: needs.trust.outputs.trusted == 'true'
-        uses: namespace-actions/upload-artifact@f6ccaacc655aec41b93af180d1d7eef21af862d2 # v1.0.3
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: iso-${{ github.run_id }}-${{ env.ARCH }}
           overwrite: true
@@ -171,25 +137,10 @@ jobs:
           # left.
           retention-days: 7
 
-      - name: Hand the ISO to the install jobs (GitHub's runner)
-        if: needs.trust.outputs.trusted != 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: iso-${{ github.run_id }}-${{ env.ARCH }}
-          overwrite: true
-          path: |
-            release/*.iso
-            test-runs/build-seconds
-          compression-level: 0
-          retention-days: 7
-
-  # A trusted author gets aarch64 too, on Linux on Apple Silicon: the ARM
-  # runners that have KVM. Anyone else gets x86_64 only, on GitHub's runner.
+  # aarch64 on Linux on Apple Silicon: the ARM runners that have KVM.
   build-aarch64:
     name: "aarch64: build the ISO"
-    needs: trust
-    if: needs.trust.outputs.trusted == 'true'
-    runs-on: namespace-profile-arm64-linux-apple-12x32
+    runs-on: namespace-profile-untrusted-arm64-apple-12x32
     timeout-minutes: 60
     env:
       ARCH: aarch64
@@ -197,8 +148,8 @@ jobs:
 
   install:
     name: "x86_64: ${{ matrix.variant }}"
-    needs: [trust, build-x86_64]
-    runs-on: ${{ needs.trust.outputs.trusted != 'true' && 'ubuntu-26.04' || 'namespace-profile-linux-amd64-16x32' }}
+    needs: build-x86_64
+    runs-on: namespace-profile-untrusted-amd64-16x32
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -282,13 +233,6 @@ jobs:
           persist-credentials: false
 
       - name: Fetch the ISO
-        if: needs.trust.outputs.trusted == 'true'
-        uses: namespace-actions/download-artifact@7cbad919e4b0e09f17e9d6311a444ff002992b5b # v2.0.1
-        with:
-          name: iso-${{ github.run_id }}-x86_64
-
-      - name: Fetch the ISO (GitHub's runner)
-        if: needs.trust.outputs.trusted != 'true'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: iso-${{ github.run_id }}-x86_64
@@ -493,8 +437,8 @@ jobs:
   # still runs those checks and the LUKS-sector check before it stops.
   free-space:
     name: "x86_64: free-space install"
-    needs: [trust, build-x86_64]
-    runs-on: ${{ needs.trust.outputs.trusted != 'true' && 'ubuntu-26.04' || 'namespace-profile-linux-amd64-16x32' }}
+    needs: build-x86_64
+    runs-on: namespace-profile-untrusted-amd64-16x32
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -503,13 +447,6 @@ jobs:
           persist-credentials: false
 
       - name: Fetch the ISO
-        if: needs.trust.outputs.trusted == 'true'
-        uses: namespace-actions/download-artifact@7cbad919e4b0e09f17e9d6311a444ff002992b5b # v2.0.1
-        with:
-          name: iso-${{ github.run_id }}-x86_64
-
-      - name: Fetch the ISO (GitHub's runner)
-        if: needs.trust.outputs.trusted != 'true'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: iso-${{ github.run_id }}-x86_64
@@ -574,9 +511,8 @@ jobs:
 
   install-aarch64:
     name: "aarch64: ${{ matrix.name }}"
-    # Skipped with its build, which runs for a trusted author only.
     needs: build-aarch64
-    runs-on: namespace-profile-arm64-linux-apple-12x32
+    runs-on: namespace-profile-untrusted-arm64-apple-12x32
     timeout-minutes: 75
     strategy:
       fail-fast: false
@@ -606,7 +542,7 @@ jobs:
           persist-credentials: false
 
       - name: Fetch the ISO
-        uses: namespace-actions/download-artifact@7cbad919e4b0e09f17e9d6311a444ff002992b5b # v2.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: iso-${{ github.run_id }}-aarch64
 

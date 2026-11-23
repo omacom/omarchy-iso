@@ -32,8 +32,7 @@ steps_of() {
 isos=$(sed -nE 's/^ *name: (iso-.*)$/\1/p' "$WORKFLOW")
 # The build's own name ends in its architecture's expression, the install
 # jobs' in the architecture itself.
-# One name, which a runner's own artifact step (Namespace's or GitHub's)
-# may upload under.
+# One name, which the build uploads under.
 upload=$(grep -vE -- '-(x86_64|aarch64)$' <<<"$isos" | sort -u) || fail "the build uploads no per-architecture ISO artifact"
 [[ $(grep -c "" <<<"$upload") == 1 ]] || fail "more than one ISO upload name: $upload"
 grep -F 'run_attempt' <<<"$isos" && fail "an ISO artifact name carries the attempt, which a partial re-run's install jobs never find"
@@ -46,17 +45,24 @@ uploads=$(steps_of "$upload")
 [[ $(grep -cE '^ *overwrite: true$' <<<"$uploads") == $(grep -c '^--$' <<<"$uploads") ]] \
   || fail "an ISO upload step cannot replace its ISO when a build runs again"
 
-# Namespace's artifact actions only work on Namespace's runners. A step that
-# uses one runs only for a trusted author, or in a job that is on Namespace
-# whoever the author is; GitHub's runner keeps GitHub's actions.
+# Every job runs a pull request's code, and every one runs on the same
+# Restricted Namespace profiles, whoever wrote the pull request: the baseline
+# a pull request is compared against is measured there too. A Restricted
+# runner cannot call Namespace's API, so no step may use Namespace's actions.
+# An aarch64 job, named so, runs on the ARM profile; every other job on the
+# x86_64 one.
 awk '
-  /^  [A-Za-z0-9_-]+:$/ { job = $1; ns = 0 }
-  /^    runs-on: namespace-profile-/ { ns = 1 }
-  match($0, /^ *- /) { trusted = 0 }
-  /^ *if: needs\.trust\.outputs\.trusted == .true.$/ { trusted = 1 }
-  /^ *(- )?uses: namespace-actions\// && !trusted && !ns { print job " " $0; bad = 1 }
-  END { exit bad }
-' "$WORKFLOW" || fail "a Namespace artifact step can run on GitHub's runner (above)"
+  function check() {
+    want = job ~ /aarch64/ ? "namespace-profile-untrusted-arm64-apple-12x32" : "namespace-profile-untrusted-amd64-16x32"
+    if (job && runs != want) { print job " runs on " (runs ? runs : "no runner") ", not " want; bad = 1 }
+  }
+  /^jobs:$/ { jobs = 1; next }
+  /^[^ #]/ { if (jobs) check(); jobs = 0; job = "" }
+  jobs && /^  [A-Za-z0-9_-]+: *(#.*)?$/ { check(); job = $1; sub(/:.*/, "", job); runs = "" }
+  jobs && /^    runs-on:/ { runs = $0; sub(/^    runs-on: */, "", runs); sub(/ +#.*$/, "", runs); gsub(/["\047]/, "", runs) }
+  /^ *(- )?uses: *["\047]?namespace-actions\// { print job " " $0; bad = 1 }
+  END { if (jobs) check(); exit bad }
+' "$WORKFLOW" || fail "a job runs off its Restricted profile, or a step needs Namespace's API (above)"
 
 # Every test-result artifact keeps the run and the attempt, as the comment
 # workflow reads them.

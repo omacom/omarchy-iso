@@ -955,9 +955,18 @@ done
 set +e
 wait "$child_pid"
 status=$?
+# Wait for the sanitize_child_output process substitution to drain EOF into $LOG_FILE.
+wait 2>/dev/null
 set -e
 child_pid=""
 child_pgid=""
+
+# Refresh the target's copy of the log once the sanitizer pipe has drained so
+# it never misses trailing boot/user lines or failure output before unmount.
+if [[ -f $LOG_FILE && -d /mnt/var/log ]] && mountpoint -q /mnt 2>/dev/null; then
+  cp -f "$LOG_FILE" /mnt/var/log/omarchy-install.log 2>/dev/null || true
+  chmod 0644 /mnt/var/log/omarchy-install.log 2>/dev/null || true
+fi
 
 dashboard_log "installer child exited with status $status"
 

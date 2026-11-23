@@ -3394,7 +3394,8 @@ def finalize_boot_and_user(ctx: InstallContext) -> None:
                 if log_path is not None and Path(log_path).is_file():
                     shutil.copy2(log_path, target_log)
                 with target_log.open("ab") as saved:
-                    saved.writelines(user_log)
+                    for chunk in user_log:
+                        saved.write(re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", chunk))
                 target_log.chmod(0o644)
             except OSError:
                 pass

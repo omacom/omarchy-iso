@@ -154,11 +154,11 @@ greeter() {
 
   tagline=$(t greeter.tagline)
   tpad=$(((cols - $(display_width "$tagline")) / 2)); (( tpad < 0 )) && tpad=0
-  printf '\033[%d;%dH%s' "$tagline_row" "$((tpad + 1))" "$tagline"
+  printf '\033[%d;%dH%s\n' "$tagline_row" "$((tpad + 1))" "$tagline"
 
   hint=$(t greeter.hint)
   hpad=$(((cols - $(display_width "$hint")) / 2)); (( hpad < 0 )) && hpad=0
-  printf '\033[%d;%dH\033[2m%s\033[0m' "$hint_row" "$((hpad + 1))" "$hint"
+  printf '\033[%d;%dH\033[2m%s\033[0m\n' "$hint_row" "$((hpad + 1))" "$hint"
 
   # ColorShift the logo: a green base (indexed color 2) with a cyan accent (6)
   # drifting through, settling on green. Indexed ANSI colors, not hex — the

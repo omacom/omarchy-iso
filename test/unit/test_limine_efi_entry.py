@@ -156,8 +156,8 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
     def entry(self, label, guid, part=1, loader=LOADER):
         return [label, f"HD({part},GPT,{guid},0x800,0x400000)/{loader}"]
 
-    def register(self):
-        phases_impl._register_limine_efi_entry(Path("/dev/nvme1n1"), 3, LOADER)
+    def register(self, replaced_guids=None):
+        phases_impl._register_limine_efi_entry(Path("/dev/nvme1n1"), 3, LOADER, replaced_guids=replaced_guids)
         return json.loads(self.nvram.read_text())
 
     def calls(self):
@@ -440,29 +440,32 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
         self.assertIn("No space left on device", warnings[0])
 
-    def test_stale_limine_entries_for_wiped_partitions_are_pruned(self):
-        # A previous install on a wiped disk left a "Limine" entry pointing at
-        # a GPT PARTUUID that no longer exists anywhere. Pruning it before
-        # --create frees the slot (even when NVRAM was full) and leaves live
-        # installs and non-Limine entries untouched.
-        stale = "11111111-2222-3333-4444-555555555555"
+    def test_stale_limine_entries_for_replaced_partitions_are_pruned_and_disconnected_disks_survive(self):
+        # A previous install on the disk this install just wiped left a "Limine"
+        # entry whose GUID is in replaced_guids. Pruning it before --create
+        # frees the slot (even when NVRAM was full), while a "Limine" entry for
+        # a disconnected disk (not attached AND not in replaced_guids) survives.
+        replaced = "11111111-2222-3333-4444-555555555555"
+        disconnected = "66666666-7777-8888-9999-aaaaaaaaaaaa"
         self.nvram_with(
             {
                 "0000": self.entry("Windows Boot Manager", WINDOWS),
-                "0002": self.entry("Omarchy", stale, loader="\\EFI\\Linux\\omarchy_linux.efi"),
-                "0003": self.entry("Limine", stale),
+                "0002": self.entry("Omarchy", replaced, loader="\\EFI\\Linux\\omarchy_linux.efi"),
+                "0003": self.entry("Limine", replaced),
                 "0004": self.entry("Limine", OTHER),
+                "0005": self.entry("Limine", disconnected),
             },
-            ["0003", "0004", "0000", "0002"],
+            ["0003", "0004", "0005", "0000", "0002"],
         )
-        with mock.patch.dict(os.environ, {"FAKE_SLOTS": "4"}):
-            nvram = self.register()
+        with mock.patch.dict(os.environ, {"FAKE_SLOTS": "5"}):
+            nvram = self.register(replaced_guids={replaced})
         self.assertIn("0000", nvram["entries"])
         self.assertIn("0002", nvram["entries"])
         self.assertIn("0004", nvram["entries"])
+        self.assertIn("0005", nvram["entries"], "disconnected disk entry must not be deleted")
         ours = next(num for num, (label, dp) in nvram["entries"].items() if label == "Limine" and OURS in dp)
-        self.assertNotIn(stale, str(nvram["entries"][ours]))
-        self.assertEqual(nvram["order"], [ours, "0004", "0000", "0002"])
+        self.assertNotIn(replaced, str(nvram["entries"][ours]))
+        self.assertEqual(nvram["order"], [ours, "0004", "0005", "0000", "0002"])
         self.assertEqual(nvram.get("next"), ours)
 
 

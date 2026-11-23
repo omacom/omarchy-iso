@@ -619,6 +619,16 @@ def arch_install_system(ctx: InstallContext) -> None:
     pre_mounted = arch.is_pre_mount(config)
 
     if not pre_mounted:
+        replaced_guids: set[str] = set()
+        if config.disk_config:
+            for mod in getattr(config.disk_config, "device_modifications", ()):
+                if getattr(mod, "wipe", False):
+                    dev_info = getattr(getattr(mod, "device", None), "device_info", None)
+                    dev_path = getattr(dev_info, "path", None)
+                    if dev_path:
+                        replaced_guids |= _disk_partition_guids(Path(dev_path))
+        ctx.state["replaced_partition_guids"] = replaced_guids
+
         info("› partitioning + formatting + encrypting")
         with _time_step("STEP.perform_filesystem_operations"):
             # The btrfs archinstall makes here is overwritten by the root
@@ -1548,6 +1558,7 @@ def _install_limine_omarchy(ctx: InstallContext, installer, config) -> None:
             disk=arch.parent_device_path(efi_partition.safe_dev_path),
             part=int(efi_partition.partn),
             removable=bootloader_removable,
+            replaced_guids=ctx.state.get("replaced_partition_guids"),
         )
     else:
         _install_limine_bios(ctx, boot_partition)
@@ -1604,6 +1615,7 @@ def _install_limine_efi(
     esp_path: str = "/EFI/limine",
     efi_binary: str | None = None,
     pre_state: dict | None = None,
+    replaced_guids: set[str] | None = None,
 ) -> None:
     if efi_binary is None:
         efi_binary = _default_limine_efi_binary()
@@ -1620,7 +1632,13 @@ def _install_limine_efi(
     hook_command = f"/usr/bin/cp /usr/share/limine/{source_name} {target_path}"
     _write_limine_pacman_hook(ctx.target, hook_command)
 
-    _register_limine_efi_entry(disk, part, _limine_efi_loader(esp_path, efi_binary), pre_state=pre_state)
+    _register_limine_efi_entry(
+        disk,
+        part,
+        _limine_efi_loader(esp_path, efi_binary),
+        pre_state=pre_state,
+        replaced_guids=replaced_guids,
+    )
 
 
 def _limine_efi_loader(esp_path: str, efi_binary: str) -> str:
@@ -1635,6 +1653,7 @@ def _register_limine_efi_entry(
     loader: str,
     *,
     pre_state: dict | None = None,
+    replaced_guids: set[str] | None = None,
 ) -> None:
     pre_state = pre_state or _read_efibootmgr()
     if pre_state.get("unreadable"):
@@ -1656,11 +1675,11 @@ def _register_limine_efi_entry(
     # An efibootmgr that prints no paths matches nothing, and a reinstall
     # onto the same ESP then leaves one duplicate behind, which is harmless.
     esp = _partition_guid(disk, part)
-    live_guids = _existing_partition_guids()
+    replaced = {g.lower() for g in (replaced_guids or ())}
     stale = [
         num
         for num, text in pre_state["entries"].items()
-        if _is_stale_limine_entry(text, live_guids, esp)
+        if _is_stale_limine_entry(text, replaced, esp)
     ]
     identical = [
         num
@@ -2352,24 +2371,25 @@ def _entry_partition_guid(entry: str) -> str:
     return match.group(1) if match else ""
 
 
-def _existing_partition_guids() -> set[str]:
-    """Every GPT partition GUID currently present on any disk, lower case."""
-    res = capture(["lsblk", "-nlo", "PARTUUID"])
+def _disk_partition_guids(disk: Path) -> set[str]:
+    """Every GPT partition GUID currently on `disk`, lower case."""
+    res = capture(["lsblk", "-nlo", "PARTUUID", str(disk)])
     if res.returncode != 0:
         return set()
     return {line.strip().lower() for line in res.stdout.splitlines() if line.strip()}
 
 
-def _is_stale_limine_entry(entry: str, live_guids: set[str], current_esp: str) -> bool:
+def _is_stale_limine_entry(entry: str, replaced_guids: set[str], current_esp: str) -> bool:
     """Whether an entry is a "Limine" boot entry pointing to a GPT partition
-    that no longer exists on any attached disk."""
-    if not live_guids:
+    that this install just wiped on the target disk (never touching entries for
+    other or temporarily disconnected disks)."""
+    if not replaced_guids:
         return False
     label, _, _ = entry.lower().partition("\t")
     if label.strip() != "limine":
         return False
     guid = _entry_partition_guid(entry)
-    return bool(guid) and guid != current_esp and guid not in live_guids
+    return bool(guid) and guid != current_esp and guid in replaced_guids
 
 
 def _partition_guid(disk: Path, part: int) -> str:
@@ -3361,6 +3381,23 @@ def finalize_boot_and_user(ctx: InstallContext) -> None:
             except BaseException as exc:  # noqa: BLE001 - re-raised below
                 errors.append(exc)
     if user_log:
+        # Refresh the target's saved log BEFORE flushing user_log to stdout so
+        # we don't race the dashboard's stdout pipe: target_log gets everything
+        # written to ctx.log_path so far (including boot finalization) plus the
+        # buffered user output and [step] timings, even when a branch failed.
+        target = getattr(ctx, "target", None)
+        log_path = getattr(ctx, "log_path", None)
+        if target is not None:
+            target_log = Path(target) / "var" / "log" / "omarchy-install.log"
+            try:
+                target_log.parent.mkdir(parents=True, exist_ok=True)
+                if log_path is not None and Path(log_path).is_file():
+                    shutil.copy2(log_path, target_log)
+                with target_log.open("ab") as saved:
+                    saved.writelines(user_log)
+                target_log.chmod(0o644)
+            except OSError:
+                pass
         sys.stdout.buffer.writelines(user_log)
         sys.stdout.buffer.flush()
     if errors:

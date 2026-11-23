@@ -182,7 +182,7 @@ def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
     instance_patches: list[str] = []
     luks_originals: dict[str, object] = {}
     commit_original = None
-    settle = {"calls": 0, "seconds": 0.0}
+    settle = {"calls": 0, "seconds": 0.0, "durations": []}
     settle_originals: dict[object, object] = {}
 
     def timed(original, label):
@@ -217,8 +217,10 @@ def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
             try:
                 return original(*args, **kwargs)
             finally:
+                elapsed = time.monotonic() - started
                 settle["calls"] += 1
-                settle["seconds"] += time.monotonic() - started
+                settle["seconds"] += elapsed
+                settle["durations"].append(elapsed)
         return wrapper
 
     def commit_wrapper(original):
@@ -273,7 +275,8 @@ def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
         for module, function in settle_originals.items():
             module.udev_sync = function
         if settle["seconds"] >= 0.05:
-            info(f"[step] FS.udevadm settle ({settle['calls']} calls): {settle['seconds']:.6f}s")
+            per_call = ", ".join(f"{d:.3f}s" for d in settle["durations"])
+            info(f"[step] FS.udevadm settle ({settle['calls']} calls: {per_call}): {settle['seconds']:.6f}s")
 
 
 def _write_locale_conf_for_prebuilt(installer, locale_config) -> bool:
@@ -342,7 +345,11 @@ def perform_filesystem_operations(arch_config: ArchConfig, throwaway_root_fs: bo
     attempts = 3
     with _filesystem_step_tweaks(throwaway_root_fs):
         for attempt in range(1, attempts + 1):
+            t0 = time.monotonic()
             udev_sync()
+            elapsed = time.monotonic() - t0
+            if elapsed >= 0.05:
+                info(f"[step] FS.pre_attempt_udev_sync: {elapsed:.6f}s")
             try:
                 handler.perform_filesystem_operations(**fs_kwargs)
                 return
@@ -367,7 +374,13 @@ class OmarchyInstaller(Installer):
 
     def __exit__(self, exc_type, exc_value, traceback):
         if exc_type is None:
-            return super().__exit__(exc_type, exc_value, traceback)
+            started = time.monotonic()
+            try:
+                return super().__exit__(exc_type, exc_value, traceback)
+            finally:
+                elapsed = time.monotonic() - started
+                if elapsed >= 0.05:
+                    info(f"[step] STEP.installer_exit (sync + post_install_check): {elapsed:.6f}s")
         sync_log = getattr(self, "sync_log_to_install_medium", None)
         if sync_log is not None:
             sync_log()

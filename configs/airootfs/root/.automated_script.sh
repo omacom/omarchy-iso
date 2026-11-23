@@ -162,6 +162,19 @@ elif /usr/local/bin/omarchy-cidata-load; then
   set_tokyo_night_colors
   echo "Autoinstall configuration found on cidata drive; skipping the configurator."
   export OMARCHY_UI_INTERACTIVE=no
+
+  # Run pre-install scripts if they exist
+  if [[ -d /root/scripts-pre ]]; then
+    export OMARCHY_SCRIPTS_PRE=/root/scripts-pre
+    for script in $OMARCHY_SCRIPTS_PRE/*; do
+      echo "Running pre-install scripts: $script"
+      . "$script"
+    done
+  fi
+  if [[ -d /root/scripts-post ]]; then
+    echo "Registering post-install scripts..."
+    export OMARCHY_SCRIPTS_POST=/root/scripts-post
+  fi
 else
   # The wizard and the whole install run in kmscon, which runs this script
   # again: fonts with every script the installer speaks, the same on every

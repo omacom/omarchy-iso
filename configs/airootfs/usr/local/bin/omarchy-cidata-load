@@ -66,5 +66,13 @@ if [[ -f $mnt/user_configuration.json ]] && [[ -f $mnt/user_credentials.json || 
   fi
 fi
 
+# Copy optional script directories
+optional_script_dirs=(scripts-pre scripts-post)
+for dir in "${optional_script_dirs[@]}"; do
+  if [[ -d $mnt/$dir ]]; then
+    cp -r "$mnt/$dir" "$dest/"
+  fi
+done
+
 umount "$mnt"
 exit $loaded

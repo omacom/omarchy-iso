@@ -1054,21 +1054,30 @@ def _write_root_image_parallel(container: Path, device: str,
     # minutes of the install.
     progress = Path(tempfile.mkdtemp(prefix="omarchy-image-write-")) / "progress"
     env = {**os.environ, "OMARCHY_IMAGE_WRITE_PROGRESS": str(progress)}
-    with _time_step("F1.image_write (parallel, O_DIRECT)"):
-        proc = subprocess.Popen([str(IMAGE_WRITE), "write-squashfs", str(container), device],
-                                stderr=subprocess.PIPE, text=True, env=env)
-        while True:
-            try:
-                _, stderr = proc.communicate(timeout=0.5)
-                break
-            except subprocess.TimeoutExpired:
-                if on_progress:
-                    try:
-                        done, total = (int(n) for n in progress.read_text().split())
-                        on_progress(done / total)
-                    except (OSError, ValueError, ZeroDivisionError):
-                        pass  # not written yet, or caught between two samples
-    shutil.rmtree(progress.parent, ignore_errors=True)
+    proc = None
+    try:
+        with _time_step("F1.image_write (parallel, O_DIRECT)"):
+            proc = subprocess.Popen([str(IMAGE_WRITE), "write-squashfs", str(container), device],
+                                    stderr=subprocess.PIPE, text=True, env=env)
+            while True:
+                try:
+                    _, stderr = proc.communicate(timeout=0.5)
+                    break
+                except subprocess.TimeoutExpired:
+                    if on_progress:
+                        try:
+                            done, total = (int(n) for n in progress.read_text().split())
+                            on_progress(done / total)
+                        except (OSError, ValueError, ZeroDivisionError):
+                            pass  # not written yet, or caught between two samples
+    finally:
+        # An interrupt or an error in the progress callback ends this
+        # function, never the writer: stop it before anything cleans up
+        # the target it is still writing.
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        shutil.rmtree(progress.parent, ignore_errors=True)
     for line in stderr.splitlines():
         info(f"› {line}")
     if proc.returncode == 2:

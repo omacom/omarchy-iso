@@ -117,6 +117,27 @@ class WriteRootImageParallelTest(unittest.TestCase):
             Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.sfs"), "/dev/mapper/root", seen.append))
         self.assertEqual(set(seen), {0.5})
 
+    def test_an_interrupt_stops_the_writer_too(self):
+        pid_file = self.tmp / "pid"
+        self.tool.write_text(
+            "#!/bin/bash\n"
+            f'echo $$ >"{pid_file}"\n'
+            'echo "1 10" >"$OMARCHY_IMAGE_WRITE_PROGRESS"\n'
+            "exec sleep 30\n"
+        )
+        self.tool.chmod(0o755)
+
+        def interrupt(_done):
+            raise KeyboardInterrupt
+
+        with self.assertRaises(KeyboardInterrupt):
+            phases_impl._write_root_image_parallel(
+                Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.sfs"), "/dev/mapper/root", interrupt)
+        pid = int(pid_file.read_text())
+        # Reaped, not a zombie: kill(pid, 0) fails once the writer is gone.
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
     def test_refused_image_falls_back_to_dd(self):
         self.stub(2, "omarchy-image-write: squashfs: the file ends in a fragment\\n")
         self.assertFalse(self.write())

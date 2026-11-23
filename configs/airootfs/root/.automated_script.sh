@@ -152,11 +152,6 @@ if [[ -f /usr/share/omarchy-iso/oem-install ]]; then
 elif [[ ${OMARCHY_KMSCON:-} == 1 ]]; then
   # The tty1 run already looked for cidata.
   ./configurator && status=0 || status=$?
-  # A retry from the shell left after an abort: that shell, not kmscon's
-  # command, gets the relaunch request, so end it to end kmscon.
-  if ((status == 75)) && [[ -n ${OMARCHY_KMSCON_SHELL:-} ]]; then
-    kill -HUP "$OMARCHY_KMSCON_SHELL" 2>/dev/null || true
-  fi
   ((status == 0)) || exit "$status"
 elif /usr/local/bin/omarchy-cidata-load; then
   set_tokyo_night_colors
@@ -170,27 +165,24 @@ else
   # first-boot owner setup is drawn with.
   # shellcheck disable=SC1091
   source /usr/share/omarchy-iso/kmscon.sh
+  # shellcheck disable=SC1091
+  source /usr/share/omarchy-iso/kmscon-session.sh
 
-  # The script exits 75 to ask for a relaunch; anything else that is not
-  # success leaves a shell in kmscon, so an abort's message stays readable and
-  # the installer can be rerun in its language. The shell keeps this PID, so a
-  # retry from it that asks for a relaunch can hang it up, which ends kmscon.
-  inner='"$@"; status=$?; ((status == 0 || status == 75)) && exit $status; export OMARCHY_KMSCON_SHELL=$$; exec bash -l'
+  # The answers a relaunch carries hold the password: however this run ends,
+  # none outlive it.
+  trap 'kill "$warm_pid" 2>/dev/null; rm -f "$KMSCON_RESUME"*; printf "\e[?25h" >/dev/tty1 2>/dev/null' EXIT
 
-  # kmscon takes its layout and font once, at its start: the configurator
-  # exits 75 with its answers saved to have it started again with the layout
-  # and language just picked. Before any are, US and the language an ISO
-  # presets (presets/<code>.json).
-  mkdir -p /run/omarchy-iso
-  while true; do
-    keymap=us language=$(jq -r '.language // empty' /usr/share/omarchy-iso/preset.json 2>/dev/null || true)
-    if [[ -r /run/omarchy-iso/kmscon-resume ]]; then
-      { read -r keymap; read -r language; } < <(bash -c 'source "$1"; printf "%s\n%s\n" "${keyboard:-us}" "${language:-}"' _ /run/omarchy-iso/kmscon-resume)
-    fi
-    omarchy_kmscon /run/omarchy-iso/kmscon.log "$keymap" "$language" "" /bin/bash -c "$inner" _ /root/.automated_script.sh
-    # Without a relaunch asked for, the installer ran to its end in kmscon.
-    [[ -e /run/omarchy-iso/kmscon-resume ]] || exit 0
-  done
+  # Before any language is picked, the one an ISO presets (presets/<code>.json).
+  language=$(jq -r '.language // empty' /usr/share/omarchy-iso/preset.json 2>/dev/null || true)
+  if kmscon_session "$language" /bin/bash -c "$(kmscon_command)" _ /root/.automated_script.sh; then
+    exit 0
+  fi
+  # kmscon could not hold: the console draws the installer, in English for
+  # the languages only kmscon can draw.
+  rm -f "$KMSCON_RESUME"*
+  unset OMARCHY_KMSCON_SUPERVISOR
+  set_tokyo_night_colors
+  ./configurator
 fi
 
 # Deferred-provisioning installs skip the celebration/reboot prompt and reboot on

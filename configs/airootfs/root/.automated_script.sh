@@ -65,7 +65,7 @@ touch "$OMARCHY_INSTALL_LOG_FILE"
 
 export COLUMNS=$(tput cols)
 export LINES=$(tput lines)
-exec > >(tee >(sed -u 's/\x1b\[[0-9;?]*[A-Za-z]//g' >>"$OMARCHY_INSTALL_LOG_FILE") 2>/dev/null) 2>/dev/tty
+exec > >(tee >(sed -u -E 's/\x1b(\[[0-9;?]*[A-Za-z]|[78])//g' >>"$OMARCHY_INSTALL_LOG_FILE") 2>/dev/null) 2>/dev/tty
 export CLICOLOR_FORCE=1
 export FORCE_COLOR=1
 

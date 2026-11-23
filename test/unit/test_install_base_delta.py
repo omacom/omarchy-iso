@@ -93,6 +93,48 @@ class InstallBaseDeltaTest(unittest.TestCase):
         calls = self.run_delta(Installer45(self.target(), []))
         self.assertEqual(calls[-1], "post-install hook")
 
+    def test_prebuilt_locale_skips_set_locale_and_empty_kb_skips_vconsole(self):
+        target = self.target()
+        (target / "etc").mkdir()
+        (target / "etc" / "locale.gen").write_text("#de_DE.UTF-8 UTF-8\nen_US.UTF-8 UTF-8\n")
+        installer = Installer45(target, [])
+        installer.set_vconsole = lambda lc: installer.calls.append(("vconsole", lc.kb_layout))
+        installer.set_locale = lambda lc: installer.calls.append(("locale", lc.sys_lang)) or True
+        installer.set_keyboard_language = lambda kb: installer.calls.append(("kb", kb))
+
+        arch = self.enterContext(adapter({"archinstall.lib.pacman.config": {"PacmanConfig": PacmanConfig}}, version="4.5"))
+        timer = types.SimpleNamespace(_time_step=lambda name: nullcontext())
+        self.enterContext(mock.patch.dict(sys.modules, {"orchestrator.phases_impl": timer}))
+        self.enterContext(mock.patch.object(arch, "info", lambda *_: None))
+        config = types.SimpleNamespace(mirror_config=None, pacman_config=None)
+        locale_cfg = types.SimpleNamespace(sys_lang="en_US.UTF-8", sys_enc="UTF-8", kb_layout="")
+        arch.install_base_delta(installer, config, hostname=None, locale_config=locale_cfg)
+
+        self.assertEqual((target / "etc" / "locale.conf").read_text(), "LANG=en_US.UTF-8\n")
+        self.assertNotIn("locale", [c[0] for c in installer.calls if isinstance(c, tuple)])
+        self.assertNotIn("vconsole", [c[0] for c in installer.calls if isinstance(c, tuple)])
+        self.assertNotIn("kb", [c[0] for c in installer.calls if isinstance(c, tuple)])
+
+    def test_non_prebuilt_locale_falls_through_to_set_locale(self):
+        target = self.target()
+        (target / "etc").mkdir()
+        (target / "etc" / "locale.gen").write_text("#da_DK.UTF-8 UTF-8\nen_US.UTF-8 UTF-8\n")
+        installer = Installer45(target, [])
+        installer.set_vconsole = lambda lc: installer.calls.append(("vconsole", lc.kb_layout))
+        installer.set_locale = lambda lc: installer.calls.append(("locale", lc.sys_lang)) or True
+        installer.set_keyboard_language = lambda kb: installer.calls.append(("kb", kb))
+
+        arch = self.enterContext(adapter({"archinstall.lib.pacman.config": {"PacmanConfig": PacmanConfig}}, version="4.5"))
+        timer = types.SimpleNamespace(_time_step=lambda name: nullcontext())
+        self.enterContext(mock.patch.dict(sys.modules, {"orchestrator.phases_impl": timer}))
+        config = types.SimpleNamespace(mirror_config=None, pacman_config=None)
+        locale_cfg = types.SimpleNamespace(sys_lang="da_DK.UTF-8", sys_enc="UTF-8", kb_layout="dk")
+        arch.install_base_delta(installer, config, hostname=None, locale_config=locale_cfg)
+
+        self.assertIn(("locale", "da_DK.UTF-8"), installer.calls)
+        self.assertIn(("vconsole", "dk"), installer.calls)
+        self.assertIn(("kb", "dk"), installer.calls)
+
 
 class TargetPackagesTest(unittest.TestCase):
     """What the delta counts as already installed: what pacman says satisfies

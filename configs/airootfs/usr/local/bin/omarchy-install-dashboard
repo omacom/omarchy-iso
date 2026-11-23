@@ -71,6 +71,9 @@ export GUM_CONFIRM_UNSELECTED_BACKGROUND="${GUM_CONFIRM_UNSELECTED_BACKGROUND:-0
 
 child_pid=""
 child_pgid=""
+sanitizer_pid=""
+sanitizer_dir=""
+sanitizer_fifo=""
 
 tips=(
   progress.tip.menu
@@ -94,6 +97,7 @@ tips=(
 )
 
 cleanup() {
+  [[ -n ${sanitizer_dir:-} ]] && rm -rf "$sanitizer_dir" 2>/dev/null || true
   printf '%s%s' "$RESET" "$SHOW_CURSOR" >"$TTY_PATH" 2>/dev/null || true
 }
 
@@ -102,22 +106,30 @@ dashboard_log() {
 }
 
 stop_child() {
-  [[ -n ${child_pid:-} ]] || return 0
-  if kill -0 "$child_pid" 2>/dev/null; then
-    if [[ -n ${child_pgid:-} ]]; then
-      kill -- -"$child_pgid" 2>/dev/null || true
-    fi
-    kill "$child_pid" 2>/dev/null || true
-    for _ in {1..20}; do
-      kill -0 "$child_pid" 2>/dev/null || break
-      sleep 0.05
-    done
+  if [[ -n ${child_pid:-} ]]; then
     if kill -0 "$child_pid" 2>/dev/null; then
-      [[ -n ${child_pgid:-} ]] && kill -9 -- -"$child_pgid" 2>/dev/null || true
-      kill -9 "$child_pid" 2>/dev/null || true
+      if [[ -n ${child_pgid:-} ]]; then
+        kill -- -"$child_pgid" 2>/dev/null || true
+      fi
+      kill "$child_pid" 2>/dev/null || true
+      for _ in {1..20}; do
+        kill -0 "$child_pid" 2>/dev/null || break
+        sleep 0.05
+      done
+      if kill -0 "$child_pid" 2>/dev/null; then
+        [[ -n ${child_pgid:-} ]] && kill -9 -- -"$child_pgid" 2>/dev/null || true
+        kill -9 "$child_pid" 2>/dev/null || true
+      fi
     fi
+    wait "$child_pid" 2>/dev/null || true
+    child_pid=""
+    child_pgid=""
   fi
-  wait "$child_pid" 2>/dev/null || true
+  if [[ -n ${sanitizer_pid:-} ]]; then
+    kill "$sanitizer_pid" 2>/dev/null || true
+    wait "$sanitizer_pid" 2>/dev/null || true
+    sanitizer_pid=""
+  fi
 }
 
 interrupt() {
@@ -928,8 +940,15 @@ sanitize_child_output() {
 
 launch_child() {
   mkdir -p "$(dirname "$LOG_FILE")"
+  sanitizer_dir=$(mktemp -d)
+  sanitizer_fifo="$sanitizer_dir/child-output.fifo"
+  mkfifo "$sanitizer_fifo"
+  # Start the sanitizer as a direct child of the dashboard so we can wait on
+  # its PID after the installer exits and guarantee $LOG_FILE has drained.
+  sanitize_child_output <"$sanitizer_fifo" >>"$LOG_FILE" &
+  sanitizer_pid=$!
   # Child is non-interactive. All visible UI belongs to this supervisor.
-  PYTHONUNBUFFERED=1 setsid "${INSTALL_CMD[@]}" </dev/null > >(sanitize_child_output >>"$LOG_FILE") 2>&1 &
+  PYTHONUNBUFFERED=1 setsid "${INSTALL_CMD[@]}" </dev/null >"$sanitizer_fifo" 2>&1 &
   child_pid=$!
   child_pgid=$child_pid
 }
@@ -955,9 +974,26 @@ done
 set +e
 wait "$child_pid"
 status=$?
+# Wait for the sanitizer process to drain EOF into $LOG_FILE before copying.
+if [[ -n ${sanitizer_pid:-} ]]; then
+  wait "$sanitizer_pid" 2>/dev/null
+fi
 set -e
 child_pid=""
 child_pgid=""
+sanitizer_pid=""
+if [[ -n ${sanitizer_dir:-} ]]; then
+  rm -rf "$sanitizer_dir" 2>/dev/null || true
+  sanitizer_dir=""
+  sanitizer_fifo=""
+fi
+
+# Refresh the target's copy of the log once the sanitizer pipe has drained so
+# it never misses trailing boot/user lines or failure output before unmount.
+if [[ -f $LOG_FILE && -d /mnt/var/log ]] && mountpoint -q /mnt 2>/dev/null; then
+  cp -f "$LOG_FILE" /mnt/var/log/omarchy-install.log 2>/dev/null || true
+  chmod 0644 /mnt/var/log/omarchy-install.log 2>/dev/null || true
+fi
 
 dashboard_log "installer child exited with status $status"
 

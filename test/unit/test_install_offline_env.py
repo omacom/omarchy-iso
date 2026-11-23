@@ -41,6 +41,7 @@ class MiseOfflineTest(unittest.TestCase):
         command = timing.call_args.args[0]
         self.assertIn("arch-chroot", command)
         self.assertIn("MISE_OFFLINE=1", command)
+        self.assertIn("MISE_LOG_LEVEL=error", command)
 
 
 if __name__ == "__main__":

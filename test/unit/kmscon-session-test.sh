@@ -29,6 +29,7 @@ case $ACTION in
   finish) exit 0 ;;
   abort) exit 1 ;;
   crash) kill -9 "$PPID" ;; # kmscon dies, taking the command with it
+  interrupt) kill -INT "$PPID" "$$" ;; # Ctrl+C reaches the command and the installer
 esac
 INNER
 
@@ -77,6 +78,14 @@ run save crash finish
 [[ $(<"$work/seen") == $'none\ns3cr"et\nnone' ]] || fail "after a crash the runs saw $(<"$work/seen")"
 left && fail "the answers outlived a crash"
 echo "ok - kmscon dying after the answers are taken starts the installer over"
+
+# Ctrl+C on a screen of the installer ends the installer, not the session:
+# kmscon is not started again under the shell it leaves.
+run interrupt
+((status == 0)) || fail "an interrupted install returns $status"
+[[ $(<"$work/starts") == "interrupt us -" ]] || fail "after Ctrl+C kmscon started with $(<"$work/starts")"
+left && fail "the answers outlived an interrupted install"
+echo "ok - Ctrl+C ends the installer without starting kmscon again"
 
 # kmscon that keeps dying is started again each time, with the answers, until
 # it holds: there is no console to hand the installer to.

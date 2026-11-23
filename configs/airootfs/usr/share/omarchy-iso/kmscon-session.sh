@@ -61,9 +61,12 @@ kmscon_session() {
 # to ask for a relaunch; anything else that is not success leaves a shell in
 # kmscon, so an abort's message stays readable and the installer can be rerun
 # in its language. The shell keeps this PID, so a rerun from it that asks for
-# a relaunch can hang it up, which ends kmscon.
+# a relaunch can hang it up, which ends kmscon. Ctrl+C reaches this command
+# along with the installer it interrupts: caught here, so it still records the
+# ending and leaves that shell, where dying of it would pass for kmscon dying
+# and start the installer over.
 kmscon_command() {
-  printf '%s' '"$@"; status=$?; printf "%s\n" "$status" >"$OMARCHY_KMSCON_ENDED"; ((status == 0 || status == 75)) && exit $status; export OMARCHY_KMSCON_SHELL=$$; exec bash -l'
+  printf '%s' 'trap : INT; "$@"; status=$?; printf "%s\n" "$status" >"$OMARCHY_KMSCON_ENDED"; ((status == 0 || status == 75)) && exit $status; trap - INT; export OMARCHY_KMSCON_SHELL=$$; exec bash -l'
 }
 
 kmscon_supervised() {

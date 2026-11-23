@@ -20,9 +20,11 @@ before, by the format.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 from pathlib import Path
 from subprocess import CalledProcessError
+from typing import Iterator
 
 from archinstall.lib.command import run
 from archinstall.lib.disk.luks import Luks2
@@ -49,7 +51,9 @@ def _unlock(self: Luks2, key_file: Path | None = None) -> None:
         return
     # The volume key the format just used, when this is the open after it.
     volume_key = getattr(self, "omarchy_volume_key", None)
+    keep_volume_key = getattr(self, "omarchy_keep_volume_key", False)
     self.omarchy_volume_key = None
+    self.omarchy_keep_volume_key = False
     if volume_key is not None:
         key_file_arg, passphrase = ["--volume-key-file", str(volume_key)], None
     else:
@@ -61,7 +65,7 @@ def _unlock(self: Luks2, key_file: Path | None = None) -> None:
     except CalledProcessError as err:
         raise DiskError(f'Could not unlock luks2 device "{self.luks_dev_path}": {err.stdout.decode().rstrip()}')
     finally:
-        if volume_key is not None:
+        if volume_key is not None and not keep_volume_key:
             volume_key.unlink(missing_ok=True)
     debug(f"cryptsetup open output: {result.stdout.decode().rstrip()}")
     if not self.is_unlocked():
@@ -88,8 +92,16 @@ def _chroot_argv(self, *args: str) -> list[str]:
     wraps each one in a transient systemd unit (systemd-run). Measured in a
     traced install: useradd 0.77 s of which 0.6 s is useradd itself, a
     chpasswd 0.15 s for 5 ms of work. The orchestrator's own chroots use
-    plain arch-chroot, and so do these."""
-    return ["arch-chroot", str(self.target), *args]
+    plain arch-chroot, and so do these.
+
+    When the orchestrator sets _omarchy_empty_skel on the installer, useradd
+    skips copying /etc/skel byte-by-byte so the host can reflink-copy it
+    across btrfs subvolumes instead."""
+    argv = list(args)
+    empty_skel = getattr(self, "_omarchy_empty_skel", None)
+    if empty_skel and argv and argv[0] == "useradd" and "-k" not in argv and "--skel" not in argv:
+        argv = [argv[0], "-k", str(empty_skel), *argv[1:]]
+    return ["arch-chroot", str(self.target), *argv]
 
 
 def _locale_archive_has_all(target: Path) -> bool:
@@ -121,27 +133,87 @@ def _run_command(self, cmd: str, peek_output: bool = False):
     return SysCommand(f"arch-chroot {self.target} {cmd}", peek_output=peek_output)
 
 
+_deferred_keyslots: list | None = None
+
+
+@contextmanager
+def defer_argon2_keyslot() -> Iterator[list]:
+    """Allow Luks2.encrypt inside this block to defer Argon2id slot-0
+    enrollment so the orchestrator can overlap it with post-image-write setup.
+    Standalone callers outside this block stay synchronous."""
+    global _deferred_keyslots
+    previous = _deferred_keyslots
+    collected: list = []
+    _deferred_keyslots = collected
+    try:
+        yield collected
+    except BaseException:
+        for entry in collected:
+            entry.abort()
+        raise
+    finally:
+        _deferred_keyslots = previous
+
+
 def _with_calibration(original_encrypt):
     def encrypt(self, *args, **kwargs):
         from archinstall.lib.disk import luks
-        from .luks_calibration import format_command, new_volume_key, stop_calibration
+        from .luks_calibration import (
+            DeferredKeyslot,
+            deferred_format_command,
+            format_command,
+            new_volume_key,
+            stop_calibration,
+        )
         stop_calibration()
         original_run = luks.run
         volume_key = new_volume_key()
+        temp_keyfile: Path | None = None
+        deferred_entry: DeferredKeyslot | None = None
+
         # Keep archinstall's passphrase/key-file handling, return value and
         # error handling intact. Only adjust its format argv, for this call.
         def calibrated_run(command, *run_args, **run_kwargs):
+            nonlocal temp_keyfile, deferred_entry
+            input_data = run_kwargs.get("input_data")
+            if (_deferred_keyslots is not None and deferred_entry is None
+                    and isinstance(input_data, (bytes, bytearray)) and input_data):
+                candidate_temp = new_volume_key(256)
+                split = deferred_format_command(command, volume_key, candidate_temp)
+                if split is not None:
+                    fast_cmd, enroll_cmd, kill_cmd = split
+                    temp_keyfile = candidate_temp
+                    device = command[command.index("luksFormat") + 1]
+                    no_input_kwargs = {k: v for k, v in run_kwargs.items() if k != "input_data"}
+                    result = original_run(fast_cmd, *run_args, **no_input_kwargs)
+                    deferred_entry = DeferredKeyslot(
+                        device=device,
+                        volume_key=volume_key,
+                        temp_keyfile=temp_keyfile,
+                        enroll_cmd=enroll_cmd,
+                        kill_cmd=kill_cmd,
+                        passphrase=bytes(input_data),
+                    )
+                    return result
+                candidate_temp.unlink(missing_ok=True)
             return original_run(format_command(command, volume_key), *run_args, **run_kwargs)
+
         luks.run = calibrated_run
         try:
             result = original_encrypt(self, *args, **kwargs)
         except BaseException:
             volume_key.unlink(missing_ok=True)
+            if temp_keyfile is not None:
+                temp_keyfile.unlink(missing_ok=True)
             raise
         finally:
             luks.run = original_run
-        # For the unlock that follows on this handler, which removes it.
+        # For the unlock that follows on this handler, which removes it unless
+        # a deferred keyslot enrollment still needs it.
         self.omarchy_volume_key = volume_key
+        if deferred_entry is not None:
+            self.omarchy_keep_volume_key = True
+            _deferred_keyslots.append(deferred_entry)
         return result
     return encrypt
 

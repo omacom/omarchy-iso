@@ -623,10 +623,13 @@ def arch_install_system(ctx: InstallContext) -> None:
         with _time_step("STEP.perform_filesystem_operations"):
             # The btrfs archinstall makes here is overwritten by the root
             # image a moment later, so it need not TRIM the device first.
-            arch.perform_filesystem_operations(
-                config,
-                throwaway_root_fs=True,
-            )
+            with arch.defer_argon2_keyslot() as deferred_keyslots:
+                arch.perform_filesystem_operations(
+                    config,
+                    throwaway_root_fs=True,
+                )
+            if deferred_keyslots:
+                ctx.state["luks_deferred_keyslots"] = deferred_keyslots
 
     info("› opening installer context")
     with arch.open_installer(config, ctx.target, silent=True) as installer:
@@ -639,6 +642,10 @@ def arch_install_system(ctx: InstallContext) -> None:
 
         with _time_step("STEP.install_root_image"):
             _install_root_image(ctx)
+        # Start Argon2id slot-0 enrollment now, after the 8-thread image write
+        # finishes, so it overlaps single-threaded setup without contending for
+        # CPU or memory bandwidth with omarchy-image-write.
+        _start_luks_keyslot_enroll(ctx)
         _apply_platform_layer(ctx)
 
         if not pre_mounted and arch.is_encrypted(config):
@@ -715,7 +722,7 @@ def arch_install_system(ctx: InstallContext) -> None:
             info("› creating user (with /etc/skel populated)")
             if config.auth_config and config.auth_config.users:
                 with _time_step("STEP.create_users"):
-                    installer.create_users(config.auth_config.users)
+                    _create_users_with_reflink_skel(ctx, installer, config.auth_config.users)
 
             if config.app_config:
                 # The image carries the PipeWire packages; this adds the audio
@@ -1367,6 +1374,98 @@ def stop_target_keyring_init(ctx: InstallContext) -> None:
         return
     subprocess.run(["systemctl", "stop", TARGET_KEYRING_UNIT], check=False, capture_output=True)
     _join_target_keyring_init(ctx, raise_on_error=False)
+
+
+def _start_luks_keyslot_enroll(ctx: InstallContext) -> None:
+    state = getattr(ctx, "state", None)
+    if not state:
+        return
+    for entry in state.get("luks_deferred_keyslots") or ():
+        entry.start()
+
+
+def _join_luks_keyslot_enroll(ctx: InstallContext, *, raise_on_error: bool = True) -> None:
+    state = getattr(ctx, "state", None)
+    entries = state.pop("luks_deferred_keyslots", None) if state else None
+    if not entries:
+        return
+    with _time_step("STEP.join_luks_keyslot"):
+        errors: list[Exception] = []
+        for entry in entries:
+            try:
+                entry.join(raise_on_error=raise_on_error)
+            except Exception as exc:  # noqa: BLE001 - finish cleaning up every entry
+                errors.append(exc)
+        if errors and raise_on_error:
+            raise errors[0]
+
+
+def stop_luks_keyslot_enroll(ctx: InstallContext) -> None:
+    """Exit path: terminate any in-flight LUKS keyslot thread and delete its
+    temporary key files from /run without masking the install's own error."""
+    state = getattr(ctx, "state", None)
+    entries = state.pop("luks_deferred_keyslots", None) if state else None
+    if not entries:
+        return
+    for entry in entries:
+        entry.abort()
+
+
+def _target_passwd_entry(target: Path, username: str) -> tuple[int, int, str] | None:
+    passwd = target / "etc" / "passwd"
+    if not passwd.is_file():
+        return None
+    for line in passwd.read_text().splitlines():
+        parts = line.split(":")
+        if len(parts) >= 6 and parts[0] == username:
+            return int(parts[2]), int(parts[3]), parts[5]
+    return None
+
+
+def _create_users_with_reflink_skel(ctx: InstallContext, installer, users) -> None:
+    """Create users with an empty skel and reflink-copy /etc/skel from the
+    host across btrfs subvolumes, avoiding useradd's byte-by-byte copy of
+    ~79 MiB / ~10k files."""
+    skel = ctx.target / "etc" / "skel"
+    if (os.environ.get("OMARCHY_LUKS_TUNING", "1") != "1"
+            or not skel.is_dir()
+            or _findmnt_value(ctx.target, "FSTYPE") != "btrfs"):
+        installer.create_users(users)
+        return
+
+    entries = list(skel.iterdir())
+    if not entries:
+        installer.create_users(users)
+        return
+
+    tmp_dir = ctx.target / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    empty_skel = Path(tempfile.mkdtemp(prefix="omarchy-empty-skel-", dir=tmp_dir))
+    try:
+        installer._omarchy_empty_skel = "/" + str(empty_skel.relative_to(ctx.target))
+        installer.create_users(users)
+    finally:
+        if hasattr(installer, "_omarchy_empty_skel"):
+            delattr(installer, "_omarchy_empty_skel")
+        shutil.rmtree(empty_skel, ignore_errors=True)
+
+    for user in users:
+        username = getattr(user, "username", str(user))
+        entry = _target_passwd_entry(ctx.target, username)
+        if entry is None:
+            continue
+        uid, gid, home_dir = entry
+        target_home = ctx.target / home_dir.lstrip("/")
+        if not target_home.is_dir():
+            continue
+        subprocess.run(
+            ["cp", "-a", "--reflink=auto", "--", *(str(p) for p in entries), str(target_home) + "/"],
+            check=True,
+        )
+        subprocess.run(
+            ["chown", "-hR", f"{uid}:{gid}", str(target_home)],
+            check=True,
+        )
 
 
 def _umount_tree(root: Path, attempts: int = 20) -> None:
@@ -3043,7 +3142,7 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
             )
 
     subprocess.run(
-        ["arch-chroot", str(ctx.target), "btrfs", "quota", "disable", "/"],
+        ["btrfs", "quota", "disable", str(ctx.target)],
         check=False,
         capture_output=True,
     )
@@ -3512,6 +3611,7 @@ def validate_boot(ctx: InstallContext) -> None:
         _validate_provisioning_state(ctx)
 
     _validate_package_signing(ctx)
+    _join_luks_keyslot_enroll(ctx)
 
 
 OFFLINE_MIRROR = Path("/var/cache/omarchy/mirror/offline")
@@ -3934,6 +4034,7 @@ def _mark_updates_applied(ctx: InstallContext) -> None:
 def create_factory_snapshot(ctx: InstallContext) -> None:
     # The keyring unit writes into @; the snapshot must not catch it midway.
     _join_target_keyring_init(ctx)
+    _join_luks_keyslot_enroll(ctx)
     _mark_updates_applied(ctx)
 
     fstype = _findmnt_value(ctx.target, "FSTYPE")

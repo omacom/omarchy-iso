@@ -374,4 +374,138 @@ class SectorSize(unittest.TestCase):
         self.assertEqual(argv[-1], '-')
 
 
+class DeferredArgon2Keyslot(unittest.TestCase):
+    def setUp(self):
+        self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.state = self.directory / 'result.json'
+        self.data = dict(schema=1, iter_time=2000, key_size=512, cpus=4,
+                         iterations=13, memory=1048576, parallel=4)
+        self.state.write_text(json.dumps(self.data))
+        self.state.chmod(0o600)
+        fstat = os.fstat
+        def root_stat(fd):
+            st = fstat(fd)
+            return types.SimpleNamespace(st_uid=0, st_mode=st.st_mode, st_size=st.st_size)
+        self.enterContext(mock.patch.object(luks, 'STATE', self.state))
+        self.enterContext(mock.patch.object(luks, 'memory_total', return_value=8*1024*1024))
+        self.enterContext(mock.patch.object(luks, 'memory_available', return_value=4*1024*1024))
+        self.enterContext(mock.patch.object(luks.os, 'cpu_count', return_value=4))
+        self.enterContext(mock.patch.object(luks.os, 'fstat', side_effect=root_stat))
+
+    def test_splits_calibrated_format_into_fast_slot1_and_argon2_slot0(self):
+        vk = self.directory / 'vk'
+        tk = self.directory / 'tk'
+        split = luks.deferred_format_command(COMMAND, vk, tk)
+        self.assertIsNotNone(split)
+        fast_cmd, enroll_cmd, kill_cmd = split
+        self.assertIn('--key-slot', fast_cmd)
+        self.assertEqual(fast_cmd[fast_cmd.index('--key-slot') + 1], '1')
+        self.assertEqual(fast_cmd[fast_cmd.index('--pbkdf') + 1], 'pbkdf2')
+        self.assertEqual(fast_cmd[fast_cmd.index('--pbkdf-force-iterations') + 1], '1000')
+        self.assertEqual(fast_cmd[-1], str(tk))
+        self.assertNotIn('--iter-time', fast_cmd)
+        self.assertEqual(enroll_cmd[:6], ['cryptsetup', '--batch-mode', 'luksAddKey', '--key-slot', '0', '--volume-key-file'])
+        self.assertIn('--pbkdf-force-iterations', enroll_cmd)
+        self.assertEqual(enroll_cmd[-2:], ['/dev/vda2', '-'])
+        self.assertEqual(kill_cmd, ['cryptsetup', '--batch-mode', 'luksKillSlot', '/dev/vda2', '1'])
+
+    def test_falls_back_on_low_cpus_low_memory_or_opt_out(self):
+        vk, tk = self.directory / 'vk', self.directory / 'tk'
+        with mock.patch.object(luks.os, 'cpu_count', return_value=2):
+            self.assertIsNone(luks.deferred_format_command(COMMAND, vk, tk))
+        with mock.patch.object(luks, 'memory_available', return_value=2*1024*1024):
+            self.assertIsNone(luks.deferred_format_command(COMMAND, vk, tk))
+        with mock.patch.dict(os.environ, {'OMARCHY_LUKS_ASYNC_KEYSLOT': '0'}):
+            self.assertIsNone(luks.deferred_format_command(COMMAND, vk, tk))
+        self.assertIsNone(luks.deferred_format_command(COMMAND + ['/tmp/keyfile'], vk, tk))
+
+    def test_deferred_keyslot_enrolls_kills_slot1_and_cleans_up_files(self):
+        vk = self.directory / 'vk'
+        tk = self.directory / 'tk'
+        vk.write_bytes(b'v' * 64)
+        tk.write_bytes(b't' * 32)
+        seen = []
+        class FakePopen:
+            def __init__(self, cmd, **_kwargs):
+                self.cmd = cmd
+                self.returncode = 0
+            def communicate(self, input=None):
+                seen.append((self.cmd, input, vk.exists(), tk.exists()))
+                return b'', None
+        entry = luks.DeferredKeyslot('/dev/vda2', vk, tk, ['enroll'], ['kill'], b'secret')
+        with mock.patch.object(luks.subprocess, 'Popen', FakePopen):
+            entry.start()
+            entry.join()
+        self.assertEqual([s[0] for s in seen], [['enroll'], ['kill']])
+        self.assertEqual(seen[0][1], b'secret')
+        self.assertTrue(seen[0][2] and seen[0][3])
+        self.assertFalse(vk.exists() or tk.exists())
+
+    def test_deferred_keyslot_failure_raises_and_cleans_up(self):
+        vk = self.directory / 'vk'
+        tk = self.directory / 'tk'
+        vk.write_bytes(b'v' * 64)
+        tk.write_bytes(b't' * 32)
+        class FailPopen:
+            def __init__(self, cmd, **_kwargs):
+                self.returncode = 2
+            def communicate(self, input=None):
+                return b'bad header', None
+        entry = luks.DeferredKeyslot('/dev/vda2', vk, tk, ['enroll'], ['kill'], b'secret')
+        with mock.patch.object(luks.subprocess, 'Popen', FailPopen):
+            entry.start()
+            with self.assertRaisesRegex(RuntimeError, 'luksAddKey failed.*bad header'):
+                entry.join()
+        self.assertFalse(vk.exists() or tk.exists())
+
+    def test_encrypt_inside_defer_context_keeps_volume_key_across_unlock(self):
+        sys.path.insert(0, str(Path(__file__).parent))
+        from archinstall_fakes import orchestrator_module
+        calls = []
+        def runner(cmd, input_data=None):
+            calls.append((cmd, input_data))
+            return types.SimpleNamespace(stdout=b'')
+        class Luks2:
+            def lock(self): pass
+            def encrypt(self, key_file=None):
+                from archinstall.lib.disk import luks as real
+                real.run(COMMAND, input_data=b'passphrase')
+                return key_file
+        names = {
+            'archinstall.lib.disk.luks': {'Luks2': Luks2, 'run': runner},
+            'archinstall.lib.command': {'run': runner},
+            'archinstall.lib.exceptions': {'DiskError': RuntimeError},
+            'archinstall.lib.log': {'debug': lambda *_: None},
+        }
+        with orchestrator_module('luks_tuning', names) as tuning:
+            import importlib
+            shared = importlib.import_module('orchestrator.luks_calibration')
+            real_fstat = os.fstat
+            with mock.patch.object(shared, 'stop_calibration'), \
+                    mock.patch.object(shared, 'VOLUME_KEY_DIR', self.directory), \
+                    mock.patch.object(shared, 'STATE', self.state), \
+                    mock.patch.object(shared, 'memory_total', return_value=8*1024*1024), \
+                    mock.patch.object(shared, 'memory_available', return_value=4*1024*1024), \
+                    mock.patch.object(shared.os, 'cpu_count', return_value=4), \
+                    mock.patch.object(shared.os, 'fstat', side_effect=lambda fd: types.SimpleNamespace(
+                        st_uid=0, st_mode=real_fstat(fd).st_mode, st_size=real_fstat(fd).st_size)):
+                wrapped = tuning._with_calibration(Luks2.encrypt)
+                handler = Luks2()
+                handler.luks_dev_path = Path('/dev/vda2')
+                handler.mapper_name = 'root'
+                handler.is_unlocked = lambda: len(calls) >= 2
+                with tuning.defer_argon2_keyslot() as deferred:
+                    wrapped(handler)
+                    self.assertEqual(len(deferred), 1)
+                    vk = handler.omarchy_volume_key
+                    self.assertTrue(handler.omarchy_keep_volume_key)
+                    tuning._unlock(handler)
+                    # Volume key remains alive for the background luksAddKey.
+                    self.assertTrue(vk.exists())
+                # Abort cleans up both temporary keys.
+                deferred[0].abort()
+                self.assertFalse(vk.exists())
+                self.assertFalse(deferred[0].temp_keyfile.exists())
+
+
 if __name__ == '__main__': unittest.main()

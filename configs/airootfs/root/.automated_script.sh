@@ -145,27 +145,31 @@ cd /root
 # Autoinstall: a cidata drive carrying the configurator's own output files
 # stands in for the wizard. omarchy-cidata-load copies them into /root and
 # everything downstream runs the ordinary path against ordinary inputs.
+# A rerun from the shell an abort left: the first run's mark that it ended
+# would stand for this one too, and a kmscon that died under it would pass
+# for an installer that finished. This run leaves its own, when it ends by
+# itself, wizard or cidata install alike: kmscon dying hangs it up, and that
+# is no ending to record.
+if [[ -n ${OMARCHY_KMSCON_SHELL:-} && -n ${OMARCHY_KMSCON_ENDED:-} ]]; then
+  rm -f "$OMARCHY_KMSCON_ENDED"
+  trap 'printf "%s\n" "$?" >"$OMARCHY_KMSCON_ENDED"' EXIT
+  trap 'trap - EXIT HUP TERM; kill -HUP $$' HUP TERM
+fi
 if [[ -f /usr/share/omarchy-iso/oem-install ]]; then
   export OMARCHY_UI_INTERACTIVE=no
   set_tokyo_night_colors
   ./configurator --oem
-elif [[ ${OMARCHY_KMSCON:-} == 1 ]]; then
-  # A rerun from the shell an abort left: the first run's mark that it ended
-  # would stand for this one too, and a kmscon that died under it would pass
-  # for an installer that finished. This run leaves its own, when it ends by
-  # itself: kmscon dying hangs it up, and that is no ending to record.
-  if [[ -n ${OMARCHY_KMSCON_SHELL:-} && -n ${OMARCHY_KMSCON_ENDED:-} ]]; then
-    rm -f "$OMARCHY_KMSCON_ENDED"
-    trap 'printf "%s\n" "$?" >"$OMARCHY_KMSCON_ENDED"' EXIT
-    trap 'trap - EXIT HUP TERM; kill -HUP $$' HUP TERM
-  fi
-  # The tty1 run already looked for cidata.
-  ./configurator && status=0 || status=$?
-  ((status == 0)) || exit "$status"
-elif /usr/local/bin/omarchy-cidata-load; then
-  set_tokyo_night_colors
+elif [[ ${OMARCHY_KMSCON:-} != 1 || -n ${OMARCHY_KMSCON_SHELL:-} ]] && /usr/local/bin/omarchy-cidata-load; then
+  # Looked for by the tty1 run and by a rerun from the shell an abort left,
+  # where a cidata drive may have been plugged in since. Not by the run kmscon
+  # starts: the tty1 run that started it has just looked. The palette is the
+  # console's to set; kmscon has its own.
+  [[ ${OMARCHY_KMSCON:-} == 1 ]] || set_tokyo_night_colors
   echo "Autoinstall configuration found on cidata drive; skipping the configurator."
   export OMARCHY_UI_INTERACTIVE=no
+elif [[ ${OMARCHY_KMSCON:-} == 1 ]]; then
+  ./configurator && status=0 || status=$?
+  ((status == 0)) || exit "$status"
 else
   # The wizard and the whole install run in kmscon, which runs this script
   # again: fonts with every script the installer speaks, the same on every

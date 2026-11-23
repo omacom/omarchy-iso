@@ -371,6 +371,17 @@ if grep -q '^#en_US.UTF-8 UTF-8' "$root/etc/locale.gen"; then
   arch-chroot "$root" locale-gen >/dev/null && echo "en_US.UTF-8 compiled into the image's locale archive"
 fi
 
+# Pre-bake the static UFW + ufw-docker rules into the root image while keeping
+# UFW disabled (ENABLED=no in ufw.conf) so chroot ufw calls during install
+# never reload the live ISO's kernel firewall. At install time firewall.sh sees
+# its stamp and only flips ENABLED=yes and enables ufw.service.
+firewall_sh="$root/usr/share/omarchy/install/config/firewall.sh"
+if [[ -f $firewall_sh ]] && grep -q 'OMARCHY_FIREWALL_RULES_ONLY' "$firewall_sh"; then
+  arch-chroot "$root" env OMARCHY_FIREWALL_RULES_ONLY=1 /bin/bash -eE -c 'source /usr/share/omarchy/install/config/firewall.sh'
+  rm -f "$root"/etc/ufw/after*.rules-ufw-docker~*
+  echo "Pre-baked static UFW + ufw-docker firewall rules"
+fi
+
 # The runtime's install log helper forks `date` twice per script it runs
 # (131 forks in a traced install, about 0.5 s). bash formats the same
 # timestamp itself. Same output, no fork; patched here until the runtime

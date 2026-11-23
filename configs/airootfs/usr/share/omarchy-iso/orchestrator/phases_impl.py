@@ -275,7 +275,8 @@ def prepare_live(ctx: InstallContext) -> None:
         disk = _install_disk(ctx)
         if disk:
             info(f"› cleaning up holders on install disk: {disk}")
-            result = capture(["omarchy-iso-cleanup-disk", disk])
+            with _time_step("LIVE.cleanup_disk"):
+                result = capture(["omarchy-iso-cleanup-disk", disk])
             for line in (result.stdout + result.stderr).splitlines():
                 info(f"  {line}")
             if result.returncode != 0:
@@ -284,10 +285,11 @@ def prepare_live(ctx: InstallContext) -> None:
                 raise RuntimeError(lines[-1] if lines else f"Could not release {disk}")
 
     info("› loading configurator output")
-    ctx.state["arch_config_handler"] = arch.load_arch_config(
-        ctx.arch_config_path, ctx.creds_path
-    )
-    ctx.state["mirror_handler"] = arch.make_mirror_handler(offline=True)
+    with _time_step("LIVE.load_arch_config"):
+        ctx.state["arch_config_handler"] = arch.load_arch_config(
+            ctx.arch_config_path, ctx.creds_path
+        )
+        ctx.state["mirror_handler"] = arch.make_mirror_handler(offline=True)
 
 
 def _install_disk(ctx: InstallContext) -> str | None:
@@ -739,11 +741,12 @@ def arch_install_system(ctx: InstallContext) -> None:
                 # firmware archinstall's hardware detection asks for and wires
                 # the per-user PipeWire units.
                 info("› applying archinstall application selections")
-                arch.install_applications(
-                    installer,
-                    config,
-                    before_strap=lambda: _join_target_keyring_init(ctx),
-                )
+                with _time_step("STEP.install_applications"):
+                    arch.install_applications(
+                        installer,
+                        config,
+                        before_strap=lambda: _join_target_keyring_init(ctx),
+                    )
 
             _write_language_marker(ctx)
             _write_region_marker(ctx)
@@ -762,16 +765,20 @@ def arch_install_system(ctx: InstallContext) -> None:
 
         # Standard arch finishers.
         if config.timezone:
-            installer.set_timezone(config.timezone)
+            with _time_step("STEP.set_timezone"):
+                installer.set_timezone(config.timezone)
         if config.ntp:
-            installer.activate_time_synchronization()
+            with _time_step("STEP.activate_time_sync"):
+                installer.activate_time_synchronization()
         if root := arch.root_user(config):
-            installer.set_user_password(root)
+            with _time_step("STEP.set_root_password"):
+                installer.set_user_password(root)
 
-        if pre_mounted:
-            _write_pre_mounted_fstab(ctx)
-        else:
-            installer.genfstab()
+        with _time_step("STEP.genfstab"):
+            if pre_mounted:
+                _write_pre_mounted_fstab(ctx)
+            else:
+                installer.genfstab()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2479,14 +2486,45 @@ def _debug_run(ctx: InstallContext, cmd: list[str]) -> None:
 #  4. arch-chroot as user → omarchy-provision-user --first-install
 # ─────────────────────────────────────────────────────────────────────────────
 
+OFFLINE_MIRROR_DIR = "/var/cache/omarchy/mirror/offline"
+
+
+def _write_offline_target_pacman_conf(source: Path, dest: Path) -> None:
+    """Copy the live ISO's offline pacman.conf into the target with CacheDir
+    pointed at the bind-mounted offline mirror.
+
+    Without CacheDir, pacman copies every hardware package installed during
+    target setup from file:///var/cache/omarchy/mirror/offline/ into
+    /mnt/var/cache/pacman/pkg/ (~20 MiB on Intel laptops) before extracting it,
+    and leaves those copies behind. post-install/pacman.sh replaces this
+    temporary config with the online pacman.conf once offline installs finish.
+    """
+    text = source.read_text()
+    cache_line = f"CacheDir = {OFFLINE_MIRROR_DIR}/"
+    if not re.search(rf"^\s*{re.escape(cache_line)}\s*$", text, flags=re.MULTILINE):
+        text, count = re.subn(
+            r"^(\[options\][^\n]*\n)",
+            rf"\1{cache_line}\n",
+            text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        if count == 0:
+            text = f"[options]\n{cache_line}\n{text}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(text)
+
+
 def _prepare_target_setup(ctx: InstallContext) -> None:
     if ctx.state.get("target_setup_prepared"):
         return
 
-    shutil.copy("/etc/pacman.conf", str(ctx.target / "etc" / "pacman.conf"))
+    _write_offline_target_pacman_conf(
+        Path("/etc/pacman.conf"), ctx.target / "etc" / "pacman.conf"
+    )
 
     bind_mounts = [
-        ("/var/cache/omarchy/mirror/offline", "/var/cache/omarchy/mirror/offline"),
+        (OFFLINE_MIRROR_DIR, OFFLINE_MIRROR_DIR),
     ]
     # build-iso.sh bundles Node only for a runtime whose setup still unpacks it.
     if NODE_PACKAGES_DIR.is_dir():
@@ -3435,6 +3473,39 @@ def _read_omarchy_mirror() -> str:
 # boundary; unencrypted installs leave SDDM as the auth screen.
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _target_group_gid(target: Path, group: str) -> int | None:
+    group_file = target / "etc" / "group"
+    if not group_file.is_file():
+        return None
+    for line in group_file.read_text().splitlines():
+        parts = line.split(":")
+        if len(parts) >= 3 and parts[0] == group:
+            try:
+                return int(parts[2])
+            except ValueError:
+                return None
+    return None
+
+
+def _sddm_service_enabled(target: Path) -> bool:
+    """Whether sddm.service is already enabled as display-manager.service in
+    target (as install/config/enable-services.sh does) and not masked."""
+    etc_systemd = target / "etc" / "systemd" / "system"
+    unit = target / "usr" / "lib" / "systemd" / "system" / "sddm.service"
+    if not unit.is_file():
+        return False
+    override = etc_systemd / "sddm.service"
+    if override.is_symlink() and os.readlink(override) == "/dev/null":
+        return False
+    dm_link = etc_systemd / "display-manager.service"
+    if not dm_link.is_symlink():
+        return False
+    return os.readlink(dm_link) in (
+        "/usr/lib/systemd/system/sddm.service",
+        "/lib/systemd/system/sddm.service",
+    )
+
+
 def configure_login(ctx: InstallContext) -> None:
     sddm_dir = ctx.target / "etc" / "sddm.conf.d"
     sddm_dir.mkdir(parents=True, exist_ok=True)
@@ -3458,22 +3529,39 @@ def configure_login(ctx: InstallContext) -> None:
     if not ctx.defer_provisioning:
         state_dir = ctx.target / "var" / "lib" / "sddm"
         state_dir.mkdir(parents=True, exist_ok=True)
-        (state_dir / "state.conf").write_text(
+        state_file = state_dir / "state.conf"
+        state_file.write_text(
             f"[Last]\nSession=omarchy.desktop\nUser={ctx.username}\n"
         )
-        subprocess.run(
-            ["arch-chroot", str(ctx.target), "chown", "sddm:sddm",
-             "/var/lib/sddm", "/var/lib/sddm/state.conf"],
-            check=False, capture_output=True,
-        )
+        sddm_entry = _target_passwd_entry(ctx.target, "sddm")
+        sddm_gid = _target_group_gid(ctx.target, "sddm")
+        if (sddm_entry is not None and sddm_gid is not None
+                and not state_dir.is_symlink() and not state_file.is_symlink()):
+            uid = sddm_entry[0]
+            try:
+                os.chown(state_dir, uid, sddm_gid, follow_symlinks=False)
+                os.chown(state_file, uid, sddm_gid, follow_symlinks=False)
+            except OSError:
+                subprocess.run(
+                    ["arch-chroot", str(ctx.target), "chown", "sddm:sddm",
+                     "/var/lib/sddm", "/var/lib/sddm/state.conf"],
+                    check=False, capture_output=True,
+                )
+        else:
+            subprocess.run(
+                ["arch-chroot", str(ctx.target), "chown", "sddm:sddm",
+                 "/var/lib/sddm", "/var/lib/sddm/state.conf"],
+                check=False, capture_output=True,
+            )
 
     autologin = ctx.target / "etc" / "systemd" / "system" / "getty@tty1.service.d" / "autologin.conf"
     autologin.unlink(missing_ok=True)
 
-    subprocess.run(
-        ["arch-chroot", str(ctx.target), "systemctl", "enable", "sddm.service"],
-        check=False, capture_output=True,
-    )
+    if not _sddm_service_enabled(ctx.target):
+        subprocess.run(
+            ["systemctl", f"--root={ctx.target}", "enable", "sddm.service"],
+            check=False, capture_output=True,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

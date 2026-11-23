@@ -64,7 +64,7 @@ start_vm "$DISK" "$RUN_DIR/install-serial.log" \
   -device ide-cd,drive=cdrom0,bootindex=2 \
   -drive "file=$CIDATA_IMG,format=raw,if=none,id=cidata"
 
-wait_for_screen "Linux by DHH" 300
+OCR_KMSCON=1 wait_for_screen "Linux by DHH" 300
 # The prompt it leaves is coloured past what OCR reads; the fill's own line on
 # the serial console is what confirms the command ran.
 press ctrl-c

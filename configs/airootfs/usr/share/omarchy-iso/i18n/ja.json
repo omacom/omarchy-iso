@@ -12,7 +12,6 @@
   "owner.yes": "はい、別の所有者向けに準備する",
   "owner.no": "いいえ、設定を続ける",
   "owner.prompt": "このマシンを別の所有者向けに準備しますか？",
-  "user.intro": "ユーザーアカウントを設定しましょう…",
   "summary.field": "項目",
   "summary.value": "設定値",
   "summary.username": "ユーザー名",

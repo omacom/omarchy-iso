@@ -45,6 +45,21 @@ uploads=$(steps_of "$upload")
 [[ $(grep -cE '^ *overwrite: true$' <<<"$uploads") == $(grep -c '^--$' <<<"$uploads") ]] \
   || fail "an ISO upload step cannot replace its ISO when a build runs again"
 
+# GitHub's artifact download can stall and never end. Every ISO fetch is cut
+# at a timeout and lets the job go on, and each one has a second try that runs
+# when the first did not succeed.
+for arch in x86_64 aarch64; do
+  fetches=$(steps_of "iso-\${{ github.run_id }}-$arch")
+  firsts=$(grep -c '^ *id: fetch-iso$' <<<"$fetches" || true)
+  retries=$(grep -c "^ *if: steps\.fetch-iso\.outcome != 'success'\$" <<<"$fetches" || true)
+  ((firsts > 0)) || fail "no $arch ISO fetch has the id its second try reads"
+  ((retries == firsts)) || fail "$firsts $arch ISO fetches but $retries second tries"
+  [[ $(grep -c '^ *continue-on-error: true$' <<<"$fetches") == "$firsts" ]] \
+    || fail "a first $arch ISO fetch stops the job when it fails, so its second try never runs"
+  [[ $(grep -c '^ *timeout-minutes: [0-9]' <<<"$fetches") == "$(grep -c '^--$' <<<"$fetches")" ]] \
+    || fail "an $arch ISO fetch has no timeout, and a stalled download holds its job to the job's own limit"
+done
+
 # Every job runs a pull request's code, and every one runs on the same
 # Restricted Namespace profiles, whoever wrote the pull request: the baseline
 # a pull request is compared against is measured there too. A Restricted

@@ -232,7 +232,21 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
+      # GitHub's artifact download can stall on its blob storage and never
+      # end (actions/toolkit#2575): one of this ISO's fetches sat 15 minutes
+      # with no byte, while 40 others finished in at most 116 s. A fetch
+      # gets 5 minutes, and a stalled one a second try.
       - name: Fetch the ISO
+        id: fetch-iso
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: iso-${{ github.run_id }}-x86_64
+
+      - name: Fetch the ISO again
+        if: steps.fetch-iso.outcome != 'success'
+        timeout-minutes: 5
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: iso-${{ github.run_id }}-x86_64
@@ -446,7 +460,18 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
+      # A fetch gets 5 minutes, and a stalled one a second try (see install).
       - name: Fetch the ISO
+        id: fetch-iso
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: iso-${{ github.run_id }}-x86_64
+
+      - name: Fetch the ISO again
+        if: steps.fetch-iso.outcome != 'success'
+        timeout-minutes: 5
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: iso-${{ github.run_id }}-x86_64
@@ -541,7 +566,18 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
+      # A fetch gets 5 minutes, and a stalled one a second try (see install).
       - name: Fetch the ISO
+        id: fetch-iso
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: iso-${{ github.run_id }}-aarch64
+
+      - name: Fetch the ISO again
+        if: steps.fetch-iso.outcome != 'success'
+        timeout-minutes: 5
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: iso-${{ github.run_id }}-aarch64

@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "DHH'dan chiroyli, qiziqarli va agentli Linux",
+  "greeter.hint": "Oʻrnatishni boshlash uchun Enter ni bosing",
   "common.yes": "Ha",
   "common.back": "Orqaga",
   "common.change": "Yoʻq, oʻzgartirish",
@@ -15,7 +17,6 @@
   "summary.value": "Qiymat",
   "summary.username": "Foydalanuvchi nomi",
   "summary.password": "Parol",
-  "summary.hostname": "Kompyuter nomi",
   "summary.timezone": "Vaqt mintaqasi",
   "summary.keyboard": "Klaviatura",
   "summary.language": "Til",

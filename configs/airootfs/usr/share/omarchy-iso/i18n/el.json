@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Όμορφο, διασκεδαστικό & agentic Linux από τον DHH",
+  "greeter.hint": "Πάτα Enter για να ξεκινήσει η εγκατάσταση",
   "common.yes": "Ναι",
   "common.back": "Πίσω",
   "common.change": "Όχι, αλλαγή",
@@ -15,7 +17,6 @@
   "summary.value": "Τιμή",
   "summary.username": "Όνομα χρήστη",
   "summary.password": "Κωδικός",
-  "summary.hostname": "Όνομα υπολογιστή",
   "summary.timezone": "Ζώνη ώρας",
   "summary.keyboard": "Πληκτρολόγιο",
   "summary.language": "Γλώσσα",

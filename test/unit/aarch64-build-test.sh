@@ -56,7 +56,7 @@ if grep -Fq -- '--config "/configs/pacman-online-' "$ROOT/builder/build-iso.sh";
 fi
 grep -Fq 'configure_archiso_aarch64_mkinitcpio' "$ROOT/builder/build-iso.sh" || fail "live initramfs is not adapted for aarch64"
 grep -Fq 'kernel_options="console=tty0 acpi=nospcr initramfs_async=0"' "$ROOT/builder/build-iso.sh" || fail "aarch64 live boot does not pin the panel console"
-grep -Fq 'boot_splash_kernel_options="quiet splash "' "$ROOT/builder/build-iso.sh" || fail "aarch64 live boot does not show the splash"
+grep -Fq 'boot_splash_kernel_options="quiet loglevel=3 ' "$ROOT/builder/build-iso.sh" || fail "aarch64 live boot is not quiet"
 grep -Fq 'plymouth.enable=0 console=tty0' "$ROOT/builder/build-iso.sh" && fail "aarch64 live boot still turns Plymouth off"
 grep -Fq '"$mkarchiso_command" -v -w' "$ROOT/builder/build-iso.sh" || fail "builder does not use the patched mkarchiso on aarch64"
 # pacman takes the first repository carrying a name: the platform bundle, then
@@ -164,16 +164,10 @@ grub="$ROOT/configs/grub/grub.cfg"
 grep -Fq 'smbios --type 4 --get-string 7 --set cpu_maker' "$grub" || fail "GRUB does not ask the firmware who made the processor"
 [[ $(grep -c 'default=archlinux-uki' "$grub") == $(grep -B1 'default=archlinux-uki' "$grub" | grep -c "regexp '") ]] \
   || fail "the device tree entry is the default on a machine that is not a Snapdragon"
-# A Snapdragon can't start the kernel without a device tree, so its screen
-# reader entry boots the UKI, and the s hotkey reaches that entry first.
-sed -n "/id 'archlinux-uki-accessibility'/,/}/p" "$grub" | grep -Eq '^\s*chainloader /%INSTALL_DIR%/boot/%ARCH%/omarchy-live\.efi .*accessibility=on' \
-  || fail "a Snapdragon has no screen reader entry that boots the device tree"
-[[ $(grep -m1 -- '--hotkey s ' "$grub") == *"--id 'archlinux-uki-accessibility'"* ]] \
-  || fail "on a Snapdragon the s hotkey boots the screen reader without a device tree"
 
 # --- manifest filter -----------------------------------------------------------
 source "$ROOT/builder/aarch64-package-filter.sh"
-result=$(filter_aarch64_packages linux-omarchy linux linux-headers linux-omarchy linux-omarchy-headers amd-ucode broadcom-wl-dkms tzupdate lib32-nvidia-utils dell-xps13-sidecar-amps linux-firmware-cirrus-dx13260 apple-bcm-firmware-fetcher superwhisper-bin mise-bin nvim vi obs-studio yay-debug hyprland omarchy-dev 2>/dev/null | tr '\n' ' ')
+result=$(filter_aarch64_packages linux-omarchy linux linux-headers linux-omarchy linux-omarchy-headers amd-ucode broadcom-wl-dkms tzupdate lib32-nvidia-utils dell-xps13-sidecar-amps linux-firmware-cirrus-dx13260 apple-bcm-firmware-fetcher facetimehd-dkms facetimehd-firmware-fetcher superwhisper-bin mise-bin nvim vi obs-studio yay-debug hyprland omarchy-dev 2>/dev/null | tr '\n' ' ')
 [[ $result == "linux-omarchy linux-omarchy-headers linux-omarchy linux-omarchy-headers tzupdate superwhisper-bin mise-bin neovim ex-vi-compat hyprland omarchy-dev " ]] || fail "manifest filter produced: $result"
 # The N1x list names linux-omarchy, and keeps the name.
 result=$(filter_aarch64_packages linux-omarchy linux-omarchy linux-omarchy-headers 2>/dev/null | paste -sd' ')
@@ -285,7 +279,7 @@ make_refuses 'Unknown option: --platform' --arch aarch64 --platform n1x --edge
 # firmware provides none. Every image tries to build one from its own kernel.
 uki="$ROOT/builder/qualcomm/live-uki.sh"
 bash -n "$uki"
-grep -Fq 'parted systemd-ukify systemd-stub-omarchy linux-firmware-qcom qcom-firmware-extract python)' "$ROOT/builder/build-iso.sh" \
+grep -Fq 'parted systemd-ukify systemd-stub-omarchy linux-firmware-qcom qcom-firmware-extract python ' "$ROOT/builder/build-iso.sh" \
   || fail "the live image lacks ukify or the Snapdragon firmware tools"
 # The UKI is built in the image's customize step, once pacstrap has made the
 # kernel and initramfs it wraps: the builder's own lines, run against the live

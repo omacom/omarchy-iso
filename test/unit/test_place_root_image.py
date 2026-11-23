@@ -96,7 +96,7 @@ class InstallRootImageDdTest(unittest.TestCase):
              mock.patch.object(phases_impl, "_umount_root_image",
                                side_effect=lambda: self.calls.append(["umount-image"])), \
              mock.patch.object(phases_impl, "_write_root_image_parallel",
-                               side_effect=lambda i, d: self.calls.append(["frames", str(i), d]) or frames_written), \
+                               side_effect=lambda i, d, *_: self.calls.append(["frames", str(i), d]) or frames_written), \
              mock.patch.object(phases_impl, "_write_root_image_dd", side_effect=self.fake_dd), \
              mock.patch.object(phases_impl, "_wait_for_blkid_uuid",
                                side_effect=lambda d: self.calls.append(["blkid-wait", d])), \

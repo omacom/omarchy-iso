@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Vakker, morsom og agentisk Linux fra DHH",
+  "greeter.hint": "Trykk Enter for å starte installasjonen",
   "common.yes": "Ja",
   "common.back": "Tilbake",
   "common.change": "Nei, endre det",
@@ -15,7 +17,6 @@
   "summary.value": "Verdi",
   "summary.username": "Brukernavn",
   "summary.password": "Passord",
-  "summary.hostname": "Vertsnavn",
   "summary.timezone": "Tidssone",
   "summary.keyboard": "Tastatur",
   "summary.language": "Språk",

@@ -18,15 +18,15 @@ terminal-border: "0"
 # The entries in Tokyo Night's foreground and bright foreground: both read at
 # better than 7:1 on the background, and test/integration.d's OCR finds them.
 # The installer's console face, Terminus Bold 16 with every pixel doubled
-# (builder/grub-font-double.py). Exactly as tall as its three
-# entries: 3 x item_height + 2 x item_spacing, plus the selection box's 1 px
-# top and bottom edges, which gui_list.c takes off before it counts rows. All
-# three show on every screen the logo fits.
+# (builder/grub-font-double.py). Exactly as tall as its two
+# entries: 2 x item_height + item_spacing, plus the selection box's 1 px top
+# and bottom edges, which gui_list.c takes off before it counts rows. Both
+# show on every screen the logo fits.
 + boot_menu {
     left = 50%-150
     top = 50%+134
     width = 300
-    height = 126
+    height = 84
     item_font = "Terminus 2x Bold 32"
     selected_item_font = "Terminus 2x Bold 32"
     item_color = "#a9b1d6"

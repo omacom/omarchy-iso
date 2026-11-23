@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Szép, szórakoztató és ágensalapú Linux DHH-tól",
+  "greeter.hint": "Nyomj Entert a telepítés indításához",
   "common.yes": "Igen",
   "common.back": "Vissza",
   "common.change": "Nem, módosítom",
@@ -15,7 +17,6 @@
   "summary.value": "Érték",
   "summary.username": "Felhasználónév",
   "summary.password": "Jelszó",
-  "summary.hostname": "Gépnév",
   "summary.timezone": "Időzóna",
   "summary.keyboard": "Billentyűzet",
   "summary.language": "Nyelv",

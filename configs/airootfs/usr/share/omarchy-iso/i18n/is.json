@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Fallegt, skemmtilegt og gervigreindarvætt Linux frá DHH",
+  "greeter.hint": "Ýttu á Enter til að hefja uppsetningu",
   "common.yes": "Já",
   "common.back": "Til baka",
   "common.change": "Nei, breyta",
@@ -15,7 +17,6 @@
   "summary.value": "Gildi",
   "summary.username": "Notandanafn",
   "summary.password": "Lykilorð",
-  "summary.hostname": "Vélarheiti",
   "summary.timezone": "Tímabelti",
   "summary.keyboard": "Lyklaborð",
   "summary.language": "Tungumál",

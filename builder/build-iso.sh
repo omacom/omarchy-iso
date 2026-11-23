@@ -6,8 +6,8 @@ OMARCHY_ISO_REF="${OMARCHY_ISO_REF:-quattro}"
 OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
 OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
 OMARCHY_KERNEL="${OMARCHY_KERNEL:-linux-omarchy}"
-# profiledef.sh reads both in the mkarchiso environment.
-export OMARCHY_ARCH OMARCHY_KERNEL OMARCHY_OEM_INSTALL
+# profiledef.sh reads these in the mkarchiso environment.
+export OMARCHY_ARCH OMARCHY_KERNEL OMARCHY_OEM_INSTALL OMARCHY_PRESET
 
 source /builder/node-release.sh
 source /builder/arm64-kernel-image.sh
@@ -228,6 +228,11 @@ if [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]]; then
   touch "$build_cache_dir/airootfs/usr/share/omarchy-iso/oem-install"
   sed -i 's/^TIMEOUT .*/TIMEOUT 1/' "$build_cache_dir/syslinux/archiso_sys.cfg"
 fi
+# A preset ISO (--preset): the configurator takes the answers presets/<code>.json
+# gives instead of asking, and the orchestrator hands its region to the target.
+if [[ -f /preset.json ]]; then
+  cp /preset.json "$build_cache_dir/airootfs/usr/share/omarchy-iso/preset.json"
+fi
 # The OEM's own bundle (--oem-config, --oem-script), as builder/oem-bundle.py
 # checked and laid it out: the installer hands its branding and agreement to
 # first-boot setup and runs its scripts in the new system.
@@ -266,7 +271,7 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # etc/initcpio/hooks/udev); the aarch64 boards keep the full settle, which
   # the Qualcomm firmware staging before media discovery was proven with.
   rm -f "$build_cache_dir/airootfs/etc/initcpio/hooks/udev"
-  boot_splash_kernel_options="quiet splash "
+  boot_splash_kernel_options="quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 disablehooks=plymouth plymouth.enable=0 "
   # The N1x firmware's SPCR serial console would take the console from the
   # panel, hence console=tty0 acpi=nospcr.
   kernel_options="console=tty0 acpi=nospcr initramfs_async=0"
@@ -292,11 +297,7 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   install -Dm0755 /builder/qualcomm/quiet-efivars-install "$build_cache_dir/airootfs/usr/lib/initcpio/install/omarchy_quiet_efivars"
   rm -rf "$build_cache_dir/syslinux" "$build_cache_dir/efiboot"
 else
-  # The live initramfs carries no GPU driver, so Plymouth draws on the
-  # firmware's framebuffer through simpledrm, which it otherwise leaves alone
-  # until its 8 s DeviceTimeout: the logo showed 7.8 s after the menu pick on
-  # an MSI Z690 from USB.
-  boot_splash_kernel_options="quiet splash plymouth.use-simpledrm "
+  boot_splash_kernel_options="quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 disablehooks=plymouth plymouth.enable=0 "
   # The boot menu offers Install and Try only, so nothing starts releng's
   # memory test or UEFI shell, which mkarchiso copies onto the medium
   # whenever their packages are in the live system.
@@ -305,11 +306,22 @@ else
   done
   kernel_options="xe.enable_panel_replay=0 initramfs_async=0 intel_idle.states_off=0x3fc"
 fi
+# The live boot is black until the installer draws its first screen: no
+# splash, whose logo would only be replaced by the installer's a moment later
+# (and without one Plymouth would show the boot log, so it is off), no boot
+# messages, and no console cursor blinking in the corner.
+# Try keeps the logo: its desktop takes about 11 s to draw. The live initramfs
+# carries no GPU driver, so Plymouth draws on the firmware's framebuffer
+# through simpledrm, which it otherwise leaves alone until its 8 s
+# DeviceTimeout: the logo showed 7.8 s after the menu pick on an MSI Z690 from
+# USB.
+try_splash_kernel_options="quiet splash plymouth.use-simpledrm "
 for grub_config in "$build_cache_dir/grub/grub.cfg" "$build_cache_dir/grub/loopback.cfg"; do
   configure_grub_platform "$grub_config" "$OMARCHY_ARCH"
   sed -i \
     -e "s|%KERNEL%|$OMARCHY_KERNEL|g" \
     -e "s|%BOOT_SPLASH_KERNEL_OPTIONS%|$boot_splash_kernel_options|g" \
+    -e "s|%TRY_SPLASH_KERNEL_OPTIONS%|$try_splash_kernel_options|g" \
     -e "s|%KERNEL_OPTIONS%|$kernel_options|g" \
     "$grub_config"
 done
@@ -395,16 +407,19 @@ fi
 # The selected omarchy-settings package is needed here so its post_install hook
 # drops Omarchy's plymouthd.conf into /etc/plymouth before mkarchiso builds the
 # live initramfs.
+# kmscon draws the installer in JetBrains Mono, Omarchy's own terminal font,
+# and the CJK font carries it in the languages the Linux console cannot draw;
+# customize_airootfs.sh trims that font to the one face kmscon uses.
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # Plymouth stays out of the live initramfs (archiso-aarch64-mkinitcpio.sh);
   # openssh and pciutils serve the recovery entry and remote debugging.
   # For the Snapdragon laptops: ukify builds the live UKI on systemd-stub-omarchy's
   # stub, whose header holds every device tree, and the installer
   # saves a laptop's signed firmware from Windows with qcom-firmware-extract.
-  arch_packages=("$OMARCHY_KERNEL" archlinuxarm-keyring git gum jq openssl openssh pciutils plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted systemd-ukify systemd-stub-omarchy linux-firmware-qcom qcom-firmware-extract python)
+  arch_packages=("$OMARCHY_KERNEL" archlinuxarm-keyring git gum jq openssl openssh pciutils plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted systemd-ukify systemd-stub-omarchy linux-firmware-qcom qcom-firmware-extract python kmscon noto-fonts-cjk ttf-jetbrains-mono-nerd-basic)
 else
   # linux-t2 is the live kernel on a Mac (configs/grub/grub.cfg).
-  arch_packages=("$OMARCHY_KERNEL" linux-t2 git gum jq openssl plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted)
+  arch_packages=("$OMARCHY_KERNEL" linux-t2 git gum jq openssl plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted kmscon noto-fonts-cjk ttf-jetbrains-mono-nerd-basic)
 fi
 live_packages_file="$build_cache_dir/packages.$OMARCHY_ARCH"
 printf '%s\n' "${arch_packages[@]}" >> "$live_packages_file"
@@ -429,6 +444,7 @@ if [[ -d /omarchy-source ]]; then
   base_pkg_lists=(/omarchy-source/install/omarchy-base.packages /omarchy-source/install/omarchy-other.packages)
   setup_form=/omarchy-source/install/provisioning/setup-form.sh
   progress_icon=/omarchy-source/install/provisioning/progress-icon.sh
+  kmscon_lib=/omarchy-source/install/provisioning/kmscon.sh
   console_font=/omarchy-source/install/provisioning/console-font
   mise_work=/omarchy-source/install/user/mise-work.sh
 else
@@ -454,6 +470,8 @@ else
   setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/progress-icon.sh 2>/dev/null || true
   progress_icon=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/progress-icon.sh
+  bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/kmscon.sh 2>/dev/null || true
+  kmscon_lib=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/kmscon.sh
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/console-font.sh \
     usr/share/omarchy/install/provisioning/console-font.py 2>/dev/null || true
   console_font=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/console-font
@@ -600,6 +618,25 @@ if [[ ! -f $progress_icon ]]; then
   exit 1
 fi
 cp "$progress_icon" "$build_cache_dir/airootfs/usr/share/omarchy-iso/progress-icon.sh"
+
+# The installer is drawn in kmscon by the runtime's own launcher, the one
+# first-boot owner setup is drawn with, so the two look and type alike. A
+# runtime predating it ships no such file, which would leave the installer
+# with nothing to draw in.
+if [[ ! -f $kmscon_lib ]]; then
+  if [[ -d /omarchy-source ]]; then
+    echo "ERROR: the --local-source checkout ships no install/provisioning/kmscon.sh" >&2
+    remedy="Update the checkout to a revision carrying the kmscon launcher."
+  else
+    echo "ERROR: $OMARCHY_RUNTIME_PACKAGE does not ship install/provisioning/kmscon.sh" >&2
+    remedy="Publish a runtime carrying the kmscon launcher, or build with --local-source against a checkout that has it."
+  fi
+  echo "       The installer starts kmscon with that file, so this ISO would boot" >&2
+  echo "       into no installer at all." >&2
+  echo "       $remedy" >&2
+  exit 1
+fi
+cp "$kmscon_lib" "$build_cache_dir/airootfs/usr/share/omarchy-iso/kmscon.sh"
 
 # The console font comes from the same runtime too, so the installer and
 # first-boot setup are set in one font at one size. A runtime predating the
@@ -1226,6 +1263,18 @@ fi
 
 # Live ISO uses the same offline pacman.conf.
 cp "$build_cache_dir/pacman-offline.conf" "$build_cache_dir/airootfs/etc/pacman.conf"
+
+# mkarchiso pacstraps the live root from the profile's copy of it. With
+# CacheDir on the mirror itself, as for the root image, pacman takes each
+# package file where the mirror's db describes it. With pacman's default
+# cache, /var/cache/pacman/pkg, it copied them there first, and a file of the
+# same name already in that directory won: the host's cache is mounted there,
+# and what the container's own pacman fetches lands there too. A
+# --local-source build of the commit edge had published names its packages
+# exactly as edge's are, so the published omarchy-settings-dev was taken for
+# the local one and failed the mirror's checksum ("invalid or corrupted
+# package"), ending the build.
+sed -i "/^\[options\]/a CacheDir = /var/cache/omarchy/mirror/offline/" "$build_cache_dir/pacman-offline.conf"
 
 # Build the ISO. profiledef.sh reads OMARCHY_ARCH for the archiso arch/bootmodes.
 echo "[timing] mkarchiso start $(date +%s)"

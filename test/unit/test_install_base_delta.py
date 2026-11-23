@@ -135,5 +135,42 @@ class TargetPackagesTest(unittest.TestCase):
         self.assertFalse((self.target / "var").exists())
 
 
+class InstallApplicationsBeforeStrapTest(unittest.TestCase):
+    """install_applications runs before_strap only when a package is actually missing."""
+
+    def setUp(self):
+        self.arch = self.enterContext(adapter())
+        self.target = Path(self.enterContext(TemporaryDirectory()))
+
+    def test_before_strap_runs_only_before_a_real_pacstrap(self):
+        for missing, expected in (
+            ([], []),
+            (["sof-firmware"], ["before_strap", ("strap", ["sof-firmware"])]),
+        ):
+            with self.subTest(missing=missing):
+                events = []
+                installer = types.SimpleNamespace(
+                    target=self.target,
+                    add_additional_packages=lambda pkgs: events.append(("strap", list(pkgs))),
+                )
+                handler = types.SimpleNamespace(
+                    install_applications=lambda inst, app_cfg, users=None: inst.add_additional_packages(["pipewire", "sof-firmware"]),
+                )
+                arch_config = types.SimpleNamespace(
+                    app_config=object(),
+                    auth_config=types.SimpleNamespace(users=["dhh"]),
+                )
+                with (
+                    mock.patch.object(self.arch, "_application_handler", return_value=handler),
+                    mock.patch.object(self.arch, "target_missing_packages", return_value=missing),
+                ):
+                    self.arch.install_applications(
+                        installer,
+                        arch_config,
+                        before_strap=lambda: events.append("before_strap"),
+                    )
+                self.assertEqual(events, expected)
+
+
 if __name__ == "__main__":
     unittest.main()

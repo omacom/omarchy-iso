@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Linux bonito, divertido y agéntico, por DHH",
+  "greeter.hint": "Presiona Enter para iniciar la instalación",
   "common.yes": "Sí",
   "common.back": "Regresar",
   "common.change": "No, cambiarlo",
@@ -15,7 +17,6 @@
   "summary.value": "Valor",
   "summary.username": "Usuario",
   "summary.password": "Contraseña",
-  "summary.hostname": "Nombre del equipo",
   "summary.timezone": "Zona horaria",
   "summary.keyboard": "Teclado",
   "summary.language": "Idioma",

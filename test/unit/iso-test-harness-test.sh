@@ -231,7 +231,7 @@ echo "ok - an OEM install is sent no keys, and is not asked for a free-space ins
 
 (
   take drive_provision_owner drive_oem_agreement wait_for_screen wait_for_screen_any
-  KEYBOARD_LABEL="English (US)" GUEST_USER=owner GUEST_PASSWORD=secret GUEST_HOSTNAME=box
+  KEYBOARD_LABEL="English (US)" GUEST_USER=owner GUEST_PASSWORD=secret
   GREETER_TEXT="Linux by DHH" GREETER_OCR_THRESHOLD=50 OEM_EULA=false
   press() {
     [[ $(sed -n "$(($(<"$work/screen") - 1))p" "$work/screens") != "Let's set your timezone..." ]] ||
@@ -254,22 +254,22 @@ echo "ok - an OEM install is sent no keys, and is not asked for a free-space ins
 
   zones="Timezone > Filter... America/Chicago Africa/Abidjan" # one line: a scripted screen is a line
   drive "Linux by DHH" "Language" "Select keyboard layout" "$zones" "Username>" "Username>" "Password>" \
-    "Confirm>" "Hostname>" "Does this look right?" "477" "" "" "48>" "desktop" "" "login:" "never read"
+    "Confirm>" "Does this look right?" "477" "" "" "48>" "desktop" "" "login:" "never read"
   driven_ok
   # OCR reads the percent sign as anything, and from a screen caught mid-redraw
   # nothing at all: the progress screen lasts until two readable screens in a
   # row are not it.
-  [[ -s $work/captured-progress && $(<"$work/screen") == 18 ]] || fail "the setup progress screen was not followed to its end"
-  expected="press ret,press ret,press down,press ret,press ret,type owner,press ret,type secret,press ret,type secret,press ret,type box,press ret,press ret,"
+  [[ -s $work/captured-progress && $(<"$work/screen") == 17 ]] || fail "the setup progress screen was not followed to its end"
+  expected="press ret,press ret,press down,press ret,press ret,type owner,press ret,type secret,press ret,type secret,press ret,press ret,"
   [[ $(tr '\n' ',' <"$work/actions") == "$expected" ]] ||
     fail "the installer's order was answered as: $(tr '\n' ' ' <"$work/actions")"
 
   # The older runtime names the step in a heading while it fetches its guess;
   # a Return then is lost, so only the picker itself is answered.
-  drive "Linux by DHH" "Select keyboard layout" "Username>" "Password>" "Confirm>" "Hostname>" \
+  drive "Linux by DHH" "Select keyboard layout" "Username>" "Password>" "Confirm>" \
     "Let's set your timezone..." "$zones" "Does this look right?" "desktop" "desktop"
   driven_ok
-  expected="press ret,press down,press ret,type owner,press ret,type secret,press ret,type secret,press ret,type box,press ret,press ret,press ret,"
+  expected="press ret,press down,press ret,type owner,press ret,type secret,press ret,type secret,press ret,press ret,press ret,"
   [[ $(tr '\n' ',' <"$work/actions") == "$expected" ]] ||
     fail "the older order was answered as: $(tr '\n' ' ' <"$work/actions")"
 
@@ -279,10 +279,10 @@ echo "ok - an OEM install is sent no keys, and is not asked for a free-space ins
   GREETER_TEXT="Start Setup" OEM_EULA=true
   agreement="Do you accept this agreement?"
   drive "Acme Book 14, pouwered by Omarchy Press Return to Start Setup" "Language" "Select keyboard layout" "$zones" "Username>" "Password>" \
-    "Confirm>" "Hostname>" "Does this look right?" "$agreement" "Reboot this machine?" "$agreement" \
+    "Confirm>" "Does this look right?" "$agreement" "Reboot this machine?" "$agreement" \
     "Shut doun this machine? Yes, shut doun No, back to the agreement" "$agreement" "50%" "desktop" "desktop"
   driven_ok
-  expected="press ret,press ret,press down,press ret,press ret,type owner,press ret,type secret,press ret,type secret,press ret,type box,press ret,press ret,"
+  expected="press ret,press ret,press down,press ret,press ret,type owner,press ret,type secret,press ret,type secret,press ret,press ret,"
   expected+="press pgdn,press ctrl-c,press right,press ret,press tab,press ret,press ret,press end,press ret,"
   [[ $(tr '\n' ',' <"$work/actions") == "$expected" ]] ||
     fail "the OEM's agreement was answered as: $(tr '\n' ' ' <"$work/actions")"
@@ -357,7 +357,7 @@ echo "ok - an OEM install is held to its config's bundle and to a record of its 
 (
   take drive_configurator
   source "$ROOT/configs/airootfs/usr/share/omarchy-iso/disk-partitioning.sh"
-  mapfile -t modes < <(install_mode_choices true 2)
+  mapfile -t modes < <(install_mode_choices true false)
   FREE_SPACE=true PROVISION=false ENCRYPT=true
   KEYBOARD_LABEL="English (US)" GUEST_USER=omarchy GUEST_PASSWORD=omarchy
   picking=false selected=0 choice=""

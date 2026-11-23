@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Gražus, smagus ir agentinis Linux iš DHH",
+  "greeter.hint": "Paspauskite Enter, kad pradėtumėte diegimą",
   "common.yes": "Taip",
   "common.back": "Atgal",
   "common.change": "Ne, pakeisti",
@@ -15,7 +17,6 @@
   "summary.value": "Reikšmė",
   "summary.username": "Naudotojo vardas",
   "summary.password": "Slaptažodis",
-  "summary.hostname": "Kompiuterio vardas",
   "summary.timezone": "Laiko juosta",
   "summary.keyboard": "Klaviatūra",
   "summary.language": "Kalba",

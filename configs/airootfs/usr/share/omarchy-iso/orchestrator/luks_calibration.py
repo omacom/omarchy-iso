@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 STATE = Path("/run/omarchy-luks-calibration/result.json")
 UNIT = "omarchy-luks-calibrate.service"
@@ -17,6 +18,7 @@ KEY_SIZE = 512
 MIN_MEMORY = 65536
 MAX_MEMORY = 1048576
 SECTOR_SIZE = 4096
+VOLUME_KEY_DIR = Path("/run")
 
 
 def memory_total() -> int:
@@ -83,10 +85,33 @@ def calibrate() -> None:
     print(output.strip())
 
 
-def stop_calibration() -> None:
-    # Cancel a still-running (or queued) benchmark before format's own PBKDF
-    # allocates memory. Never wait for calibration to finish. The unit keeps
-    # completed state on stop, and systemd kills the benchmark's whole cgroup.
+def _calibration_pending() -> bool:
+    """Whether the unit's benchmark is running, or queued to run."""
+    output = subprocess.run(["systemctl", "show", UNIT, "--property=ActiveState,Job"],
+                            check=False, capture_output=True, text=True, timeout=5).stdout
+    state = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+    return state.get("ActiveState") in ("active", "activating") or bool(state.get("Job"))
+
+
+def stop_calibration(wait: float = 20) -> None:
+    """Before the format: let a benchmark that is under way finish, then stop
+    the unit, so the format's own PBKDF never allocates memory beside it.
+
+    The unit starts when the hashes of the medium end, which is also when an
+    install that was waiting for them begins: an unattended one, or a wizard
+    answered before the stick was read. Cancelling the benchmark there threw
+    its work away and had the format run the same search from the start (a
+    7.6 s format against 1.5 s with the costs known, where the benchmark
+    itself takes 5 s). The wait is bounded: a benchmark that outlasts it is
+    stopped, and the format calibrates as it always could. The unit keeps
+    completed state on stop, and systemd kills the benchmark's whole cgroup.
+    """
+    try:
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline and _calibration_pending():
+            time.sleep(0.2)
+    except (OSError, subprocess.TimeoutExpired):
+        pass  # a poll that fails ends the wait, not the stop
     try:
         subprocess.run(["systemctl", "stop", UNIT], check=False,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
@@ -151,10 +176,26 @@ def with_sector_size(command: list[str]) -> list[str]:
     return command[:index + 1] + ["--sector-size", str(SECTOR_SIZE)] + command[index + 1:]
 
 
-def format_command(command: list[str]) -> list[str]:
-    """The installer's luksFormat: 4096-byte sectors, then this boot's
-    Argon2id calibration."""
-    return calibrated_command(with_sector_size(command))
+def new_volume_key(key_size: int = KEY_SIZE) -> Path:
+    """A random volume key in a root-only file on tmpfs, for luksFormat
+    --volume-key-file. Opening the new volume with the same file takes no key
+    derivation, where opening it by passphrase repeats the Argon2id the
+    format just did (2 s at the installer's iter-time). The kernel's
+    generator, as luksFormat --use-urandom would use; the caller removes the
+    file once the volume is open."""
+    fd, name = tempfile.mkstemp(dir=VOLUME_KEY_DIR, prefix="omarchy-volume-key-")
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(os.urandom(key_size // 8))
+    return Path(name)
+
+
+def format_command(command: list[str], volume_key: Path | None = None) -> list[str]:
+    """The installer's luksFormat: 4096-byte sectors, this boot's Argon2id
+    calibration, and the volume key the open will use."""
+    command = calibrated_command(with_sector_size(command))
+    if volume_key is not None:
+        command = command[:1] + ["--volume-key-file", str(volume_key)] + command[1:]
+    return command
 
 
 def calibrated_command(command: list[str]) -> list[str]:
@@ -189,14 +230,16 @@ def calibrated_command(command: list[str]) -> list[str]:
 def main() -> None:
     if sys.argv[1:] == ["calibrate"]:
         calibrate()
-    elif len(sys.argv) == 3 and sys.argv[1] == "format":
+    elif sys.argv[1:] == ["volume-key"]:
+        print(new_volume_key())
+    elif len(sys.argv) in (3, 4) and sys.argv[1] == "format":
         stop_calibration()
         # Same free-space format, with the existing defaults made explicit.
         command = ["cryptsetup", "luksFormat", sys.argv[2], "--type", "luks2", "--batch-mode",
                    "--pbkdf", "argon2id", "--key-size", "512", "--iter-time", "2000", "-"]
-        os.execvp("cryptsetup", format_command(command))
+        os.execvp("cryptsetup", format_command(command, Path(sys.argv[3]) if len(sys.argv) == 4 else None))
     else:
-        raise SystemExit("usage: omarchy-luks-calibrate calibrate | format DEVICE")
+        raise SystemExit("usage: omarchy-luks-calibrate calibrate | volume-key | format DEVICE [VOLUME-KEY]")
 
 
 if __name__ == "__main__":

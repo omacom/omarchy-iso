@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Linux yang indah, seru & agentik oleh DHH",
+  "greeter.hint": "Tekan Enter untuk memulai pemasangan",
   "common.yes": "Ya",
   "common.back": "Kembali",
   "common.change": "Tidak, ubah",
@@ -15,7 +17,6 @@
   "summary.value": "Nilai",
   "summary.username": "Nama pengguna",
   "summary.password": "Kata sandi",
-  "summary.hostname": "Nama komputer",
   "summary.timezone": "Zona waktu",
   "summary.keyboard": "Keyboard",
   "summary.language": "Bahasa",

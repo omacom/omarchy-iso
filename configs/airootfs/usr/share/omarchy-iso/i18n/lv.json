@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Skaists, jautrs un aģentisks Linux no DHH",
+  "greeter.hint": "Nospied Enter, lai sāktu instalēšanu",
   "common.yes": "Jā",
   "common.back": "Atpakaļ",
   "common.change": "Nē, mainīt",
@@ -15,7 +17,6 @@
   "summary.value": "Vērtība",
   "summary.username": "Lietotājvārds",
   "summary.password": "Parole",
-  "summary.hostname": "Datora nosaukums",
   "summary.timezone": "Laika josla",
   "summary.keyboard": "Tastatūra",
   "summary.language": "Valoda",

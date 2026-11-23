@@ -181,16 +181,17 @@ echo "ok - typing at the passphrase prompt counts against the install timeout"
 # type_text sends key positions, which the guest reads through the layout
 # being typed into: KB_LAYOUT on the installed system, us on the live ISO. A
 # layout whose keys type_text does not know is refused before a VM starts,
-# and on uk the two characters that move are typed on their uk keys.
+# on uk the two characters that move are typed on their uk keys, and on de
+# the letters are, y and z swapped, while its symbols are refused.
 
 take kb_layout_typeable
-for layout in us uk; do
+for layout in us uk de; do
   run kb_layout_typeable "$layout"
   ((status == 0)) || fail "the $layout layout was refused: $(cat "$work/out")"
 done
-run kb_layout_typeable de
-((status != 0)) || fail "the de layout was accepted, where the passphrase omarchy types as omarchz"
-grep -q "OMARCHY_INTEGRATION_KB_LAYOUT=de" "$work/out" || fail "the refusal does not name the setting: $(cat "$work/out")"
+run kb_layout_typeable fr
+((status != 0)) || fail "the fr layout was accepted, where the passphrase omarchy types as o,qrchy"
+grep -q "OMARCHY_INTEGRATION_KB_LAYOUT=fr" "$work/out" || fail "the refusal does not name the setting: $(cat "$work/out")"
 echo "ok - a layout the harness cannot type is refused"
 
 # What type_text pressed for each text, under each layout.
@@ -210,6 +211,15 @@ TYPE_LAYOUT=us
   fail "the email was typed under us as $(typed "test@omarchy.org")"
 [[ $(typed "cd ~") == "c d spc shift-grave_accent" ]] || fail "~ was typed under us as $(typed "cd ~")"
 echo "ok - type_text types @ and ~ on the keys of the layout being typed into"
+
+# de: the passphrase's y is on the z key, which is what makes an encrypted de
+# install's boot a test of the LUKS prompt's layout.
+TYPE_LAYOUT=de
+[[ $(typed omarchy) == "o m a r c h z" ]] || fail "the passphrase was typed under de as $(typed omarchy)"
+[[ $(typed "Zy 9") == "shift-y z spc 9" ]] || fail "letters were typed under de as $(typed "Zy 9")"
+[[ $(typed "a-b") == "a refusal: type_text: cannot type - on the de layout" ]] || fail "a de symbol was typed: $(typed "a-b")"
+TYPE_LAYOUT=us
+echo "ok - type_text types de's letters with y and z swapped and refuses its symbols"
 
 # The live ISO is us whatever the install was given.
 take bootstrap_live_root_ssh grub_menus_waiting

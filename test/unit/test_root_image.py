@@ -15,6 +15,7 @@ import tempfile
 import time
 import types
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest import mock
@@ -416,20 +417,29 @@ class FinishRootImageTest(unittest.TestCase):
         self.ctx = types.SimpleNamespace(target=Path(self.tmp.name) / "mnt")
         self.packages = {"limine", "omarchy-keyring", "omarchy"}
         self.calls = []
+        def fake_run(cmd, **kw):
+            self.calls.append(cmd)
+            return CompletedProcess(cmd, 0, stdout="", stderr="")
+
         for patch in (
             mock.patch.object(phases_impl, "_root_image_required_packages",
                               return_value=["limine", "omarchy-keyring", "omarchy"]),
             mock.patch.object(phases_impl.arch, "target_package_names", create=True,
                               side_effect=lambda target: self.packages),
-            mock.patch.object(phases_impl.subprocess, "run",
-                              side_effect=lambda cmd, **kw: self.calls.append(cmd)),
+            mock.patch.object(phases_impl.subprocess, "run", side_effect=fake_run),
         ):
             patch.start()
             self.addCleanup(patch.stop)
 
     def test_sets_up_the_machine_id(self):
         phases_impl._finish_root_image(self.ctx)
-        self.assertEqual(self.calls, [["systemd-machine-id-setup", f"--root={self.ctx.target}"]])
+        self.assertIn(["systemd-machine-id-setup", f"--root={self.ctx.target}"], self.calls)
+
+    def test_prepares_nocow_journal_directory(self):
+        phases_impl._finish_root_image(self.ctx)
+        journal_dir = self.ctx.target / "var" / "log" / "journal"
+        self.assertTrue(journal_dir.is_dir())
+        self.assertIn(["chattr", "+C", str(journal_dir)], self.calls)
 
     def test_missing_required_package_fails_before_anything_else(self):
         self.packages.discard("omarchy")
@@ -533,6 +543,77 @@ class TargetKeyringUnitTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "keyring init failed"):
                 phases_impl.create_factory_snapshot(self.ctx)
         self.assertEqual(self.runs, [])
+
+    def test_arch_install_starts_keyring_after_swap_and_before_limine_and_users(self):
+        for tailscale in (False, True):
+            with self.subTest(tailscale=tailscale):
+                events = []
+                received_before_strap = []
+                installer = mock.MagicMock()
+                installer.create_users.side_effect = lambda users: events.append("create_users")
+                installer.add_additional_packages.side_effect = lambda pkgs: events.append(("strap", list(pkgs)))
+
+                def record_install_apps(inst, cfg, *, before_strap=None):
+                    events.append("install_apps")
+                    received_before_strap.append(before_strap)
+
+                config = types.SimpleNamespace(
+                    kernels=["linux-omarchy"], locale_config=None, mirror_config=None,
+                    swap=types.SimpleNamespace(enabled=True),
+                    auth_config=types.SimpleNamespace(users=["dhh"]),
+                    app_config=object(), timezone=None, ntp=False, hostname="test",
+                    pacman_config="/etc/pacman.conf",
+                )
+                ctx = types.SimpleNamespace(
+                    state={"arch_config_handler": types.SimpleNamespace(config=config), "mirror_handler": None},
+                    target=Path("/mnt"),
+                    tailscale_authkey_path=Path("/tmp/key") if tailscale else None,
+                    defer_provisioning=False,
+                    omarchy_install={},
+                )
+                with ExitStack() as stack:
+                    for name in (
+                        "_mount_offline_package_cache",
+                        "_unmount_offline_package_cache",
+                        "_mask_mkinitcpio_pacman_hooks",
+                        "_unmask_mkinitcpio_pacman_hooks",
+                        "_install_root_image",
+                        "_apply_platform_layer",
+                        "_drop_archinstall_zram_conf",
+                        "_write_language_marker",
+                        "_write_region_marker",
+                        "_write_pre_mounted_fstab",
+                    ):
+                        stack.enter_context(mock.patch.object(phases_impl, name))
+                    stack.enter_context(mock.patch.object(phases_impl, "_platform_delta_packages", return_value=[]))
+                    stack.enter_context(mock.patch.object(phases_impl, "_configure_limine_boot", side_effect=lambda *a: events.append("limine")))
+                    stack.enter_context(mock.patch.object(phases_impl, "configure_keyboard", return_value=True))
+                    stack.enter_context(mock.patch.object(phases_impl, "_start_target_keyring_init", side_effect=lambda c: events.append("start_keyring")))
+                    stack.enter_context(mock.patch.object(phases_impl, "_join_target_keyring_init", side_effect=lambda c: events.append("join_keyring")))
+                    stack.enter_context(mock.patch.object(phases_impl.arch, "is_pre_mount", return_value=True, create=True))
+                    opened = stack.enter_context(mock.patch.object(phases_impl.arch, "open_installer", create=True))
+                    stack.enter_context(mock.patch.object(phases_impl.arch, "sanity_check", create=True))
+                    stack.enter_context(mock.patch.object(phases_impl.arch, "install_base_delta", create=True))
+                    stack.enter_context(mock.patch.object(phases_impl.arch, "setup_zram_swap", side_effect=lambda inst: events.append("zram"), create=True))
+                    stack.enter_context(mock.patch.object(phases_impl.arch, "target_missing_packages", return_value=[], create=True))
+                    stack.enter_context(mock.patch.object(phases_impl.arch, "install_applications", side_effect=record_install_apps, create=True))
+                    stack.enter_context(mock.patch.object(phases_impl.arch, "root_user", return_value=None, create=True))
+                    opened.return_value.__enter__.return_value = installer
+                    phases_impl.arch_install_system(ctx)
+
+                self.assertLess(events.index("zram"), events.index("start_keyring"))
+                self.assertLess(events.index("start_keyring"), events.index("limine"))
+                self.assertLess(events.index("start_keyring"), events.index("create_users"))
+                self.assertEqual(len(received_before_strap), 1)
+                self.assertIsNotNone(received_before_strap[0])
+                if tailscale:
+                    self.assertLess(events.index("join_keyring"), events.index(("strap", ["tailscale"])))
+                else:
+                    self.assertNotIn("join_keyring", events)
+                    # Calling the passed before_strap callback joins the keyring unit.
+                    with mock.patch.object(phases_impl, "_join_target_keyring_init", side_effect=lambda c: events.append("callback_join")):
+                        received_before_strap[0]()
+                    self.assertIn("callback_join", events)
 
 
 if __name__ == "__main__":

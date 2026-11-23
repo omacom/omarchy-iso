@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Piękny, zabawny i agentowy Linux od DHH",
+  "greeter.hint": "Naciśnij Enter, aby rozpocząć instalację",
   "common.yes": "Tak",
   "common.back": "Wstecz",
   "common.change": "Nie, zmień",
@@ -15,7 +17,6 @@
   "summary.value": "Wartość",
   "summary.username": "Użytkownik",
   "summary.password": "Hasło",
-  "summary.hostname": "Nazwa hosta",
   "summary.timezone": "Strefa czasowa",
   "summary.keyboard": "Klawiatura",
   "summary.language": "Język",

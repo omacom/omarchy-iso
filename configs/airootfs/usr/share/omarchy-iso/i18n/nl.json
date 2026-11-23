@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Mooie, leuke & agentische Linux van DHH",
+  "greeter.hint": "Druk op Enter om de installatie te starten",
   "common.yes": "Ja",
   "common.back": "Terug",
   "common.change": "Nee, wijzigen",
@@ -15,7 +17,6 @@
   "summary.value": "Waarde",
   "summary.username": "Gebruikersnaam",
   "summary.password": "Wachtwoord",
-  "summary.hostname": "Computernaam",
   "summary.timezone": "Tijdzone",
   "summary.keyboard": "Toetsenbord",
   "summary.language": "Taal",

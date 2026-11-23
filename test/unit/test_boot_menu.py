@@ -1,8 +1,8 @@
 """Unit tests for the boot menus: what they offer and how they look.
 
-The x86_64 menus offer Install, Just try and the screen reader and nothing else, in GRUB (UEFI, and an
-ISO file booted through loopback.cfg) and in syslinux (BIOS), with the same
-countdown. The GRUB theme refers only to files builder/boot-menu-theme.sh
+The x86_64 menus offer Install and Just try and nothing else, in GRUB (UEFI,
+and an ISO file booted through loopback.cfg) and in syslinux (BIOS), with the
+same countdown. The GRUB theme refers only to files builder/boot-menu-theme.sh
 makes and fonts grub.cfg loads, and its entries keep enough contrast for a
 person to read them and for test/integration.d's OCR to find them.
 """
@@ -56,11 +56,11 @@ class MenuEntries(unittest.TestCase):
         # The device-tree entry is inside `if grub_cpu == arm64`.
         self.assertEqual(
             [e for e in entries(config) if "device tree" not in e],
-            ["Install", "Just try", "Screen reader"],
+            ["Install", "Just try"],
         )
 
     def test_iso_file_menu_offers_install_and_try(self):
-        self.assertEqual(entries(configured("loopback.cfg", "x86_64")), ["Install", "Just try", "Screen reader"])
+        self.assertEqual(entries(configured("loopback.cfg", "x86_64")), ["Install", "Just try"])
 
     def test_aarch64_keeps_its_own_entries(self):
         config = configured("grub.cfg", "aarch64")
@@ -72,9 +72,8 @@ class MenuEntries(unittest.TestCase):
         labels = []
         for cfg in ("archiso_sys.cfg", "archiso_sys-linux.cfg", "archiso_head.cfg"):
             labels += re.findall(r"^MENU LABEL (.+)$", (SYSLINUX / cfg).read_text(), re.M)
-        # A caret marks an entry's hotkey: J for Just try, S for the screen
-        # reader, as GRUB's --hotkey s.
-        self.assertEqual(labels, ["Install", "^Just try", "^Screen reader"])
+        # A caret marks an entry's hotkey: J for Just try.
+        self.assertEqual(labels, ["Install", "^Just try"])
         self.assertFalse((SYSLINUX / "archiso_tail.cfg").exists())
 
     def test_bios_entries_fit_the_menu(self):
@@ -154,13 +153,13 @@ class Theme(unittest.TestCase):
     def test_the_menu_holds_its_entries(self):
         menu = self.theme[self.theme.index("+ boot_menu"):]
         value = lambda key: int(re.search(rf"\b{key} = (\d+)\b", menu).group(1))
-        # Install, Just try and Screen reader, with no scrolling at any
-        # resolution. GRUB's list takes
-        # the selection box's edges (select_n/select_s, 1 px each, built by
-        # builder/boot-menu-theme.sh) off its height before it counts rows.
+        # Install and Just try, with no scrolling at any resolution. GRUB's
+        # list takes the selection box's edges (select_n/select_s, 1 px each,
+        # built by builder/boot-menu-theme.sh) off its height before it counts
+        # rows.
         edges = 2
         self.assertIn('for part in n ne e se s sw c; do\n    magick -size 1x1', self.builder)
-        self.assertEqual(value("height"), 3 * value("item_height") + 2 * value("item_spacing") + edges)
+        self.assertEqual(value("height"), 2 * value("item_height") + value("item_spacing") + edges)
 
     def test_entries_are_readable(self):
         background = re.search(r'desktop-color: "(#[0-9a-f]{6})"', self.theme).group(1)

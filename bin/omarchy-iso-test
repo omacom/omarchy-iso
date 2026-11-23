@@ -95,7 +95,9 @@ NO_NETWORK=false
 
 GUEST_USER="omarchy"
 GUEST_PASSWORD="omarchy"
-GUEST_HOSTNAME="omarchy-test"
+# Not asked: the setup form makes it from the user and the machine, which a
+# QEMU guest reports as a virtual machine.
+GUEST_HOSTNAME="omarchy-vm"
 
 while (($#)); do
   case "$1" in
@@ -410,8 +412,13 @@ ocr_screen() {
   [[ -s $shot ]] || return 0
   # Black on white: the negated grays alone read the focused button on the
   # finished install, dark text on a light bar, as "Reboot Nou".
-  magick "$shot" -colorspace gray -negate -resize 150% -threshold "${OCR_THRESHOLD:-50}%" "$prepped" 2>/dev/null || return 0
-  tesseract "$prepped" - --psm 6 2>/dev/null || true
+  # Gray by the brightest channel, not by luminance: kmscon draws the form's
+  # purple headings and prompts as dark as gum asks for them, where the console
+  # brightened them to its palette, and by luminance they fall with the dim
+  # hints the harness must not read. --psm 4, a column of lines: as one block
+  # of text (6) a lone thin prompt under the logo is dropped.
+  magick "$shot" -grayscale Brightness -negate -resize 150% -threshold "${OCR_THRESHOLD:-50}%" "$prepped" 2>/dev/null || return 0
+  tesseract "$prepped" - --psm 4 2>/dev/null || true
 }
 
 # Wait until the console shows the given text. Saves the offending screen as
@@ -898,11 +905,12 @@ drive_configurator() {
     capture_console "success-installer-02-prepare-confirm"
     press ret # "Yes, prepare for another owner" is the affirmative default
 
-    # Jumps straight to disk selection, then the overwrite confirm.
-    wait_for_screen "install disk" 60
-    capture_console "success-installer-03-prepare-install-disk"
-    press ret
-
+    # Jumps to the overwrite confirm. The VM's one disk is no choice, but an
+    # ISO from before that (a stable release) lists it first.
+    wait_for_screen "install disk\|recovery possible" 60
+    if ocr_screen | grep -qi "install disk"; then
+      press ret
+    fi
     wait_for_screen "recovery possible" 60
     capture_console "success-installer-04-prepare-disk-warning-encrypted"
     if ! $ENCRYPT; then
@@ -951,35 +959,27 @@ drive_configurator() {
   capture_console "success-installer-04-password"
   press ret
 
-  # The same cursor, the other phase: while it covers the placeholder's first
-  # letter, OCR misreads "Must match"; "you just typed" reads either way.
-  wait_for_screen_any "Must match" "you just typed" 60
+  # The prompt, or its placeholder: kmscon draws the placeholder too dim to
+  # read, and on the console the cursor covers its first letter in one phase.
+  wait_for_screen_any "Conf *irm>" "you just typed" 60
   type_text "$GUEST_PASSWORD"
   capture_console "success-installer-05-password-confirmation"
-  press ret
-
-  wait_for_screen "Hostname" 60
-  type_text "$GUEST_HOSTNAME"
-  capture_console "success-installer-07-hostname"
   press ret
 
   wait_for_screen "look right" 60
   capture_console "success-installer-09-review"
   press ret
 
-  wait_for_screen "install disk" 60
-  capture_console "success-installer-10-install-disk"
-  press ret # the single virtio disk
-
+  # The VM's one virtio disk is taken without a disk list, except by an ISO
+  # from before that (a stable release), which lists it first.
+  wait_for_screen "install disk\|installation mode\|recovery possible" 60
+  if ocr_screen | grep -qi "install disk"; then
+    press ret
+  fi
   if $FREE_SPACE; then
     # The picker only appears when the disk has usable free space on UEFI.
     wait_for_screen "installation mode" 60
     capture_console "success-installer-11-install-mode"
-    # Esc goes back to the disk list rather than ending the install.
-    press esc
-    wait_for_screen "install disk" 60
-    press ret
-    wait_for_screen "installation mode" 60
     # "Full disk install" comes first; free space is the next entry.
     press home
     press down
@@ -1131,8 +1131,6 @@ drive_provision_owner() {
       prompt=password
     elif grep -qi "Username" <<<"$screen"; then
       prompt=username
-    elif grep -qi "Hostname" <<<"$screen"; then
-      prompt=hostname
     elif grep -q "[A-Z][a-z]\+/[A-Z][a-z]" <<<"$screen"; then
       # The picker's list of zones, not a heading that names the step while
       # the guess is still being fetched: a Return sent then is lost.
@@ -1145,7 +1143,6 @@ drive_provision_owner() {
       case $prompt in
         username) type_text "$GUEST_USER" ;;
         password | confirmation) type_text "$GUEST_PASSWORD" ;;
-        hostname) type_text "$GUEST_HOSTNAME" ;;
         timezone) ;; # accept the guess that leads the list
       esac
       capture_console "success-provision-02-$prompt"
@@ -1216,7 +1213,9 @@ wait_for_install() {
   while true; do
     text=$(ocr_screen)
 
-    if grep -qi "Reboot Now" <<<"$text"; then
+    # The button, or the line above it: dark on its light bar, the button is
+    # the one thing on the screen OCR drops in some fonts.
+    if grep -qi "Reboot Now\|Installed Omarchy in" <<<"$text"; then
       log "Install finished. Confirming the reboot prompt."
       capture_console "success-installer-15-reboot"
       press ret
@@ -1563,8 +1562,8 @@ install_phase() {
 
     # The owner's hostname and timezone are set at first boot now, not baked
     # into the install — confirm they actually landed on the running system.
-    # Hostname is deterministic (we typed it), so a mismatch is a hard failure;
-    # timezone is geo-guessed, so just report what landed.
+    # Hostname is deterministic (made from the owner and the VM), so a mismatch
+    # is a hard failure; timezone is geo-guessed, so just report what landed.
     local got_host="" got_tz=""
     got_host=$(ssh_guest "cat /etc/hostname" 2>/dev/null | tr -d '\r\n') || got_host=""
     got_tz=$(ssh_guest "timedatectl show -p Timezone --value" 2>/dev/null | tr -d '\r\n') || got_tz=""

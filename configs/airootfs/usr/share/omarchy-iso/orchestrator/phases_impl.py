@@ -16,8 +16,8 @@ Phase ordering (full-disk and protected/pre-mounted):
                              root image write, per-machine
                              package delta, Limine setup, useradd, fstab; the
                              per-machine pacman keyring starts as a transient
-                             systemd unit after the last pacstrap
-    configure_hibernation  → root-owned swap/resume drop-ins
+                             systemd unit before Limine/useradd and joins
+                             before any later pacstrap or the factory snapshot
     run_system_finalizer   → arch-chroot root omarchy-apply-system, including Snapper
     finalize_limine_boot   → final Limine config/UKI build after hardware drop-ins
     run_chroot_finalizer   → arch-chroot -u user omarchy-provision-user
@@ -42,9 +42,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -705,6 +707,13 @@ def arch_install_system(ctx: InstallContext) -> None:
                     arch.setup_zram_swap(installer)
                     _drop_archinstall_zram_conf(ctx)
 
+            # Start initializing the target's per-machine pacman keyring now so
+            # it overlaps Limine setup and user creation. setup_zram_swap can
+            # pacstrap zram-generator if missing, so this starts after it; any
+            # later pacstrap (missing app firmware or staged tailscale) joins
+            # the unit first so two pacman-key runs never race on gnupg.
+            _start_target_keyring_init(ctx)
+
             with _time_step("STEP.configure_limine_boot (mkinitcpio + ukify + limine-install)"):
                 _configure_limine_boot(ctx, installer, config)
 
@@ -718,25 +727,26 @@ def arch_install_system(ctx: InstallContext) -> None:
                 # firmware archinstall's hardware detection asks for and wires
                 # the per-user PipeWire units.
                 info("› applying archinstall application selections")
-                arch.install_applications(installer, config)
+                arch.install_applications(
+                    installer,
+                    config,
+                    before_strap=lambda: _join_target_keyring_init(ctx),
+                )
 
             _write_language_marker(ctx)
+            _write_region_marker(ctx)
 
             # Tailscale is bundled in the offline mirror but only installed
             # when an autoinstall drive staged an auth key; must happen here,
             # while the mirror is still bind-mounted, not in the phase that
             # configures the join.
             if ctx.tailscale_authkey_path is not None:
+                _join_target_keyring_init(ctx)
                 info("› installing tailscale (auth key staged for first boot)")
                 installer.add_additional_packages(["tailscale"])
         finally:
             _unmask_mkinitcpio_pacman_hooks(ctx)
             _unmount_offline_package_cache(ctx)
-
-        # After the last pacstrap: each one runs its own pacman-key --init on
-        # the target's gnupg dir. Runs on while the phases below configure the
-        # target; create_factory_snapshot joins it.
-        _start_target_keyring_init(ctx)
 
         # Standard arch finishers.
         if config.timezone:
@@ -1027,7 +1037,8 @@ def _umount_root_image() -> None:
         subprocess.run(["umount", str(ROOT_IMAGE_MOUNT)], capture_output=True, check=False)
 
 
-def _write_root_image_parallel(container: Path, device: str) -> bool:
+def _write_root_image_parallel(container: Path, device: str,
+                               on_progress: Callable[[float], None] | None = None) -> bool:
     """Write the image with omarchy-image-write write-squashfs
     (builder/omarchy-image-write.c), straight from the squashfs without
     mounting it: N threads each decode the next 1 MiB block with libzstd and
@@ -1038,16 +1049,33 @@ def _write_root_image_parallel(container: Path, device: str) -> bool:
     too small) or the write failed partway."""
     if not IMAGE_WRITE.is_file():
         return False
+    # The tool reports the blocks it has taken to a file while it writes,
+    # which goes on to the progress bar: from a slow USB stick the write is
+    # minutes of the install.
+    progress = Path(tempfile.mkdtemp(prefix="omarchy-image-write-")) / "progress"
+    env = {**os.environ, "OMARCHY_IMAGE_WRITE_PROGRESS": str(progress)}
     with _time_step("F1.image_write (parallel, O_DIRECT)"):
-        proc = subprocess.run([str(IMAGE_WRITE), "write-squashfs", str(container), device],
-                              stderr=subprocess.PIPE, text=True, check=False)
-    for line in proc.stderr.splitlines():
+        proc = subprocess.Popen([str(IMAGE_WRITE), "write-squashfs", str(container), device],
+                                stderr=subprocess.PIPE, text=True, env=env)
+        while True:
+            try:
+                _, stderr = proc.communicate(timeout=0.5)
+                break
+            except subprocess.TimeoutExpired:
+                if on_progress:
+                    try:
+                        done, total = (int(n) for n in progress.read_text().split())
+                        on_progress(done / total)
+                    except (OSError, ValueError, ZeroDivisionError):
+                        pass  # not written yet, or caught between two samples
+    shutil.rmtree(progress.parent, ignore_errors=True)
+    for line in stderr.splitlines():
         info(f"› {line}")
     if proc.returncode == 2:
         info("› image-write refused the image; writing it with dd")
         return False
     if proc.returncode != 0:
-        raise subprocess.CalledProcessError(proc.returncode, proc.args, stderr=proc.stderr)
+        raise subprocess.CalledProcessError(proc.returncode, proc.args, stderr=stderr)
     return True
 
 
@@ -1087,7 +1115,10 @@ def _place_root_image(ctx: InstallContext) -> None:
     # the page cache: near zero when the verify left it all cached, up to the
     # whole image on a machine whose RAM could not hold it.
     medium_before = _medium_bytes_read()
-    if not _write_root_image_parallel(container, device):
+    # The rest of the placement after the write takes moments; it gets the
+    # last few percent.
+    if not _write_root_image_parallel(container, device,
+                                      lambda done: _write_phase_progress(ctx, 0.95 * done)):
         try:
             _write_root_image_dd(_mount_root_image(container), device)
         finally:
@@ -1218,15 +1249,27 @@ def _apply_platform_layer(ctx: InstallContext, layer: Path | None = None) -> Non
 
 def _finish_root_image(ctx: InstallContext) -> None:
     """What the written image owes the rest of the install: it carries
-    the packages the phases assume, and the target has a machine-id (the
+    the packages the phases assume, the target has a machine-id (the
     image deliberately ships an empty one) before limine-entry-tool and the
-    factory snapshot read it."""
+    factory snapshot read it, and /var/log/journal is pre-created with NOCOW
+    so first-boot journald writes system.journal without btrfs CoW."""
     target = ctx.target
     installed = arch.target_package_names(target)
     missing = [pkg for pkg in _root_image_required_packages() if pkg not in installed]
     if missing:
         raise RuntimeError(f"root image lacks required packages: {', '.join(missing)}")
     subprocess.run(["systemd-machine-id-setup", f"--root={target}"], check=True, capture_output=True)
+    # Arch's systemd defaults to Storage=persistent, so systemd-journal-flush
+    # creates /var/log/journal and system.journal before systemd-tmpfiles-setup
+    # applies journal-nocow.conf. Pre-creating the empty directory with +C lets
+    # initial journal files inherit NOCOW while tmpfiles still owns permissions
+    # and ACLs on first boot.
+    journal_dir = target / "var" / "log" / "journal"
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(["chattr", "+C", str(journal_dir)], check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
+        info(f"› could not set NOCOW on {journal_dir}: {detail}")
 
 
 # Transient systemd unit that initialises the target's pacman keyring.
@@ -1248,10 +1291,11 @@ def _start_target_keyring_init(ctx: InstallContext) -> None:
     --gpgdir and --populate-from address the target directly, so no API
     mounts are held.
 
-    Started after the last pacstrap (each runs its own --init on this dir)
-    and joined by create_factory_snapshot: on x86_64 nothing in between
-    reads the keyring (the offline repo is SigLevel = Never) or writes it,
-    and the snapshot must not capture it half-written. Where the runtime's
+    Started after setup_zram_swap (before Limine setup and user creation) and
+    joined before any later pacstrap (missing app firmware or staged tailscale)
+    or by create_factory_snapshot: on x86_64 nothing in between reads the
+    keyring (the offline repo is SigLevel = Never) or writes it, and the
+    snapshot must not capture it half-written. Where the runtime's
     post-install inits and populates it itself, no unit starts: the
     finalizer had to wait for it before doing the same work again. Apple
     Silicon, whose image brings its keyrings, keeps it, and
@@ -1307,7 +1351,8 @@ def _join_target_keyring_init(ctx: InstallContext, *, raise_on_error: bool = Tru
     proc = ctx.state.pop("target_keyring_proc", None)
     if proc is None:
         return
-    out, _ = proc.communicate()
+    with _time_step("STEP.join_target_keyring"):
+        out, _ = proc.communicate()
     if raise_on_error and proc.returncode != 0:
         raise RuntimeError(
             f"per-machine pacman keyring init failed (exit {proc.returncode}):\n"
@@ -1928,6 +1973,20 @@ def _write_language_marker(ctx: InstallContext) -> None:
     marker.chmod(0o644)
 
 
+def _write_region_marker(ctx: InstallContext, preset: Path = Path("/usr/share/omarchy-iso/preset.json")) -> None:
+    """A preset ISO (--preset) that names an Omarchy region, such as cn, hands
+    it to the target's /etc/omarchy/region, where the runtime's pacman
+    finalizer (omarchy-apply-pacman) puts that region's mirrors first. Every
+    other ISO writes nothing, which means global."""
+    region = json.loads(preset.read_text()).get("region") if preset.is_file() else None
+    if not region:
+        return
+    marker = ctx.target / "etc/omarchy/region"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(region + "\n")
+    marker.chmod(0o644)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Install intent helpers: normalize the Omarchy-specific part of the
 # configurator JSON so full-disk and pre-mounted installs feed the same boot
@@ -2187,27 +2246,6 @@ def _split_partition_device(part_dev: str) -> tuple[str, int]:
     if not part_num:
         raise RuntimeError(f"could not find partition number for {part_dev}")
     return f"/dev/{parent}", int(part_num)
-
-
-def configure_hibernation(ctx: InstallContext) -> None:
-    """Configure swap/resume in the target as root before user setup.
-
-    Hibernation is system boot configuration, not per-user setup. The final
-    Limine UKI build still happens later in finalize_limine_boot after this
-    writes the resume hook and kernel cmdline drop-in.
-    """
-    setup = ctx.target / "usr" / "bin" / "omarchy-hibernation-setup"
-    if not setup.exists():
-        _debug_log(ctx, "skipping hibernation: /usr/bin/omarchy-hibernation-setup is not installed")
-        return
-
-    subprocess.run([
-        "arch-chroot", str(ctx.target),
-        "env",
-        "OMARCHY_PATH=/usr/share/omarchy",
-        "OMARCHY_INSTALL_LOG_FILE=/var/log/omarchy-install.log",
-        "/usr/bin/omarchy-hibernation-setup", "--force", "--no-rebuild",
-    ], check=True)
 
 
 def _install_debug_enabled() -> bool:
@@ -2722,7 +2760,8 @@ def _prebuilt_uki_keymap_stale(target: Path) -> str:
     UKI that is only copied. The LUKS passphrase prompt runs from that
     initramfs: leaving it stale is upstream omarchy#8196, where a passphrase
     enrolled under AZERTY cannot be typed at a QWERTY prompt and the owner is
-    locked out of a fresh install with no recovery but reinstalling.
+    locked out of a fresh install with no recovery but reinstalling. The
+    caller writes the choice into the UKI (uki_vconsole.py), or builds one.
 
     An image that records nothing is assumed to have built in "us", and that
     covers two cases:
@@ -2912,19 +2951,25 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
         info(f"› hardware setup added initramfs modules ({'; '.join(added_modules)}); "
              "building the UKI on this machine instead of using the pre-built one")
 
-    # Same reasoning for the console keymap: the pre-built initramfs has the
-    # image's, and the LUKS prompt types with it.
+    # The console keymap is the image's too, and the LUKS prompt types with
+    # it. An image that reserved room for it takes this install's keyboard
+    # settings in place (uki_vconsole.py); one that did not is built here.
     stale_keymap = _prebuilt_uki_keymap_stale(ctx.target)
+    vconsole = ctx.target / "etc" / "vconsole.conf"
+    keymap_fits = False
     if prebuilt_uki.is_file() and stale_keymap:
-        info(f"› keyboard layout {stale_keymap} differs from the pre-built UKI's; "
-             "building the UKI on this machine so the LUKS prompt uses it")
+        from .uki_vconsole import vconsole_fits
+        keymap_fits = vconsole_fits(prebuilt_uki, vconsole)
+        if not keymap_fits:
+            info(f"› keyboard layout {stale_keymap} differs from the pre-built UKI's, which has no room for it; "
+                 "building the UKI on this machine so the LUKS prompt uses it")
     # And for an encrypted deferred install: its first boot unlocks with the
     # provisioning key, which only an initramfs built here carries.
     provisioning_key = _initramfs_carries_provisioning_key(ctx.target)
     if prebuilt_uki.is_file() and provisioning_key:
         info("› the first boot unlocks with the provisioning key; "
              "building the UKI on this machine so its initramfs carries it")
-    skip_prebuilt = bool(added_modules) or bool(stale_keymap) or provisioning_key
+    skip_prebuilt = bool(added_modules) or (bool(stale_keymap) and not keymap_fits) or provisioning_key
 
     # A selected kernel other than the image's boots first, as in omarchy's own
     # kernel migration. Written before any UKI is built so the entries sort by it.
@@ -2954,6 +2999,14 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
             shutil.copy2(prebuilt_uki, esp_uki)
             info(f"› deployed pre-built UKI ({prebuilt_uki.stat().st_size >> 20} MiB)")
         # Before --add-uki: the Limine entry pins the UKI's BLAKE2B hash.
+        if stale_keymap:
+            with _time_step("LIMINE.embed_vconsole (keyboard layout into the pre-built UKI)"):
+                from .uki_vconsole import embed_vconsole
+                # It fit a moment ago, in the copy's source. A prompt in the
+                # wrong layout locks the owner out, so nothing boots without it.
+                if not embed_vconsole(esp_uki, vconsole):
+                    raise RuntimeError(f"could not write keyboard layout {stale_keymap} into {esp_uki}")
+                info(f"› UKI carries keyboard layout {stale_keymap} for the console and the LUKS prompt")
         with _time_step("LIMINE.embed_cmdline (pre-built UKI boots without a loader)"):
             from .uki_cmdline import embed_cmdline
             if embed_cmdline(esp_uki, cmdline):

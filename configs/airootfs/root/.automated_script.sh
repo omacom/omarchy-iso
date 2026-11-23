@@ -10,7 +10,14 @@
 #   - COLUMNS/LINES so gum picks up real terminal size
 set -euo pipefail
 
-[[ $(tty) == /dev/tty1 ]] || exit 0
+# Inside kmscon this runs again on kmscon's pty: the wizard and the install
+# are shown there, in real fonts, and tty1 waits.
+[[ $(tty) == /dev/tty1 || ${OMARCHY_KMSCON:-} == 1 ]] || exit 0
+
+# The live boot hides the console's cursor (vt.global_cursor_default=0), so
+# nothing blinks on the black screen before the installer draws. A shell left
+# here after this script needs it back.
+[[ ${OMARCHY_KMSCON:-} == 1 ]] || trap 'printf "\e[?25h" >/dev/tty1 2>/dev/null' EXIT
 
 # Try Omarchy never installs. Its initramfs hook boots the root image instead of
 # this live system; if this script runs under omarchy.try=1 at all, that hook
@@ -48,7 +55,9 @@ fi
 # prompts that already say what to do, so every widget leaves them off.
 export GUM_CHOOSE_SHOW_HELP=false GUM_CONFIRM_SHOW_HELP=false GUM_FILTER_SHOW_HELP=false GUM_INPUT_SHOW_HELP=false
 
-# Tokyo Night palette so the live VT matches the installed look.
+# Tokyo Night palette so the live VT matches the installed look, for the
+# installs drawn on it (OEM and cidata). The console stays black, untouched,
+# under an install kmscon draws.
 set_tokyo_night_colors() {
   echo -en "\e]P01a1b26"; echo -en "\e]P1f7768e"; echo -en "\e]P29ece6a"
   echo -en "\e]P3e0af68"; echo -en "\e]P47aa2f7"; echo -en "\e]P5bb9af7"
@@ -58,8 +67,7 @@ set_tokyo_night_colors() {
   echo -en "\e]PFc0caf5"
   echo -en "\033[0m"
   clear
-}
-set_tokyo_night_colors
+} >/dev/tty # not into the install log, which stdout is copied to by then
 
 mkdir -p /var/log
 touch "$OMARCHY_INSTALL_LOG_FILE"
@@ -135,22 +143,62 @@ warm_offline_mirror() {
   done < <(du -k "$mirror"/*.pkg.tar.zst 2>/dev/null | sort -rn)
 }
 
-warm_offline_mirror &
-warm_pid=$!
-trap 'kill "$warm_pid" 2>/dev/null' EXIT
+# Inside kmscon the tty1 run is still warming the cache.
+if [[ ${OMARCHY_KMSCON:-} != 1 ]]; then
+  warm_offline_mirror &
+  warm_pid=$!
+  trap 'kill "$warm_pid" 2>/dev/null; printf "\e[?25h" >/dev/tty1 2>/dev/null' EXIT
+fi
 
 cd /root
 # Autoinstall: a cidata drive carrying the configurator's own output files
 # stands in for the wizard. omarchy-cidata-load copies them into /root and
 # everything downstream runs the ordinary path against ordinary inputs.
+# A rerun from the shell an abort left: the first run's mark that it ended
+# would stand for this one too, and a kmscon that died under it would pass
+# for an installer that finished. This run leaves its own, when it ends by
+# itself, wizard or cidata install alike: kmscon dying hangs it up, and that
+# is no ending to record.
+if [[ -n ${OMARCHY_KMSCON_SHELL:-} && -n ${OMARCHY_KMSCON_ENDED:-} ]]; then
+  rm -f "$OMARCHY_KMSCON_ENDED"
+  trap 'printf "%s\n" "$?" >"$OMARCHY_KMSCON_ENDED"' EXIT
+  trap 'trap - EXIT HUP TERM; kill -HUP $$' HUP TERM
+fi
 if [[ -f /usr/share/omarchy-iso/oem-install ]]; then
   export OMARCHY_UI_INTERACTIVE=no
+  set_tokyo_night_colors
   ./configurator --oem
-elif /usr/local/bin/omarchy-cidata-load; then
+elif [[ ${OMARCHY_KMSCON:-} != 1 || -n ${OMARCHY_KMSCON_SHELL:-} ]] && /usr/local/bin/omarchy-cidata-load; then
+  # Looked for by the tty1 run and by a rerun from the shell an abort left,
+  # where a cidata drive may have been plugged in since. Not by the run kmscon
+  # starts: the tty1 run that started it has just looked. The palette is the
+  # console's to set; kmscon has its own.
+  [[ ${OMARCHY_KMSCON:-} == 1 ]] || set_tokyo_night_colors
   echo "Autoinstall configuration found on cidata drive; skipping the configurator."
   export OMARCHY_UI_INTERACTIVE=no
+elif [[ ${OMARCHY_KMSCON:-} == 1 ]]; then
+  ./configurator && status=0 || status=$?
+  ((status == 0)) || exit "$status"
 else
-  ./configurator
+  # The wizard and the whole install run in kmscon, which runs this script
+  # again: fonts with every script the installer speaks, the same on every
+  # machine, where the console has one bitmap font and cannot draw Chinese,
+  # Japanese or Korean at all. The launcher is the runtime's own, the one
+  # first-boot owner setup is drawn with.
+  # shellcheck disable=SC1091
+  source /usr/share/omarchy-iso/kmscon.sh
+  # shellcheck disable=SC1091
+  source /usr/share/omarchy-iso/kmscon-session.sh
+
+  # The answers a relaunch carries hold the password: however this run ends,
+  # none outlive it.
+  trap 'kill "$warm_pid" 2>/dev/null || true; rm -f "$KMSCON_RESUME"*; printf "\e[?25h" >/dev/tty1 2>/dev/null' EXIT
+
+  # Before any language is picked, the one an ISO presets (presets/<code>.json).
+  language=$(jq -r '.language // empty' /usr/share/omarchy-iso/preset.json 2>/dev/null || true)
+  kmscon_session "$language" /bin/bash -c "$(kmscon_command)" _ /root/.automated_script.sh
+  # The installer ran to its end in kmscon.
+  exit 0
 fi
 
 # Deferred-provisioning installs skip the celebration/reboot prompt and reboot on

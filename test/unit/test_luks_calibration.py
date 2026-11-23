@@ -146,6 +146,52 @@ class Calibration(unittest.TestCase):
             with mock.patch.object(luks.subprocess, 'run', side_effect=failure):
                 luks.stop_calibration()
 
+    def test_a_poll_that_fails_still_stops_the_unit(self):
+        for failure in (OSError(), subprocess.TimeoutExpired('systemctl', 5)):
+            calls = []
+            def run(command, **_kwargs):
+                calls.append(command[1])
+                if command[1] == 'show':
+                    raise failure
+                return types.SimpleNamespace(stdout='')
+            with mock.patch.object(luks.subprocess, 'run', side_effect=run):
+                luks.stop_calibration()
+            self.assertEqual(calls, ['show', 'stop'])
+
+    def stop(self, states, wait=20):
+        """stop_calibration against a unit that reports each of states in
+        turn (the last one from then on), on a clock that only sleep moves."""
+        calls, clock = [], [0.0]
+        def run(command, **_kwargs):
+            calls.append(command[1])
+            state = states[min(calls.count('show') - 1, len(states) - 1)] if command[1] == 'show' else ''
+            return types.SimpleNamespace(stdout=state)
+        with mock.patch.object(luks.subprocess, 'run', side_effect=run), \
+                mock.patch.object(luks.time, 'monotonic', side_effect=lambda: clock[0]), \
+                mock.patch.object(luks.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            luks.stop_calibration(wait)
+        return calls, clock[0]
+
+    def test_a_benchmark_under_way_is_waited_for_then_the_unit_is_stopped(self):
+        running, done = 'ActiveState=active\nJob=\n', 'ActiveState=inactive\nJob=\n'
+        calls, waited = self.stop([running, running, running, done])
+        self.assertEqual(calls, ['show', 'show', 'show', 'show', 'stop'])
+        self.assertAlmostEqual(waited, 0.6)
+
+    def test_a_queued_benchmark_counts_as_under_way(self):
+        calls, _ = self.stop(['ActiveState=inactive\nJob=42\n', 'ActiveState=activating\nJob=42\n', 'ActiveState=inactive\nJob=\n'])
+        self.assertEqual(calls, ['show', 'show', 'show', 'stop'])
+
+    def test_a_finished_or_absent_benchmark_costs_no_wait(self):
+        for state in ('ActiveState=inactive\nJob=\n', 'ActiveState=failed\nJob=\n', ''):
+            calls, waited = self.stop([state])
+            self.assertEqual((calls, waited), (['show', 'stop'], 0.0))
+
+    def test_a_benchmark_that_outlasts_the_wait_is_stopped(self):
+        calls, waited = self.stop(['ActiveState=active\nJob=\n'], wait=2)
+        self.assertEqual(calls[-1], 'stop')
+        self.assertTrue(2.0 <= waited < 2.5, waited)
+
 
 class ArchinstallBoundary(unittest.TestCase):
     def test_original_encrypt_keeps_input_return_and_restores_runner_on_error(self):
@@ -160,19 +206,112 @@ class ArchinstallBoundary(unittest.TestCase):
                 calls.append(real.run(COMMAND, input_data=b'not-logged'))
                 return key_file
         names={'archinstall.lib.disk.luks': {'Luks2':Luks2, 'run':runner}}
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
         with orchestrator_module('luks_tuning', names) as tuning:
             import importlib
             shared=importlib.import_module('orchestrator.luks_calibration')
             real=importlib.import_module('archinstall.lib.disk.luks')
-            with mock.patch.object(shared,'stop_calibration') as stop, mock.patch.object(shared,'format_command', return_value=['changed']):
+            with mock.patch.object(shared,'stop_calibration') as stop, mock.patch.object(shared,'format_command', return_value=['changed']) as format_command, \
+                    mock.patch.object(shared,'VOLUME_KEY_DIR', directory):
                 wrapped=tuning._with_calibration(Luks2.encrypt)
-                self.assertEqual(wrapped(Luks2(), key_file='key-file'), 'key-file')
+                handler=Luks2()
+                self.assertEqual(wrapped(handler, key_file='key-file'), 'key-file')
                 runner.assert_called_once_with(['changed'], input_data=b'not-logged')
                 stop.assert_called_once()
                 self.assertIs(real.run, runner)
+                # The format is given a volume key, which the handler keeps for its open.
+                self.assertEqual(format_command.call_args.args, (COMMAND, handler.omarchy_volume_key))
+                self.assertEqual(list(directory.iterdir()), [handler.omarchy_volume_key])
+                handler.omarchy_volume_key.unlink()
                 runner.side_effect=RuntimeError('format failed')
-                with self.assertRaises(RuntimeError): wrapped(Luks2())
+                failed=Luks2()
+                with self.assertRaises(RuntimeError): wrapped(failed)
                 self.assertIs(real.run, runner)
+                self.assertFalse(hasattr(failed, 'omarchy_volume_key'))
+                self.assertEqual(list(directory.iterdir()), [], 'a failed format leaves its volume key behind')
+
+    def unlock(self, handler, runner):
+        sys.path.insert(0, str(Path(__file__).parent))
+        from archinstall_fakes import orchestrator_module
+        class Luks2:
+            def lock(self): pass
+        names={'archinstall.lib.disk.luks': {'Luks2':Luks2}, 'archinstall.lib.command': {'run':runner},
+               'archinstall.lib.exceptions': {'DiskError':RuntimeError}, 'archinstall.lib.log': {'debug':lambda *_: None}}
+        with orchestrator_module('luks_tuning', names) as tuning:
+            tuning._unlock(handler)
+
+    def handler(self, **attributes):
+        opened=[]
+        return types.SimpleNamespace(
+            luks_dev_path=Path('/dev/vda2'), mapper_name='root', is_unlocked=lambda: bool(opened),
+            _get_passphrase_args=lambda key_file: ([], b'passphrase'), opened=opened, **attributes)
+
+    def test_the_open_after_a_format_uses_its_volume_key_and_removes_it(self):
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        key = directory / 'omarchy-volume-key-x'
+        key.write_bytes(bytes(64))
+        handler = self.handler(omarchy_volume_key=key)
+        seen = {}
+        def runner(command, input_data=None):
+            seen.update(command=command, input_data=input_data, key_there=key.exists())
+            handler.opened.append(True)
+            return types.SimpleNamespace(stdout=b'')
+        self.unlock(handler, runner)
+        self.assertEqual(seen['command'], ['cryptsetup', 'open', '/dev/vda2', 'root', '--volume-key-file', str(key),
+                                           '--type', 'luks2', '--persistent', '--allow-discards', '--perf-no_read_workqueue'])
+        self.assertIsNone(seen['input_data'], 'no passphrase, so no key derivation')
+        self.assertTrue(seen['key_there'])
+        self.assertFalse(key.exists())
+        self.assertIsNone(handler.omarchy_volume_key)
+
+    def test_an_open_with_no_format_before_it_uses_the_passphrase(self):
+        handler = self.handler()
+        seen = {}
+        def runner(command, input_data=None):
+            seen.update(command=command, input_data=input_data)
+            handler.opened.append(True)
+            return types.SimpleNamespace(stdout=b'')
+        self.unlock(handler, runner)
+        self.assertNotIn('--volume-key-file', seen['command'])
+        self.assertEqual(seen['input_data'], b'passphrase')
+
+    def test_a_failed_open_still_removes_the_volume_key(self):
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        key = directory / 'omarchy-volume-key-x'
+        key.write_bytes(bytes(64))
+        def runner(command, input_data=None):
+            raise subprocess.CalledProcessError(1, command, output=b'no')
+        with self.assertRaises(RuntimeError):
+            self.unlock(self.handler(omarchy_volume_key=key), runner)
+        self.assertFalse(key.exists())
+
+
+class VolumeKey(unittest.TestCase):
+    def test_the_key_is_random_root_only_and_the_cipher_keys_size(self):
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        with mock.patch.object(luks, 'VOLUME_KEY_DIR', directory):
+            first, second = luks.new_volume_key(), luks.new_volume_key()
+        for key in (first, second):
+            self.assertEqual(key.parent, directory)
+            self.assertEqual(key.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(len(key.read_bytes()), 64)
+        self.assertNotEqual(first.read_bytes(), second.read_bytes())
+
+    def test_the_format_takes_the_key_and_keeps_its_other_arguments(self):
+        with mock.patch.object(luks, 'STATE', Path('/nonexistent/result.json')):
+            self.assertEqual(luks.format_command(COMMAND, Path('/run/key')),
+                             COMMAND[:1] + ['--volume-key-file', '/run/key'] + COMMAND[1:])
+            self.assertEqual(luks.format_command(COMMAND), COMMAND)
+
+    def test_the_free_space_format_passes_its_key_file_on(self):
+        with mock.patch.object(luks.sys, 'argv', ['omarchy-luks-calibrate', 'format', '/dev/vda3', '/run/key']), \
+                mock.patch.object(luks, 'stop_calibration'), \
+                mock.patch.object(luks, 'STATE', Path('/nonexistent/result.json')), \
+                mock.patch.object(luks.os, 'execvp') as execvp:
+            luks.main()
+        argv = execvp.call_args.args[1]
+        self.assertEqual(argv[:3], ['cryptsetup', '--volume-key-file', '/run/key'])
+        self.assertEqual(argv[-1], '-')
 
 
 class SectorSize(unittest.TestCase):

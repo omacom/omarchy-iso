@@ -1,4 +1,6 @@
 {
+  "greeter.tagline": "Linux nzuri, ya kufurahisha na ya kiwakala kutoka kwa DHH",
+  "greeter.hint": "Bonyeza Enter kuanza usakinishaji",
   "common.yes": "Ndiyo",
   "common.back": "Rudi",
   "common.change": "Hapana, badilisha",
@@ -15,7 +17,6 @@
   "summary.value": "Thamani",
   "summary.username": "Jina la mtumiaji",
   "summary.password": "Nenosiri",
-  "summary.hostname": "Jina la kompyuta",
   "summary.timezone": "Saa za eneo",
   "summary.keyboard": "Kibodi",
   "summary.language": "Lugha",

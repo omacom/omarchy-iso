@@ -149,6 +149,14 @@ if [[ -f /usr/share/omarchy-iso/oem-install ]]; then
   export OMARCHY_UI_INTERACTIVE=no
   set_tokyo_night_colors
   ./configurator --oem
+elif [[ ${OMARCHY_KMSCON:-} != 1 || -n ${OMARCHY_KMSCON_SHELL:-} ]] && /usr/local/bin/omarchy-cidata-load; then
+  # Looked for by the tty1 run and by a rerun from the shell an abort left,
+  # where a cidata drive may have been plugged in since. Not by the run kmscon
+  # starts: the tty1 run that started it has just looked. The palette is the
+  # console's to set; kmscon has its own.
+  [[ ${OMARCHY_KMSCON:-} == 1 ]] || set_tokyo_night_colors
+  echo "Autoinstall configuration found on cidata drive; skipping the configurator."
+  export OMARCHY_UI_INTERACTIVE=no
 elif [[ ${OMARCHY_KMSCON:-} == 1 ]]; then
   # A rerun from the shell an abort left: the first run's mark that it ended
   # would stand for this one too, and a kmscon that died under it would pass
@@ -159,13 +167,8 @@ elif [[ ${OMARCHY_KMSCON:-} == 1 ]]; then
     trap 'printf "%s\n" "$?" >"$OMARCHY_KMSCON_ENDED"' EXIT
     trap 'trap - EXIT HUP TERM; kill -HUP $$' HUP TERM
   fi
-  # The tty1 run already looked for cidata.
   ./configurator && status=0 || status=$?
   ((status == 0)) || exit "$status"
-elif /usr/local/bin/omarchy-cidata-load; then
-  set_tokyo_night_colors
-  echo "Autoinstall configuration found on cidata drive; skipping the configurator."
-  export OMARCHY_UI_INTERACTIVE=no
 else
   # The wizard and the whole install run in kmscon, which runs this script
   # again: fonts with every script the installer speaks, the same on every

@@ -102,6 +102,7 @@ check_archinstall_version()
 
 from . import luks_tuning  # noqa: E402 - patches archinstall only after the check
 luks_tuning.apply()
+defer_argon2_keyslot = luks_tuning.defer_argon2_keyslot
 
 
 def load_arch_config(config_path: Path, creds_path: Path) -> ArchConfigHandler:

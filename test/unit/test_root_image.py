@@ -616,5 +616,37 @@ class TargetKeyringUnitTest(unittest.TestCase):
                     self.assertIn("callback_join", events)
 
 
+class ReflinkSkelCreateUsers(unittest.TestCase):
+    def test_reflink_skel_uses_empty_skel_and_chowns_from_target_passwd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            (target / "etc" / "skel" / ".config").mkdir(parents=True)
+            (target / "etc" / "skel" / ".bashrc").write_text("export FOO=1\n")
+            (target / "etc" / "passwd").write_text("root:x:0:0:root:/root:/bin/bash\ndhh:x:1001:1001::/home/dhh:/bin/bash\n")
+            home = target / "home" / "dhh"
+            home.mkdir(parents=True)
+            ctx = types.SimpleNamespace(target=target, state={})
+            seen_skel = []
+            runs = []
+
+            class FakeInstaller:
+                def create_users(self, users):
+                    seen_skel.append(getattr(self, "_omarchy_empty_skel", None))
+                    self.assert_empty = list((target / seen_skel[0].lstrip("/")).iterdir())
+
+            installer = FakeInstaller()
+            with mock.patch.object(phases_impl, "_findmnt_value", return_value="btrfs"), \
+                    mock.patch.object(phases_impl.subprocess, "run", side_effect=lambda cmd, **kw: runs.append(cmd)):
+                phases_impl._create_users_with_reflink_skel(ctx, installer, [types.SimpleNamespace(username="dhh")])
+
+            self.assertEqual(len(seen_skel), 1)
+            self.assertTrue(seen_skel[0].startswith("/tmp/omarchy-empty-skel-"))
+            self.assertEqual(installer.assert_empty, [])
+            self.assertFalse(hasattr(installer, "_omarchy_empty_skel"))
+            self.assertEqual(runs[0][:4], ["cp", "-a", "--reflink=auto", "--"])
+            self.assertEqual(runs[0][-1], f"{home}/")
+            self.assertEqual(runs[1], ["chown", "-hR", "1001:1001", str(home)])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -12,7 +12,6 @@
   "owner.yes": "Sí, prepara'l per a un altre",
   "owner.no": "No, continua configurant",
   "owner.prompt": "Vols preparar aquest ordinador per a un altre propietari?",
-  "user.intro": "Configurem el teu compte d'usuari…",
   "summary.field": "Camp",
   "summary.value": "Valor",
   "summary.username": "Nom d'usuari",

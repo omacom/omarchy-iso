@@ -356,9 +356,9 @@ keyboard_form() {
       break
     fi
 
-    # Under the heading of the steps that follow, so the screen does not
-    # shift when the keyboard gives way to them.
-    step "$(t user.intro)"
+    # Under the heading of the language before it and the account steps
+    # after it, so the screen does not shift from one to the next.
+    step "$(t keyboard.intro)"
     if ! i18n_translated "$language"; then
       # English on purpose: there is no catalog for this language to say it in.
       say --foreground 8 "The installer stays in English. Omarchy will be in $(language_label "$language") once installed."
@@ -438,7 +438,7 @@ confirm_prepare_for_another_owner() {
 # operator sets nothing user-specific.
 
 user_form() {
-  step "$(t user.intro)"
+  step "$(t keyboard.intro)"
 
   # Each prompt reports 0 (set), OMARCHY_FORM_BACK (Esc), or OMARCHY_FORM_SIGNAL
   # (Ctrl+C). Both non-zero cases unwind to user_step, which decides what they

@@ -12,7 +12,6 @@
   "owner.yes": "Oui, préparer pour un autre",
   "owner.no": "Non, continuer",
   "owner.prompt": "Préparer cette machine pour un autre propriétaire ?",
-  "user.intro": "Configurons votre compte utilisateur…",
   "summary.field": "Champ",
   "summary.value": "Valeur",
   "summary.username": "Nom d'utilisateur",

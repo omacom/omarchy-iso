@@ -82,7 +82,7 @@
   "progress.tip.menu": "Super + Space 開啟 Omarchy 選單，可存取應用程式、設定等",
   "progress.tip.keybindings": "Super + K 顯示所有快捷鍵",
   "progress.tip.superKey": "Super 就是鍵盤上的 Windows 鍵或 Command 鍵",
-  "progress.tip.signPdfs": "用 Xournal++ 簽署 PDF",
+  "progress.tip.signPdfs": "用 Signed 簽署 PDF",
   "progress.tip.localSend": "用 LocalSend 與手機和電腦分享檔案",
   "progress.tip.webApps": "在選單中選擇“安裝 > 網頁應用”，把任意網站變成應用程式",
   "progress.tip.terminal": "Super + Return 開啟終端，Super + Shift + Return 開啟瀏覽器",

@@ -150,6 +150,13 @@ if [[ -f /usr/share/omarchy-iso/oem-install ]]; then
   set_tokyo_night_colors
   ./configurator --oem
 elif [[ ${OMARCHY_KMSCON:-} == 1 ]]; then
+  # A rerun from the shell an abort left: the first run's mark that it ended
+  # would stand for this one too, and a kmscon that died under it would pass
+  # for an installer that finished. This run leaves its own.
+  if [[ -n ${OMARCHY_KMSCON_SHELL:-} && -n ${OMARCHY_KMSCON_ENDED:-} ]]; then
+    rm -f "$OMARCHY_KMSCON_ENDED"
+    trap 'printf "%s\n" "$?" >"$OMARCHY_KMSCON_ENDED"' EXIT
+  fi
   # The tty1 run already looked for cidata.
   ./configurator && status=0 || status=$?
   ((status == 0)) || exit "$status"
@@ -170,19 +177,13 @@ else
 
   # The answers a relaunch carries hold the password: however this run ends,
   # none outlive it.
-  trap 'kill "$warm_pid" 2>/dev/null; rm -f "$KMSCON_RESUME"*; printf "\e[?25h" >/dev/tty1 2>/dev/null' EXIT
+  trap 'kill "$warm_pid" 2>/dev/null || true; rm -f "$KMSCON_RESUME"*; printf "\e[?25h" >/dev/tty1 2>/dev/null' EXIT
 
   # Before any language is picked, the one an ISO presets (presets/<code>.json).
   language=$(jq -r '.language // empty' /usr/share/omarchy-iso/preset.json 2>/dev/null || true)
-  if kmscon_session "$language" /bin/bash -c "$(kmscon_command)" _ /root/.automated_script.sh; then
-    exit 0
-  fi
-  # kmscon could not hold: the console draws the installer, in English for
-  # the languages only kmscon can draw.
-  rm -f "$KMSCON_RESUME"*
-  unset OMARCHY_KMSCON_SUPERVISOR
-  set_tokyo_night_colors
-  ./configurator
+  kmscon_session "$language" /bin/bash -c "$(kmscon_command)" _ /root/.automated_script.sh
+  # The installer ran to its end in kmscon.
+  exit 0
 fi
 
 # Deferred-provisioning installs skip the celebration/reboot prompt and reboot on

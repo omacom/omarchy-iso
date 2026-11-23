@@ -11,8 +11,8 @@
 #
 #   kmscon_session <language> <command...>
 #       tty1: run command in kmscon until it ends without asking for a
-#       relaunch: 0 once it ran to its end, 1 when kmscon kept dying before
-#       it did, for the caller to run the installer on the console instead
+#       relaunch, starting kmscon again for as long as it dies under the
+#       command: the installer is drawn in kmscon and nowhere else
 #   kmscon_save_answers <variable...>
 #       configurator: save the variables for the relaunch; 1 outside a session
 #   kmscon_take_answers
@@ -26,7 +26,7 @@ KMSCON_RESUME=$KMSCON_RUN_DIR/kmscon-resume
 KMSCON_ENDED=$KMSCON_RUN_DIR/kmscon-ended
 
 kmscon_session() {
-  local language=$1 keymap start_language deaths=0
+  local language=$1 keymap start_language
   shift
   mkdir -p "$KMSCON_RUN_DIR"
   chmod 700 "$KMSCON_RUN_DIR"
@@ -42,18 +42,13 @@ kmscon_session() {
     rm -f "$KMSCON_ENDED"
     omarchy_kmscon "$KMSCON_RUN_DIR/kmscon.log" "$keymap" "$start_language" "" "$@"
 
-    if [[ -e $KMSCON_ENDED ]]; then
-      deaths=0
-    else
+    if [[ ! -e $KMSCON_ENDED ]]; then
       # kmscon died under the command. Answers not yet taken back are run
       # again; answers taken back are lost with the run that held them, and
-      # the installer starts over. Twice in a row and kmscon is not going to
-      # hold: the console draws the installer instead.
-      if ((++deaths >= 2)); then
-        rm -f "$KMSCON_RESUME"*
-        return 1
-      fi
+      # the installer starts over. The pause keeps a kmscon that cannot start
+      # from spinning.
       echo "kmscon ended before the installer did; starting it again." >&2
+      sleep "${KMSCON_RETRY_PAUSE:-1}"
       continue
     fi
     # The relaunch the configurator asked for.
@@ -88,6 +83,12 @@ kmscon_save_answers() {
   declare -p "$@" 2>/dev/null >"$tmp" || true
   if ! mv -f "$tmp" "$KMSCON_RESUME"; then
     rm -f "$tmp"
+    return 1
+  fi
+  # The tty1 run may have ended, and cleaned up, between the check above and
+  # the write: answers nobody is left to take back are removed here.
+  if ! kmscon_supervised; then
+    rm -f "$KMSCON_RESUME"
     return 1
   fi
   # A rerun from the shell an abort left: that shell, not kmscon's command,

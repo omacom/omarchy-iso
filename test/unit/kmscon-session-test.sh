@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-export KMSCON_RUN_DIR="$work/run" WORK="$work" SESSION="$ROOT/configs/airootfs/usr/share/omarchy-iso/kmscon-session.sh"
+export KMSCON_RETRY_PAUSE=0 KMSCON_RUN_DIR="$work/run" WORK="$work" SESSION="$ROOT/configs/airootfs/usr/share/omarchy-iso/kmscon-session.sh"
 # shellcheck disable=SC1090
 source "$SESSION"
 
@@ -78,11 +78,28 @@ run save crash finish
 left && fail "the answers outlived a crash"
 echo "ok - kmscon dying after the answers are taken starts the installer over"
 
-# kmscon that keeps dying: the caller falls back to the console, no answers left.
-run save die die
-((status == 1)) || fail "a kmscon that keeps dying returns $status"
+# kmscon that keeps dying is started again each time, with the answers, until
+# it holds: there is no console to hand the installer to.
+run save die die die finish
+((status == 0)) || fail "an install that finished after kmscon kept dying returns $status"
+[[ $(<"$work/starts") == $'save us -\ndie jp106 ja\ndie jp106 ja\ndie jp106 ja\nfinish jp106 ja' ]] || fail "a kmscon that kept dying started with $(<"$work/starts")"
+[[ $(<"$work/seen") == $'none\ns3cr"et' ]] || fail "after kmscon kept dying the run saw $(<"$work/seen")"
 left && fail "the answers outlived a kmscon that kept dying"
-echo "ok - a kmscon that keeps dying hands back to the console without answers"
+echo "ok - a kmscon that keeps dying is started again with the answers until it holds"
+
+# The tty1 run ending between the check and the write: the answers written
+# for nobody are removed.
+(
+  export OMARCHY_KMSCON_SUPERVISOR=$BASHPID
+  mkdir -p "$KMSCON_RUN_DIR"
+  calls=0
+  kmscon_supervised() { ((++calls == 1)); }
+  password=x
+  kmscon_save_answers password && fail "saved answers for a session that had ended"
+  left && fail "answers written as the session ended were left behind"
+  exit 0
+)
+echo "ok - answers written as the session ends are removed"
 
 # A file planted before the session is not taken as its answers.
 mkdir -p "$KMSCON_RUN_DIR"; echo 'password=planted' >"$KMSCON_RUN_DIR/kmscon-resume"

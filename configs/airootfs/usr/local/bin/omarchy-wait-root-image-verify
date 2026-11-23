@@ -14,15 +14,17 @@
 # Also logs the boot device and its I/O scheduler to stdout (the idle class only
 # takes effect under bfq) -- this folds in what used to be omarchy-iso-boot-medium.
 #
-# Exit 0: image verified (device/scheduler line on stdout). Non-zero: corrupt,
-# missing, or unverifiable -- the message is on stderr with the first line
-# written to headline the install dashboard. A hash mismatch is re-read cold
-# before it is called corrupt: transient misreads pass, persistently wrong
-# bytes keep the corrupt verdict, reads that disagree with each other are
-# reported as unstable reads rather than a corrupt medium, and a cold read
-# that stalls past the unit's size-based timeout reports a slow medium.
-# Every added read is failure-path only and bounded, so the F1 install
-# budget on the happy path is untouched.
+# Exit 0: image verified (device/scheduler line on stdout; a failed hash adds
+# one line reporting its re-read). Non-zero: corrupt, missing, or unverifiable.
+# The message is on stderr with the first line written to headline the install
+# dashboard. A hash mismatch is re-read cold before it is called corrupt: a
+# first cold read that matches passes (the bytes on the medium are intact and
+# the first read was misread), two cold reads that agree on a wrong answer keep
+# the corrupt verdict, two that disagree with each other are reported as
+# unstable reads rather than a corrupt medium, and a cold read that does not
+# finish within the unit's size-based timeout reports a slow medium. Every
+# added read is failure-path only and bounded, so the F1 install budget on the
+# happy path is untouched.
 set -uo pipefail
 
 UNIT=omarchy-root-image-verify.service
@@ -131,11 +133,21 @@ finish_progress() {
   printf '\n' >>"$OMARCHY_VERIFY_PROGRESS" 2>/dev/null || true
 }
 
-# Whatever the kernel said about the medium lately, for the failure message.
-# Empty when dmesg is unavailable: the forensics then just omit it.
+# What the kernel said lately about reads failing, for the failure message:
+# I/O errors and disconnects, never a stick's ordinary USB enumeration. On a
+# machine booted from one a looser match finds nothing else, and the failure
+# screen shows every line of this, then echoes each into its log tail. Not
+# narrowed to the medium's own disk: its kernel name is not known here in
+# every boot mode (under Ventoy the ISO is mapped through /dev/mapper/ventoy,
+# a loopback boot mounts a loop device). So an error on another disk can be
+# among them; each line names the device or port it is about. Empty when
+# dmesg is unavailable or the kernel said nothing, which is the usual case
+# for a misread.
 cold_medium_lines() {
   command -v dmesg >/dev/null 2>&1 || return 0
-  dmesg 2>/dev/null | grep -iE 'sda|usb|I/O error|Buffer' | tail -n 10 || true
+  dmesg 2>/dev/null |
+    grep -iE 'I/O error|Buffer I/O|blk_update_request|print_req_error|Sense Key|Unrecovered|Medium Error|FAILED Result|USB disconnect' |
+    tail -n 5 || true
 }
 
 # One best-effort page-cache drop. False (quietly) when there is nothing
@@ -145,15 +157,23 @@ drop_page_cache() {
   echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
 }
 
-# Sorted basenames the offline mirror's own sums reject; empty when it all
-# matches. --strict keeps unreadable files failures too, so a vanished
-# package cannot look verified.
+# One cold check of the offline mirror's own sums. Nothing is printed when
+# every checksum matched: status 0. --strict keeps unreadable files failures
+# too, so a vanished package cannot look verified. When sha256sum rejected
+# anything, the rejected basenames are printed, sorted: status 1 with them
+# named; 3 with none named, which is sha256sum rejecting the sums file itself
+# (a malformed or unreadable line) -- a failed check too, never a clean
+# mirror. 124: the read timed out (prints TIMEOUT). 2: the check could not run.
 cold_mirror_failures() { # $1: seconds
   local out rc=0
   out=$(cd "$MIRROR_DIR" && timeout "$1" sha256sum --check --strict --quiet "$MIRROR_SUMS" 2>/dev/null) || rc=$?
   if (( rc == 124 )); then echo TIMEOUT; return 124; fi
-  (( rc != 0 && rc != 1 )) && return 1
-  printf '%s\n' "$out" | sed -n 's/: FAILED.*$//p' | sort
+  (( rc != 0 && rc != 1 )) && return 2
+  out=$(printf '%s\n' "$out" | sed -n 's/: FAILED.*$//p' | sort)
+  printf '%s\n' "$out"
+  (( rc == 0 )) && return 0
+  [[ -n $out ]] && return 1
+  return 3
 }
 
 # Re-read one cold verdict for the image: full sha256 hex of a fresh read, or
@@ -175,12 +195,15 @@ cold_timeout_for() { # $1: bytes -> seconds on stdout
 }
 
 # Re-read the verdict cold, bypassing possibly poisoned page cache. Prints the
-# verdict word on the first line -- pass (a cold read matched), unstable (two
-# cold reads disagreed with each other), corrupt (two cold reads agreed, but
-# not with the expected sums), slow (a cold read stalled past its size-based
-# timeout), unknown (could not re-read: no timeout helper, no permission,
-# files unreadable) -- followed by the forensics lines for the failure message
-# (none unless corrupt, unstable or slow). Failure-path only: the happy path
+# verdict word on the first line -- pass (the first cold read matched),
+# unstable (two cold reads disagreed with each other: two different wrong
+# answers, or one wrong and one right), corrupt (two cold reads agreed on an
+# answer that is not the expected one), slow (a cold read did not finish
+# within its size-based timeout; after a first read that did not, there is no
+# second: it could only say the same), unknown (could not re-read: no timeout
+# helper, no permission, files unreadable, or the mirror's own sums file
+# rejected) -- followed by the forensics lines for the failure message (none
+# unless corrupt, unstable or slow). Failure-path only: the happy path
 # returns from the active branch without ever coming here.
 cold_recheck() {
   local expected first second size medium lines verdict secs rc1 rc2
@@ -192,15 +215,23 @@ cold_recheck() {
     secs=$(cold_timeout_for "$size")
     drop_page_cache || { echo unknown; return 0; }
     first=$(cold_mirror_failures "$secs"); rc1=$?
-    if (( rc1 == 0 )) && [[ -z $first ]]; then echo pass; return 0; fi
-    drop_page_cache || { echo unknown; return 0; }
-    second=$(cold_mirror_failures "$secs"); rc2=$?
-    if (( rc2 == 0 )) && [[ -z $second ]]; then echo pass; return 0; fi
+    (( rc1 == 0 )) && { echo pass; return 0; }
+    # A read that timed out already says what a second one would.
+    rc2=0
+    if (( rc1 != 124 )); then
+      drop_page_cache || { echo unknown; return 0; }
+      second=$(cold_mirror_failures "$secs"); rc2=$?
+    fi
     if (( rc1 == 124 || rc2 == 124 )); then
       verdict=slow
       lines="a cold re-read timed out after ${secs}s"
-    elif (( rc1 != 0 || rc2 != 0 )); then
+    elif (( rc1 > 1 || rc2 > 1 )); then
       echo unknown; return 0
+    elif (( rc2 == 0 )); then
+      # One read rejected a package and the next found nothing wrong: the
+      # reads disagree, which is the unstable verdict, not a pass.
+      verdict=unstable
+      lines="first cold read failures:"$'\n'"$first"$'\n'"second cold read: every checksum matched (the reads differ)"
     elif [[ $first == "$second" ]]; then
       verdict=corrupt
       lines="failing files (both cold reads):"$'\n'"$first"
@@ -223,9 +254,14 @@ cold_recheck() {
     drop_page_cache || { echo unknown; return 0; }
     first=$(cold_image_hex "$secs"); rc1=$?
     if (( rc1 == 0 )) && [[ $first == "$expected" ]]; then echo pass; return 0; fi
-    drop_page_cache || { echo unknown; return 0; }
-    second=$(cold_image_hex "$secs"); rc2=$?
-    if (( rc2 == 0 )) && [[ $second == "$expected" ]]; then echo pass; return 0; fi
+    # A read that timed out already says what a second one would. One that
+    # came back wrong is only evidence: a second read that then matches means
+    # the reads disagree (unstable), not that the medium is fine.
+    rc2=0
+    if (( rc1 != 124 )); then
+      drop_page_cache || { echo unknown; return 0; }
+      second=$(cold_image_hex "$secs"); rc2=$?
+    fi
     if (( rc1 == 124 || rc2 == 124 )); then
       verdict=slow
       lines="a cold re-read timed out after ${secs}s"
@@ -251,7 +287,7 @@ cold_recheck() {
 # $UNIT is global because unit_prop and hash_pct read it.
 await_verdict() {
   UNIT=$1
-  local what=$2 load_state state tail msg pct cold verdict COLD_EVIDENCE
+  local what=$2 load_state state tail msg pct cold verdict COLD_EVIDENCE cold_began
   local reported=false progress_drawn=false settling=0 unanswered=0
   local where last_where="" last_move=$SECONDS starting=""
   local label="verifying the install medium"
@@ -327,12 +363,17 @@ await_verdict() {
         # install budget is untouched.
         # Verdict on the first line, forensics after it (command substitution
         # cannot see the function's variables, so they travel as text).
+        cold_began=$SECONDS
         cold=$(cold_recheck)
         verdict=${cold%%$'\n'*}
         COLD_EVIDENCE=""
         if [[ $cold == *$'\n'* ]]; then
           COLD_EVIDENCE=${cold#*$'\n'}
         fi
+        # The orchestrator logs this script's stdout line by line once it
+        # exits: the support log then says what the re-read found, and how
+        # long the installer sat apparently still.
+        echo "re-read $what cold after the failed hash: $verdict, $((SECONDS - cold_began)) s"
         case "$verdict" in
           pass)
             finish_progress full

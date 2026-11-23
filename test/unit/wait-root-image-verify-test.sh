@@ -75,12 +75,26 @@ EOF
   # TIMEOUT_STUB=1: scripted timeout. Passes the duration and command through
   # (shift; exec), so cold reads behave normally. With TIMEOUT_EXPIRE=1 it
   # exits 124 without running anything, like a stalled read hitting the cap.
+  # Every call is logged: COLD_READS is how many cold reads a run made.
   if [[ -n ${TIMEOUT_STUB:-} ]]; then
     cat >"$box/bin/timeout" <<EOF
 #!/bin/bash
+echo "\$*" >>"$box/timeout_argv"
 if [[ -n "\${TIMEOUT_EXPIRE:-}" ]]; then exit 124; fi
 shift
 exec "\$@"
+EOF
+  fi
+  # DMESG_STUB=1: a scripted dmesg: a stick's ordinary USB enumeration, then
+  # the kernel giving up on a read of it. Only the second kind belongs in a
+  # failure message.
+  if [[ -n ${DMESG_STUB:-} ]]; then
+    cat >"$box/bin/dmesg" <<EOF
+#!/bin/bash
+echo "usb 1-4: new high-speed USB device number 4 using xhci_hcd"
+echo "usb-storage 1-4:1.0: USB Mass Storage device detected"
+echo "blk_update_request: I/O error, dev sdz, sector 7654321 op 0x0:(READ) flags 0x807"
+echo "Buffer I/O error on dev sdz1, logical block 956790, async page read"
 EOF
   fi
 
@@ -109,6 +123,10 @@ EOF
   printf '%s\n' "$active_seq" >"$box/active_seq"
   printf '%s\n' "$loadstate" >"$box/load_seq"
   printf '%s\n' "${MIRROR_SEQ:-inactive}" >"$box/mirror_seq"
+  # Four hex digits a line: malformed on purpose, and it has to stay that way.
+  # Nothing hashes against this file except the test that runs the real
+  # sha256sum, which needs a sums file --strict rejects outright. Given real
+  # digests, that test would still pass, but as an ordinary package mismatch.
   [[ -n ${MIRROR_SEQ:-} ]] && printf '%s\n' "0000  a.pkg.tar.zst" "0000  b.pkg.tar.zst" \
     "0000  linux-t2.pkg.tar.zst" "0000  offline.db.tar.gz" >"$box/sums"
   # WITH_MIRROR_HASHER=1: the mirror hasher (pid 4343) has the third of the
@@ -210,6 +228,7 @@ EOF
   set -e
   PROGRESS_OUT=$(cat "$box/progress" 2>/dev/null || true)
   ARGV_OUT=$(cat "$box/sha256_argv" 2>/dev/null || true)
+  COLD_READS=$(cat "$box/timeout_argv" 2>/dev/null | grep -c . || true)
   rm -rf "$box"
 }
 
@@ -362,12 +381,26 @@ check "a verified mirror and a corrupt image is a corrupt image" 1 "$RC" "sha256
 
 # --- cold re-reads after a failed hash --------------------------------------
 # With drop_caches available and scripted sha256sum output, a cold read that
-# matches clears the gate: the unit hashed poisoned cache.
+# matches clears the gate: the unit hashed poisoned cache. The re-read and
+# its verdict are said on stdout, for the orchestrator to put in the log.
 SUMS_EXPECTED=40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d \
 SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
 SUMS_OUT1="40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d  omarchy-root.img.zst" \
   run_helper loaded "failed" 0
 check "a cold read that matches clears the gate" 0 "$RC" "" "$OUT"
+[[ $OUT == *"re-read the root image cold after the failed hash: pass"* ]] && echo "ok: the re-read is reported for the install log" || \
+  { echo "FAIL: the re-read is not reported on stdout: $OUT"; fails=1; }
+
+# A first cold read that is wrong is only evidence: a second that then
+# matches shows the two disagree, so this is unstable reads, not a pass.
+SUMS_EXPECTED=40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d \
+SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
+SUMS_OUT1="ba79a0d0f5aadeb30be9f8490f596073c92df6e653d8c2a9a04ee8cf3cf0eb4c  omarchy-root.img.zst" \
+SUMS_OUT2="40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d  omarchy-root.img.zst" \
+  run_helper loaded "failed" 0
+check "a wrong then a matching cold read report unstable reads" 1 "$RC" "install medium reads are unstable" "$OUT"
+[[ $OUT == *"second cold read 40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d (differ)"* ]] && echo "ok: the matching read is in the evidence" || \
+  { echo "FAIL: the matching read missing from message: $OUT"; fails=1; }
 
 # Two cold reads that disagree with each other are unstable reads, not a
 # corrupt medium -- and never the re-flash advice.
@@ -405,16 +438,33 @@ check "no drop_caches falls back to the unit's verdict" 1 "$RC" "install medium 
 [[ $OUT != *"expected 40dd"* ]] && echo "ok: no forensics without a cold read" || \
   { echo "FAIL: forensics without a cold read: $OUT"; fails=1; }
 
-# Mirror cold path: a failing package list followed by a clean one clears the
-# gate the same way a matching image read does. The cold check must address
-# the sums file by its absolute path (bare basenames resolve against the
-# mirror dir, exactly like the unit): assert that from the logged argv.
+# Mirror cold path: a clean first cold read clears the gate, as for the
+# image. The cold check must address the sums file by its absolute path
+# (bare basenames resolve against the mirror dir, exactly like the unit):
+# assert that from the logged argv.
 MIRROR_SEQ=failed WITH_MIRROR_HASHER=1 SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
-SUMS_OUT1="linux-t2.pkg.tar.zst: FAILED" SUMS_RC1=1 SUMS_OUT2="" SUMS_RC2=0 \
   run_helper loaded "active" 0
 check "a mirror cold read that matches clears the gate" 0 "$RC" "" "$OUT"
 [[ $ARGV_OUT == *"/sums"* ]] && echo "ok: cold mirror read uses the absolute sums path" || \
   { echo "FAIL: cold mirror read did not use the absolute sums path: $ARGV_OUT"; fails=1; }
+
+# A first cold read that rejects a package and a second that is clean are
+# reads that disagree: unstable, not a pass (as for the image).
+MIRROR_SEQ=failed WITH_MIRROR_HASHER=1 SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
+SUMS_OUT1="linux-t2.pkg.tar.zst: FAILED" SUMS_RC1=1 SUMS_RC2=0 \
+  run_helper loaded "active" 0
+check "a wrong then a clean mirror cold read report unstable reads" 1 "$RC" "install medium reads are unstable" "$OUT"
+[[ $OUT == *"linux-t2.pkg.tar.zst"* && $OUT == *"every checksum matched"* ]] && echo "ok: both mirror reads are in the evidence" || \
+  { echo "FAIL: the mirror reads are not both in the message: $OUT"; fails=1; }
+
+# sha256sum also fails without naming a package: --strict rejects a sums file
+# with a malformed line outright and prints no FAILED line (it complains on
+# stderr, which the helper drops). That is a failed check, never a clean
+# mirror. The sandbox's sums file is exactly such a file (malformed on
+# purpose, see run_helper), so the real sha256sum answers here.
+MIRROR_SEQ=failed WITH_MIRROR_HASHER=1 TIMEOUT_STUB=1 DROPCACHES=1 \
+  run_helper loaded "active" 0
+check "a sums file sha256sum rejects never passes the cold check" 1 "$RC" "install medium is corrupt: re-flash it" "$OUT"
 
 # Mirror cold reads that keep failing name the mirror, persistently.
 MIRROR_SEQ=failed WITH_MIRROR_HASHER=1 SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
@@ -426,13 +476,29 @@ check "mirror cold reads that keep failing stay corrupt" 1 "$RC" "sha256 mismatc
   { echo "FAIL: failing package missing from message: $OUT"; fails=1; }
 
 # A cold read that stalls past its size-based timeout reports a slow medium,
-# not a corrupt one -- and never hangs the installer waiting on dead media.
+# not a corrupt one -- and never hangs the installer waiting on dead media. A
+# second read could only time out the same way, so none is started.
 SUMS_EXPECTED=40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d \
 TIMEOUT_STUB=1 TIMEOUT_EXPIRE=1 DROPCACHES=1 \
   run_helper loaded "failed" 0
 check "a stalled cold read reports a slow medium" 1 "$RC" "install medium is too slow" "$OUT"
 [[ $OUT == *"timed out after 600s"* ]] && echo "ok: the timeout is the size-based one" || \
   { echo "FAIL: size-based timeout missing from message: $OUT"; fails=1; }
+((COLD_READS == 1)) && echo "ok: a read that timed out is not repeated" || \
+  { echo "FAIL: $COLD_READS cold reads after one timed out"; fails=1; }
+
+# The kernel's own account of the medium failing is part of the forensics.
+# The stick's ordinary USB enumeration, which a looser match catches as well,
+# is not: the failure screen shows every line of the message.
+SUMS_EXPECTED=40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d \
+SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 DMESG_STUB=1 \
+SUMS_OUT1="7c0664f49b6e88a87906a896ac75f534ddd30d2412247a00985d552335a1501a  omarchy-root.img.zst" \
+SUMS_OUT2="7c0664f49b6e88a87906a896ac75f534ddd30d2412247a00985d552335a1501a  omarchy-root.img.zst" \
+  run_helper loaded "failed" 0
+[[ $OUT == *"Buffer I/O error on dev sdz1"* ]] && echo "ok: the kernel's read errors reach the message" || \
+  { echo "FAIL: the kernel's read errors missing from message: $OUT"; fails=1; }
+[[ $OUT != *"USB Mass Storage device detected"* ]] && echo "ok: ordinary USB enumeration stays out of the message" || \
+  { echo "FAIL: USB enumeration in the message: $OUT"; fails=1; }
 
 [[ $fails -eq 0 ]] && echo "ok: omarchy-wait-root-image-verify gate behaves"
 exit "$fails"

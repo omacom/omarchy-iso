@@ -403,23 +403,21 @@ keyboard_form() {
 # configurator saves the answers so far and exits 75; .automated_script.sh
 # starts kmscon again, which runs the installer from the saved stage.
 
-KMSCON_RESUME=${KMSCON_RESUME:-/run/omarchy-iso/kmscon-resume}
 KMSCON_SWITCH=75
 # The runtime's launcher, for the layout and font kmscon would start with.
 KMSCON_LIB="${KMSCON_LIB:-/usr/share/omarchy-iso/kmscon.sh}"
 [[ -r $KMSCON_LIB ]] || KMSCON_LIB="$OMARCHY_PATH/install/provisioning/kmscon.sh"
 # shellcheck disable=SC1090
 source "$KMSCON_LIB"
+# shellcheck disable=SC1091
+source "$OMARCHY_ISO_SHARE/kmscon-session.sh"
 
 switch_to_kmscon() {
   local resume_stage=$1
-  mkdir -p "$(dirname "$KMSCON_RESUME")"
-  (
-    umask 077
-    declare -p resume_stage language keyboard keyboard_label keyboard_input_method \
-      keyboard_xkb_layout defer_provisioning timezone username password password_hash hostname \
-      2>/dev/null >"$KMSCON_RESUME"
-  )
+  # Outside the kmscon tty1 started, by hand on another VT, nothing would
+  # start it again: carry on in this one.
+  kmscon_save_answers resume_stage language keyboard keyboard_label keyboard_input_method \
+    keyboard_xkb_layout defer_provisioning timezone username password password_hash hostname || return 0
   exit $KMSCON_SWITCH
 }
 
@@ -1414,10 +1412,9 @@ fi
 
 # Carry on from where the run before a kmscon relaunch left off.
 resume_stage=""
-if [[ -r $KMSCON_RESUME ]]; then
-  # shellcheck disable=SC1090
-  source "$KMSCON_RESUME"
-  rm -f "$KMSCON_RESUME"
+if answers=$(kmscon_take_answers); then
+  eval "$answers"
+  unset answers
   i18n_load "$language"
   set_form_language
 fi

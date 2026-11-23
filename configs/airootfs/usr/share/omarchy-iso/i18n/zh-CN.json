@@ -82,7 +82,7 @@
   "progress.tip.menu": "Super + Space 打开 Omarchy 菜单，可找到应用、设置等",
   "progress.tip.keybindings": "Super + K 显示所有快捷键",
   "progress.tip.superKey": "Super 就是键盘上的 Windows 键或 Command 键",
-  "progress.tip.signPdfs": "用 Xournal++ 签署 PDF",
+  "progress.tip.signPdfs": "用 Signed 签署 PDF",
   "progress.tip.localSend": "用 LocalSend 与手机和电脑互传文件",
   "progress.tip.webApps": "在菜单中选择“安装 > 网页应用”，把任意网站变成应用",
   "progress.tip.terminal": "Super + Return 打开终端，Super + Shift + Return 打开浏览器",

@@ -294,7 +294,7 @@ class KmsconLanguageTest(unittest.TestCase):
 
     def test_cjk_speaks_only_inside_kmscon(self):
         # On the Linux console CJK would be boxes, so the installer stays English there.
-        for code, reboot in (("zh-CN", "立即重启"), ("ja", "今すぐ再起動"), ("ko", "지금 다시 시작")):
+        for code, reboot in (("zh-CN", "立即重启"), ("zh-TW", "立即重啟"), ("ja", "今すぐ再起動"), ("ko", "지금 다시 시작")):
             with self.subTest(code=code):
                 script = f"i18n_load {code}; t finish.reboot"
                 self.assertEqual(self.shell(script), "Reboot Now")

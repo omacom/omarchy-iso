@@ -277,9 +277,11 @@ static int pack(const char *raw, const char *out)
 
 	pthread_mutex_init(&ctx.mu, NULL);
 	pthread_cond_init(&ctx.cv, NULL);
-	for (int t = 0; t < threads; t++)
-		if (pthread_create(&tid[t], NULL, pack_worker, &ctx) == 0)
-			started++;
+	for (int t = 0; t < threads; t++) {
+		if (pthread_create(&tid[t], NULL, pack_worker, &ctx) != 0)
+			break;
+		started++;
+	}
 	if (started == 0)
 		die(FAILED, "cannot start a thread");
 

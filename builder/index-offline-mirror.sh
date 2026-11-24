@@ -59,13 +59,23 @@ for entry in os.scandir(mirror_dir):
 matched = set()
 
 def scan_tar(tf):
+    # Arch Linux ARM sync DBs split metadata across <pkg>/desc and
+    # <pkg>/depends; copy both so pacman can resolve dependencies from offline.db.
+    pkgs = {}
     for m in tf:
-        if not m.name.endswith("/desc"):
+        if not m.isfile() or "/" not in m.name:
+            continue
+        pkg_dir, base = m.name.rsplit("/", 1)
+        if base not in ("desc", "depends"):
             continue
         f = tf.extractfile(m)
-        if not f:
+        if f:
+            pkgs.setdefault(pkg_dir, {})[base] = f.read()
+
+    for pkg_dir, files in pkgs.items():
+        raw = files.get("desc")
+        if not raw:
             continue
-        raw = f.read()
         lines = raw.decode("utf-8", errors="replace").splitlines()
         filename = csize = None
         for i, line in enumerate(lines):
@@ -80,11 +90,13 @@ def scan_tar(tf):
                 continue
         except ValueError:
             continue
-        pkg_dir = os.path.dirname(m.name)
+        if not pkg_dir or pkg_dir in (".", "..") or "/" in pkg_dir:
+            raise ValueError(f"invalid package directory in sync DB: {pkg_dir!r}")
         dst_dir = os.path.join(db_out, pkg_dir)
         os.makedirs(dst_dir, exist_ok=True)
-        with open(os.path.join(dst_dir, "desc"), "wb") as out:
-            out.write(raw)
+        for base, content in files.items():
+            with open(os.path.join(dst_dir, base), "wb") as out:
+                out.write(content)
         matched.add(filename)
 
 for db in sync_dbs:

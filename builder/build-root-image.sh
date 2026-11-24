@@ -97,7 +97,7 @@ write_n1x_layer() {
     --exclude=./run --exclude=./tmp --exclude=./var/cache --exclude=./var/log \
     --exclude=./var/tmp --exclude=./var/lib/pacman/sync \
     --exclude=./etc/pacman.d/gnupg \
-    -cf - . | zstd -q -T0 -6 -o "$layer" || return 1
+    -cf - . | zstd -q -T0 -15 -o "$layer" || return 1
   echo "N1x layer: $(du -h "$layer" | cut -f1) at $layer"
 }
 
@@ -220,13 +220,13 @@ if [[ ! -r $pacman_conf ]]; then
   exit 1
 fi
 
-# Forced zstd at level 6: btrfs's incompressibility heuristic declines a lot of
-# data in this tree that zstd handles fine, while level 15 stalls pacstrap for
-# over 3 minutes because btrfs compresses each file's extents across only a few
-# workers (~14 MB/s per thread at level 15 vs ~148 MB/s at level 6). Level 6
-# finishes compression behind pacstrap's own extraction at nearly the same size
-# as levels 9-10; the installed system writes new data at its own mount option.
-IMAGE_COMPRESS="compress-force=zstd:6"
+# Forced zstd at level 15: btrfs's incompressibility heuristic declines a lot of
+# data in this tree that zstd handles fine, and the image is written to the
+# target as it is. To avoid stalling single-threaded pacstrap on btrfs writeback
+# (~225 s on ~3 CPUs), pacstrap and pre-build steps run in an uncompressed
+# staging root and copy-tree-parallel.py then populates the mounted btrfs across
+# every CPU.
+IMAGE_COMPRESS="compress-force=zstd:15"
 # Name of the image's one subvolume. The installer renames it to @ after the
 # write (phases_impl.ROOT_IMAGE_SUBVOLUME).
 IMAGE_SUBVOLUME="omarchy-root"
@@ -246,6 +246,7 @@ deferred_boot_hooks=(
 )
 
 work=$(mktemp -d /tmp/omarchy-root-image.XXXXXX)
+stage="$work/stage"
 backing="$work/image.btrfs"
 mnt="$work/mnt"
 loop=""
@@ -255,15 +256,23 @@ loop=""
 # gone the image cannot be unmounted. Nothing should, as no keyring exists in
 # the image, but kill whatever did.
 stop_image_gpg_agents() {
-  gpgconf --homedir "$mnt/$IMAGE_SUBVOLUME/etc/pacman.d/gnupg" --kill all 2>/dev/null || true
-  pkill -f "$mnt/$IMAGE_SUBVOLUME/etc/pacman.d/gnupg" 2>/dev/null || true
+  local dir
+  for dir in "$stage" "$mnt/$IMAGE_SUBVOLUME"; do
+    [[ -d "$dir/etc/pacman.d/gnupg" ]] || continue
+    gpgconf --homedir "$dir/etc/pacman.d/gnupg" --kill all 2>/dev/null || true
+    pkill -f "$dir/etc/pacman.d/gnupg" 2>/dev/null || true
+  done
 }
 
 cleanup() {
   local status=$?
   set +e
+  stop_image_gpg_agents
+  if mountpoint -q "$stage" 2>/dev/null; then
+    sleep 1
+    umount -R "$stage" || echo "WARNING: $stage is still mounted; leaving $work in place" >&2
+  fi
   if mountpoint -q "$mnt" 2>/dev/null; then
-    stop_image_gpg_agents
     sleep 1
     if ! umount -R "$mnt"; then
       echo "WARNING: $mnt is still mounted; leaving $work in place" >&2
@@ -278,31 +287,22 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$work/hooks"
+mkdir -p "$work/hooks" "$stage"
 for hook in "${deferred_boot_hooks[@]}"; do
   ln -s /dev/null "$work/hooks/$hook"
 done
 effective_pacman_conf="$work/pacman.conf"
 sed "/^\[options\]/a HookDir = $work/hooks/" "$pacman_conf" >"$effective_pacman_conf"
 
-echo "Building root image with ${#packages[@]} packages"
-truncate -s "${OMARCHY_IMAGE_SIZE:-24G}" "$backing"
-# Docker fills the container's /dev once, at start. A loop device the kernel
-# creates afterwards (loop-control hands one out on demand, loading the module
-# on a host that had none) exists on the host but has no node in here, so make
-# the nodes ourselves when they are missing.
-[[ -e /dev/loop-control ]] || mknod /dev/loop-control c 10 237
-# losetup reports a device whose node is missing as "/dev/loopN (lost)".
-loop=$(losetup --find | awk '{ print $1 }')
-[[ $loop == /dev/loop[0-9]* ]] || { echo "ERROR: no free loop device: $loop" >&2; exit 1; }
-[[ -b $loop ]] || mknod "$loop" b 7 "${loop#/dev/loop}"
-losetup "$loop" "$backing"
-mkfs.btrfs -q -L omarchy-root-image "$loop"
-mkdir -p "$mnt"
-mount -o "$IMAGE_COMPRESS,noatime,commit=600" "$loop" "$mnt"
-btrfs subvolume create "$mnt/$IMAGE_SUBVOLUME" >/dev/null
-root="$mnt/$IMAGE_SUBVOLUME"
+# Stage in tmpfs when ample memory is free so pacstrap avoids disk I/O before
+# the parallel copy into the compressed btrfs image.
+mem_avail_kb=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null || echo 0)
+if (( mem_avail_kb >= 20 * 1024 * 1024 )); then
+  mount -t tmpfs -o size=16G,mode=0755 omarchy-root-stage "$stage" 2>/dev/null || true
+fi
+root="$stage"
 
+echo "Building root image with ${#packages[@]} packages"
 # -c: packages come straight from the config's CacheDir (the offline mirror),
 #     so nothing is copied into the image's own cache first.
 # -G: no pacman keyring in the image, neither the builder's copied in nor one
@@ -626,13 +626,39 @@ CONF
     "$root/etc/vconsole.conf.prebuilt-uki" "$root/usr/lib/initcpio/install/omarchy-vconsole-room"
 fi
 
+# Now create the compressed btrfs filesystem and populate it in parallel across
+# every CPU so zstd:15 runs at full host parallelism, then free the staging tree
+# before shrinking and packing.
+truncate -s "${OMARCHY_IMAGE_SIZE:-24G}" "$backing"
+# Docker fills the container's /dev once, at start. A loop device the kernel
+# creates afterwards (loop-control hands one out on demand, loading the module
+# on a host that had none) exists on the host but has no node in here, so make
+# the nodes ourselves when they are missing.
+[[ -e /dev/loop-control ]] || mknod /dev/loop-control c 10 237
+# losetup reports a device whose node is missing as "/dev/loopN (lost)".
+loop=$(losetup --find | awk '{ print $1 }')
+[[ $loop == /dev/loop[0-9]* ]] || { echo "ERROR: no free loop device: $loop" >&2; exit 1; }
+[[ -b $loop ]] || mknod "$loop" b 7 "${loop#/dev/loop}"
+losetup "$loop" "$backing"
+mkfs.btrfs -q -L omarchy-root-image "$loop"
+mkdir -p "$mnt"
+mount -o "$IMAGE_COMPRESS,noatime,commit=600" "$loop" "$mnt"
+btrfs subvolume create "$mnt/$IMAGE_SUBVOLUME" >/dev/null
+
+echo "Populating btrfs root image with $IMAGE_COMPRESS across $(nproc) CPUs"
+python3 "$(dirname -- "${BASH_SOURCE[0]}")/copy-tree-parallel.py" "$stage" "$mnt/$IMAGE_SUBVOLUME"
+sync
+if mountpoint -q "$stage" 2>/dev/null; then
+  umount -R "$stage"
+fi
+rm -rf "$stage"
+
 # The image is the loop backing file itself: the same on-disk bytes, written
 # to the target partition as they are.
 #
 # Shrink the filesystem and truncate the backing file first: xorriso stores a
 # file at its apparent size, so a sparse 24 GiB backing file would overflow
 # the medium even with 5 GiB in use.
-sync
 # Size it from the bytes actually in use, plus slack. `btrfs inspect-internal
 # min-dev-size` is unreliable (Debian bug #921038: off by gigabytes in both
 # directions). Too large is harmless, because the installer grows the

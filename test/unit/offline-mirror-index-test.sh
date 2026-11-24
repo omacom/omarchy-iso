@@ -82,4 +82,18 @@ contents "$fixture/fast/offline.db" "$fixture/x-fast-got"
 diff -r "$fixture/x-fast-ref" "$fixture/x-fast-got" >/dev/null \
   || fail "the sync-db indexed database differs from repo-add's"
 
+# Split desc + depends entries (Arch Linux ARM sync DB layout) must both be copied.
+mkdir -p "$fixture/arm-sync/alpha-1.0-1" "$fixture/arm-mirror"
+cp "$fixture/fast/alpha-1.0-1-any.pkg.tar.gz" "$fixture/arm-mirror/"
+cp "$fixture/x-fast-ref/alpha-1.0-1/desc" "$fixture/arm-sync/alpha-1.0-1/desc"
+printf '%%DEPENDS%%\nfoo\n' >"$fixture/arm-sync/alpha-1.0-1/depends"
+bsdtar -czf "$fixture/sync-dbs/alarm.db" -C "$fixture/arm-sync" alpha-1.0-1
+OMARCHY_SYNC_DBS_DIR="$fixture/sync-dbs" \
+  OMARCHY_SYNC_DB_ORDER="alarm" \
+  bash "$index" "$fixture/arm-mirror" 1 >/dev/null \
+  || fail "indexing split desc+depends sync DB failed"
+contents "$fixture/arm-mirror/offline.db" "$fixture/x-arm-got"
+[[ -f $fixture/x-arm-got/alpha-1.0-1/depends ]] \
+  || fail "split depends entry was dropped when indexing from sync DB"
+
 echo "offline mirror index tests passed"

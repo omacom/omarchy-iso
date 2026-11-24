@@ -408,6 +408,22 @@ target "$work/target" 170
 run write-squashfs "$work/truncated.sfs" "$work/target"
 untouched 2 "write-squashfs refuses a truncated squashfs" "$work/target"
 
+printf 'tiny' >"$work/tiny.zst"
+target "$work/target" 170
+run write "$work/tiny.zst" "$work/target"
+untouched 2 "write refuses a file shorter than the seek-table footer" "$work/target"
+
+python3 - "$sfs" "$work/short-inodes.sfs" <<'PY'
+import struct, sys
+data = bytearray(open(sys.argv[1], "rb").read())
+start = struct.unpack_from("<Q", data, 64)[0]
+struct.pack_into("<Q", data, 72, start + 1)
+open(sys.argv[2], "wb").write(data)
+PY
+target "$work/target" 170
+run write-squashfs "$work/short-inodes.sfs" "$work/target"
+untouched 2 "write-squashfs refuses a 1-byte inode table" "$work/target"
+
 run write-squashfs "$work/missing.sfs" "$work/target"
 untouched 2 "write-squashfs refuses a missing image" "$work/target"
 

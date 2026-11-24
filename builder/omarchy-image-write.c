@@ -250,11 +250,14 @@ static int pack(const char *raw, const char *out)
  */
 static off_t read_seek_table(size_t size)
 {
-	const uint8_t *footer = image + size - FOOTER;
+	const uint8_t *footer;
 	size_t n, table, pos = 0;
 	off_t dst = 0;
 
-	if (size < SKIP_HEADER + FOOTER || get_le32(footer + 5) != SEEKABLE_MAGIC)
+	if (size < SKIP_HEADER + FOOTER)
+		die(REFUSED, "no seek table: not an image packed by omarchy-image-write");
+	footer = image + size - FOOTER;
+	if (get_le32(footer + 5) != SEEKABLE_MAGIC)
 		die(REFUSED, "no seek table: not an image packed by omarchy-image-write");
 	n = get_le32(footer);
 	if (footer[4] != 0)
@@ -291,7 +294,7 @@ static off_t read_seek_table(size_t size)
  * 2-byte header with its size and whether it is compressed, from the table's
  * start to the directory table's.
  */
-static uint8_t *squashfs_inodes(uint64_t start, uint64_t end, size_t size, size_t *len)
+static uint8_t *squashfs_inodes(uint64_t start, uint64_t end, size_t *len)
 {
 	uint8_t *out = NULL;
 	uint64_t pos = start;
@@ -302,8 +305,8 @@ static uint8_t *squashfs_inodes(uint64_t start, uint64_t end, size_t size, size_
 		uint16_t h;
 		size_t c, n;
 
-		if (pos + 2 > size)
-			die(REFUSED, "squashfs: inode table runs past the file");
+		if (pos + 2 > end)
+			die(REFUSED, "squashfs: inode table runs past the table end");
 		h = get_le16(image + pos);
 		c = h & ~SQUASHFS_META_STORED;
 		pos += 2;
@@ -358,7 +361,7 @@ static off_t squashfs_frames(size_t size)
 	if (bs == 0 || bs % ALIGN || bs > MAX_FRAME || used > size || start >= end || end > used)
 		die(REFUSED, "squashfs: bad superblock");
 
-	in = squashfs_inodes(start, end, size, &len);
+	in = squashfs_inodes(start, end, &len);
 	if (len < 16)
 		die(REFUSED, "squashfs: empty inode table");
 	switch (get_le16(in)) {
@@ -575,7 +578,12 @@ static uint64_t target_size(int fd, const char *path)
  */
 static int frame_cached(const unsigned char *vec, const struct frame *f, size_t page)
 {
-	size_t p = f->src / page, end = (f->src + f->csize + page - 1) / page;
+	size_t p, end;
+
+	if (f->csize == 0)
+		return 1;
+	p = f->src / page;
+	end = (f->src + f->csize + page - 1) / page;
 
 	while (p < end && (vec[p] & 1))
 		p++;
@@ -700,7 +708,7 @@ static int write_image(const char *path, const char *target, int threads)
 
 	fprintf(stderr, "omarchy-image-write: wrote %.2f of %.2f GiB (%zu frames, %zu zero, %zu cached, %d threads) in %.2f s\n",
 		atomic_load(&bytes_written) / 1073741824.0, total / 1073741824.0, nframes,
-		atomic_load(&zero_frames), cached_frames, threads, (t3 - t0) / 1e9);
+		atomic_load(&zero_frames), cached_frames, started, (t3 - t0) / 1e9);
 	/*
 	 * Where the time went: before the first frame, the frames, the final
 	 * flush; and the workers' thread-seconds, so a slow install says whether

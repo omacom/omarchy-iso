@@ -12,7 +12,7 @@
 # them, so every step checks itself.
 build_grub_theme() {
   local theme_dir=$1 settings_archive=$2
-  local size pf2 part
+  local pf2 part
 
   if ! bsdtar -xOf "$settings_archive" usr/share/plymouth/themes/omarchy/logo.png >"$theme_dir/logo.png" ||
     [[ ! -s $theme_dir/logo.png ]]; then
@@ -44,7 +44,7 @@ build_grub_theme() {
   # Night's selection colour with the logo's green down its left edge.
   # PNG32: ImageMagick writes a one-colour image as a 1-bit colormap, which
   # GRUB's PNG reader rejects, and the menu loses its selection bar.
-  for part in n ne e se s sw c; do
+  for part in n ne e se s c; do
     magick -size 1x1 xc:'#292e42' PNG32:"$theme_dir/select_$part.png" || return 1
   done
   for part in w nw sw; do

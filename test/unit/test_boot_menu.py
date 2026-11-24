@@ -105,6 +105,15 @@ class MenuEntries(unittest.TestCase):
         # syslinux counts tenths of a second.
         self.assertEqual(int(bios_timeout.group(1)), int(grub_timeout.group(1)) * 10)
 
+    def test_bios_try_uses_simpledrm_and_matches_x86_kernel_options(self):
+        sys_cfg = (SYSLINUX / "archiso_sys-linux.cfg").read_text()
+        install_append = re.search(r"LABEL arch64\b.*?^APPEND (.+)$", sys_cfg, re.M | re.S).group(1)
+        try_append = re.search(r"LABEL arch64try\b.*?^APPEND (.+)$", sys_cfg, re.M | re.S).group(1)
+        self.assertIn("intel_idle.states_off=0x3fc", install_append)
+        self.assertIn("plymouth.use-simpledrm", try_append)
+        self.assertIn("intel_idle.states_off=0x3fc", try_append)
+        self.assertIn("systemd.gpt_auto=0", try_append)
+
 
 class Theme(unittest.TestCase):
     @classmethod
@@ -158,7 +167,7 @@ class Theme(unittest.TestCase):
         # built by builder/boot-menu-theme.sh) off its height before it counts
         # rows.
         edges = 2
-        self.assertIn('for part in n ne e se s sw c; do\n    magick -size 1x1', self.builder)
+        self.assertIn('for part in n ne e se s c; do\n    magick -size 1x1', self.builder)
         self.assertEqual(value("height"), 2 * value("item_height") + value("item_spacing") + edges)
 
     def test_entries_are_readable(self):

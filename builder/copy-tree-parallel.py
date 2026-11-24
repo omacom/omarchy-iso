@@ -40,7 +40,12 @@ def _copy_xattrs(src, dst, *, follow_symlinks=True):
         if name.startswith("trusted.overlay."):
             continue
         val = os.getxattr(src, name, **kw)
-        os.setxattr(dst, name, val, **kw)
+        try:
+            os.setxattr(dst, name, val, **kw)
+        except OSError as exc:
+            if exc.errno in (errno.ENOTSUP, errno.EOPNOTSUPP):
+                continue
+            raise
 
 
 def _copy_regular_file(job):

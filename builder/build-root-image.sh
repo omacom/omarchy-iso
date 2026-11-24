@@ -646,8 +646,10 @@ mount -o "$IMAGE_COMPRESS,noatime,commit=600" "$loop" "$mnt"
 btrfs subvolume create "$mnt/$IMAGE_SUBVOLUME" >/dev/null
 
 echo "Populating btrfs root image with $IMAGE_COMPRESS across $(nproc) CPUs"
+copy_start=$(date +%s)
 python3 "$(dirname -- "${BASH_SOURCE[0]}")/copy-tree-parallel.py" "$stage" "$mnt/$IMAGE_SUBVOLUME"
 sync
+echo "Populated btrfs root image in $(( $(date +%s) - copy_start ))s"
 if mountpoint -q "$stage" 2>/dev/null; then
   umount -R "$stage"
 fi

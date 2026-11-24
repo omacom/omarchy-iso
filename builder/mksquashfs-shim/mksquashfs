@@ -5,7 +5,9 @@
 # Every other call is mksquashfs's own.
 if [[ -n ${OMARCHY_ROOT_IMAGE:-} && ${1:-} == */airootfs && -d $1 ]]; then
   pseudo=$(mktemp /tmp/omarchy-airootfs.XXXXXX.pseudo)
+  trap 'rm -f "$pseudo"' EXIT
   bash /builder/dedup-airootfs.sh "$OMARCHY_ROOT_IMAGE" "$1" "$pseudo" || exit 1
-  exec /usr/bin/mksquashfs "$@" -pf "$pseudo"
+  /usr/bin/mksquashfs "$@" -pf "$pseudo"
+  exit $?
 fi
 exec /usr/bin/mksquashfs "$@"

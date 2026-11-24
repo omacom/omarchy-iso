@@ -54,6 +54,7 @@ import filecmp, os, stat, sys
 
 live, image, pseudo = sys.argv[1], sys.argv[2], sys.argv[3]
 KEEP = ("etc", "var", "root", "boot", "usr/local", "usr/lib/systemd", "usr/lib/udev",
+        "usr/lib/firmware", "usr/share/dbus-1", "usr/share/polkit-1",
         "usr/lib/tmpfiles.d", "usr/lib/sysusers.d", "usr/lib/sysctl.d", "usr/lib/modprobe.d",
         "usr/lib/modules-load.d", "usr/lib/binfmt.d", "usr/lib/environment.d", "usr/share/factory")
 
@@ -72,6 +73,14 @@ def same(a, b):
     if not stat.S_ISREG(sa.st_mode) or sa.st_size != sb.st_size or xattrs(a) != xattrs(b):
         return False
     return filecmp.cmp(a, b, shallow=False)
+
+# Ensure every KEEP directory that exists in the image also exists in live so
+# overlayfs marks it opaque instead of exposing the image's copy.
+for rel in KEEP:
+    live_dir = os.path.join(live, rel)
+    image_dir = os.path.join(image, rel)
+    if not os.path.lexists(live_dir) and os.path.isdir(image_dir):
+        os.makedirs(live_dir, exist_ok=True)
 
 removed = kept_bytes = removed_bytes = 0
 opaque = []

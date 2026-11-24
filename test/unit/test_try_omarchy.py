@@ -192,6 +192,49 @@ class BuildTryLayerTest(unittest.TestCase):
         self.assertIn("theme-system.sh", self.text)
 
 
+class DedupAndBuildIsoTest(unittest.TestCase):
+    def test_dedup_keeps_firmware_dbus_polkit_and_creates_missing_keep_dirs(self):
+        text = DEDUP.read_text()
+        for rel in ("usr/lib/firmware", "usr/share/dbus-1", "usr/share/polkit-1"):
+            self.assertIn(f'"{rel}"', text)
+        # Extract and run the embedded Python dedup logic on synthetic trees.
+        py_src = re.search(r"python3 - .*?<<'PY'\n(.*?)\nPY", text, re.S).group(1)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            live = tmp / "live"
+            image = tmp / "image"
+            pseudo = tmp / "pseudo"
+            # Directory present in image and in KEEP, absent from live -> must become opaque!
+            (image / "usr/lib/firmware/iwlwifi").mkdir(parents=True)
+            (image / "usr/lib/firmware/iwlwifi/test.ucode").write_bytes(b"fw")
+            (live / "etc").mkdir(parents=True)
+            # Identical file outside KEEP -> must be deduplicated!
+            (live / "usr/bin").mkdir(parents=True)
+            (image / "usr/bin").mkdir(parents=True)
+            (live / "usr/bin/same").write_bytes(b"hello")
+            (image / "usr/bin/same").write_bytes(b"hello")
+            (live / "usr/bin/diff").write_bytes(b"live-version")
+            (image / "usr/bin/diff").write_bytes(b"image-version")
+
+            res = subprocess.run(
+                ["python3", "-c", py_src, str(live), str(image), str(pseudo)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertFalse((live / "usr/bin/same").exists())
+            self.assertTrue((live / "usr/bin/diff").exists())
+            self.assertTrue((live / "usr/lib/firmware").is_dir())
+            pseudo_lines = pseudo.read_text().splitlines()
+            self.assertIn("/usr/lib/firmware x trusted.overlay.opaque=y", pseudo_lines)
+            self.assertIn("/etc x trusted.overlay.opaque=y", pseudo_lines)
+            self.assertTrue((live / "etc/omarchy-iso-live-over-image").is_file())
+
+    def test_mksquashfs_shim_cleans_up_pseudo_file(self):
+        shim_text = SHIM.read_text()
+        self.assertIn('trap \'rm -f "$pseudo"\' EXIT', shim_text)
+        self.assertNotIn('exec /usr/bin/mksquashfs "$@" -pf "$pseudo"', shim_text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -37,7 +37,7 @@ fi
 # everything a machine may need to show the installer and speak it: GPU
 # firmware (a GPU driver that fails for want of firmware has already taken the
 # screen from the firmware framebuffer, and nouveau needs nvidia/ for GSP),
-# audio (the accessibility entry speaks), microcode, and wired NICs.
+# audio, microcode, and wired NICs.
 # qcom/ goes too, Adreno's included: msm keeps the display without it and
 # loads the GPU's microcode only when the DRM device is first opened
 # (msm_open -> load_gpu in drivers/gpu/drm/msm/msm_drv.c), which the installer,
@@ -65,6 +65,14 @@ fi
 # it speaks English only.
 rm -rf /usr/share/doc /usr/share/man /usr/share/info /usr/share/gtk-doc /usr/share/gir-1.0 /usr/include
 find /usr/share/locale -mindepth 1 -maxdepth 1 ! -name 'en*' ! -name locale.alias -exec rm -rf {} +
+
+# kmscon draws the CJK installer with one face: Noto Sans Mono CJK, which lives
+# in the Regular collection. The other weights and the serif set are ~280 MB of
+# live root nobody sees.
+if [[ -d /usr/share/fonts/noto-cjk ]]; then
+  find /usr/share/fonts/noto-cjk -type f ! -name NotoSansCJK-Regular.ttc -delete
+  fc-cache -f >/dev/null 2>&1 || true
+fi
 
 mirror=/var/cache/omarchy/mirror/offline
 shipped_list=/usr/share/omarchy-iso/offline-mirror.shipped

@@ -56,17 +56,19 @@ KB_LAYOUT="${OMARCHY_INTEGRATION_KB_LAYOUT:-us}"
 # own keymap: KB_LAYOUT at the installed system's console, LUKS prompt and
 # desktop, us on the live ISO (an autoinstall skips the configurator, the one
 # thing there that loads another). TYPE_LAYOUT is the layout being typed
-# into; a caller typing into anything else sets it. type_text knows us and
-# uk: of what it sends, kbd's uk map moves only @ (Shift+') and ~ (Shift+#,
-# the key beside Enter). Other layouts move what every run types: de swaps y
-# and z, so the passphrase "omarchy" arrives as "omarchz" and the unlock and
-# the console login fail. Teach type_text a layout's keys before allowing it
-# here.
+# into; a caller typing into anything else sets it. type_text knows us, uk
+# and the letters of de: of what it sends, kbd's uk map moves only @ (Shift+')
+# and ~ (Shift+#, the key beside Enter). de swaps y and z, so the passphrase
+# "omarchy" is typed on the keys o m a r c h z, and a LUKS prompt that came up
+# in us instead reads "omarchz" and does not unlock: an encrypted de install
+# that boots proves the prompt has the install's layout. de moves every
+# symbol type_text sends as well, and those it refuses. Teach type_text a
+# layout's keys before allowing it here.
 kb_layout_typeable() {
   case "$1" in
-    us | uk) ;;
+    us | uk | de) ;;
     *)
-      echo "OMARCHY_INTEGRATION_KB_LAYOUT=$1: the harness can type only the us and uk layouts" >&2
+      echo "OMARCHY_INTEGRATION_KB_LAYOUT=$1: the harness can type only the us, uk and de layouts" >&2
       return 1
       ;;
   esac
@@ -399,8 +401,19 @@ ocr_screen_once() {
   [[ -s $shot ]] || return 0
   # Black on white: the negated grays alone read the focused button on the
   # finished install, dark text on a light bar, as "Reboot Nou".
-  magick "$shot" -colorspace gray -negate -resize 150% -threshold 50% "$prepped" 2>/dev/null || return 0
-  tesseract "$prepped" - --psm 6 2>/dev/null || true
+  # OCR_KMSCON=1 for a screen kmscon draws, the installer's welcome and
+  # first-boot setup: at its text size luminance reads "DHH" as "OHH", and it draws
+  # the purple headings and prompts as dark as gum asks, where the console
+  # brightened them to its palette, so there the gray is the brightest channel,
+  # not luminance, and the screen is read as a column of lines, since as one
+  # block a lone thin prompt under the logo is dropped. Not for every screen:
+  # read that way, Ventoy's menu loses its footer.
+  local gray=(-colorspace gray) psm=6
+  if [[ -n ${OCR_KMSCON:-} ]]; then
+    gray=(-grayscale Brightness) psm=4
+  fi
+  magick "$shot" "${gray[@]}" -negate -resize 150% -threshold 50% "$prepped" 2>/dev/null || return 0
+  tesseract "$prepped" - --psm "$psm" 2>/dev/null || true
 }
 
 wait_for_screen() {
@@ -445,6 +458,14 @@ type_text() {
 
   for ((i = 0; i < ${#text}; i++)); do
     ch=${text:i:1}
+    if [[ $TYPE_LAYOUT == de ]]; then
+      case "$ch" in
+        [yY]) ch=$(tr yY zZ <<<"$ch") ;;
+        [zZ]) ch=$(tr zZ yY <<<"$ch") ;;
+        [a-zA-Z0-9" "]) ;;
+        *) echo "type_text: cannot type $ch on the de layout" >&2; return 1 ;;
+      esac
+    fi
     case "$ch" in
       [a-z0-9]) press "$ch" ;;
       [A-Z]) press "shift-${ch,,}" ;;

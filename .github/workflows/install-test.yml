@@ -249,9 +249,11 @@ jobs:
           - variant: kb-uk
             scenarios: boot keymap-locale
             env: OMARCHY_INTEGRATION_KB_LAYOUT=uk
-          - variant: encrypted-kb-uk
+          # de, not uk: its y and z are swapped, so the passphrase omarchy
+          # only unlocks at boot if the LUKS prompt has the install's layout.
+          - variant: encrypted-kb-de
             scenarios: boot keymap-locale
-            env: OMARCHY_INTEGRATION_ENCRYPT=true OMARCHY_INTEGRATION_KB_LAYOUT=uk
+            env: OMARCHY_INTEGRATION_ENCRYPT=true OMARCHY_INTEGRATION_KB_LAYOUT=de
           - variant: small-disk
             scenarios: boot
             env: OMARCHY_INTEGRATION_DISK_GB=24

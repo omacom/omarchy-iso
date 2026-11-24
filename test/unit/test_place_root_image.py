@@ -82,7 +82,7 @@ class InstallRootImageDdTest(unittest.TestCase):
              mock.patch.object(phases_impl, "_umount_tree",
                                side_effect=lambda t: self.calls.append(["umount-tree", str(t)])), \
              mock.patch.object(phases_impl, "_write_root_image_frames",
-                               side_effect=lambda i, d: self.calls.append(["frames", str(i), d]) or frames_written), \
+                               side_effect=lambda i, d, *_: self.calls.append(["frames", str(i), d]) or frames_written), \
              mock.patch.object(phases_impl, "_write_root_image_pipe",
                                side_effect=lambda i, d: self.calls.append(["pipe", str(i), d])), \
              mock.patch.object(phases_impl, "_wait_for_blkid_uuid",
@@ -407,6 +407,30 @@ class FinalizeBootAndUserTest(unittest.TestCase):
                                side_effect=lambda ctx, **kw: order.append(("user", kw))):
             phases_impl.finalize_boot_and_user(self.ctx(defer=True))
         self.assertEqual(order, ["boot", ("user", {})])
+
+    def test_buffered_user_output_is_saved_to_target_log_even_on_failure(self):
+        import io
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        live_log = tmp / "live.log"
+        live_log.write_text("boot phase line\n")
+        target = tmp / "mnt"
+        ctx = types.SimpleNamespace(defer_provisioning=False, target=target, log_path=live_log)
+
+        def user(ctx, private_mounts=False):
+            phases_impl._THREAD_LOG_BUFFER.chunks.append(b"user script failed\n")
+            raise RuntimeError("user failed")
+
+        out = io.BytesIO()
+        stdout = types.SimpleNamespace(buffer=out)
+        with mock.patch.object(phases_impl, "finalize_limine_boot", side_effect=lambda _ctx: None), \
+             mock.patch.object(phases_impl, "run_chroot_finalizer", side_effect=user), \
+             mock.patch.object(phases_impl.sys, "stdout", stdout):
+            with self.assertRaisesRegex(RuntimeError, "user failed"):
+                phases_impl.finalize_boot_and_user(ctx)
+
+        saved = (target / "var" / "log" / "omarchy-install.log").read_text()
+        self.assertEqual(saved, "boot phase line\nuser script failed\n")
+        self.assertEqual(out.getvalue(), b"user script failed\n")
 
 
 if __name__ == "__main__":

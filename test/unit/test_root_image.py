@@ -560,6 +560,39 @@ class TargetKeyringUnitTest(unittest.TestCase):
         self.assertEqual(events[0], ("keyring", live_keyrings))
         self.assertEqual(events[1][0], "cleanup")
 
+    def test_prepare_live_skips_keyring_when_live_keyrings_are_missing(self):
+        missing_keyrings = Path(self.tmp.name) / "empty-keyrings"
+        missing_keyrings.mkdir()
+
+        events = []
+        ctx = types.SimpleNamespace(
+            target=self.target,
+            state_dir=self.state_dir,
+            state={},
+            is_protected=False,
+            user_configuration={"disk_config": {"device_modifications": [{"device": "/dev/vda", "wipe": True}]}},
+            arch_config_path=Path("/tmp/cfg.json"),
+            creds_path=Path("/tmp/creds.json"),
+        )
+        with (
+            mock.patch.object(phases_impl, "LIVE_KEYRINGS_DIR", missing_keyrings),
+            mock.patch.object(phases_impl, "_stage_qualcomm_firmware"),
+            mock.patch.object(
+                phases_impl, "_start_target_keyring_init",
+                side_effect=lambda c, *, keyrings_dir=None: events.append(("keyring", keyrings_dir)),
+            ),
+            mock.patch.object(
+                phases_impl, "capture",
+                side_effect=lambda cmd: events.append(("cleanup", cmd)) or CompletedProcess(cmd, 0, "", ""),
+            ),
+            mock.patch.object(phases_impl.arch, "load_arch_config", return_value=object(), create=True),
+            mock.patch.object(phases_impl.arch, "make_mirror_handler", return_value=object(), create=True),
+        ):
+            phases_impl.prepare_live(ctx)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][0], "cleanup")
+
     def test_join_installs_staged_keyring_replacing_existing_and_skipping_sockets(self):
         staged = self.state_dir / "target-gnupg"
         (staged / "private-keys-v1.d").mkdir(parents=True)

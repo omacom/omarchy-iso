@@ -1328,7 +1328,8 @@ def _target_keyring_stage_dir(ctx: InstallContext) -> Path:
     return base / "target-gnupg"
 
 
-def _live_keyrings_ready(keyrings_dir: Path = LIVE_KEYRINGS_DIR) -> bool:
+def _live_keyrings_ready(keyrings_dir: Path | None = None) -> bool:
+    keyrings_dir = LIVE_KEYRINGS_DIR if keyrings_dir is None else keyrings_dir
     return all((keyrings_dir / f"{name}.gpg").is_file() for name in _target_keyrings())
 
 

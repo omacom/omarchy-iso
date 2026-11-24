@@ -40,6 +40,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -47,6 +48,7 @@ import textwrap
 import threading
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -1041,7 +1043,7 @@ def _write_root_image_parallel(container: Path, device: str,
                                on_progress: Callable[[float], None] | None = None) -> bool:
     """Write the image with omarchy-image-write write-squashfs
     (builder/omarchy-image-write.c), straight from the squashfs without
-    mounting it: N threads each decode the next 1 MiB block with libzstd and
+    mounting it: N threads each decode the next 256 KiB block with libzstd and
     pwrite it with O_DIRECT, skipping zero blocks, so the drive sees N
     requests in flight where dd gives it one. False when the tool is not on
     the ISO or refuses the image (exit 2, nothing written), so the caller can
@@ -1106,6 +1108,41 @@ def _write_root_image_dd(image: Path, device: str) -> None:
         _check_dd_full_blocks(dd.stderr)
 
 
+@contextmanager
+def _flock_whole_disk(device: str):
+    """Hold an exclusive BSD lock on `device`'s whole-disk block node so
+    systemd-udevd defers probing across the raw image write and `btrfstune -m`.
+    Otherwise udev reacts to the write's IN_CLOSE_WRITE and scans the target
+    while it still carries the mounted live root image's FSID."""
+    try:
+        resolved = Path(device).resolve()
+        if not stat.S_ISBLK(resolved.stat().st_mode):
+            yield
+            return
+        lock_target = resolved
+        sys_block = Path("/sys/class/block") / resolved.name
+        if (sys_block / "partition").exists():
+            parent = Path("/dev") / sys_block.resolve().parent.name
+            if parent.exists() and stat.S_ISBLK(parent.stat().st_mode):
+                lock_target = parent
+        fd = os.open(str(lock_target), os.O_RDONLY | os.O_CLOEXEC)
+    except OSError:
+        yield
+        return
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError:
+            pass
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
+
+
 def _place_root_image(ctx: InstallContext) -> None:
     """Write the pre-built btrfs image onto the target root device, give it a
     fresh fsid, grow it to the partition, and reshape it into the @ layout:
@@ -1124,26 +1161,27 @@ def _place_root_image(ctx: InstallContext) -> None:
     # the page cache: near zero when the verify left it all cached, up to the
     # whole image on a machine whose RAM could not hold it.
     medium_before = _medium_bytes_read()
-    # The rest of the placement after the write takes moments; it gets the
-    # last few percent.
-    if not _write_root_image_parallel(container, device,
-                                      lambda done: _write_phase_progress(ctx, 0.95 * done)):
-        try:
-            _write_root_image_dd(_mount_root_image(container), device)
-        finally:
-            _umount_root_image()
-    medium_after = _medium_bytes_read()
-    if medium_before is not None and medium_after is not None:
-        info(f"› read {(medium_after - medium_before) / 1048576:.0f} MiB of the "
-             f"{ROOT_IMAGE.stat().st_size / 1048576:.0f} MiB image off the install medium while writing it")
+    with _flock_whole_disk(device):
+        # The rest of the placement after the write takes moments; it gets the
+        # last few percent.
+        if not _write_root_image_parallel(container, device,
+                                          lambda done: _write_phase_progress(ctx, 0.95 * done)):
+            try:
+                _write_root_image_dd(_mount_root_image(container), device)
+            finally:
+                _umount_root_image()
+        medium_after = _medium_bytes_read()
+        if medium_before is not None and medium_after is not None:
+            info(f"› read {(medium_after - medium_before) / 1048576:.0f} MiB of the "
+                 f"{container.stat().st_size / 1048576:.0f} MiB image off the install medium while writing it")
 
-    # -m sets a fresh fsid via the METADATA_UUID feature (kernel 5.0+) by
-    # writing the superblocks only; -u rewrites every metadata block of the
-    # 4.5 GB image, which takes 0.8-2.0 s. The visible UUID (blkid, fstab,
-    # snapper) is the new one either way; two installs from the same image
-    # are distinct filesystems to the kernel because they differ in fsid.
-    with _time_step("F1.btrfstune -m (new fsid via metadata_uuid)"):
-        subprocess.run(["btrfstune", "-f", "-m", device], check=True)
+        # -m sets a fresh fsid via the METADATA_UUID feature (kernel 5.0+) by
+        # writing the superblocks only; -u rewrites every metadata block of the
+        # 4.5 GB image, which takes 0.8-2.0 s. The visible UUID (blkid, fstab,
+        # snapper) is the new one either way; two installs from the same image
+        # are distinct filesystems to the kernel because they differ in fsid.
+        with _time_step("F1.btrfstune -m (new fsid via metadata_uuid)"):
+            subprocess.run(["btrfstune", "-f", "-m", device], check=True)
     # genfstab and the Limine cmdline read the UUID through libblkid, whose
     # cache only refreshes once udev has re-probed the device. On a slow
     # machine genfstab can run first and record the image's old fsid, and the

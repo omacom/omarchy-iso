@@ -382,6 +382,25 @@ class InstallRootImageDdTest(unittest.TestCase):
         self.index(["umount", str(top)])
         self.assertFalse(any(c[0] == "mount" and c[1:3] != ["-o", "subvolid=5"] for c in self.calls))
 
+    def test_medium_read_log_uses_resolved_container_and_flocks_across_fsid_change(self):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def fake_flock(dev):
+            self.calls.append(["flock-enter", dev])
+            try:
+                yield
+            finally:
+                self.calls.append(["flock-exit", dev])
+
+        with mock.patch.object(phases_impl, "ROOT_IMAGE", Path("/nonexistent/omarchy-root.sfs")), \
+             mock.patch.object(phases_impl, "_medium_bytes_read", side_effect=[0, 4096]), \
+             mock.patch.object(phases_impl, "_flock_whole_disk", side_effect=fake_flock):
+            self.install()
+        steps = [["flock-enter", DEVICE], ["frames"], ["btrfstune"], ["flock-exit", DEVICE], ["blkid-wait"]]
+        indices = [self.index(step) for step in steps]
+        self.assertEqual(indices, sorted(indices), self.calls)
+
 
 class FinalizeBootAndUserTest(unittest.TestCase):
     def ctx(self, defer=False):

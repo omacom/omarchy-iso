@@ -2,9 +2,10 @@
 
 Phase ordering (full-disk and protected/pre-mounted):
 
-    prepare_live           → disk cleanup when wiping, load configurator
-                             handlers (archinstall patch happens in the
-                             wrapper before Python imports it)
+    prepare_live           → start the staged per-machine pacman keyring unit
+                             in tmpfs, disk cleanup when wiping, load
+                             configurator handlers (archinstall patch happens
+                             in the wrapper before Python imports it)
     prepare_install_target → everything that can fail before the disk is
                              touched: the pre-mounted target/ESP when the JSON
                              uses pre_mounted_config (a freshly made btrfs,
@@ -15,9 +16,8 @@ Phase ordering (full-disk and protected/pre-mounted):
     arch_install_system    → one archinstall flow for partition/mount-or-use,
                              root image write, per-machine
                              package delta, Limine setup, useradd, fstab; the
-                             per-machine pacman keyring starts as a transient
-                             systemd unit before Limine/useradd and joins
-                             before any later pacstrap or the factory snapshot
+                             staged keyring keeps building in tmpfs without
+                             blocking pacstrap and lands on target at join time
     run_system_finalizer   → arch-chroot root omarchy-apply-system, including Snapper
     finalize_limine_boot   → final Limine config/UKI build after hardware drop-ins
     run_chroot_finalizer   → arch-chroot -u user omarchy-provision-user
@@ -40,6 +40,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -268,6 +269,14 @@ def _copy_firmware_stage_into_target(ctx: InstallContext) -> None:
 
 
 def prepare_live(ctx: InstallContext) -> None:
+    # Start the target's per-machine pacman keyring in tmpfs right away so it
+    # overlaps disk cleanup, medium verification, image writing, and setup.
+    # The live ISO carries the same keyring packages as the root image; if a
+    # test or custom environment lacks them, arch_install_system starts the
+    # unit from the target's keyrings once the image is mounted.
+    if _live_keyrings_ready():
+        _start_target_keyring_init(ctx, keyrings_dir=LIVE_KEYRINGS_DIR)
+
     _stage_qualcomm_firmware()
     if ctx.is_protected:
         info("› protected mode: skipping whole-disk cleanup")
@@ -659,6 +668,10 @@ def arch_install_system(ctx: InstallContext) -> None:
         # CPU or memory bandwidth with omarchy-image-write.
         _start_luks_keyslot_enroll(ctx)
         _apply_platform_layer(ctx)
+        # Fallback if prepare_live did not already start the staged keyring
+        # unit (e.g., when live /usr/share/pacman/keyrings was incomplete or
+        # arch_install_system was invoked directly). No-op if already running.
+        _start_target_keyring_init(ctx)
 
         if not pre_mounted and arch.is_encrypted(config):
             installer.generate_key_files()
@@ -721,13 +734,6 @@ def arch_install_system(ctx: InstallContext) -> None:
                     arch.setup_zram_swap(installer)
                     _drop_archinstall_zram_conf(ctx)
 
-            # Start initializing the target's per-machine pacman keyring now so
-            # it overlaps Limine setup and user creation. setup_zram_swap can
-            # pacstrap zram-generator if missing, so this starts after it; any
-            # later pacstrap (missing app firmware or staged tailscale) joins
-            # the unit first so two pacman-key runs never race on gnupg.
-            _start_target_keyring_init(ctx)
-
             with _time_step("STEP.configure_limine_boot (Limine EFI + config)"):
                 _configure_limine_boot(ctx, installer, config)
 
@@ -737,15 +743,16 @@ def arch_install_system(ctx: InstallContext) -> None:
                     _create_users_with_reflink_skel(ctx, installer, config.auth_config.users)
 
             if config.app_config:
-                # The image carries the PipeWire packages; this adds the audio
-                # firmware archinstall's hardware detection asks for and wires
-                # the per-user PipeWire units.
+                # The image carries the PipeWire packages; this adds any audio
+                # firmware archinstall's hardware detection asks for (except
+                # sof-firmware when Omarchy's own Intel SOF script handles it
+                # in Phase 4) and wires the per-user PipeWire units.
                 info("› applying archinstall application selections")
                 with _time_step("STEP.install_applications"):
                     arch.install_applications(
                         installer,
                         config,
-                        before_strap=lambda: _join_target_keyring_init(ctx),
+                        skip_packages=_app_packages_deferred_to_hardware(ctx),
                     )
 
             _write_language_marker(ctx)
@@ -756,7 +763,6 @@ def arch_install_system(ctx: InstallContext) -> None:
             # while the mirror is still bind-mounted, not in the phase that
             # configures the join.
             if ctx.tailscale_authkey_path is not None:
-                _join_target_keyring_init(ctx)
                 info("› installing tailscale (auth key staged for first boot)")
                 installer.add_additional_packages(["tailscale"])
         finally:
@@ -1297,52 +1303,118 @@ def _finish_root_image(ctx: InstallContext) -> None:
 
 # Transient systemd unit that initialises the target's pacman keyring.
 TARGET_KEYRING_UNIT = "omarchy-target-keyring"
+LIVE_KEYRINGS_DIR = Path("/usr/share/pacman/keyrings")
 
 
-def _start_target_keyring_init(ctx: InstallContext) -> None:
-    """Initialise and populate the target's per-machine pacman keyring, as a
-    transient systemd unit that runs on while the install continues.
+def _app_packages_deferred_to_hardware(ctx: InstallContext) -> tuple[str, ...]:
+    """Application packages that Omarchy's Phase 4 hardware setup handles more
+    accurately (and in one batched pacman transaction).
+
+    archinstall's PipeWire handler adds sof-firmware whenever any snd_sof
+    module is loaded — including AMD ACP70 (snd_sof_amd_acp), even though
+    sof-firmware only ships /usr/lib/firmware/intel/. Omarchy's own
+    install/hardware/intel/sof-firmware.sh checks Intel audio PCI IDs and
+    queues sof-firmware for helpers/flush-packages.sh, so skip it in
+    install_applications whenever the target runtime ships that script.
+    """
+    if (ctx.target / "usr/share/omarchy/install/hardware/intel/sof-firmware.sh").is_file():
+        return ("sof-firmware",)
+    return ()
+
+
+def _target_keyring_stage_dir(ctx: InstallContext) -> Path:
+    state_dir = getattr(ctx, "state_dir", None)
+    base = Path(state_dir) if isinstance(state_dir, (str, os.PathLike)) else Path("/run/omarchy-install")
+    return base / "target-gnupg"
+
+
+def _live_keyrings_ready(keyrings_dir: Path = LIVE_KEYRINGS_DIR) -> bool:
+    return all((keyrings_dir / f"{name}.gpg").is_file() for name in _target_keyrings())
+
+
+def _ignore_keyring_sockets(directory: str, names: list[str]) -> set[str]:
+    ignored: set[str] = set()
+    for name in names:
+        try:
+            mode = os.lstat(os.path.join(directory, name)).st_mode
+        except OSError:
+            continue
+        if stat.S_ISSOCK(mode):
+            ignored.add(name)
+    return ignored
+
+
+def _install_staged_target_keyring(staged: Path, dest: Path) -> None:
+    """Copy a completed tmpfs keyring staging dir into the target's
+    /etc/pacman.d/gnupg, replacing anything pacstrap may have left there."""
+    if not staged.is_dir():
+        return
+    if dest.is_dir() and not dest.is_symlink() and shutil.which("gpgconf"):
+        subprocess.run(
+            ["gpgconf", "--homedir", str(dest), "--kill", "all"],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp_dest = dest.parent / f"{dest.name}.omarchy-tmp"
+    shutil.rmtree(tmp_dest, ignore_errors=True)
+    shutil.copytree(staged, tmp_dest, symlinks=True, ignore=_ignore_keyring_sockets)
+    os.chmod(tmp_dest, 0o700)
+    if dest.is_symlink() or dest.is_file():
+        dest.unlink()
+    elif dest.is_dir():
+        shutil.rmtree(dest)
+    os.replace(tmp_dest, dest)
+    shutil.rmtree(staged, ignore_errors=True)
+
+
+def _start_target_keyring_init(ctx: InstallContext, *, keyrings_dir: Path | None = None) -> None:
+    """Initialise and populate the target's per-machine pacman keyring in a
+    tmpfs staging directory, as a transient systemd unit that runs on while
+    the install continues.
 
     The image ships no /etc/pacman.d/gnupg: its master key would be the same
     on every install, and a shared signing key must never be distributed. On
     a target pacstrapped directly, pacstrap -K initialised the keyring and
     the keyring packages' scriptlets populated it; here those packages come
     from the image, where their scriptlets ran with no keyring to populate.
-    The delta pacstrap's -K still ran --init (generating the master key), and
-    --init is idempotent, so run it again for installs that pacstrapped
-    nothing, then populate from the target's own keyring files. Chroot-free:
-    --gpgdir and --populate-from address the target directly, so no API
-    mounts are held.
+    Staging under state_dir (tmpfs in /run) avoids btrfs/dm-crypt write
+    overhead for ~150 gpg trustdb updates, lets the unit start in prepare_live
+    using the live ISO's matching /usr/share/pacman/keyrings before the disk
+    is even touched, and keeps it completely isolated from any pacstrap that
+    touches /mnt/etc/pacman.d/gnupg during arch_install_system.
 
-    Started after setup_zram_swap (before Limine setup and user creation) and
-    joined before any later pacstrap (missing app firmware or staged tailscale)
-    or by create_factory_snapshot: on x86_64 nothing in between reads the
-    keyring (the offline repo is SigLevel = Never) or writes it, and the
-    snapshot must not capture it half-written. Where the runtime's
-    post-install inits and populates it itself, no unit starts: the
-    finalizer had to wait for it before doing the same work again. Apple
-    Silicon, whose image brings its keyrings, keeps it, and
-    run_system_finalizer joins it there first. A unit rather than a plain
-    child process: pacman-key leaves a gpg-agent and dirmngr behind, which
-    systemd kills with the rest of the unit's cgroup the moment pacman-key
-    exits (sockets under the target's gnupg dir would otherwise block the
-    unmount); the dashboard's process-group kill does not reach it, while
-    `systemctl stop` still does (stop_target_keyring_init); and its output
-    is in the journal whatever happens to the orchestrator. --wait --pipe
-    give a child to join with the unit's exit status and output.
+    Joined before any phase that reads or snapshots the target keyring
+    (run_system_finalizer on aarch64, run_oem_setup, _validate_package_signing,
+    or create_factory_snapshot), where the finished staged directory atomically
+    replaces /mnt/etc/pacman.d/gnupg. Where the runtime's post-install inits
+    and populates it itself, no unit starts: the finalizer had to wait for it
+    before doing the same work again. Apple Silicon, whose image brings its
+    keyrings, keeps it, and run_system_finalizer joins it there first. A unit
+    rather than a plain child process: pacman-key leaves a gpg-agent and
+    dirmngr behind, which systemd kills with the rest of the unit's cgroup the
+    moment pacman-key exits; the dashboard's process-group kill does not reach
+    it, while `systemctl stop` still does (stop_target_keyring_init); and its
+    output is in the journal whatever happens to the orchestrator. --wait
+    --pipe give a child to join with the unit's exit status and output.
     """
     if _runtime_populates_target_keyring():
         return
-    gpgdir = shlex.quote(str(ctx.target / "etc" / "pacman.d" / "gnupg"))
-    keyrings = shlex.quote(str(ctx.target / "usr" / "share" / "pacman" / "keyrings"))
+    if ctx.state.get("target_keyring_proc") is not None or ctx.state.get("target_keyring_installed"):
+        return
+    staged = _target_keyring_stage_dir(ctx)
+    keyrings = keyrings_dir or (ctx.target / "usr" / "share" / "pacman" / "keyrings")
+    staged_q = shlex.quote(str(staged))
+    keyrings_q = shlex.quote(str(keyrings))
     script = (
-        f"pacman-key --gpgdir {gpgdir} --init && "
-        f"pacman-key --gpgdir {gpgdir} --populate-from {keyrings} --populate {' '.join(_target_keyrings())}"
+        f"rm -rf {staged_q} && mkdir -m 700 -p {staged_q} && "
+        f"pacman-key --gpgdir {staged_q} --init && "
+        f"pacman-key --gpgdir {staged_q} --populate-from {keyrings_q} --populate {' '.join(_target_keyrings())}"
     )
     info("› initializing per-machine pacman keyring (background unit)")
     # A failed unit from an earlier attempt would hold the name (--collect
     # releases it, but not for a unit started without it).
     subprocess.run(["systemctl", "reset-failed", TARGET_KEYRING_UNIT], check=False, capture_output=True)
+    ctx.state["target_keyring_stage"] = staged
     ctx.state["target_keyring_proc"] = subprocess.Popen(
         ["systemd-run", "--wait", "--pipe", "--collect", "--quiet",
          f"--unit={TARGET_KEYRING_UNIT}", "sh", "-c", script],
@@ -1370,17 +1442,32 @@ def _target_keyrings() -> list[str]:
 
 
 def _join_target_keyring_init(ctx: InstallContext, *, raise_on_error: bool = True) -> None:
-    """Wait for the keyring unit if one is running; no-op otherwise."""
+    """Wait for the keyring unit if one is running and move the staged keyring
+    into the target; no-op otherwise."""
     proc = ctx.state.pop("target_keyring_proc", None)
+    staged = ctx.state.pop("target_keyring_stage", None)
     if proc is None:
+        if staged is not None:
+            shutil.rmtree(staged, ignore_errors=True)
         return
     with _time_step("STEP.join_target_keyring"):
         out, _ = proc.communicate()
-    if raise_on_error and proc.returncode != 0:
-        raise RuntimeError(
-            f"per-machine pacman keyring init failed (exit {proc.returncode}):\n"
-            f"{(out or '').strip()}"
-        )
+    if proc.returncode != 0:
+        if staged is not None:
+            shutil.rmtree(staged, ignore_errors=True)
+        if raise_on_error:
+            raise RuntimeError(
+                f"per-machine pacman keyring init failed (exit {proc.returncode}):\n"
+                f"{(out or '').strip()}"
+            )
+        return
+    if raise_on_error:
+        if staged is not None:
+            with _time_step("STEP.install_target_keyring"):
+                _install_staged_target_keyring(staged, ctx.target / "etc" / "pacman.d" / "gnupg")
+        ctx.state["target_keyring_installed"] = True
+    elif staged is not None:
+        shutil.rmtree(staged, ignore_errors=True)
 
 
 def stop_target_keyring_init(ctx: InstallContext) -> None:

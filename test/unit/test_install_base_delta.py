@@ -213,6 +213,43 @@ class InstallApplicationsBeforeStrapTest(unittest.TestCase):
                     )
                 self.assertEqual(events, expected)
 
+    def test_skip_packages_omits_deferred_packages_without_strapping(self):
+        for requested, expected_wanted, missing, expected_events in (
+            (["sof-firmware"], [], [], []),
+            (["pipewire", "sof-firmware", "alsa-firmware"], ["pipewire", "alsa-firmware"], ["alsa-firmware"], ["before_strap", ("strap", ["alsa-firmware"])]),
+        ):
+            with self.subTest(requested=requested):
+                events = []
+                checked = []
+                installer = types.SimpleNamespace(
+                    target=self.target,
+                    add_additional_packages=lambda pkgs: events.append(("strap", list(pkgs))),
+                )
+                handler = types.SimpleNamespace(
+                    install_applications=lambda inst, app_cfg, users=None: inst.add_additional_packages(requested),
+                )
+                arch_config = types.SimpleNamespace(
+                    app_config=object(),
+                    auth_config=types.SimpleNamespace(users=["dhh"]),
+                )
+
+                def fake_missing(target, pkgs):
+                    checked.append(list(pkgs))
+                    return missing
+
+                with (
+                    mock.patch.object(self.arch, "_application_handler", return_value=handler),
+                    mock.patch.object(self.arch, "target_missing_packages", side_effect=fake_missing),
+                ):
+                    self.arch.install_applications(
+                        installer,
+                        arch_config,
+                        before_strap=lambda: events.append("before_strap"),
+                        skip_packages=("sof-firmware",),
+                    )
+                self.assertEqual(events, expected_events)
+                self.assertEqual(checked, [expected_wanted] if expected_wanted else [])
+
 
 if __name__ == "__main__":
     unittest.main()

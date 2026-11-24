@@ -678,6 +678,7 @@ def install_applications(
     arch_config: ArchConfig,
     *,
     before_strap: Callable[[], None] | None = None,
+    skip_packages: Iterable[str] = (),
 ) -> None:
     """Install archinstall application selections such as PipeWire audio.
 
@@ -693,19 +694,24 @@ def install_applications(
     users = arch_config.auth_config.users if arch_config.auth_config else None
     handler = _application_handler()
     install_applications_method = handler.install_applications
+    skipped = set(skip_packages)
 
     # The application installers strap their package sets unconditionally.
     # The root image already carries those (PipeWire and friends) and the
     # offline mirror no longer does, and pacstrap --needed still has to
     # resolve every target before it can skip it. Strap only what the target
-    # lacks (the hardware-detected firmware), through the installer instance
-    # the handlers call into.
+    # lacks (the hardware-detected firmware), minus any packages deferred to
+    # Omarchy's own hardware setup, through the installer instance the handlers
+    # call into.
     original_strap = installer.add_additional_packages
 
     def strap_missing(packages: str | list[str]) -> None:
         if isinstance(packages, str):
             packages = [packages]
-        missing = target_missing_packages(installer.target, packages)
+        wanted = [pkg for pkg in packages if pkg not in skipped]
+        if not wanted:
+            return
+        missing = target_missing_packages(installer.target, wanted)
         if missing:
             if before_strap is not None:
                 before_strap()

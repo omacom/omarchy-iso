@@ -97,7 +97,7 @@ write_n1x_layer() {
     --exclude=./run --exclude=./tmp --exclude=./var/cache --exclude=./var/log \
     --exclude=./var/tmp --exclude=./var/lib/pacman/sync \
     --exclude=./etc/pacman.d/gnupg \
-    -cf - . | zstd -q -T0 -15 -o "$layer" || return 1
+    -cf - . | zstd -q -T0 -6 -o "$layer" || return 1
   echo "N1x layer: $(du -h "$layer" | cut -f1) at $layer"
 }
 
@@ -112,7 +112,7 @@ build_n1x_uki_in() {
   # install them (_platform_delta_packages), from the same mirror.
   mapfile -t n1x_packages < <(grep -hv '^\s*#\|^\s*$' "$merged/usr/share/omarchy/install/omarchy-aarch64-n1x.packages")
   ((${#n1x_packages[@]})) || return 1
-  pacstrap -C "$pacman_conf" -c -G -M "$merged" --needed "${n1x_packages[@]}" || return 1
+  pacstrap -C "$effective_pacman_conf" -c -G -M "$merged" --needed "${n1x_packages[@]}" || return 1
 
   # What the installed system's pacman hooks would have left, whether or not
   # the building system has those hooks: the module index and linker cache
@@ -220,22 +220,22 @@ if [[ ! -r $pacman_conf ]]; then
   exit 1
 fi
 
-# Forced zstd at a higher level than the installer's own compress=zstd (level
-# 3): btrfs's incompressibility heuristic declines a lot of data in this tree
-# that zstd handles fine, and the level only costs build time. The image is
-# written to the target as it is, so neither choice affects install speed; the
-# installed system writes new data at its own mount option either way.
-IMAGE_COMPRESS="compress-force=zstd:15"
+# Forced zstd at level 6: btrfs's incompressibility heuristic declines a lot of
+# data in this tree that zstd handles fine, while level 15 stalls pacstrap for
+# over 3 minutes because btrfs compresses each file's extents across only a few
+# workers (~14 MB/s per thread at level 15 vs ~148 MB/s at level 6). Level 6
+# finishes compression behind pacstrap's own extraction at nearly the same size
+# as levels 9-10; the installed system writes new data at its own mount option.
+IMAGE_COMPRESS="compress-force=zstd:6"
 # Name of the image's one subvolume. The installer renames it to @ after the
 # write (phases_impl.ROOT_IMAGE_SUBVOLUME).
 IMAGE_SUBVOLUME="omarchy-root"
 
 # Boot-image pacman hooks that must not run while the image is built: there is
-# no kernel in the image and no ESP to deploy to. pacstrap reads hooks from the
-# building system's /etc/pacman.d/hooks (pacman.conf(5): HookDir is absolute,
-# the target root is not prepended), so mask them here, the same way the
-# orchestrator masks the live ISO's around its pacstrap. Keep in step with
-# DEFERRED_BOOT_HOOKS in
+# no kernel in the image and no ESP to deploy to. Point HookDir at a private
+# directory in $work rather than mutating /etc/pacman.d/hooks globally, so
+# concurrent pacstrap runs (like mkarchiso) are unaffected and a crash leaves
+# no stale masks behind. Keep in step with DEFERRED_BOOT_HOOKS in
 # configs/airootfs/usr/share/omarchy-iso/orchestrator/phases_impl.py.
 deferred_boot_hooks=(
   60-mkinitcpio-remove.hook
@@ -249,7 +249,6 @@ work=$(mktemp -d /tmp/omarchy-root-image.XXXXXX)
 backing="$work/image.btrfs"
 mnt="$work/mnt"
 loop=""
-masked_hooks=()
 
 # Anything that touches a keyring under the image (pacman-key in a scriptlet,
 # say) starts a gpg-agent for that homedir and leaves it running; until it is
@@ -263,12 +262,6 @@ stop_image_gpg_agents() {
 cleanup() {
   local status=$?
   set +e
-  for hook in "${masked_hooks[@]}"; do
-    rm -f "/etc/pacman.d/hooks/$hook"
-    if [[ -e "/etc/pacman.d/hooks/$hook.omarchy-backup" ]]; then
-      mv -f "/etc/pacman.d/hooks/$hook.omarchy-backup" "/etc/pacman.d/hooks/$hook"
-    fi
-  done
   if mountpoint -q "$mnt" 2>/dev/null; then
     stop_image_gpg_agents
     sleep 1
@@ -285,23 +278,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p /etc/pacman.d/hooks
+mkdir -p "$work/hooks"
 for hook in "${deferred_boot_hooks[@]}"; do
-  path="/etc/pacman.d/hooks/$hook"
-  # Already masked: an earlier run died before its cleanup. Moving the mask
-  # over that run's backup would lose the real hook for good, so leave both
-  # for it to be restored by hand (the orchestrator's _is_devnull_symlink
-  # makes the same call).
-  if [[ -L $path && $(readlink "$path") == /dev/null ]]; then
-    echo "WARNING: $path is already masked; leaving it and any backup alone" >&2
-    continue
-  fi
-  if [[ -e $path || -L $path ]]; then
-    mv -f "$path" "$path.omarchy-backup"
-  fi
-  ln -s /dev/null "$path"
-  masked_hooks+=("$hook")
+  ln -s /dev/null "$work/hooks/$hook"
 done
+effective_pacman_conf="$work/pacman.conf"
+sed "/^\[options\]/a HookDir = $work/hooks/" "$pacman_conf" >"$effective_pacman_conf"
 
 echo "Building root image with ${#packages[@]} packages"
 truncate -s "${OMARCHY_IMAGE_SIZE:-24G}" "$backing"
@@ -317,7 +299,7 @@ loop=$(losetup --find | awk '{ print $1 }')
 losetup "$loop" "$backing"
 mkfs.btrfs -q -L omarchy-root-image "$loop"
 mkdir -p "$mnt"
-mount -o "$IMAGE_COMPRESS" "$loop" "$mnt"
+mount -o "$IMAGE_COMPRESS,noatime,commit=600" "$loop" "$mnt"
 btrfs subvolume create "$mnt/$IMAGE_SUBVOLUME" >/dev/null
 root="$mnt/$IMAGE_SUBVOLUME"
 
@@ -331,7 +313,7 @@ root="$mnt/$IMAGE_SUBVOLUME"
 #     packages' scriptlets did when the target was pacstrapped directly.
 # -M: the builder's mirrorlist means nothing to an installed system; the
 #     installer writes the target's own.
-pacstrap -C "$pacman_conf" -c -G -M "$root" "${packages[@]}"
+pacstrap -C "$effective_pacman_conf" -c -G -M "$root" "${packages[@]}"
 stop_image_gpg_agents
 # The keyring packages' scriptlets only populate an existing keyring, so with
 # -G they have nothing to do; remove whatever a scriptlet may have seeded
@@ -575,6 +557,7 @@ BINARIES=()
 FILES=()
 HOOKS=(base systemd plymouth autodetect microcode modconf keyboard sd-vconsole omarchy-vconsole-room block sd-encrypt filesystems fsck sd-btrfs-overlayfs)
 COMPRESSION="zstd"
+COMPRESSION_OPTIONS=(-T0)
 CONF
 
   # Bundle the mount-event burst override into the pre-built systemd initramfs:
@@ -674,6 +657,7 @@ fstrim -v "$mnt" || echo "WARNING: fstrim failed; free space ships as whatever i
 sync
 umount "$mnt"
 losetup -d "$loop"
+loop=""
 truncate -s "${shrink_mb}M" "$backing"
 
 # Compress the image for the ISO. zstd collapses the unused space; the data

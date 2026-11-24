@@ -41,7 +41,8 @@ for required in bin/omarchy-hw-platform install/hardware/qualcomm/dtb-uki.sh ins
 done
 grep -Fq 'sha256sum --check --strict --quiet SHA256SUMS' "$ROOT/bin/omarchy-iso-make" || fail "bundle checksums are not verified on the host"
 grep -Fq -- '-v "$PACKAGE_DIR:/packages:ro"' "$ROOT/bin/omarchy-iso-make" || fail "bundle is not mounted read-only at /packages"
-grep -Fq 'OMARCHY_ARCH == x86_64 && -d /var/cache/pacman/pkg' "$ROOT/bin/omarchy-iso-make" || fail "host pacman cache would leak into aarch64 builds"
+grep -Fq '/var/cache/pacman/pkg:/var/cache/pacman/pkg' "$ROOT/bin/omarchy-iso-make" && fail "host pacman cache would leak into builds"
+grep -Fq 'builder_pkg_${OMARCHY_MIRROR}_${OMARCHY_ARCH}' "$ROOT/bin/omarchy-iso-make" || fail "builder package cache is not isolated by channel and arch"
 grep -Fq 'aarch64 builds use the stable, rc or edge channel' "$ROOT/builder/build-iso.sh" || fail "an aarch64 build accepts a channel it has no config for"
 grep -Fq 'OMARCHY_KERNEL=linux-omarchy' "$ROOT/bin/omarchy-iso-make" || fail "an aarch64 image does not boot linux-omarchy"
 grep -Fq -- '--kernel' "$ROOT/bin/omarchy-iso-make" && fail "an aarch64 build still offers a choice of kernel"

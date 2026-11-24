@@ -33,7 +33,7 @@ airootfs_image_type="squashfs"
 # same options build the aarch64 image too.
 airootfs_image_tool_options=(
   '-comp' 'zstd'
-  '-Xcompression-level' '19'
+  '-Xcompression-level' '6'
   '-b' '1M'
   '-action' 'uncompressed@subpathname(var/cache/omarchy/mirror/offline)'
 )

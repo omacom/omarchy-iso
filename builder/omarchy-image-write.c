@@ -63,6 +63,7 @@
 #define ALIGN		4096		/* O_DIRECT: sizes and offsets */
 #define LEVEL		3
 #define MAX_THREADS	64
+#define MAX_BATCH	16		/* max consecutive frames per worker grab */
 
 /* The seekable format: a skippable frame of 8-byte entries and a footer. */
 #define SEEK_TABLE_MAGIC	0x184D2A5Eu	/* skippable frame magic */
@@ -95,16 +96,20 @@ struct frame {
 static const uint8_t *image;
 static struct frame *frames;
 static size_t *order;		/* the frames in the order they are written */
-static size_t nframes, max_dsize, cached_frames;
-static int target_fd;
+static size_t nframes, max_dsize, max_csize, cached_frames, frame_batch = 1;
+static int src_fd = -1, target_fd;
 static uint8_t *zero_frame;
 static size_t zero_frame_size;
-static atomic_size_t next_frame, bytes_written, zero_frames;
-static atomic_int failed, workers_done;
+static _Alignas(64) atomic_size_t next_frame;
+static atomic_size_t bytes_written, zero_frames;
+static atomic_int failed;
+static pthread_mutex_t done_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t done_cv;
+static int done_count, expected_workers;
 static int squashfs_input;	/* write-squashfs: frames are squashfs blocks */
-/* Thread-nanoseconds, summed over the workers: decoding (including the page
- * faults on the image), in pwrite, and checking for zeros (the compressed
- * bytes against the zero frame, or a decoded frame for all zeros). */
+/* Thread-nanoseconds, summed over the workers: reading and decoding the source
+ * frames, in pwrite, and checking for zeros (the compressed bytes against the
+ * zero frame, or a decoded frame for all zeros). */
 static atomic_uint_fast64_t decode_ns, write_ns, skip_ns;
 static volatile sig_atomic_t writing;
 
@@ -153,22 +158,32 @@ static void put_le32(uint8_t *p, uint32_t v)
 	p[3] = v >> 24;
 }
 
-static const uint8_t *map_file(const char *path, size_t *size, int status)
+static const uint8_t *map_fd(int fd, const char *path, size_t *size, int status)
 {
 	struct stat st;
 	void *p;
-	int fd;
 
-	fd = open(path, O_RDONLY | O_CLOEXEC);
-	if (fd < 0 || fstat(fd, &st) < 0)
+	if (fstat(fd, &st) < 0)
 		die(status, "%s: %s", path, strerror(errno));
 	if (st.st_size == 0)
 		die(status, "%s: empty", path);
 	p = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
 	if (p == MAP_FAILED)
 		die(status, "%s: %s", path, strerror(errno));
-	close(fd);
 	*size = st.st_size;
+	return p;
+}
+
+static const uint8_t *map_file(const char *path, size_t *size, int status)
+{
+	const uint8_t *p;
+	int fd;
+
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		die(status, "%s: %s", path, strerror(errno));
+	p = map_fd(fd, path, size, status);
+	close(fd);
 	return p;
 }
 
@@ -421,15 +436,19 @@ static off_t read_seek_table(size_t size)
 	frames = calloc(n, sizeof(*frames));
 	if (!frames)
 		die(REFUSED, "out of memory");
+	size_t max_bound = ZSTD_compressBound(MAX_FRAME);
+
 	for (nframes = 0; nframes < n; nframes++) {
 		const uint8_t *e = image + table + SKIP_HEADER + nframes * ENTRY;
 		size_t c = get_le32(e), d = get_le32(e + 4);
 
-		if (c == 0 || c > table - pos || d == 0 || d > MAX_FRAME || d % ALIGN)
+		if (c == 0 || c > table - pos || c > max_bound || d == 0 || d > MAX_FRAME || d % ALIGN)
 			die(REFUSED, "seek table: frame %zu: %zu bytes decoding to %zu", nframes, c, d);
 		frames[nframes] = (struct frame){ pos, c, dst, d, 0 };
 		if (d > max_dsize)
 			max_dsize = d;
+		if (c > max_csize)
+			max_csize = c;
 		pos += c;
 		dst += d;
 	}
@@ -493,21 +512,25 @@ static off_t squashfs_frames(size_t size)
 	const uint8_t *sb = image;
 	uint64_t file_size, start, used, end, pos;
 	size_t len, head, k, bs;
+	uint16_t blog;
 	uint32_t frag;
 	uint8_t *in;
 	off_t dst = 0;
 
-	if (size < SQUASHFS_SUPER || get_le32(sb) != SQUASHFS_MAGIC || get_le16(sb + 28) != 4)
+	if (size < SQUASHFS_SUPER || get_le32(sb) != SQUASHFS_MAGIC ||
+	    get_le16(sb + 28) != 4 || get_le16(sb + 30) != 0)
 		die(REFUSED, "not a squashfs 4.0 image");
 	if (get_le16(sb + 20) != SQUASHFS_ZSTD)
 		die(REFUSED, "squashfs: compressed with %u, not zstd", get_le16(sb + 20));
 	if (get_le32(sb + 4) != 2)
 		die(REFUSED, "squashfs: %u inodes, not one file in the root directory", get_le32(sb + 4));
 	bs = get_le32(sb + 12);
+	blog = get_le16(sb + 22);
 	used = get_le64(sb + 40);
 	start = get_le64(sb + 64);
 	end = get_le64(sb + 72);
-	if (bs == 0 || bs % ALIGN || bs > MAX_FRAME || used > size || start >= end || end > used)
+	if (blog < 12 || blog > 24 || bs != ((size_t)1 << blog) || bs % ALIGN ||
+	    bs > MAX_FRAME || used > size || start < SQUASHFS_SUPER || start >= end || end > used)
 		die(REFUSED, "squashfs: bad superblock");
 
 	in = squashfs_inodes(start, end, &len);
@@ -562,6 +585,8 @@ static off_t squashfs_frames(size_t size)
 		frames[k] = (struct frame){ pos, c, dst, d, !!(e & SQUASHFS_BLOCK_STORED) };
 		if (d > max_dsize)
 			max_dsize = d;
+		if (c > max_csize)
+			max_csize = c;
 		pos += c;
 		dst += d;
 	}
@@ -593,18 +618,28 @@ static void encode_zero_frame(void)
 	ZSTD_freeCCtx(cctx);
 }
 
-static int is_zero_frame(const struct frame *f)
-{
-	return f->dsize == max_dsize && f->csize == zero_frame_size &&
-	       memcmp(image + f->src, zero_frame, zero_frame_size) == 0;
-}
-
 static uint64_t now_ns(void)
 {
 	struct timespec t;
 
 	clock_gettime(CLOCK_MONOTONIC, &t);
 	return (uint64_t)t.tv_sec * 1000000000 + t.tv_nsec;
+}
+
+static int pread_all(int fd, uint8_t *p, size_t n, off_t off)
+{
+	while (n) {
+		ssize_t r = pread(fd, p, n, off);
+
+		if (r < 0 && errno == EINTR)
+			continue;
+		if (r <= 0)
+			return r < 0 ? -errno : -EIO;
+		p += r;
+		n -= r;
+		off += r;
+	}
+	return 0;
 }
 
 static int pwrite_all(int fd, const uint8_t *p, size_t n, off_t off)
@@ -639,63 +674,91 @@ static void fail(const char *fmt, ...)
 static void *worker(void *arg)
 {
 	ZSTD_DCtx *dctx = ZSTD_createDCtx();
-	uint8_t *buf = NULL;
+	uint8_t *buf = NULL, *cbuf = NULL;
 	uint64_t decode = 0, write = 0, skip = 0, t0, t1;
+	size_t local_bytes = 0, local_zeros = 0;
 
 	(void)arg;
-	if (!dctx || posix_memalign((void **)&buf, ALIGN, max_dsize)) {
+	if (!dctx || posix_memalign((void **)&buf, ALIGN, max_dsize) ||
+	    (max_csize > 0 && !(cbuf = malloc(max_csize)))) {
 		fail("out of memory");
 		goto out;
 	}
 	while (!atomic_load(&failed)) {
-		size_t k = atomic_fetch_add(&next_frame, 1);
-		const struct frame *f;
-		size_t n;
-		int err;
+		size_t base = atomic_fetch_add(&next_frame, frame_batch);
+		size_t end = base + frame_batch < nframes ? base + frame_batch : nframes;
 
-		if (k >= nframes)
+		if (base >= nframes)
 			break;
-		k = order[k];
-		f = &frames[k];
-		t0 = now_ns();
-		if (f->csize == 0 || (!squashfs_input && is_zero_frame(f))) {
-			atomic_fetch_add(&zero_frames, 1);
-			skip += now_ns() - t0;
-			continue;
+		for (size_t idx = base; idx < end && !atomic_load(&failed); idx++) {
+			size_t k = order[idx];
+			const struct frame *f = &frames[k];
+			size_t n;
+			int err;
+
+			t0 = now_ns();
+			if (f->csize == 0) {
+				local_zeros++;
+				skip += now_ns() - t0;
+				continue;
+			}
+			if (f->stored) {
+				err = pread_all(src_fd, buf, f->dsize, (off_t)f->src);
+				if (err) {
+					fail("frame %zu: read at byte %zu: %s", k, f->src, strerror(-err));
+					goto out;
+				}
+				n = f->dsize;
+			} else {
+				err = pread_all(src_fd, cbuf, f->csize, (off_t)f->src);
+				if (err) {
+					fail("frame %zu: read at byte %zu: %s", k, f->src, strerror(-err));
+					goto out;
+				}
+				if (!squashfs_input && f->dsize == max_dsize &&
+				    f->csize == zero_frame_size &&
+				    memcmp(cbuf, zero_frame, zero_frame_size) == 0) {
+					local_zeros++;
+					skip += now_ns() - t0;
+					continue;
+				}
+				n = ZSTD_decompressDCtx(dctx, buf, f->dsize, cbuf, f->csize);
+			}
+			t1 = now_ns();
+			decode += t1 - t0;
+			if (ZSTD_isError(n) || n != f->dsize) {
+				fail("frame %zu: %s", k, ZSTD_isError(n) ?
+				     ZSTD_getErrorName(n) : "decoded to the wrong size");
+				goto out;
+			}
+			if (all_zero(buf, n)) {
+				local_zeros++;
+				skip += now_ns() - t1;
+				continue;
+			}
+			t0 = now_ns();
+			skip += t0 - t1;
+			err = pwrite_all(target_fd, buf, n, f->dst);
+			write += now_ns() - t0;
+			if (err) {
+				fail("write at byte %lld: %s", (long long)f->dst, strerror(-err));
+				goto out;
+			}
+			local_bytes += n;
 		}
-		if (f->stored) {
-			memcpy(buf, image + f->src, f->dsize);
-			n = f->dsize;
-		} else {
-			n = ZSTD_decompressDCtx(dctx, buf, f->dsize, image + f->src, f->csize);
-		}
-		t1 = now_ns();
-		decode += t1 - t0;
-		if (ZSTD_isError(n) || n != f->dsize) {
-			fail("frame %zu: %s", k, ZSTD_isError(n) ?
-			     ZSTD_getErrorName(n) : "decoded to the wrong size");
-			break;
-		}
-		if (all_zero(buf, n)) {
-			atomic_fetch_add(&zero_frames, 1);
-			skip += now_ns() - t1;
-			continue;
-		}
-		t0 = now_ns();
-		skip += t0 - t1;
-		err = pwrite_all(target_fd, buf, n, f->dst);
-		write += now_ns() - t0;
-		if (err) {
-			fail("write at byte %lld: %s", (long long)f->dst, strerror(-err));
-			break;
-		}
-		atomic_fetch_add(&bytes_written, n);
 	}
 out:
-	atomic_fetch_add(&workers_done, 1);
+	atomic_fetch_add(&bytes_written, local_bytes);
+	atomic_fetch_add(&zero_frames, local_zeros);
 	atomic_fetch_add(&decode_ns, decode);
 	atomic_fetch_add(&write_ns, write);
 	atomic_fetch_add(&skip_ns, skip);
+	pthread_mutex_lock(&done_mu);
+	done_count++;
+	if (done_count >= expected_workers)
+		pthread_cond_broadcast(&done_cv);
+	pthread_mutex_unlock(&done_mu);
+	free(cbuf);
 	free(buf);
 	ZSTD_freeDCtx(dctx);
 	return NULL;
@@ -755,7 +818,7 @@ static unsigned char *cache_snapshot(size_t size)
 	return NULL;
 }
 
-static void plan_order(size_t size, unsigned char *vec)
+static void plan_order(unsigned char *vec)
 {
 	size_t page = sysconf(_SC_PAGESIZE), k, n = 0;
 
@@ -770,7 +833,6 @@ static void plan_order(size_t size, unsigned char *vec)
 		for (k = 0; k < nframes; k++)
 			if (!frame_cached(vec, &frames[k], page))
 				order[n++] = k;
-		madvise((void *)image, size, MADV_SEQUENTIAL);
 	} else {
 		for (k = 0; k < nframes; k++)
 			order[k] = k;
@@ -780,19 +842,23 @@ static void plan_order(size_t size, unsigned char *vec)
 
 /*
  * With OMARCHY_IMAGE_WRITE_PROGRESS set to a file, "<frames taken> <frames>"
- * goes there four times a second and once more when the workers are done, for the
- * installer's progress bar. Best effort: a sample that cannot be written is
- * skipped, and a reader may see the file empty between two samples.
+ * goes there four times a second and once more as soon as the workers are done,
+ * for the installer's progress bar. Best effort: a sample that cannot be
+ * written is skipped, and a reader may see the file empty between two samples.
  */
-static void report_progress(const char *path, int workers)
+static void report_progress(const char *path)
 {
-	const struct timespec quarter = { 0, 250000000 };
 	char line[64];
 	size_t k;
 	int fd, n, done;
 
-	do {
-		done = atomic_load(&workers_done) >= workers;
+	for (;;) {
+		struct timespec ts;
+
+		pthread_mutex_lock(&done_mu);
+		done = done_count >= expected_workers;
+		pthread_mutex_unlock(&done_mu);
+
 		k = atomic_load(&next_frame);
 		n = snprintf(line, sizeof(line), "%zu %zu\n", k < nframes ? k : nframes, nframes);
 		fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
@@ -802,20 +868,39 @@ static void report_progress(const char *path, int workers)
 			}
 			close(fd);
 		}
-	} while (!done && !nanosleep(&quarter, NULL));
+		if (done)
+			break;
+
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		ts.tv_nsec += 250000000;
+		if (ts.tv_nsec >= 1000000000) {
+			ts.tv_sec++;
+			ts.tv_nsec -= 1000000000;
+		}
+		pthread_mutex_lock(&done_mu);
+		while (done_count < expected_workers) {
+			if (pthread_cond_timedwait(&done_cv, &done_mu, &ts) == ETIMEDOUT)
+				break;
+		}
+		pthread_mutex_unlock(&done_mu);
+	}
 }
 
 static int write_image(const char *path, const char *target, int threads)
 {
 	pthread_t tid[MAX_THREADS];
+	pthread_condattr_t cattr;
 	uint64_t t0, t1, t2, t3;
 	unsigned char *cached;
-	size_t size;
+	size_t size, batch;
 	off_t total;
 	int i, started;
 
 	t0 = now_ns();
-	image = map_file(path, &size, REFUSED);
+	src_fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (src_fd < 0)
+		die(REFUSED, "%s: %s", path, strerror(errno));
+	image = map_fd(src_fd, path, &size, REFUSED);
 	cached = cache_snapshot(size);
 	if (squashfs_input) {
 		total = squashfs_frames(size);
@@ -823,7 +908,17 @@ static int write_image(const char *path, const char *target, int threads)
 		total = read_seek_table(size);
 		encode_zero_frame();
 	}
-	plan_order(size, cached);
+	plan_order(cached);
+	/*
+	 * Unmap before workers start and read frames with pread() in batches:
+	 * faulting a multi-GiB mmap from 16 threads contends on pte_offset_map_lock
+	 * (warm) and __filemap_add_folio's xa_lock (cold), shatters cold readahead
+	 * into ~9 KiB requests, and leaves ~90 ms of exit_mmap PTE teardown after
+	 * the write finishes. Unmapping now touches zero data PTEs.
+	 */
+	munmap((void *)image, size);
+	image = NULL;
+	posix_fadvise(src_fd, 0, 0, POSIX_FADV_SEQUENTIAL);
 
 	/*
 	 * O_DIRECT, so the data goes straight to the drive instead of piling up
@@ -836,6 +931,16 @@ static int write_image(const char *path, const char *target, int threads)
 	if (target_size(target_fd, target) < (uint64_t)total)
 		die(FAILED, "%s: smaller than the %lld-byte image", target, (long long)total);
 
+	batch = nframes / ((size_t)threads * MAX_BATCH);
+	frame_batch = batch < 1 ? 1 : batch > MAX_BATCH ? MAX_BATCH : batch;
+
+	pthread_condattr_init(&cattr);
+	pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC);
+	pthread_cond_init(&done_cv, &cattr);
+	pthread_condattr_destroy(&cattr);
+	done_count = 0;
+	expected_workers = threads;
+
 	writing = 1;
 	t1 = now_ns();
 	for (i = 0; i < threads; i++)
@@ -844,10 +949,19 @@ static int write_image(const char *path, const char *target, int threads)
 	if (i == 0)
 		die(FAILED, "cannot start a thread");
 	started = i;
+	if (started < threads) {
+		pthread_mutex_lock(&done_mu);
+		expected_workers = started;
+		if (done_count >= expected_workers)
+			pthread_cond_broadcast(&done_cv);
+		pthread_mutex_unlock(&done_mu);
+	}
 	if (getenv("OMARCHY_IMAGE_WRITE_PROGRESS"))
-		report_progress(getenv("OMARCHY_IMAGE_WRITE_PROGRESS"), started);
+		report_progress(getenv("OMARCHY_IMAGE_WRITE_PROGRESS"));
 	while (i--)
 		pthread_join(tid[i], NULL);
+	pthread_cond_destroy(&done_cv);
+	close(src_fd);
 	t2 = now_ns();
 	if (atomic_load(&failed))
 		return FAILED;

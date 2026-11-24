@@ -12,7 +12,6 @@
   "owner.yes": "Yes, prepare for another owner",
   "owner.no": "No, keep setting up",
   "owner.prompt": "Prepare this machine for another owner?",
-  "user.intro": "Let's setup your user account...",
   "summary.field": "Field",
   "summary.value": "Value",
   "summary.username": "Username",

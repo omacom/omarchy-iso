@@ -190,12 +190,91 @@ static int all_zero(const uint8_t *p, size_t n)
 	return p[0] == 0 && memcmp(p, p + 1, n - 1) == 0;
 }
 
+struct pack_slot {
+	uint8_t *buf;
+	size_t csize;
+	size_t dsize;
+	int zero;
+	int ready;
+};
+
+struct pack_ctx {
+	const uint8_t *in;
+	size_t size, nframes, bound, ring;
+	const uint8_t *zero_frame;
+	size_t zero_frame_size;
+	struct pack_slot *slots;
+	atomic_size_t next;
+	size_t written;
+	pthread_mutex_t mu;
+	pthread_cond_t cv;
+	atomic_int failed;
+};
+
+static void *pack_worker(void *arg)
+{
+	struct pack_ctx *ctx = arg;
+	ZSTD_CCtx *cctx = pack_cctx();
+
+	for (;;) {
+		size_t k = atomic_fetch_add(&ctx->next, 1);
+		size_t pos, len, c;
+		struct pack_slot *slot;
+		int is_zero;
+
+		if (k >= ctx->nframes || atomic_load(&ctx->failed))
+			break;
+		pos = k * FRAME_SIZE;
+		len = ctx->size - pos < FRAME_SIZE ? ctx->size - pos : FRAME_SIZE;
+		slot = &ctx->slots[k % ctx->ring];
+
+		pthread_mutex_lock(&ctx->mu);
+		while (k >= ctx->written + ctx->ring && !atomic_load(&ctx->failed))
+			pthread_cond_wait(&ctx->cv, &ctx->mu);
+		pthread_mutex_unlock(&ctx->mu);
+		if (atomic_load(&ctx->failed))
+			break;
+
+		is_zero = all_zero(ctx->in + pos, len);
+		if (is_zero && len == FRAME_SIZE && ctx->zero_frame_size > 0) {
+			memcpy(slot->buf, ctx->zero_frame, ctx->zero_frame_size);
+			c = ctx->zero_frame_size;
+		} else {
+			c = ZSTD_compress2(cctx, slot->buf, ctx->bound, ctx->in + pos, len);
+			if (ZSTD_isError(c)) {
+				if (!atomic_exchange(&ctx->failed, 1))
+					fprintf(stderr, "omarchy-image-write: frame %zu: %s\n",
+						k, ZSTD_getErrorName(c));
+				pthread_mutex_lock(&ctx->mu);
+				pthread_cond_broadcast(&ctx->cv);
+				pthread_mutex_unlock(&ctx->mu);
+				break;
+			}
+		}
+
+		pthread_mutex_lock(&ctx->mu);
+		slot->csize = c;
+		slot->dsize = len;
+		slot->zero = is_zero;
+		slot->ready = 1;
+		pthread_cond_broadcast(&ctx->cv);
+		pthread_mutex_unlock(&ctx->mu);
+	}
+	ZSTD_freeCCtx(cctx);
+	return NULL;
+}
+
 static int pack(const char *raw, const char *out)
 {
 	size_t size, n, i, tsize, zeros = 0, packed = 0, bound = ZSTD_compressBound(FRAME_SIZE);
 	const uint8_t *in = map_file(raw, &size, FAILED);
-	ZSTD_CCtx *cctx = pack_cctx();
-	uint8_t *buf = malloc(bound), *table;
+	long cpus = sysconf(_SC_NPROCESSORS_ONLN);
+	int threads = cpus < 1 ? 1 : cpus > 16 ? 16 : (int)cpus, started = 0;
+	pthread_t tid[MAX_THREADS];
+	uint8_t *bufs = NULL, *zbuf = NULL, *table;
+	void *zraw = NULL;
+	struct pack_ctx ctx;
+	ZSTD_CCtx *zcctx;
 	FILE *f;
 
 	if (size % ALIGN)
@@ -203,25 +282,94 @@ static int pack(const char *raw, const char *out)
 	n = (size + FRAME_SIZE - 1) / FRAME_SIZE;
 	if (n > (UINT32_MAX - FOOTER) / ENTRY)
 		die(FAILED, "%s: too big for a seek table", raw);
+	if ((size_t)threads > n)
+		threads = (int)n;
 	tsize = SKIP_HEADER + n * ENTRY + FOOTER;
 	table = malloc(tsize);
 	f = fopen(out, "wbe");
-	if (!f || !buf || !table)
+
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.in = in;
+	ctx.size = size;
+	ctx.nframes = n;
+	ctx.bound = bound;
+	ctx.ring = (size_t)threads * 4;
+	ctx.slots = calloc(ctx.ring, sizeof(*ctx.slots));
+	bufs = malloc(ctx.ring * bound);
+	zbuf = malloc(bound);
+	zraw = calloc(1, FRAME_SIZE);
+	if (!f || !table || !ctx.slots || !bufs || !zbuf || !zraw)
 		die(FAILED, "%s: %s", out, strerror(errno));
+	for (i = 0; i < ctx.ring; i++)
+		ctx.slots[i].buf = bufs + i * bound;
+
+	/* Pre-encode a full zero frame once so workers copy it instead of recompressing. */
+	zcctx = pack_cctx();
+	ctx.zero_frame_size = ZSTD_compress2(zcctx, zbuf, bound, zraw, FRAME_SIZE);
+	if (ZSTD_isError(ctx.zero_frame_size))
+		ctx.zero_frame_size = 0;
+	ctx.zero_frame = zbuf;
+	ZSTD_freeCCtx(zcctx);
+	free(zraw);
+
+	pthread_mutex_init(&ctx.mu, NULL);
+	pthread_cond_init(&ctx.cv, NULL);
+	for (int t = 0; t < threads; t++) {
+		if (pthread_create(&tid[t], NULL, pack_worker, &ctx) != 0)
+			break;
+		started++;
+	}
+	if (started == 0)
+		die(FAILED, "cannot start a thread");
 
 	for (i = 0; i < n; i++) {
-		size_t pos = i * FRAME_SIZE;
-		size_t len = size - pos < FRAME_SIZE ? size - pos : FRAME_SIZE;
-		size_t c = ZSTD_compress2(cctx, buf, bound, in + pos, len);
+		struct pack_slot *slot = &ctx.slots[i % ctx.ring];
+		size_t c, len;
 
-		if (ZSTD_isError(c))
-			die(FAILED, "frame %zu: %s", i, ZSTD_getErrorName(c));
-		zeros += all_zero(in + pos, len);
+		pthread_mutex_lock(&ctx.mu);
+		while (!slot->ready && !atomic_load(&ctx.failed))
+			pthread_cond_wait(&ctx.cv, &ctx.mu);
+		if (atomic_load(&ctx.failed)) {
+			pthread_mutex_unlock(&ctx.mu);
+			break;
+		}
+		c = slot->csize;
+		len = slot->dsize;
+		zeros += (size_t)slot->zero;
+		pthread_mutex_unlock(&ctx.mu);
+
 		packed += c;
-		if (fwrite(buf, 1, c, f) != c)
-			die(FAILED, "%s: %s", out, strerror(errno));
+		if (fwrite(slot->buf, 1, c, f) != c) {
+			if (!atomic_exchange(&ctx.failed, 1))
+				fprintf(stderr, "omarchy-image-write: %s: %s\n", out, strerror(errno));
+			pthread_mutex_lock(&ctx.mu);
+			pthread_cond_broadcast(&ctx.cv);
+			pthread_mutex_unlock(&ctx.mu);
+			break;
+		}
 		put_le32(table + SKIP_HEADER + i * ENTRY, c);
 		put_le32(table + SKIP_HEADER + i * ENTRY + 4, len);
+
+		pthread_mutex_lock(&ctx.mu);
+		slot->ready = 0;
+		ctx.written = i + 1;
+		pthread_cond_broadcast(&ctx.cv);
+		pthread_mutex_unlock(&ctx.mu);
+	}
+
+	while (started--)
+		pthread_join(tid[started], NULL);
+	pthread_cond_destroy(&ctx.cv);
+	pthread_mutex_destroy(&ctx.mu);
+
+	if (atomic_load(&ctx.failed)) {
+		fclose(f);
+		free(ctx.slots);
+		free(bufs);
+		free(zbuf);
+		free(table);
+		munmap((void *)in, size);
+		return FAILED;
 	}
 
 	put_le32(table, SEEK_TABLE_MAGIC);
@@ -234,8 +382,9 @@ static int pack(const char *raw, const char *out)
 	fprintf(stderr, "omarchy-image-write: packed %.2f GiB as %zu frames (%zu zero) into %.2f GiB\n",
 		size / 1073741824.0, n, zeros, (packed + tsize) / 1073741824.0);
 
-	ZSTD_freeCCtx(cctx);
-	free(buf);
+	free(ctx.slots);
+	free(bufs);
+	free(zbuf);
 	free(table);
 	munmap((void *)in, size);
 	return 0;

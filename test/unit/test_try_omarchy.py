@@ -235,6 +235,20 @@ class DedupAndBuildIsoTest(unittest.TestCase):
         self.assertIn('trap \'rm -f "$pseudo"\' EXIT', shim_text)
         self.assertNotIn('exec /usr/bin/mksquashfs "$@" -pf "$pseudo"', shim_text)
 
+    def test_oem_iso_skips_try_layer_and_hides_grub_menu(self):
+        text = BUILD_ISO.read_text()
+        self.assertIn('[[ $OMARCHY_ARCH == x86_64 && ${OMARCHY_OEM_INSTALL:-} != "1" ]]', text)
+        self.assertIn("s/^timeout=.*/timeout=0/", text)
+        self.assertIn("s/^timeout_style=.*/timeout_style=hidden/", text)
+        self.assertIn("/^# Just try:/,$d", text)
+
+    def test_iso_size_gate_checks_only_newly_built_isos_after_chown(self):
+        text = BUILD_ISO.read_text()
+        self.assertIn('iso_staging=$(mktemp -d /out/.omarchy-iso-out.XXXXXX)', text)
+        self.assertIn('for iso in "${built_isos[@]}"; do', text)
+        self.assertNotIn("for iso in /out/*.iso; do", text)
+        self.assertLess(text.index('chown -R "$HOST_UID:$HOST_GID" /out/'), text.index("iso_fail_bytes="))
+
 
 if __name__ == "__main__":
     unittest.main()

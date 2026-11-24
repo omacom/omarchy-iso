@@ -227,6 +227,8 @@ echo "$OMARCHY_ARCH" > "$build_cache_dir/airootfs/root/omarchy_arch"
 if [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]]; then
   touch "$build_cache_dir/airootfs/usr/share/omarchy-iso/oem-install"
   sed -i 's/^TIMEOUT .*/TIMEOUT 1/' "$build_cache_dir/syslinux/archiso_sys.cfg"
+  # OEM factory-flashing media boot straight into the installer with no Try entry.
+  sed -i '/^# Just try:/,$d' "$build_cache_dir/syslinux/archiso_sys-linux.cfg"
 fi
 # A preset ISO (--preset): the configurator takes the answers presets/<code>.json
 # gives instead of asking, and the orchestrator hands its region to the target.
@@ -318,6 +320,9 @@ fi
 try_splash_kernel_options="quiet splash plymouth.use-simpledrm "
 for grub_config in "$build_cache_dir/grub/grub.cfg" "$build_cache_dir/grub/loopback.cfg"; do
   configure_grub_platform "$grub_config" "$OMARCHY_ARCH"
+  if [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]]; then
+    sed -i -e 's/^timeout=.*/timeout=0/' -e 's/^timeout_style=.*/timeout_style=hidden/' "$grub_config"
+  fi
   sed -i \
     -e "s|%KERNEL%|$OMARCHY_KERNEL|g" \
     -e "s|%BOOT_SPLASH_KERNEL_OPTIONS%|$boot_splash_kernel_options|g" \
@@ -1011,10 +1016,11 @@ iso_subdir="$(sed -n 's/^install_dir="\(.*\)"$/\1/p' "$build_cache_dir/profilede
 root_image_dir="$build_cache_dir/work/iso/$iso_subdir"
 root_image="$root_image_dir/omarchy-root.sfs"
 # The Try Omarchy layer (builder/build-try-layer.sh) beside it, which the boot
-# menu's Try entry mounts over the image. x86_64 only for now: aarch64 boards
-# boot through device-tree UKIs that do not take the Try entry.
+# menu's Try entry mounts over the image. x86_64 consumer media only: aarch64
+# boards boot through device-tree UKIs that do not take the Try entry, and OEM
+# factory-flashing media install directly.
 try_layer=""
-[[ $OMARCHY_ARCH == x86_64 ]] && try_layer="$root_image_dir/omarchy-try.sfs"
+[[ $OMARCHY_ARCH == x86_64 && ${OMARCHY_OEM_INSTALL:-} != "1" ]] && try_layer="$root_image_dir/omarchy-try.sfs"
 mkdir -p "$root_image_dir"
 # Builds from before the raw image left a send stream (and, briefly, its
 # checksum) in the persistent build cache, where they would ship inside the
@@ -1276,13 +1282,34 @@ cp "$build_cache_dir/pacman-offline.conf" "$build_cache_dir/airootfs/etc/pacman.
 # package"), ending the build.
 sed -i "/^\[options\]/a CacheDir = /var/cache/omarchy/mirror/offline/" "$build_cache_dir/pacman-offline.conf"
 
-# Build the ISO. profiledef.sh reads OMARCHY_ARCH for the archiso arch/bootmodes.
+# Build the ISO into a fresh staging directory on /out/ (same filesystem, so
+# mv is an instant rename) so the size gate checks only the ISO this build
+# produced, never pre-existing foreign-arch ISOs sharing /out/
+# (bin/omarchy-iso-make mounts release/ there).
+iso_staging=$(mktemp -d /out/.omarchy-iso-out.XXXXXX)
+trap 'rm -rf "$iso_staging"' EXIT
 echo "[timing] mkarchiso start $(date +%s)"
 # The live system goes in as a layer over the root image, which then carries
 # what both hold (builder/mksquashfs-shim, builder/dedup-airootfs.sh).
 OMARCHY_ROOT_IMAGE="$root_image" PATH="/builder/mksquashfs-shim:$PATH" \
-  "$mkarchiso_command" -v -w "$build_cache_dir/work/" -o /out/ "$build_cache_dir/"
+  "$mkarchiso_command" -v -w "$build_cache_dir/work/" -o "$iso_staging/" "$build_cache_dir/"
 echo "[timing] mkarchiso end $(date +%s)"
+
+built_isos=()
+for iso in "$iso_staging"/*.iso; do
+  [[ -f $iso ]] || continue
+  dest="/out/$(basename "$iso")"
+  mv -f "$iso" "$dest"
+  built_isos+=("$dest")
+done
+rm -rf "$iso_staging"
+trap - EXIT
+
+# Match host UID/GID on the output before any post-build gate can exit, so a
+# failed size check still leaves the produced ISO owned by the host user.
+if [[ -n $HOST_UID && -n $HOST_GID ]]; then
+  chown -R "$HOST_UID:$HOST_GID" /out/
+fi
 
 # The live initramfs must stay small enough for GRUB and the kernel to place
 # it. omarchy-iso#128: at 241 MiB (every DRM driver's firmware, via the kms
@@ -1306,7 +1333,7 @@ done
 # ARM images are not limited to an 8 GB stick.
 iso_fail_bytes=7700000000
 iso_warn_bytes=7500000000
-for iso in /out/*.iso; do
+for iso in "${built_isos[@]}"; do
   [[ -f $iso ]] || continue
   iso_bytes=$(stat -c %s "$iso")
   echo "ISO $(basename "$iso"): $iso_bytes bytes"
@@ -1319,8 +1346,3 @@ for iso in /out/*.iso; do
     fi
   fi
 done
-
-# Match host UID/GID on output.
-if [[ -n $HOST_UID && -n $HOST_GID ]]; then
-  chown -R "$HOST_UID:$HOST_GID" /out/
-fi

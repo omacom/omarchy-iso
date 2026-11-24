@@ -44,6 +44,7 @@ class InstallDiskReleaseTest(unittest.TestCase):
         patches = [
             mock.patch.object(phases_impl, "arch", self.arch, create=True),
             mock.patch.object(phases_impl, "_stage_qualcomm_firmware"),
+            mock.patch.object(phases_impl, "_start_target_keyring_init"),
         ]
         for patch in patches:
             patch.start()

@@ -9,6 +9,7 @@ reshape are in test_place_root_image.py.
 
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -466,8 +467,11 @@ class TargetKeyringUnitTest(unittest.TestCase):
     a transient unit and joined before the factory snapshot."""
 
     def setUp(self):
-        self.target = Path("/mnt")
-        self.ctx = types.SimpleNamespace(target=self.target, state={})
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.target = Path(self.tmp.name) / "mnt"
+        self.state_dir = Path(self.tmp.name) / "run"
+        self.ctx = types.SimpleNamespace(target=self.target, state_dir=self.state_dir, state={})
         self.runs = []
         self.popens = []
 
@@ -499,15 +503,123 @@ class TargetKeyringUnitTest(unittest.TestCase):
             ["systemd-run", "--wait", "--pipe", "--collect", "--quiet", "--unit=omarchy-target-keyring"],
         )
         self.assertEqual(cmd[6:8], ["sh", "-c"])
+        staged = self.state_dir / "target-gnupg"
         self.assertEqual(
             cmd[8],
-            "pacman-key --gpgdir /mnt/etc/pacman.d/gnupg --init && "
-            "pacman-key --gpgdir /mnt/etc/pacman.d/gnupg "
-            "--populate-from /mnt/usr/share/pacman/keyrings --populate archlinux omarchy",
+            f"rm -rf {staged} && mkdir -m 700 -p {staged} && "
+            f"pacman-key --gpgdir {staged} --init && "
+            f"pacman-key --gpgdir {staged} "
+            f"--populate-from {self.target}/usr/share/pacman/keyrings --populate archlinux omarchy",
         )
         self.assertNotIn("arch-chroot", cmd[8])
         self.assertIs(kwargs["stderr"], phases_impl.subprocess.STDOUT)
         self.assertIsInstance(self.ctx.state["target_keyring_proc"], FakeUnitProc)
+        self.assertEqual(self.ctx.state["target_keyring_stage"], staged)
+
+    def test_start_is_idempotent_while_running_or_installed(self):
+        phases_impl._start_target_keyring_init(self.ctx)
+        phases_impl._start_target_keyring_init(self.ctx)
+        self.assertEqual(len(self.popens), 1)
+
+        phases_impl._join_target_keyring_init(self.ctx)
+        phases_impl._start_target_keyring_init(self.ctx)
+        self.assertEqual(len(self.popens), 1)
+
+    def test_prepare_live_starts_keyring_before_disk_cleanup_when_live_keyrings_exist(self):
+        live_keyrings = Path(self.tmp.name) / "live-keyrings"
+        live_keyrings.mkdir()
+        (live_keyrings / "archlinux.gpg").write_bytes(b"a")
+        (live_keyrings / "omarchy.gpg").write_bytes(b"o")
+
+        events = []
+        ctx = types.SimpleNamespace(
+            target=self.target,
+            state_dir=self.state_dir,
+            state={},
+            is_protected=False,
+            user_configuration={"disk_config": {"device_modifications": [{"device": "/dev/vda", "wipe": True}]}},
+            arch_config_path=Path("/tmp/cfg.json"),
+            creds_path=Path("/tmp/creds.json"),
+        )
+        with (
+            mock.patch.object(phases_impl, "LIVE_KEYRINGS_DIR", live_keyrings),
+            mock.patch.object(phases_impl, "_stage_qualcomm_firmware"),
+            mock.patch.object(
+                phases_impl, "_start_target_keyring_init",
+                side_effect=lambda c, *, keyrings_dir=None: events.append(("keyring", keyrings_dir)),
+            ),
+            mock.patch.object(
+                phases_impl, "capture",
+                side_effect=lambda cmd: events.append(("cleanup", cmd)) or CompletedProcess(cmd, 0, "", ""),
+            ),
+            mock.patch.object(phases_impl.arch, "load_arch_config", return_value=object(), create=True),
+            mock.patch.object(phases_impl.arch, "make_mirror_handler", return_value=object(), create=True),
+        ):
+            phases_impl.prepare_live(ctx)
+
+        self.assertEqual(events[0], ("keyring", live_keyrings))
+        self.assertEqual(events[1][0], "cleanup")
+
+    def test_prepare_live_skips_keyring_when_live_keyrings_are_missing(self):
+        missing_keyrings = Path(self.tmp.name) / "empty-keyrings"
+        missing_keyrings.mkdir()
+
+        events = []
+        ctx = types.SimpleNamespace(
+            target=self.target,
+            state_dir=self.state_dir,
+            state={},
+            is_protected=False,
+            user_configuration={"disk_config": {"device_modifications": [{"device": "/dev/vda", "wipe": True}]}},
+            arch_config_path=Path("/tmp/cfg.json"),
+            creds_path=Path("/tmp/creds.json"),
+        )
+        with (
+            mock.patch.object(phases_impl, "LIVE_KEYRINGS_DIR", missing_keyrings),
+            mock.patch.object(phases_impl, "_stage_qualcomm_firmware"),
+            mock.patch.object(
+                phases_impl, "_start_target_keyring_init",
+                side_effect=lambda c, *, keyrings_dir=None: events.append(("keyring", keyrings_dir)),
+            ),
+            mock.patch.object(
+                phases_impl, "capture",
+                side_effect=lambda cmd: events.append(("cleanup", cmd)) or CompletedProcess(cmd, 0, "", ""),
+            ),
+            mock.patch.object(phases_impl.arch, "load_arch_config", return_value=object(), create=True),
+            mock.patch.object(phases_impl.arch, "make_mirror_handler", return_value=object(), create=True),
+        ):
+            phases_impl.prepare_live(ctx)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][0], "cleanup")
+
+    def test_join_installs_staged_keyring_replacing_existing_and_skipping_sockets(self):
+        staged = self.state_dir / "target-gnupg"
+        (staged / "private-keys-v1.d").mkdir(parents=True)
+        (staged / "pubring.gpg").write_bytes(b"pubring")
+        key_file = staged / "private-keys-v1.d" / "master.key"
+        key_file.write_bytes(b"secret")
+        key_file.chmod(0o600)
+        sock_path = staged / "S.gpg-agent"
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.bind(str(sock_path))
+            existing = self.target / "etc" / "pacman.d" / "gnupg"
+            existing.mkdir(parents=True)
+            (existing / "stale.txt").write_text("from pacstrap\n")
+
+            self.ctx.state["target_keyring_proc"] = FakeUnitProc()
+            self.ctx.state["target_keyring_stage"] = staged
+            phases_impl._join_target_keyring_init(self.ctx)
+        finally:
+            sock.close()
+
+        self.assertEqual((existing / "pubring.gpg").read_bytes(), b"pubring")
+        self.assertEqual((existing / "private-keys-v1.d" / "master.key").read_bytes(), b"secret")
+        self.assertEqual(existing.stat().st_mode & 0o777, 0o700)
+        self.assertFalse((existing / "stale.txt").exists())
+        self.assertFalse((existing / "S.gpg-agent").exists())
+        self.assertFalse(staged.exists())
 
     def test_join_waits_once_and_clears_state(self):
         proc = FakeUnitProc()
@@ -518,18 +630,28 @@ class TargetKeyringUnitTest(unittest.TestCase):
         self.assertNotIn("target_keyring_proc", self.ctx.state)
 
     def test_join_raises_with_the_unit_output(self):
+        staged = self.state_dir / "target-gnupg"
+        staged.mkdir(parents=True)
         self.ctx.state["target_keyring_proc"] = FakeUnitProc(returncode=1, output="gpg: boom\n")
+        self.ctx.state["target_keyring_stage"] = staged
         with self.assertRaisesRegex(RuntimeError, r"(?s)keyring init failed \(exit 1\).*gpg: boom"):
             phases_impl._join_target_keyring_init(self.ctx)
         self.assertNotIn("target_keyring_proc", self.ctx.state)
+        self.assertFalse(staged.exists())
 
     def test_stop_ends_the_unit_and_never_raises(self):
+        staged = self.state_dir / "target-gnupg"
+        staged.mkdir(parents=True)
+        (staged / "pubring.gpg").write_bytes(b"partial")
         proc = FakeUnitProc(returncode=1, output="killed")
         self.ctx.state["target_keyring_proc"] = proc
+        self.ctx.state["target_keyring_stage"] = staged
         phases_impl.stop_target_keyring_init(self.ctx)
         self.assertEqual(self.runs, [["systemctl", "stop", "omarchy-target-keyring"]])
         self.assertEqual(proc.joined, 1)
         self.assertNotIn("target_keyring_proc", self.ctx.state)
+        self.assertFalse(staged.exists())
+        self.assertFalse((self.target / "etc" / "pacman.d" / "gnupg").exists())
 
     def test_stop_without_a_unit_touches_nothing(self):
         phases_impl.stop_target_keyring_init(self.ctx)
@@ -544,18 +666,23 @@ class TargetKeyringUnitTest(unittest.TestCase):
                 phases_impl.create_factory_snapshot(self.ctx)
         self.assertEqual(self.runs, [])
 
-    def test_arch_install_starts_keyring_after_swap_and_before_limine_and_users(self):
-        for tailscale in (False, True):
-            with self.subTest(tailscale=tailscale):
+    def test_arch_install_starts_staged_keyring_without_blocking_pacstrap_and_defers_sof(self):
+        for tailscale, has_sof_script in ((False, True), (True, True), (False, False)):
+            with self.subTest(tailscale=tailscale, has_sof_script=has_sof_script):
                 events = []
-                received_before_strap = []
+                app_calls = []
+                target = Path(self.tmp.name) / f"mnt-{tailscale}-{has_sof_script}"
+                if has_sof_script:
+                    sof = target / "usr/share/omarchy/install/hardware/intel/sof-firmware.sh"
+                    sof.parent.mkdir(parents=True, exist_ok=True)
+                    sof.write_text("#!/bin/bash\n")
                 installer = mock.MagicMock()
                 installer.create_users.side_effect = lambda users: events.append("create_users")
                 installer.add_additional_packages.side_effect = lambda pkgs: events.append(("strap", list(pkgs)))
 
-                def record_install_apps(inst, cfg, *, before_strap=None):
+                def record_install_apps(inst, cfg, *, before_strap=None, skip_packages=()):
                     events.append("install_apps")
-                    received_before_strap.append(before_strap)
+                    app_calls.append((before_strap, tuple(skip_packages)))
 
                 config = types.SimpleNamespace(
                     kernels=["linux-omarchy"], locale_config=None, mirror_config=None,
@@ -566,7 +693,8 @@ class TargetKeyringUnitTest(unittest.TestCase):
                 )
                 ctx = types.SimpleNamespace(
                     state={"arch_config_handler": types.SimpleNamespace(config=config), "mirror_handler": None},
-                    target=Path("/mnt"),
+                    target=target,
+                    state_dir=self.state_dir,
                     tailscale_authkey_path=Path("/tmp/key") if tailscale else None,
                     defer_provisioning=False,
                     omarchy_install={},
@@ -593,7 +721,7 @@ class TargetKeyringUnitTest(unittest.TestCase):
                     stack.enter_context(mock.patch.object(phases_impl.arch, "is_pre_mount", return_value=True, create=True))
                     opened = stack.enter_context(mock.patch.object(phases_impl.arch, "open_installer", create=True))
                     stack.enter_context(mock.patch.object(phases_impl.arch, "sanity_check", create=True))
-                    stack.enter_context(mock.patch.object(phases_impl.arch, "install_base_delta", create=True))
+                    stack.enter_context(mock.patch.object(phases_impl.arch, "install_base_delta", side_effect=lambda *a, **kw: events.append("base_delta"), create=True))
                     stack.enter_context(mock.patch.object(phases_impl.arch, "setup_zram_swap", side_effect=lambda inst: events.append("zram"), create=True))
                     stack.enter_context(mock.patch.object(phases_impl.arch, "target_missing_packages", return_value=[], create=True))
                     stack.enter_context(mock.patch.object(phases_impl.arch, "install_applications", side_effect=record_install_apps, create=True))
@@ -601,19 +729,14 @@ class TargetKeyringUnitTest(unittest.TestCase):
                     opened.return_value.__enter__.return_value = installer
                     phases_impl.arch_install_system(ctx)
 
-                self.assertLess(events.index("zram"), events.index("start_keyring"))
+                self.assertLess(events.index("start_keyring"), events.index("base_delta"))
                 self.assertLess(events.index("start_keyring"), events.index("limine"))
                 self.assertLess(events.index("start_keyring"), events.index("create_users"))
-                self.assertEqual(len(received_before_strap), 1)
-                self.assertIsNotNone(received_before_strap[0])
+                self.assertNotIn("join_keyring", events)
+                expected_skip = ("sof-firmware",) if has_sof_script else ()
+                self.assertEqual(app_calls, [(None, expected_skip)])
                 if tailscale:
-                    self.assertLess(events.index("join_keyring"), events.index(("strap", ["tailscale"])))
-                else:
-                    self.assertNotIn("join_keyring", events)
-                    # Calling the passed before_strap callback joins the keyring unit.
-                    with mock.patch.object(phases_impl, "_join_target_keyring_init", side_effect=lambda c: events.append("callback_join")):
-                        received_before_strap[0]()
-                    self.assertIn("callback_join", events)
+                    self.assertIn(("strap", ["tailscale"]), events)
 
 
 class ReflinkSkelCreateUsers(unittest.TestCase):

@@ -168,6 +168,16 @@ done
 in_try runuser -u "$TRY_USER" -- install -D -m 0644 /dev/null \
   "/home/$TRY_USER/.local/state/omarchy/indicators/stay-awake"
 
+# No lock before a suspend (a closed lid). Try ships no lock screen PAM file,
+# so omarchy-system-sleep-lock could only send a critical notification at
+# every suspend that it had not locked. The unit stays enableable: first-run
+# enables it, and a mask would fail that step and rerun first-run at every
+# login.
+install -Dm644 /dev/stdin "$merged/etc/systemd/user/omarchy-sleep-lock.service.d/10-omarchy-try.conf" <<'EOF'
+[Unit]
+ConditionPathExists=/etc/pam.d/omarchy-lock-password
+EOF
+
 # Guard Hyprland's NVIDIA env script for cards that run Try on nouveau
 # (Maxwell-Volta GPUs, which have no 580xx layer, and non-T2 Macs booting
 # linux-t2). default/hypr/nvidia.lua checks sysfs PCI IDs rather than the
@@ -266,10 +276,14 @@ Current=omarchy
 RememberLastUser=true
 RememberLastSession=true
 EOF
+# Relogin: SDDM logs in by itself only once per boot. When the session ends
+# (Hyprland exits or crashes, or a logout), it shows its greeter, which asks
+# for a password the session never had.
 cat >"$merged/etc/sddm.conf.d/autologin.conf" <<EOF
 [Autologin]
 User=$TRY_USER
 Session=omarchy.desktop
+Relogin=true
 EOF
 
 # Nothing in Try touches a disk or the host OS's boot/hibernate state.

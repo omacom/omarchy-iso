@@ -46,6 +46,38 @@ wait_for_desktop() {
   done
 }
 
+# The Try user's graphical session on the seat, if any. SDDM's greeter has a
+# seat session too, of class greeter, under its own user.
+seat_session() {
+  ssh_guest 'for s in $(loginctl list-sessions --no-legend | awk "\$4 == \"seat0\" { print \$1 }"); do
+      [ "$(loginctl show-session "$s" -p Class --value)" = user ] &&
+        [ "$(loginctl show-session "$s" -p Name --value)" = "$(id -un)" ] && { echo "$s"; break; }
+    done' </dev/null
+}
+
+# End the desktop session with $1, as Omarchy's Logout does (uwsm stop). SDDM
+# must log the session in again rather than stop at its greeter. Two stand-ins
+# do not reach SDDM: loginctl terminate-session kills sddm-helper too, which
+# SDDM reads as a failed login and so shows nothing, and a killed Hyprland is
+# restarted inside the same session in Hyprland's crash recovery.
+relogin_after() {
+  local old new
+  old=$(seat_session)
+  [[ -n $old ]] || return 1
+  try_ssh "$1" || true
+  for _ in $(seq 1 30); do
+    sleep 2
+    new=$(seat_session)
+    if [[ -n $new && $new != "$old" ]] && try_ssh 'pgrep -u "$(id -u)" -x Hyprland >/dev/null && pgrep -u "$(id -u)" -x quickshell >/dev/null'; then
+      return 0
+    fi
+  done
+  capture_console "failure-try-relogin"
+  { echo "== after: $1"; ssh_guest 'loginctl list-sessions; echo; journalctl -b -o short-monotonic -u sddm --no-pager | tail -60' </dev/null; } \
+    >>"$RUN_DIR/failure-try-relogin.txt" 2>&1 || true
+  return 1
+}
+
 # In the session's environment, for hyprctl.
 try_ssh() {
   ssh_guest "export XDG_RUNTIME_DIR=/run/user/\$(id -u) \
@@ -100,6 +132,10 @@ check "Bluetooth is enabled for the live desktop" try_ssh "systemctl is-enabled 
 check "disk and host-hibernate units are masked" try_ssh \
   'for u in systemd-hibernate-clear.service lvm2-monitor.service lvm2-lvmpolld.socket systemd-boot-random-seed.service; do [ "$(systemctl is-enabled "$u" 2>/dev/null || true)" = masked ] || exit 1; done'
 check "nothing on the machine's disk is mounted" try_ssh '! lsblk -nro MOUNTPOINTS /dev/vda | grep -q .'
+# The session has no password, so nothing may ask for one.
+check "no lock is asked for before a suspend" try_ssh \
+  '[ "$(systemctl --user show -p ConditionResult --value omarchy-sleep-lock.service)" = no ]'
+check "a logout logs straight back in" relogin_after 'uwsm stop'
 # Nothing waits for the keyring at boot; wait for it here.
 check "the session made its own pacman keyring" try_ssh \
   'timeout 120 bash -c "while systemctl is-active -q omarchy-try-keyring; do sleep 1; done" && [ "$(systemctl show -p Result --value omarchy-try-keyring)" = success ]'

@@ -96,6 +96,9 @@ check "the Omarchy shell runs" try_ssh "pgrep -x quickshell"
 # An install adds these only on the machines that need them, so the root
 # image leaves them out; Try runs on whatever machine it boots.
 check "the session has the audio firmware" try_ssh "pacman -Q sof-firmware alsa-firmware >/dev/null"
+check "Bluetooth is enabled for the live desktop" try_ssh "systemctl is-enabled -q bluetooth.service"
+check "disk and host-hibernate units are masked" try_ssh \
+  'for u in systemd-hibernate-clear.service lvm2-monitor.service lvm2-lvmpolld.socket systemd-boot-random-seed.service; do [ "$(systemctl is-enabled "$u" 2>/dev/null || true)" = masked ] || exit 1; done'
 check "nothing on the machine's disk is mounted" try_ssh '! lsblk -nro MOUNTPOINTS /dev/vda | grep -q .'
 # Nothing waits for the keyring at boot; wait for it here.
 check "the session made its own pacman keyring" try_ssh \

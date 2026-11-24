@@ -100,6 +100,38 @@ chmod 0440 "$merged/etc/sudoers.d/10-omarchy-try"
 # Omarchy installed Node lazily unpacks the ISO's bundled Node tarball while
 # it does: the installer binds /opt/packages into the target for it
 # (_prepare_target_setup), and so does this, for the run only.
+#
+# Isolate from the build host's hardware: omarchy-provision-user prepends
+# $OMARCHY_PATH/bin to PATH and runs install/user/all.sh hardware tweaks
+# (vm-no-animations, asus, dell, framework, fix-nouveau-cursor), and
+# post-install/pacman.sh checks host platform/PCI. Bind-mount stub scripts
+# directly over the real detector files in $merged (outside $merged so nothing
+# leaks into $upper; check both /usr/bin and /usr/share/omarchy/bin without
+# following absolute chroot symlinks) so building inside a CI VM or on a laptop
+# never bakes host-specific toggles (like no-animations.lua) into Try.
+host_stubs="$work/host-stubs"
+mkdir -p "$host_stubs"
+bound_stubs=()
+bind_host_stub() {
+  local stub=$1 cmd=$2 target
+  for target in "$merged/usr/bin/$cmd" "$merged/usr/share/omarchy/bin/$cmd"; do
+    if [[ -f $target && ! -L $target ]]; then
+      mount --bind "$stub" "$target"
+      bound_stubs+=("$target")
+    fi
+  done
+}
+for hw_cmd in omarchy-hw-vm omarchy-hw-asus-rog omarchy-hw-match omarchy-hw-pci; do
+  printf '#!/bin/sh\nexit 1\n' >"$host_stubs/$hw_cmd"
+  chmod 0755 "$host_stubs/$hw_cmd"
+  bind_host_stub "$host_stubs/$hw_cmd" "$hw_cmd"
+done
+for noop_cmd in lspci pactl; do
+  printf '#!/bin/sh\nexit 0\n' >"$host_stubs/$noop_cmd"
+  chmod 0755 "$host_stubs/$noop_cmd"
+  bind_host_stub "$host_stubs/$noop_cmd" "$noop_cmd"
+done
+
 node_dir=${OMARCHY_TRY_NODE_DIR:-}
 if [[ -d $node_dir ]]; then
   mkdir -p "$merged/opt/packages"
@@ -109,24 +141,80 @@ in_try runuser -u "$TRY_USER" -- env \
   HOME="/home/$TRY_USER" USER="$TRY_USER" LOGNAME="$TRY_USER" \
   OMARCHY_PATH=/usr/share/omarchy OMARCHY_INSTALL=/usr/share/omarchy/install \
   OMARCHY_INSTALL_USER="$TRY_USER" MISE_OFFLINE=1 \
+  OMARCHY_PCI_DEVICES_PATH=/dev/null \
+  OMARCHY_NOUVEAU_DRIVER_PATH=/dev/null \
   /usr/bin/omarchy-provision-user --force --first-install
 if mountpoint -q "$merged/opt/packages"; then
   umount "$merged/opt/packages"
   rmdir "$merged/opt/packages" 2>/dev/null || true
 fi
 
+# Baseline system configs the installer writes for an installed machine:
+# UTF-8 locale (en_US.UTF-8 is compiled into the root image), a hostname,
+# and Chromium/Chrome browser policies & initial_preferences (so Try skips
+# Chromium's first-run EULA/ToS prompt and follows the desktop theme).
+printf 'LANG=en_US.UTF-8\n' >"$merged/etc/locale.conf"
+printf 'omarchy\n' >"$merged/etc/hostname"
+for cfg_script in browser-policy.sh theme-system.sh; do
+  if [[ -f "$merged/usr/share/omarchy/install/config/$cfg_script" ]]; then
+    in_try env OMARCHY_PATH=/usr/share/omarchy OMARCHY_INSTALL=/usr/share/omarchy/install \
+      PATH=/usr/share/omarchy/bin:/usr/bin \
+      bash -c "source \"\$OMARCHY_INSTALL/config/$cfg_script\"" >/dev/null
+  fi
+done
+
 # Stay awake: no screensaver and no idle lock in a session someone is trying
 # out (the state omarchy-toggle-idle stay-awake writes).
 in_try runuser -u "$TRY_USER" -- install -D -m 0644 /dev/null \
   "/home/$TRY_USER/.local/state/omarchy/indicators/stay-awake"
 
-# Services Omarchy's install/config/enable-services.sh enables that a live
-# desktop needs. Not cups, avahi or docker: nothing to print to, browse or run.
+# Guard Hyprland's NVIDIA env script for cards that run Try on nouveau
+# (Maxwell-Volta GPUs, which have no 580xx layer, and non-T2 Macs booting
+# linux-t2). default/hypr/nvidia.lua checks sysfs PCI IDs rather than the
+# loaded driver, so without a guard it exports __GLX_VENDOR_LIBRARY_NAME=nvidia
+# and NVD_BACKEND=egl when nvidia-utils is absent. /etc/modprobe.d/nvidia.conf
+# exists in Try if and only if omarchy-try-nvidia-open.sfs is stacked on top.
+nvidia_lua="$merged/usr/share/omarchy/default/hypr/nvidia.lua"
+if [[ -f $nvidia_lua ]]; then
+  mv "$nvidia_lua" "$merged/usr/share/omarchy/default/hypr/nvidia_upstream.lua"
+  cat >"$nvidia_lua" <<'EOF'
+-- Try Omarchy guard: only apply proprietary NVIDIA environment variables when
+-- the NVIDIA driver layer is active (/etc/modprobe.d/nvidia.conf is present).
+-- Otherwise NVIDIA GPUs run Try on nouveau (e.g. Maxwell-Volta without 580xx,
+-- or Macs booting linux-t2), where exporting __GLX_VENDOR_LIBRARY_NAME=nvidia
+-- breaks GLX and hardware cursors can be invisible.
+local f = io.open("/etc/modprobe.d/nvidia.conf", "r")
+if f then
+  f:close()
+  require("default.hypr.nvidia_upstream")
+else
+  local paths = require("default.hypr.paths")
+  if o.shell_succeeds(o.shell_quote(paths.omarchy_path .. "/bin/omarchy-hw-nvidia")) then
+    hl.config({
+      cursor = {
+        no_hardware_cursors = true,
+      },
+    })
+  end
+end
+EOF
+fi
+
+# Services Omarchy's install/config/enable-services.sh and hardware/bluetooth.sh
+# enable that a live desktop needs. Not cups, avahi or docker: nothing to print
+# to, browse or run. Retire systemd-networkd (enabled by systemd's default
+# preset in the root image) so it does not compete with NetworkManager.
 for unit in systemd-resolved.service NetworkManager.service power-profiles-daemon.service \
-  sddm.service systemd-oomd.service; do
+  sddm.service systemd-oomd.service bluetooth.service; do
   in_try systemctl enable "$unit" >/dev/null 2>&1 || echo "WARNING: could not enable $unit" >&2
 done
-in_try systemctl mask NetworkManager-wait-online.service >/dev/null 2>&1 || true
+for unit in systemd-networkd.service systemd-networkd.socket \
+  systemd-networkd-wait-online.service; do
+  in_try systemctl disable "$unit" >/dev/null 2>&1 || true
+done
+for unit in NetworkManager-wait-online.service systemd-networkd-wait-online.service; do
+  in_try systemctl mask "$unit" >/dev/null 2>&1 || true
+done
 ln -sf ../run/systemd/resolve/stub-resolv.conf "$merged/etc/resolv.conf"
 
 # pacman. The image has no mirrorlist (pacstrap -M) and no keyring (-G); an
@@ -135,19 +223,24 @@ ln -sf ../run/systemd/resolve/stub-resolv.conf "$merged/etc/resolv.conf"
 # install/post-install/pacman.sh, which renders them from Omarchy's templates
 # with no network, whichever runtime the channel carries.
 in_try env OMARCHY_PATH=/usr/share/omarchy OMARCHY_INSTALL=/usr/share/omarchy/install \
-  OMARCHY_MIRROR="$channel" PATH=/usr/share/omarchy/bin:/usr/bin \
+  OMARCHY_MIRROR="$channel" \
+  PATH=/usr/share/omarchy/bin:/usr/bin \
+  OMARCHY_PCI_DEVICES_PATH=/dev/null \
   bash -c 'source "$OMARCHY_INSTALL/post-install/pacman.sh"' >/dev/null
+for bound_stub in "${bound_stubs[@]}"; do
+  umount "$bound_stub"
+done
+rm -rf "$host_stubs"
 # The keyring is made at boot, so no two sessions share a master key, as no
-# two installs do. Then the package databases, which Omarchy's Install menu
-# expects to be there (it runs pacman -S without -y): best effort, retried
-# while the network comes up, and nothing is lost without one.
+# two installs do. Keep the package sync databases that ship-sync-databases.sh
+# already placed in the root image: they match the exact package versions in
+# omarchy-root.sfs, whereas running `pacman -Sy` at boot overwrites them with
+# newer indexes (causing partial-upgrade breakage on aged ISOs, lock contention,
+# and spurious "Update System" prompts).
 #
-# Type=exec, not oneshot: multi-user.target would wait for those retries, and
-# with it power-profiles-daemon (After=multi-user.target), which the Omarchy
-# shell waits for at start. As a oneshot it held the desktop back by the
-# whole wait for the network, 8.8 s on an MSI Z690. The keys are in 3.3 s
-# after the unit starts, before the shell has loaded; a pacman run that meets
-# the database sync fails on its lock, as during any update.
+# Type=exec, not oneshot: multi-user.target does not wait for gpg keygen, and
+# neither does power-profiles-daemon (After=multi-user.target), which the
+# Omarchy shell waits for at start.
 install -Dm644 /dev/stdin "$merged/etc/systemd/system/omarchy-try-keyring.service" <<'EOF'
 [Unit]
 Description=Try Omarchy: a pacman keyring of this session's own
@@ -155,7 +248,7 @@ ConditionPathExists=!/etc/pacman.d/gnupg/trustdb.gpg
 
 [Service]
 Type=exec
-ExecStart=/usr/bin/bash -c 'pacman-key --init && pacman-key --populate || exit 1; for i in 1 2 3 4 5 6 7 8 9 10 11 12; do pacman -Sy --noconfirm && break; sleep 5; done; exit 0'
+ExecStart=/usr/bin/bash -c 'pacman-key --init && pacman-key --populate'
 
 [Install]
 WantedBy=multi-user.target
@@ -179,11 +272,18 @@ User=$TRY_USER
 Session=omarchy.desktop
 EOF
 
-# Nothing in Try touches a disk.
-#   Snapper and limine-snapper-sync work on the installed btrfs and its ESP;
-#   / here is an overlay.
+# Nothing in Try touches a disk or the host OS's boot/hibernate state.
+#   - Snapper and limine-snapper-sync work on the installed btrfs and its ESP;
+#     / here is an overlay.
+#   - systemd-hibernate-clear.service deletes the host OS's HibernateLocation
+#     EFI variable on boot, destroying resume state on a hibernated machine.
+#   - lvm2-monitor.service / lvm2-lvmpolld.socket run `lvm vgchange --monitor y`
+#     even with 69-dm-lvm.rules masked.
+#   - systemd-boot-random-seed.service writes to the ESP when chainloaded from
+#     systemd-boot.
 for unit in snapper-timeline.timer snapper-cleanup.timer snapper-boot.timer \
-  limine-snapper-sync.service; do
+  limine-snapper-sync.service systemd-hibernate-clear.service \
+  lvm2-monitor.service lvm2-lvmpolld.socket systemd-boot-random-seed.service; do
   in_try systemctl mask "$unit" >/dev/null 2>&1 || true
 done
 #   mdadm's udev rule assembles RAID members it finds, and assembly can write
@@ -277,8 +377,11 @@ driver_layer() { # name, script, lspci line, PCI vendor, device, class
   printf '#!/bin/sh\nexit 1\n' >"$stubs/omarchy-hw-x86"
   chmod 0755 "$stubs/lspci" "$stubs/omarchy-pkg-add" "$stubs/omarchy-hw-x86"
 
-  # Twice: first for the packages it asks for, then, with them installed,
-  # for what it does with them (its files, its services).
+  # Twice: first to collect the packages it asks for (with systemctl stubbed
+  # because the packages' units are not installed yet), then, with the packages
+  # installed and the real systemctl restored, for its files and services.
+  printf '#!/bin/sh\nexit 0\n' >"$stubs/systemctl"
+  chmod 0755 "$stubs/systemctl"
   local pass
   for pass in packages config; do
     arch-chroot "$root" env PATH=/omarchy-try-stubs:/usr/share/omarchy/bin:/usr/bin \
@@ -286,6 +389,7 @@ driver_layer() { # name, script, lspci line, PCI vendor, device, class
       OMARCHY_PCI_DEVICES_PATH=/omarchy-try-stubs/pci \
       bash "/usr/share/omarchy/install/hardware/$script" >/dev/null
     if [[ $pass == packages ]]; then
+      rm -f "$stubs/systemctl"
       mapfile -t packages < <(grep -Ev '^(linux-t2|lib32-.*|.*-headers)$' "$stubs/packages")
       ((${#packages[@]})) || { echo "build-try-layer.sh: $script asked for nothing" >&2; exit 1; }
       pacstrap -C "$pacman_conf" -c -G -M "$root" "${packages[@]}" >/dev/null

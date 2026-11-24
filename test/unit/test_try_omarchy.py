@@ -138,6 +138,60 @@ class OmarchyTryHookTest(unittest.TestCase):
         self.assertIn("workdir=/run/archiso/cowspace/${cow_directory}/workdir,index=off", HOOK.read_text())
 
 
+class BuildTryLayerTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.text = TRY_LAYER.read_text()
+
+    def test_enables_bluetooth_and_retires_networkd(self):
+        self.assertRegex(self.text, r"sddm\.service\s+systemd-oomd\.service\s+bluetooth\.service")
+        self.assertIn("systemd-networkd.service", self.text)
+        self.assertIn("systemd-networkd-wait-online.service", self.text)
+
+    def test_masks_disk_and_hibernate_units(self):
+        for unit in (
+            "systemd-hibernate-clear.service",
+            "lvm2-monitor.service",
+            "lvm2-lvmpolld.socket",
+            "systemd-boot-random-seed.service",
+            "snapper-timeline.timer",
+            "limine-snapper-sync.service",
+        ):
+            self.assertIn(unit, self.text, f"{unit} should be masked in Try")
+
+    def test_keyring_service_does_not_run_pacman_sy(self):
+        m = re.search(
+            r"omarchy-try-keyring\.service\" <<'EOF'\n(.*?)\nEOF",
+            self.text,
+            re.S,
+        )
+        self.assertIsNotNone(m)
+        unit = m.group(1)
+        self.assertIn("pacman-key --init && pacman-key --populate", unit)
+        self.assertNotIn("pacman -Sy", unit)
+
+    def test_isolates_build_host_hardware_during_user_provisioning(self):
+        for stub in ("omarchy-hw-vm", "omarchy-hw-asus-rog", "omarchy-hw-match", "omarchy-hw-pci"):
+            self.assertIn(stub, self.text)
+        self.assertIn('for target in "$merged/usr/bin/$cmd" "$merged/usr/share/omarchy/bin/$cmd"; do', self.text)
+        self.assertIn('[[ -f $target && ! -L $target ]]', self.text)
+        self.assertIn("OMARCHY_PCI_DEVICES_PATH=/dev/null", self.text)
+        self.assertIn("OMARCHY_NOUVEAU_DRIVER_PATH=/dev/null", self.text)
+
+    def test_guards_nvidia_lua_when_proprietary_driver_absent(self):
+        self.assertIn('io.open("/etc/modprobe.d/nvidia.conf", "r")', self.text)
+        self.assertIn("no_hardware_cursors = true", self.text)
+
+    def test_driver_layer_stubs_systemctl_on_pass_one_only(self):
+        self.assertIn('printf \'#!/bin/sh\\nexit 0\\n\' >"$stubs/systemctl"', self.text)
+        self.assertIn('rm -f "$stubs/systemctl"', self.text)
+
+    def test_sets_utf8_locale_and_browser_policies(self):
+        self.assertIn("LANG=en_US.UTF-8", self.text)
+        self.assertIn("browser-policy.sh", self.text)
+        self.assertIn("theme-system.sh", self.text)
+
+
 
 if __name__ == "__main__":
     unittest.main()

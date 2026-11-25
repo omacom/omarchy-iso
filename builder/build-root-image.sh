@@ -24,6 +24,9 @@
 #   package...      Packages to pacstrap into the image.
 #
 # Environment:
+#   OMARCHY_FAST_COMPRESSION    When 1, build with minimal zstd compression
+#                               (btrfs compress=zstd:1 directly without staging,
+#                               N1x layer zstd -1) for faster test builds.
 #   OMARCHY_IMAGE_LOCALDB_COPY  Directory to copy the image's pacman local db
 #                               into, so the caller can resolve the per-machine
 #                               delta against what the image already holds.
@@ -88,7 +91,8 @@ n1x_layer_path() {
 # are left out: mount points, caches and logs, the sync databases (the image
 # ships its own), and the keyring the installer creates per machine.
 write_n1x_layer() {
-  local upper=$1 layer
+  local upper=$1 layer zstd_level=15
+  [[ ${OMARCHY_FAST_COMPRESSION:-} == 1 ]] && zstd_level=1
   layer=$(n1x_layer_path)
 
   # tar has no way to say "delete": an overlay whiteout (a 0:0 character
@@ -106,7 +110,7 @@ write_n1x_layer() {
     --exclude=./run --exclude=./tmp --exclude=./var/cache --exclude=./var/log \
     --exclude=./var/tmp --exclude=./var/lib/pacman/sync \
     --exclude=./etc/pacman.d/gnupg \
-    -cf - . | zstd -q -T0 -15 -o "$layer" || return 1
+    -cf - . | zstd -q -T0 "-$zstd_level" -o "$layer" || return 1
   echo "N1x layer: $(du -h "$layer" | cut -f1) at $layer"
 }
 
@@ -229,16 +233,38 @@ if [[ ! -r $pacman_conf ]]; then
   exit 1
 fi
 
-# Forced zstd at level 15: btrfs's incompressibility heuristic declines a lot of
-# data in this tree that zstd handles fine, and the image is written to the
-# target as it is. To avoid stalling single-threaded pacstrap on btrfs writeback
-# (~225 s on ~3 CPUs), pacstrap and pre-build steps run in an uncompressed
-# staging root and copy-tree-parallel.py then populates the mounted btrfs across
-# every CPU.
+# Forced zstd at level 15 by default: btrfs's incompressibility heuristic
+# declines a lot of data in this tree that zstd handles fine, and the image is
+# written to the target as it is. To avoid stalling single-threaded pacstrap on
+# btrfs writeback, pacstrap and pre-build steps run in an uncompressed staging
+# root and copy-tree-parallel.py then populates the mounted btrfs across every
+# CPU. Under OMARCHY_FAST_COMPRESSION=1 (omarchy-iso-make --fast), mount btrfs
+# at compress=zstd:1 up front and pacstrap directly into it.
 IMAGE_COMPRESS="compress-force=zstd:15"
+if [[ ${OMARCHY_FAST_COMPRESSION:-} == 1 ]]; then
+  IMAGE_COMPRESS="compress=zstd:1"
+fi
 # Name of the image's one subvolume. The installer renames it to @ after the
 # write (phases_impl.ROOT_IMAGE_SUBVOLUME).
 IMAGE_SUBVOLUME="omarchy-root"
+
+mount_root_btrfs() {
+  truncate -s "${OMARCHY_IMAGE_SIZE:-24G}" "$backing"
+  # Docker fills the container's /dev once, at start. A loop device the kernel
+  # creates afterwards (loop-control hands one out on demand, loading the module
+  # on a host that had none) exists on the host but has no node in here, so make
+  # the nodes ourselves when they are missing.
+  [[ -e /dev/loop-control ]] || mknod /dev/loop-control c 10 237
+  # losetup reports a device whose node is missing as "/dev/loopN (lost)".
+  loop=$(losetup --find | awk '{ print $1 }')
+  [[ $loop == /dev/loop[0-9]* ]] || { echo "ERROR: no free loop device: $loop" >&2; exit 1; }
+  [[ -b $loop ]] || mknod "$loop" b 7 "${loop#/dev/loop}"
+  losetup "$loop" "$backing"
+  mkfs.btrfs -q -L omarchy-root-image "$loop"
+  mkdir -p "$mnt"
+  mount -o "$IMAGE_COMPRESS,noatime,commit=600" "$loop" "$mnt"
+  btrfs subvolume create "$mnt/$IMAGE_SUBVOLUME" >/dev/null
+}
 
 # Boot-image pacman hooks that must not run while the image is built: there is
 # no kernel in the image and no ESP to deploy to. Point HookDir at a private
@@ -303,13 +329,18 @@ done
 effective_pacman_conf="$work/pacman.conf"
 sed "/^\[options\]/a HookDir = $work/hooks/" "$pacman_conf" >"$effective_pacman_conf"
 
-# Stage in tmpfs when ample memory is free so pacstrap avoids disk I/O before
-# the parallel copy into the compressed btrfs image.
-mem_avail_kb=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null || echo 0)
-if (( mem_avail_kb >= 20 * 1024 * 1024 )); then
-  mount -t tmpfs -o size=16G,mode=0755 omarchy-root-stage "$stage" 2>/dev/null || true
+if [[ ${OMARCHY_FAST_COMPRESSION:-} == 1 ]]; then
+  mount_root_btrfs
+  root="$mnt/$IMAGE_SUBVOLUME"
+else
+  # Stage in tmpfs when ample memory is free so pacstrap avoids disk I/O before
+  # the parallel copy into the compressed btrfs image.
+  mem_avail_kb=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null || echo 0)
+  if (( mem_avail_kb >= 20 * 1024 * 1024 )); then
+    mount -t tmpfs -o size=16G,mode=0755 omarchy-root-stage "$stage" 2>/dev/null || true
+  fi
+  root="$stage"
 fi
-root="$stage"
 
 echo "Building root image with ${#packages[@]} packages"
 # -c: packages come straight from the config's CacheDir (the offline mirror),
@@ -384,6 +415,18 @@ if [[ -f $logging_sh ]] && grep -q "date '+%Y-%m-%d %H:%M:%S'" "$logging_sh"; th
     -e 's/\$(date +%s)/$EPOCHSECONDS/g' \
     "$logging_sh"
   bash -n "$logging_sh" && echo "logging.sh: timestamps without forking date"
+fi
+
+# When the ISO builds the target's per-machine pacman keyring in tmpfs from
+# prepare_live, let the runtime skip rebuilding it on btrfs during Phase 4
+# (~3 s on aarch64). TODO: drop this patch once the runtime package carries it.
+keyring_helper_sh="$root/usr/share/omarchy/install/helpers/pacman-keyring.sh"
+if [[ -f $keyring_helper_sh ]] && ! grep -q 'OMARCHY_KEYRING_MANAGED_BY_ISO' "$keyring_helper_sh"; then
+  sed -i \
+    -e '/^omarchy_pacman_keyring_start() {/a\  [[ ${OMARCHY_KEYRING_MANAGED_BY_ISO:-0} == "1" ]] && return 0' \
+    -e '/^omarchy_pacman_keyring_finish() {/a\  [[ ${OMARCHY_KEYRING_MANAGED_BY_ISO:-0} == "1" ]] && return 0' \
+    "$keyring_helper_sh"
+  bash -n "$keyring_helper_sh" && echo "pacman-keyring.sh: honour OMARCHY_KEYRING_MANAGED_BY_ISO"
 fi
 
 # Package names no repository offers any more: follow the known renames in the
@@ -642,34 +685,22 @@ if [[ -n ${OMARCHY_TRY_LAYER:-} ]]; then
   bash /builder/build-try-layer.sh "$root" "$OMARCHY_TRY_LAYER" "${OMARCHY_TRY_CHANNEL:-stable}" "$pacman_conf"
 fi
 
-# Now create the compressed btrfs filesystem and populate it in parallel across
-# every CPU so zstd:15 runs at full host parallelism, then free the staging tree
-# before shrinking and packing.
-truncate -s "${OMARCHY_IMAGE_SIZE:-24G}" "$backing"
-# Docker fills the container's /dev once, at start. A loop device the kernel
-# creates afterwards (loop-control hands one out on demand, loading the module
-# on a host that had none) exists on the host but has no node in here, so make
-# the nodes ourselves when they are missing.
-[[ -e /dev/loop-control ]] || mknod /dev/loop-control c 10 237
-# losetup reports a device whose node is missing as "/dev/loopN (lost)".
-loop=$(losetup --find | awk '{ print $1 }')
-[[ $loop == /dev/loop[0-9]* ]] || { echo "ERROR: no free loop device: $loop" >&2; exit 1; }
-[[ -b $loop ]] || mknod "$loop" b 7 "${loop#/dev/loop}"
-losetup "$loop" "$backing"
-mkfs.btrfs -q -L omarchy-root-image "$loop"
-mkdir -p "$mnt"
-mount -o "$IMAGE_COMPRESS,noatime,commit=600" "$loop" "$mnt"
-btrfs subvolume create "$mnt/$IMAGE_SUBVOLUME" >/dev/null
+if [[ ${OMARCHY_FAST_COMPRESSION:-} != 1 ]]; then
+  # Now create the compressed btrfs filesystem and populate it in parallel across
+  # every CPU so zstd:15 runs at full host parallelism, then free the staging tree
+  # before shrinking and packing.
+  mount_root_btrfs
 
-echo "Populating btrfs root image with $IMAGE_COMPRESS across $(nproc) CPUs"
-copy_start=$(date +%s)
-python3 "$(dirname -- "${BASH_SOURCE[0]}")/copy-tree-parallel.py" "$stage" "$mnt/$IMAGE_SUBVOLUME"
-sync
-echo "Populated btrfs root image in $(( $(date +%s) - copy_start ))s"
-if mountpoint -q "$stage" 2>/dev/null; then
-  umount -R "$stage"
+  echo "Populating btrfs root image with $IMAGE_COMPRESS across $(nproc) CPUs"
+  copy_start=$(date +%s)
+  python3 "$(dirname -- "${BASH_SOURCE[0]}")/copy-tree-parallel.py" "$stage" "$mnt/$IMAGE_SUBVOLUME"
+  sync
+  echo "Populated btrfs root image in $(( $(date +%s) - copy_start ))s"
+  if mountpoint -q "$stage" 2>/dev/null; then
+    umount -R "$stage"
+  fi
+  rm -rf "$stage"
 fi
-rm -rf "$stage"
 
 # The image is the loop backing file itself: the same on-disk bytes, written
 # to the target partition as they are.
@@ -735,9 +766,11 @@ if [[ $output == *.sfs ]]; then
   # for the install on 4 CPUs (3.30 s against 2.97 s, the same image
   # written); 128 KiB saves only 12 MB more of the read.
   echo "Packing the root image into a squashfs"
+  sfs_zstd_level=19
+  [[ ${OMARCHY_FAST_COMPRESSION:-} == 1 ]] && sfs_zstd_level=1
   mkdir -p "$work/sfs"
   ln "$backing" "$work/sfs/omarchy-root.img"
-  mksquashfs "$work/sfs" "$output" -comp zstd -Xcompression-level 19 -b 256K -no-fragments -noappend -no-xattrs -quiet
+  mksquashfs "$work/sfs" "$output" -comp zstd -Xcompression-level "$sfs_zstd_level" -b 256K -no-fragments -noappend -no-xattrs -quiet
   rm -f "$work/sfs/omarchy-root.img"
 else
   echo "Packing the root image as 256 KiB zstd frames"

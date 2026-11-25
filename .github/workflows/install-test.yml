@@ -130,16 +130,16 @@ jobs:
       # everything else from edge, which a feature release promotes to rc.
       - name: Build the ISO
         run: |
-          flag=()
+          flag=(--fast)
           case $CHANNEL in
-            rc) flag=(--rc) ;;
-            edge) flag=(--edge) ;;
+            rc) flag+=(--rc) ;;
+            edge) flag+=(--edge) ;;
             rehearsal)
               # Not piped: this step runs bash -e without pipefail, and a
               # failed pin must stop it before the build.
               pinned=$(./test/rehearsal-pins "$ARCH" "$RUNNER_TEMP/rehearsal")
               echo "$pinned" | tee -a "$GITHUB_STEP_SUMMARY"
-              flag=(--local-source "$RUNNER_TEMP/rehearsal/omarchy" "$RUNNER_TEMP/rehearsal/omarchy-pkgs" --rehearsal)
+              flag+=(--local-source "$RUNNER_TEMP/rehearsal/omarchy" "$RUNNER_TEMP/rehearsal/omarchy-pkgs" --rehearsal)
               ;;
           esac
           start=$(date +%s)

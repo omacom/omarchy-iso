@@ -98,13 +98,19 @@ fi
 # Set OMARCHY_NO_PREFETCH=1 to A/B the same ISO with this disabled.
 warm_offline_mirror() {
   local mirror=/var/cache/omarchy/mirror/offline
-  local budget_kb spent_kb=0 size_kb path
+  local mem_avail_kb half_kb headroom_kb budget_kb spent_kb=0 size_kb path
   # The orchestrator's ROOT_IMAGE.
   local image=/run/archiso/bootmnt/arch/$(uname -m)/omarchy-root.sfs
 
   [[ ${OMARCHY_NO_PREFETCH:-} == 1 ]] && return 0
 
-  budget_kb=$(($(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo) / 2))
+  # Keep at least 2 GiB free (or half of MemAvailable when MemAvailable <= 4 GiB)
+  # so an 8 GiB machine can hold the full ~4 GiB root image warm in clean page
+  # cache while small machines still avoid evicting what verify just cached.
+  mem_avail_kb=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
+  half_kb=$((mem_avail_kb / 2))
+  headroom_kb=$((mem_avail_kb - 2097152))
+  budget_kb=$((headroom_kb > half_kb ? headroom_kb : half_kb))
   ((budget_kb > 262144)) || return 0
 
   # omarchy-mirror-verify.service and then omarchy-root-image-verify.service

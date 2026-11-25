@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "configs/airootfs/usr/share/omarchy-iso"))
 sys.path.insert(0, str(ROOT / "test/unit"))
 sys.modules.setdefault("orchestrator.archinstall_adapter", types.ModuleType("orchestrator.archinstall_adapter"))
 from orchestrator import phases_impl as phases  # noqa: E402
+from orchestrator.uki_cmdline import read_cmdline  # noqa: E402
 from test_uki_cmdline import uki  # noqa: E402
 
 MACHINE_ID = "0123456789abcdef0123456789abcdef"
@@ -238,6 +239,36 @@ class SystemdBootInstallTest(unittest.TestCase):
         self.write(f"boot/EFI/Linux/omarchy-{MACHINE_ID[:8]}-linux-omarchy-zzz999.efi", b"not a PE image")
         with self.assertRaisesRegex(RuntimeError, "no readable cmdline"):
             self.validate()
+
+    def test_validation_wants_systemd_boot_itself_beside_another_system_s_fallback_loader(self):
+        self.installed()
+        self.ctx.is_protected = True
+        self.ctx.omarchy_install["boot"] = {"enable_fallback": False}
+        (self.root / "boot/EFI/systemd/systemd-bootx64.efi").unlink()
+        with mock.patch.object(phases, "_validate_pre_mounted_filesystems"), \
+                self.assertRaisesRegex(RuntimeError, "systemd-bootx64.efi missing"):
+            self.validate()
+
+    def test_a_boot_image_cut_short_inside_its_cmdline_is_refused(self):
+        self.installed()
+        image = self.root / f"boot/EFI/Linux/omarchy-{MACHINE_ID[:8]}-linux-omarchy-abc123.efi"
+        image.write_bytes(image.read_bytes()[:0x400 + CMDLINE.index("rootflags")])
+        self.assertIsNone(read_cmdline(image))
+        with self.assertRaisesRegex(RuntimeError, "no readable cmdline"):
+            self.validate()
+
+    def test_the_esp_is_where_the_installer_mounted_it(self):
+        luks_tuning = types.ModuleType("orchestrator.luks_tuning")
+        luks_tuning.with_cmdline_options = lambda cmdline: f"{cmdline} rd.luks.name=p=root"
+        with mock.patch.dict(sys.modules, {"orchestrator.luks_tuning": luks_tuning}):
+            phases._write_limine_defaults(self.ctx, CMDLINE, esp_mount="/efi")
+        self.write("etc/snapper/configs/root", "")
+        with mock.patch.object(phases, "_drop_initramfs_modules_the_kernel_lacks"):
+            phases.finalize_boot(self.ctx)
+        self.assertTrue(any("OMARCHY_BOOT_ESP=/efi" in command for command in self.commands))
+        self.installed()
+        (self.root / "boot").rename(self.root / "efi")
+        self.validate()
 
     def test_validation_wants_the_boot_store_mounted_at_boot(self):
         self.installed()

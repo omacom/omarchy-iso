@@ -469,6 +469,16 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
         self.assertEqual(nvram.get("next"), ours)
 
 
+    def test_a_limine_install_prunes_an_earlier_systemd_boot_install_s_entry(self):
+        replaced = "11111111-2222-3333-4444-555555555555"
+        self.nvram_with(
+            {"0003": self.entry("Omarchy Boot", replaced, loader="\\EFI\\systemd\\systemd-bootx64.efi")},
+            ["0003"],
+        )
+        nvram = self.register(replaced_guids={replaced})
+        self.assertNotIn("0003", nvram["entries"])
+        self.assertEqual(self.writes()[0], "--delete-bootnum")
+
     def test_boot_check_does_not_count_another_installs_entry(self):
         # validate_boot: our entry was dropped and no fallback was deployed.
         # The other install's "Limine" entry must not pass for ours.

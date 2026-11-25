@@ -1884,7 +1884,7 @@ def _register_limine_efi_entry(
     stale = [
         num
         for num, text in pre_state["entries"].items()
-        if _is_stale_limine_entry(text, replaced, esp, labels=("Limine", label))
+        if _is_stale_limine_entry(text, replaced, esp, labels=("Limine", SYSTEMD_BOOT_LABEL))
     ]
     identical = [
         num
@@ -2142,7 +2142,7 @@ def _write_limine_defaults(
     if _boot_loader(ctx) == "systemd-boot":
         # /etc/kernel/cmdline is the whole cmdline there: no Limine drop-in
         # adds the console parameter, so the complete value goes in.
-        _write_systemd_boot_cmdline(ctx, kernel_cmdline_val, enable_fallback=enable_fallback)
+        _write_systemd_boot_cmdline(ctx, kernel_cmdline_val, esp_mount=esp_mount, enable_fallback=enable_fallback)
         return
 
     default_text = _limine_template(ctx, "default.conf").read_text()
@@ -2178,14 +2178,18 @@ def _write_limine_defaults(
     shutil.copy2(_limine_template(ctx, "limine.conf"), limine_conf)
 
 
-def _write_systemd_boot_cmdline(ctx: InstallContext, cmdline: str, *, enable_fallback: bool | None) -> None:
+def _write_systemd_boot_cmdline(
+    ctx: InstallContext, cmdline: str, *, esp_mount: str, enable_fallback: bool | None
+) -> None:
     """systemd-boot's boot images take /etc/kernel/cmdline, then every
-    /etc/cmdline.d/*.conf (omarchy-boot-sync). Whether the firmware's fallback
-    path is this install's waits for finalize_systemd_boot."""
+    /etc/cmdline.d/*.conf (omarchy-boot-sync). Where the ESP is mounted and
+    whether the firmware's fallback path is this install's wait for
+    finalize_systemd_boot, as Limine's ESP_PATH waits in /etc/default/limine."""
     kernel_cmdline = ctx.target / "etc" / "kernel" / "cmdline"
     kernel_cmdline.parent.mkdir(parents=True, exist_ok=True)
     kernel_cmdline.write_text(cmdline + "\n")
     ctx.state["boot_fallback"] = True if enable_fallback is None else enable_fallback
+    ctx.state["boot_esp_mount"] = esp_mount
 
     if platform.machine() == "aarch64":
         # As on Limine: the console on the screen, not the firmware's serial port.
@@ -3396,7 +3400,7 @@ def _skip_unused_t2_preset(ctx: InstallContext) -> None:
 def _systemd_boot_esp_mount(ctx: InstallContext) -> str:
     """The ESP where this install mounted it: /efi for an unencrypted install
     into free space. The runtime finds it there itself from then on."""
-    return _boot_intent(ctx)["esp_mount"]
+    return ctx.state.get("boot_esp_mount") or _boot_intent(ctx)["esp_mount"]
 
 
 def finalize_systemd_boot(ctx: InstallContext) -> None:
@@ -4104,12 +4108,10 @@ def validate_boot(ctx: InstallContext) -> None:
 
     boot = _boot_intent(ctx)
     storage = _storage_intent(ctx)
-    esp_mount = ctx.target / boot["esp_mount"].lstrip("/")
-
     if _boot_loader(ctx) == "systemd-boot":
-        _validate_systemd_boot(ctx, boot, storage, esp_mount)
+        _validate_systemd_boot(ctx, boot, storage, ctx.target / _systemd_boot_esp_mount(ctx).lstrip("/"))
     else:
-        _validate_limine_boot(ctx, boot, storage, esp_mount)
+        _validate_limine_boot(ctx, boot, storage, ctx.target / boot["esp_mount"].lstrip("/"))
 
     if ctx.is_protected:
         _validate_pre_mounted_filesystems(ctx)
@@ -4148,9 +4150,11 @@ def _validate_systemd_boot(ctx: InstallContext, boot: dict, storage: dict, esp_m
     install's cmdline, the boot store's fstab line, and a route to the loader."""
     if not arch.has_uefi():
         raise RuntimeError("systemd-boot install on BIOS firmware")
+    # omarchy-boot-switch install always puts it there, and the "Omarchy Boot"
+    # entry starts it. The fallback path can't stand in: on a shared ESP it may
+    # be another system's loader.
     loader = esp_mount / "EFI" / "systemd" / f"systemd-boot{_efi_arch_suffix().lower()}.efi"
-    fallback = esp_mount / "EFI" / "BOOT" / f"BOOT{_efi_arch_suffix()}.EFI"
-    if not any(path.is_file() and path.stat().st_size for path in (loader, fallback)):
+    if not (loader.is_file() and loader.stat().st_size):
         raise RuntimeError(f"{loader} missing or empty")
     if not (esp_mount / "loader" / "loader.conf").is_file():
         raise RuntimeError(f"{esp_mount / 'loader' / 'loader.conf'} missing")
@@ -4532,7 +4536,7 @@ def _validate_provisioning_state(ctx: InstallContext) -> None:
             if not required.exists():
                 raise RuntimeError(f"encrypted deferred-provisioning install but {required} is missing")
         if _boot_loader(ctx) == "systemd-boot":
-            esp_mount = ctx.target / _boot_intent(ctx)["esp_mount"].lstrip("/")
+            esp_mount = ctx.target / _systemd_boot_esp_mount(ctx).lstrip("/")
             if not any("cryptkey=rootfs:" in cmdline for cmdline in _systemd_boot_uki_cmdlines(ctx, esp_mount)):
                 raise RuntimeError("encrypted deferred-provisioning install but no boot image has cryptkey= for auto-unlock")
         else:

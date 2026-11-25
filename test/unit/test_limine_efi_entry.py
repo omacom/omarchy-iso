@@ -376,7 +376,7 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
                 mock.patch.object(phases_impl, "_warn_boot_entry_refused", warnings.append):
             nvram = self.register()
         self.assertEqual(nvram, {"entries": old, "order": ["0003", "0004"], "next": "0003"})
-        self.assertEqual(self.writes(), ["--bootorder", "--bootnext"])
+        self.assertEqual(self.writes(), ["--bootnext"])
         self.assertEqual(warnings, [])
 
     def test_an_entry_the_firmware_answers_a_create_with_is_ours(self):
@@ -507,7 +507,7 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"FAKE_NON_UTF8": "1"}), \
                 mock.patch.object(phases_impl, "error", lambda _message: None):
             nvram = self.register()
-        self.assertEqual(self.writes(), ["--create", "--bootorder", "--bootnext"])
+        self.assertEqual(self.writes(), ["--create", "--bootnext"])
         self.assertEqual(nvram.get("next"), nvram["order"][0])
 
     def test_an_unreadable_variable_store_skips_registration(self):

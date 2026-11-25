@@ -74,7 +74,8 @@ export OMARCHY_RUNTIME_PACKAGE OMARCHY_SETTINGS_PACKAGE OMARCHY_NVIM_PACKAGE
 # The ones --local-source builds from the mounted checkouts, all three unless
 # OMARCHY_LOCAL_PACKAGES names fewer; the others come from the channel. The
 # release rehearsal (--rehearsal) builds only the pinned omarchy and
-# omarchy-settings, and takes omarchy-nvim as published, as a release does.
+# omarchy-settings (and omarchy-boot-systemd, released with them), and takes
+# omarchy-nvim as published, as a release does.
 # The image boots through Limine's stack: on x86_64 the omarchy-boot package,
 # on aarch64 its packages by name. UEFI installs swap it for
 # omarchy-boot-systemd. A pkgs checkout that has them builds them with the
@@ -964,18 +965,24 @@ mapfile -t required_package_files <<< "$resolved_package_files"
 # UEFI installs swap the image's Limine stack for omarchy-boot-systemd, which
 # conflicts with it, so it is resolved in a transaction of its own and kept in
 # the mirror next to it. Built locally, it is kept with the other local builds
-# below and its dependencies came in with theirs.
+# below and its dependencies came in with theirs. The installer finishes the
+# swap with the runtime's omarchy-boot-switch, so a runtime built from an
+# Omarchy checkout without it keeps Limine whatever the channel offers.
 boot_swap_package=""
 if [[ " ${local_packages[*]} " == *" omarchy-boot-systemd "* && -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
   boot_swap_package=omarchy-boot-systemd
+elif [[ -d /omarchy-source && ! -f /omarchy-source/bin/omarchy-boot-switch ]]; then
+  echo "$OMARCHY_ARCH: the Omarchy checkout has no omarchy-boot-switch; UEFI installs will boot Limine" >&2
 elif pacman --config "$online_pacman_conf" --dbpath /tmp/offlinedb -Sp omarchy-boot-systemd >/dev/null 2>&1; then
   boot_swap_package=omarchy-boot-systemd
   pacman --config "$online_pacman_conf" --noconfirm -Sw omarchy-boot-systemd \
     --cachedir "$offline_mirror_dir/" --dbpath /tmp/offlinedb --needed
-  mapfile -t -O "${#required_package_files[@]}" required_package_files < <(
-    pacman --config "$online_pacman_conf" --noconfirm \
-      --dbpath /tmp/offlinedb -S --print --print-format '%f' omarchy-boot-systemd
-  )
+  if ! swap_package_files="$(pacman --config "$online_pacman_conf" --noconfirm \
+    --dbpath /tmp/offlinedb -S --print --print-format '%f' omarchy-boot-systemd)"; then
+    echo "ERROR: could not resolve the package files of omarchy-boot-systemd" >&2
+    exit 1
+  fi
+  mapfile -t -O "${#required_package_files[@]}" required_package_files <<<"$swap_package_files"
 else
   echo "$OMARCHY_ARCH: no repository offers omarchy-boot-systemd; UEFI installs will boot Limine" >&2
 fi
@@ -1135,10 +1142,14 @@ fi
 # The boot swap package is never in the image, and what it adds to it ships.
 if [[ -n $boot_swap_package ]]; then
   if [[ -n ${LOCAL_OMARCHY_BUILD:-} && " ${local_packages[*]} " == *" omarchy-boot-systemd "* ]]; then
+    # What it depends on, as built: the channel's database doesn't know it.
+    swap_depends=()
     for archive in "$offline_mirror_dir"/omarchy-boot-systemd-[0-9]*.pkg.tar.*; do
-      [[ $archive == *.sig ]] || installable_files+=$'\n'"${archive##*/}"
+      [[ $archive == *.sig ]] && continue
+      installable_files+=$'\n'"${archive##*/}"
+      mapfile -t -O "${#swap_depends[@]}" swap_depends < <(bsdtar -xOf "$archive" .PKGINFO | sed -n 's/^depend = //p')
     done
-    swap_depends=(systemd-ukify)
+    (( ${#swap_depends[@]} )) || { echo "ERROR: the omarchy-boot-systemd build names no dependencies" >&2; exit 1; }
   else
     swap_depends=(omarchy-boot-systemd)
   fi

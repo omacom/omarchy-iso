@@ -25,7 +25,7 @@
 #
 # Environment:
 #   OMARCHY_FAST_COMPRESSION    When 1, build with minimal zstd compression
-#                               (btrfs compress=zstd:1 directly without staging,
+#                               (btrfs compress-force=zstd:1 directly without staging,
 #                               N1x layer zstd -1) for faster test builds.
 #   OMARCHY_IMAGE_LOCALDB_COPY  Directory to copy the image's pacman local db
 #                               into, so the caller can resolve the per-machine
@@ -239,10 +239,17 @@ fi
 # btrfs writeback, pacstrap and pre-build steps run in an uncompressed staging
 # root and copy-tree-parallel.py then populates the mounted btrfs across every
 # CPU. Under OMARCHY_FAST_COMPRESSION=1 (omarchy-iso-make --fast), mount btrfs
-# at compress=zstd:1 up front and pacstrap directly into it.
+# at compress-force=zstd:1 up front and pacstrap directly into it.
+#
+# Forced in both modes for correctness, not just size: omarchy-image-write
+# (and the dd fallback's conv=sparse) skips every all-zero frame, leaving
+# whatever the target's LUKS volume held there. Only forced compression
+# guarantees no file data is stored as a raw run of zeros. Without it, a file
+# btrfs's heuristic marks incompressible keeps its zero padding raw, and the
+# installed copy fails its checksum (EIO reading prebuilt-uki-n1x.efi).
 IMAGE_COMPRESS="compress-force=zstd:15"
 if [[ ${OMARCHY_FAST_COMPRESSION:-} == 1 ]]; then
-  IMAGE_COMPRESS="compress=zstd:1"
+  IMAGE_COMPRESS="compress-force=zstd:1"
 fi
 # Name of the image's one subvolume. The installer renames it to @ after the
 # write (phases_impl.ROOT_IMAGE_SUBVOLUME).
@@ -665,7 +672,7 @@ CONF
   n1x_script="$root/usr/share/omarchy/install/hardware/n1x.sh"
   # The output directory persists between builds: no layer from an older one.
   rm -f "$(n1x_layer_path)"
-  if [[ $(uname -m) == aarch64 && -f $n1x_script && -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
+  if [[ $(uname -m) == aarch64 && -z ${OMARCHY_SNAPDRAGON:-} && -f $n1x_script && -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
     build_n1x_prebuilt_uki "$n1x_script" || {
       echo "WARNING: no N1x pre-built UKI or layer; N1x installs build their own and pacstrap the NVIDIA stack"
       rm -f "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.modules" \

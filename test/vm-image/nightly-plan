@@ -15,7 +15,8 @@
 #
 # edge-aarch64 is the edge ISO for aarch64, under the edge version: built and
 # tested on its own runner and published beside the others, never holding them
-# back. An edge version is the date and the run number. A stable version is the
+# back. edge-snapdragon is the same for the Snapdragon laptops' own aarch64
+# ISO (--snapdragon). An edge version is the date and the run number. A stable version is the
 # release's own, and on a scheduled run a release already published is left
 # out: it is done once. Two builds are never the same bytes and a published
 # file is never replaced, so no path is used twice: a stable image has the run
@@ -36,7 +37,8 @@ build=$run
 
 channels=$(jq -cn --arg v "$date.$build" '[
   {channel: "edge", arch: "x86_64", version: $v, release: "edge/\($v)"},
-  {channel: "edge-aarch64", arch: "aarch64", version: $v, release: "edge-aarch64/\($v)"}
+  {channel: "edge-aarch64", arch: "aarch64", version: $v, release: "edge-aarch64/\($v)"},
+  {channel: "edge-snapdragon", arch: "aarch64", version: $v, release: "edge-snapdragon/\($v)"}
 ]')
 if [[ $event == schedule && $published == "$stable" ]]; then
   echo "nightly-plan: stable $stable is already published" >&2

@@ -1920,20 +1920,29 @@ def _register_limine_efi_entry(
         and num != limine_num
         and num in pre_state["entries"]
     ]
-    # capture(): efibootmgr prints the boot list after a write, and legacy
-    # entries can carry bytes that are not UTF-8.
-    ordered = capture(["efibootmgr", "--bootorder", ",".join([limine_num, *keep])])
-    if ordered.returncode != 0:
-        # BootOrder is another NVRAM write and can be refused on its own. The
-        # entry exists either way, so this costs Omarchy its place at the front
-        # of the list, not its boot route.
-        order_detail = (ordered.stderr or "").strip() or f"exit status {ordered.returncode}"
-        error(
-            "Warning: the 'Limine' boot entry was registered but this firmware would "
-            f"not reorder BootOrder to put it first ({order_detail}). Omarchy is reachable "
-            "from the firmware boot menu (F11, F12 or Esc on most boards); move it to "
-            "the top of the firmware's own boot priority list to make it the default."
-        )
+    desired_order = [limine_num, *keep]
+    # efibootmgr --create already places the new entry at the front of
+    # BootOrder; skip the redundant NVRAM write when the live order matches.
+    current_order = None
+    if not identical:
+        current_order = post_state["order"]
+    elif not deleted:
+        current_order = pre_state["order"]
+    if current_order != desired_order:
+        # capture(): efibootmgr prints the boot list after a write, and legacy
+        # entries can carry bytes that are not UTF-8.
+        ordered = capture(["efibootmgr", "--bootorder", ",".join(desired_order)])
+        if ordered.returncode != 0:
+            # BootOrder is another NVRAM write and can be refused on its own. The
+            # entry exists either way, so this costs Omarchy its place at the front
+            # of the list, not its boot route.
+            order_detail = (ordered.stderr or "").strip() or f"exit status {ordered.returncode}"
+            error(
+                "Warning: the 'Limine' boot entry was registered but this firmware would "
+                f"not reorder BootOrder to put it first ({order_detail}). Omarchy is reachable "
+                "from the firmware boot menu (F11, F12 or Esc on most boards); move it to "
+                "the top of the firmware's own boot priority list to make it the default."
+            )
 
     # Some firmware keeps its own priority list and writes it back over
     # BootOrder at the next POST. An MSI MAG Z690 Tomahawk (BIOS 7D32v1O)

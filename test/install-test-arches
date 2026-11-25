@@ -1,0 +1,39 @@
+#!/bin/bash
+# Says which architectures' install tests a pull request needs, from the paths
+# it changes, one per line on stdin. Prints x86_64=true|false and
+# aarch64=true|false, for $GITHUB_OUTPUT.
+#
+# A path builds only one architecture's ISO when it is that architecture's own
+# (the Snapdragon live UKI, the x86_64 package mirrors), and neither's when
+# nothing in an ISO comes from it (documentation, the unit tests, the nightly).
+# Every other path counts for both, so a path this list does not know costs
+# test time, never a test.
+set -euo pipefail
+
+x86_64=false aarch64=false
+while IFS= read -r path; do
+  [[ -n $path ]] || continue
+  case $path in
+    *.md | LICENSE | plans/* | test/unit/* | test/vm-image/* | \
+      .github/workflows/unit-test.yml | .github/workflows/nightly-build.yml)
+      ;;
+    # test/arm64-install takes its cloud-init and package detection from it.
+    test/integration.d/base-test.sh)
+      x86_64=true aarch64=true
+      ;;
+    builder/aarch64-only.packages | configs/pacman-online-stable.conf | configs/pacman-online-rc.conf | \
+      configs/pacman-online-edge.conf | configs/syslinux/* | test/integration | test/integration.d/*)
+      x86_64=true
+      ;;
+    builder/qualcomm/* | builder/aarch64-* | builder/archiso-aarch64-* | builder/archiso-v87-aarch64-* | \
+      builder/arm64-* | builder/n1x-dev-ssh/* | builder/qcom-oem-firmware.sh | configs/pacman-online-aarch64-* | \
+      test/arm64-* | bin/lib/aarch64-firmware.sh)
+      aarch64=true
+      ;;
+    *)
+      x86_64=true aarch64=true
+      ;;
+  esac
+done
+echo "x86_64=$x86_64"
+echo "aarch64=$aarch64"

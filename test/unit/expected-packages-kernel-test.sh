@@ -41,9 +41,9 @@ for arch in x86_64 aarch64; do
     echo "$arch: the count resolves '$asked', not the kernel the install gets (linux-omarchy)"
     fail=1
   fi
-  # Two image packages, the kernel, one microcode package.
-  if [[ $count != 4 ]]; then
-    echo "$arch: expected 4 packages, got $count"
+  # Two image packages plus the kernel.
+  if [[ $count != 3 ]]; then
+    echo "$arch: expected 3 packages, got $count"
     fail=1
   fi
 done

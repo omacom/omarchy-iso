@@ -409,6 +409,18 @@ class DeferredArgon2Keyslot(unittest.TestCase):
         self.assertEqual(enroll_cmd[-2:], ['/dev/vda2', '-'])
         self.assertEqual(kill_cmd, ['cryptsetup', '--batch-mode', 'luksKillSlot', '/dev/vda2', '1'])
 
+    def test_splits_uncalibrated_format_using_iter_time_in_background(self):
+        self.state.unlink()
+        vk = self.directory / 'vk'
+        tk = self.directory / 'tk'
+        split = luks.deferred_format_command(COMMAND, vk, tk)
+        self.assertIsNotNone(split)
+        fast_cmd, enroll_cmd, kill_cmd = split
+        self.assertEqual(fast_cmd[fast_cmd.index('--pbkdf') + 1], 'pbkdf2')
+        self.assertNotIn('--pbkdf-force-iterations', enroll_cmd)
+        self.assertEqual(enroll_cmd[enroll_cmd.index('--iter-time') + 1], '2000')
+        self.assertEqual(kill_cmd, ['cryptsetup', '--batch-mode', 'luksKillSlot', '/dev/vda2', '1'])
+
     def test_falls_back_on_low_cpus_low_memory_or_opt_out(self):
         vk, tk = self.directory / 'vk', self.directory / 'tk'
         with mock.patch.object(luks.os, 'cpu_count', return_value=2):
@@ -481,7 +493,7 @@ class DeferredArgon2Keyslot(unittest.TestCase):
             import importlib
             shared = importlib.import_module('orchestrator.luks_calibration')
             real_fstat = os.fstat
-            with mock.patch.object(shared, 'stop_calibration'), \
+            with mock.patch.object(shared, 'stop_calibration') as stop, \
                     mock.patch.object(shared, 'VOLUME_KEY_DIR', self.directory), \
                     mock.patch.object(shared, 'STATE', self.state), \
                     mock.patch.object(shared, 'memory_total', return_value=8*1024*1024), \
@@ -496,6 +508,7 @@ class DeferredArgon2Keyslot(unittest.TestCase):
                 handler.is_unlocked = lambda: len(calls) >= 2
                 with tuning.defer_argon2_keyslot() as deferred:
                     wrapped(handler)
+                    stop.assert_called_once_with(wait=0)
                     self.assertEqual(len(deferred), 1)
                     vk = handler.omarchy_volume_key
                     self.assertTrue(handler.omarchy_keep_volume_key)

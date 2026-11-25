@@ -17,6 +17,29 @@ HELPER="$ROOT/configs/airootfs/usr/local/bin/omarchy-wait-root-image-verify"
 # the helper's cold reads.
 REAL_TIMEOUT=$(command -v timeout 2>/dev/null || echo timeout)
 
+# Fixed 64-hex hashes for the checksum fixtures. The cold checker hashes every
+# listed file and compares vectors, so the tests need the expected and wrong
+# hashes they script sha256sum to print.
+IMAGE_HASH=40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d
+IMAGE_WRONG1=ba79a0d0f5aadeb30be9f8490f596073c92df6e653d8c2a9a04ee8cf3cf0eb4c
+IMAGE_WRONG2=59e22734cd9a0bb52bf6c37ba18e7d5e0734418f5ef967efc721df9ba9d8f886
+IMAGE_WRONG3=7c0664f49b6e88a87906a896ac75f534ddd30d2412247a00985d552335a1501a
+LAYER_HASH=$(printf '1%.0s' {1..64})
+LAYER_WRONG1=$(printf '2%.0s' {1..64})
+LAYER_WRONG2=$(printf '3%.0s' {1..64})
+MIRROR_A_HASH=$(printf 'a%.0s' {1..64})
+MIRROR_B_HASH=$(printf 'b%.0s' {1..64})
+MIRROR_T2_HASH=$(printf 'c%.0s' {1..64})
+MIRROR_DB_HASH=$(printf 'd%.0s' {1..64})
+MIRROR_T2_WRONG1=$(printf 'e%.0s' {1..64})
+MIRROR_T2_WRONG2=$(printf 'f%.0s' {1..64})
+MIRROR_VECTOR=$(printf '%s  a.pkg.tar.zst\n%s  b.pkg.tar.zst\n%s  linux-t2.pkg.tar.zst\n%s  offline.db.tar.gz\n' \
+  "$MIRROR_A_HASH" "$MIRROR_B_HASH" "$MIRROR_T2_HASH" "$MIRROR_DB_HASH")
+MIRROR_WRONG1_VECTOR=$(printf '%s  a.pkg.tar.zst\n%s  b.pkg.tar.zst\n%s  linux-t2.pkg.tar.zst\n%s  offline.db.tar.gz\n' \
+  "$MIRROR_A_HASH" "$MIRROR_B_HASH" "$MIRROR_T2_WRONG1" "$MIRROR_DB_HASH")
+MIRROR_WRONG2_VECTOR=$(printf '%s  a.pkg.tar.zst\n%s  b.pkg.tar.zst\n%s  linux-t2.pkg.tar.zst\n%s  offline.db.tar.gz\n' \
+  "$MIRROR_A_HASH" "$MIRROR_B_HASH" "$MIRROR_T2_WRONG2" "$MIRROR_DB_HASH")
+
 fails=0
 check() { # desc, expected_rc, actual_rc, [needle in output], [output]
   local desc=$1 want=$2 got=$3 needle=${4:-} out=${5:-}
@@ -44,6 +67,18 @@ run_helper() { # loadstate, active_seq, start_rc, [result]  ->  sets RC and OUT
   : >"$box/medium/arch/x86_64/omarchy-root.img.zst.sha256"
   # SUMS_EXPECTED: the checksum the sandbox image is "built" with.
   [[ -n ${SUMS_EXPECTED:-} ]] && printf '%s  %s\n' "$SUMS_EXPECTED" omarchy-root.img.zst >"$box/medium/arch/x86_64/omarchy-root.img.zst.sha256"
+  # SUMS_LAYER_EXPECTED: the platform layer is listed in the same checksum
+  # file, exactly as build-iso.sh writes it. The cold check must hash it too.
+  if [[ -n ${SUMS_LAYER_EXPECTED:-} ]]; then
+    : >"$box/medium/arch/x86_64/omarchy-layer.aarch64-n1x.tar.zst"
+    printf '%s  %s\n' "$SUMS_LAYER_EXPECTED" omarchy-layer.aarch64-n1x.tar.zst >>"$box/medium/arch/x86_64/omarchy-root.img.zst.sha256"
+  fi
+  # BIG_MEDIUM=1: one MiB in the image and one in the layer, so the timeout
+  # test can prove the size-based bound sums both.
+  if [[ -n ${BIG_MEDIUM:-} ]]; then
+    head -c 1048576 /dev/zero >"$box/medium/arch/x86_64/omarchy-root.img.zst"
+    head -c 1048576 /dev/zero >"$box/medium/arch/x86_64/omarchy-layer.aarch64-n1x.tar.zst"
+  fi
   # DROPCACHES=1: the live /proc/sys/vm/drop_caches exists, so the helper's
   # cold re-reads run. Without it every cold path reports unknown, which is
   # how the pre-existing tests below keep exercising the unit's own verdict.
@@ -51,10 +86,11 @@ run_helper() { # loadstate, active_seq, start_rc, [result]  ->  sets RC and OUT
     mkdir -p "$box/proc/sys/vm"
     : >"$box/proc/sys/vm/drop_caches"
   fi
-  # SUMS_STUB=1: scripted sha256sum. SUMS_OUT1/SUMS_OUT2 are the literal
-  # stdout of the first/second call (multi-line ok), SUMS_RC1/SUMS_RC2 their
-  # exit codes (default 0). Absent SUMS_STUB the real sha256sum runs. Every
-  # call logs its argv for assertions about which files get hashed how.
+  # SUMS_STUB=1: scripted sha256sum. Each cold pass calls sha256sum once with
+  # every file listed in the sums file; SUMS_OUT1/SUMS_OUT2 are the literal
+  # vector it prints (multi-line ok), SUMS_RC1/SUMS_RC2 its exit codes
+  # (default 0). Absent SUMS_STUB the real sha256sum runs. Every call logs its
+  # argv for assertions about which files get hashed how.
   if [[ -n ${SUMS_STUB:-} ]]; then
     echo 1 >"$box/sums_n"
     : >"$box/sha256_argv"
@@ -123,12 +159,24 @@ EOF
   printf '%s\n' "$active_seq" >"$box/active_seq"
   printf '%s\n' "$loadstate" >"$box/load_seq"
   printf '%s\n' "${MIRROR_SEQ:-inactive}" >"$box/mirror_seq"
-  # Four hex digits a line: malformed on purpose, and it has to stay that way.
-  # Nothing hashes against this file except the test that runs the real
-  # sha256sum, which needs a sums file --strict rejects outright. Given real
-  # digests, that test would still pass, but as an ordinary package mismatch.
-  [[ -n ${MIRROR_SEQ:-} ]] && printf '%s\n' "0000  a.pkg.tar.zst" "0000  b.pkg.tar.zst" \
-    "0000  linux-t2.pkg.tar.zst" "0000  offline.db.tar.gz" >"$box/sums"
+  # A valid mirror vector is the fixture for the pass and mismatch tests.
+  # MIRROR_SUMS_MALFORMED=1 writes the four-hex file the helper's parser must
+  # reject instead; that is the fail-closed test and never a clean mirror.
+  if [[ -n ${MIRROR_SEQ:-} ]]; then
+    if [[ -n ${MIRROR_SUMS_MALFORMED:-} ]]; then
+      printf '%s\n' "0000  a.pkg.tar.zst" "0000  b.pkg.tar.zst" \
+        "0000  linux-t2.pkg.tar.zst" "0000  offline.db.tar.gz" >"$box/sums"
+    else
+      printf '%s\n' "$MIRROR_VECTOR" >"$box/sums"
+    fi
+    # The cold pass hashes every listed file and stats them for the timeout,
+    # so all four must exist even when sha256sum is stubbed.
+    mkdir -p "$box/mirror"
+    : >"$box/mirror/a.pkg.tar.zst"
+    : >"$box/mirror/b.pkg.tar.zst"
+    : >"$box/mirror/linux-t2.pkg.tar.zst"
+    : >"$box/mirror/offline.db.tar.gz"
+  fi
   # WITH_MIRROR_HASHER=1: the mirror hasher (pid 4343) has the third of the
   # four files open, so the packages line reads 50%.
   local mirror_pid=0
@@ -428,6 +476,43 @@ check "two agreeing wrong cold reads stay corrupt" 1 "$RC" "install medium is co
 [[ $OUT == *"size 0 bytes"* ]] && echo "ok: forensics carry the size" || \
   { echo "FAIL: size missing from message: $OUT"; fails=1; }
 
+# The image's checksum file lists the platform layers too. A damaged layer
+# must not pass just because the image itself matched: the boot unit checks
+# every line, and so must the cold retry.
+SUMS_EXPECTED=$IMAGE_HASH SUMS_LAYER_EXPECTED=$LAYER_HASH \
+SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
+SUMS_OUT1="$IMAGE_HASH  omarchy-root.img.zst
+$LAYER_WRONG1  omarchy-layer.aarch64-n1x.tar.zst" \
+SUMS_OUT2="$IMAGE_HASH  omarchy-root.img.zst
+$LAYER_WRONG1  omarchy-layer.aarch64-n1x.tar.zst" \
+  run_helper loaded "failed" 0
+check "a damaged platform layer stays corrupt" 1 "$RC" "install medium is corrupt: re-flash it" "$OUT"
+[[ $OUT == *"omarchy-layer.aarch64-n1x.tar.zst"* && $OUT == *"computed $LAYER_WRONG1"* ]] &&
+  echo "ok: the damaged layer and its computed hash are in the evidence" ||
+  { echo "FAIL: damaged layer missing from the message: $OUT"; fails=1; }
+
+# A layer that mismatches once and then matches is two reads that disagree:
+# unstable, not a pass and not corrupt.
+SUMS_EXPECTED=$IMAGE_HASH SUMS_LAYER_EXPECTED=$LAYER_HASH \
+SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
+SUMS_OUT1="$IMAGE_HASH  omarchy-root.img.zst
+$LAYER_WRONG1  omarchy-layer.aarch64-n1x.tar.zst" \
+SUMS_OUT2="$IMAGE_HASH  omarchy-root.img.zst
+$LAYER_HASH  omarchy-layer.aarch64-n1x.tar.zst" \
+  run_helper loaded "failed" 0
+check "a transient damaged layer reports unstable reads" 1 "$RC" "install medium reads are unstable" "$OUT"
+[[ $OUT == *"omarchy-layer.aarch64-n1x.tar.zst"* && $OUT == *"second cold read $LAYER_HASH"* ]] &&
+  echo "ok: the layer's matching second read is in the evidence" ||
+  { echo "FAIL: layer unstable evidence wrong: $OUT"; fails=1; }
+
+# Both the image and the layer matching is the pass the boot unit would give.
+SUMS_EXPECTED=$IMAGE_HASH SUMS_LAYER_EXPECTED=$LAYER_HASH \
+SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
+SUMS_OUT1="$IMAGE_HASH  omarchy-root.img.zst
+$LAYER_HASH  omarchy-layer.aarch64-n1x.tar.zst" \
+  run_helper loaded "failed" 0
+check "an intact image and layer clear the gate" 0 "$RC" "" "$OUT"
+
 # Without drop_caches there is nothing to re-read cold with: the unit's own
 # verdict stands, with no forensics grafted on.
 SUMS_EXPECTED=40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d \
@@ -439,41 +524,60 @@ check "no drop_caches falls back to the unit's verdict" 1 "$RC" "install medium 
   { echo "FAIL: forensics without a cold read: $OUT"; fails=1; }
 
 # Mirror cold path: a clean first cold read clears the gate, as for the
-# image. The cold check must address the sums file by its absolute path
-# (bare basenames resolve against the mirror dir, exactly like the unit):
-# assert that from the logged argv.
+# image. The sums file lives outside the mirror directory, so a bare basename
+# would not find it; the pass proves the helper read the absolute path. The
+# logged argv also shows that every listed package is hashed.
 MIRROR_SEQ=failed WITH_MIRROR_HASHER=1 SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
+SUMS_OUT1="$MIRROR_VECTOR" \
   run_helper loaded "active" 0
 check "a mirror cold read that matches clears the gate" 0 "$RC" "" "$OUT"
-[[ $ARGV_OUT == *"/sums"* ]] && echo "ok: cold mirror read uses the absolute sums path" || \
-  { echo "FAIL: cold mirror read did not use the absolute sums path: $ARGV_OUT"; fails=1; }
+[[ $ARGV_OUT == *"linux-t2.pkg.tar.zst"* && $ARGV_OUT == *"offline.db.tar.gz"* ]] &&
+  echo "ok: cold mirror read hashes every listed file" ||
+  { echo "FAIL: cold mirror read did not hash the listed files: $ARGV_OUT"; fails=1; }
 
-# A first cold read that rejects a package and a second that is clean are
-# reads that disagree: unstable, not a pass (as for the image).
+# A first cold read with a wrong package hash and a second with the expected
+# vector are reads that disagree: unstable, not a pass (as for the image).
 MIRROR_SEQ=failed WITH_MIRROR_HASHER=1 SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
-SUMS_OUT1="linux-t2.pkg.tar.zst: FAILED" SUMS_RC1=1 SUMS_RC2=0 \
+SUMS_OUT1="$MIRROR_WRONG1_VECTOR" SUMS_OUT2="$MIRROR_VECTOR" \
   run_helper loaded "active" 0
 check "a wrong then a clean mirror cold read report unstable reads" 1 "$RC" "install medium reads are unstable" "$OUT"
-[[ $OUT == *"linux-t2.pkg.tar.zst"* && $OUT == *"every checksum matched"* ]] && echo "ok: both mirror reads are in the evidence" || \
+[[ $OUT == *"linux-t2.pkg.tar.zst"* && $OUT == *"every checksum matched"* ]] &&
+  echo "ok: both mirror reads are in the evidence" ||
   { echo "FAIL: the mirror reads are not both in the message: $OUT"; fails=1; }
+[[ $OUT == *"first cold read $MIRROR_T2_WRONG1"* && $OUT == *"second cold read $MIRROR_T2_HASH"* ]] &&
+  echo "ok: the mirror evidence carries both computed hashes" ||
+  { echo "FAIL: mirror computed hashes missing: $OUT"; fails=1; }
 
-# sha256sum also fails without naming a package: --strict rejects a sums file
-# with a malformed line outright and prints no FAILED line (it complains on
-# stderr, which the helper drops). That is a failed check, never a clean
-# mirror. The sandbox's sums file is exactly such a file (malformed on
-# purpose, see run_helper), so the real sha256sum answers here.
-MIRROR_SEQ=failed WITH_MIRROR_HASHER=1 TIMEOUT_STUB=1 DROPCACHES=1 \
-  run_helper loaded "active" 0
-check "a sums file sha256sum rejects never passes the cold check" 1 "$RC" "install medium is corrupt: re-flash it" "$OUT"
-
-# Mirror cold reads that keep failing name the mirror, persistently.
+# Two wrong reads of the same package with different bytes: the failing
+# filenames are identical, but the computed hashes differ, so this is
+# unstable reads, not a corrupt medium.
 MIRROR_SEQ=failed WITH_MIRROR_HASHER=1 SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
-SUMS_OUT1="linux-t2.pkg.tar.zst: FAILED" SUMS_RC1=1 \
-SUMS_OUT2="linux-t2.pkg.tar.zst: FAILED" SUMS_RC2=1 \
+SUMS_OUT1="$MIRROR_WRONG1_VECTOR" SUMS_OUT2="$MIRROR_WRONG2_VECTOR" \
+  run_helper loaded "active" 0
+check "different wrong mirror bytes report unstable reads" 1 "$RC" "install medium reads are unstable" "$OUT"
+[[ $OUT == *"first cold read $MIRROR_T2_WRONG1"* && $OUT == *"second cold read $MIRROR_T2_WRONG2"* ]] &&
+  echo "ok: the differing mirror hashes are in the evidence" ||
+  { echo "FAIL: differing mirror hashes missing: $OUT"; fails=1; }
+[[ $OUT != *"install medium is corrupt: re-flash it"* ]] && echo "ok: unstable mirror reads do not say re-flash" ||
+  { echo "FAIL: unstable mirror reads gave re-flash advice: $OUT"; fails=1; }
+
+# A sums file with a malformed line is rejected by the helper's parser
+# outright; that is a failed check, never a clean mirror. The sandbox writes
+# such a file under MIRROR_SUMS_MALFORMED=1, so the real sha256sum is not
+# needed here.
+MIRROR_SEQ=failed MIRROR_SUMS_MALFORMED=1 WITH_MIRROR_HASHER=1 TIMEOUT_STUB=1 DROPCACHES=1 \
+  run_helper loaded "active" 0
+check "a malformed mirror sums file never passes the cold check" 1 "$RC" "install medium is corrupt: re-flash it" "$OUT"
+
+# Mirror cold reads that keep failing with the same wrong bytes name the
+# mirror and the computed hash, persistently.
+MIRROR_SEQ=failed WITH_MIRROR_HASHER=1 SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
+SUMS_OUT1="$MIRROR_WRONG1_VECTOR" SUMS_OUT2="$MIRROR_WRONG1_VECTOR" \
   run_helper loaded "active" 0
 check "mirror cold reads that keep failing stay corrupt" 1 "$RC" "sha256 mismatch on the package mirror" "$OUT"
-[[ $OUT == *"linux-t2.pkg.tar.zst"* ]] && echo "ok: the failing package is named" || \
-  { echo "FAIL: failing package missing from message: $OUT"; fails=1; }
+[[ $OUT == *"linux-t2.pkg.tar.zst"* && $OUT == *"computed $MIRROR_T2_WRONG1"* ]] &&
+  echo "ok: the failing package and its computed hash are named" ||
+  { echo "FAIL: failing package or hash missing from message: $OUT"; fails=1; }
 
 # A cold read that stalls past its size-based timeout reports a slow medium,
 # not a corrupt one -- and never hangs the installer waiting on dead media. A
@@ -486,6 +590,15 @@ check "a stalled cold read reports a slow medium" 1 "$RC" "install medium is too
   { echo "FAIL: size-based timeout missing from message: $OUT"; fails=1; }
 ((COLD_READS == 1)) && echo "ok: a read that timed out is not repeated" || \
   { echo "FAIL: $COLD_READS cold reads after one timed out"; fails=1; }
+
+# The cold timeout is the unit's size-based bound over every listed file:
+# image + layer bytes, not just the image.
+SUMS_EXPECTED=$IMAGE_HASH SUMS_LAYER_EXPECTED=$LAYER_HASH BIG_MEDIUM=1 \
+TIMEOUT_STUB=1 TIMEOUT_EXPIRE=1 DROPCACHES=1 \
+  run_helper loaded "failed" 0
+check "the cold timeout counts the platform layer" 1 "$RC" "install medium is too slow" "$OUT"
+[[ $OUT == *"timed out after 601s"* ]] && echo "ok: image and layer bytes set the timeout" ||
+  { echo "FAIL: layer bytes missing from the timeout: $OUT"; fails=1; }
 
 # The kernel's own account of the medium failing is part of the forensics.
 # The stick's ordinary USB enumeration, which a looser match catches as well,

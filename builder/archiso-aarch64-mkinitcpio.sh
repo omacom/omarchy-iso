@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
 configure_archiso_aarch64_mkinitcpio() {
   local config=$1
@@ -79,6 +79,10 @@ configure_archiso_aarch64_mkinitcpio() {
     echo "ERROR: expected exactly one microcode, memdisk, and plymouth hook: $config" >&2
     return 1
   fi
+
+  # Carry Orion display drivers in the Live image. This install hook adds files
+  # only; GRUB's board-specific earlymodules parameter controls loading.
+  filtered_hooks+=(omarchy-radxa-orion-live)
 
   # CPU microcode packages and memdiskfind are x86-only. Keeping memdisk after
   # excluding memtest86+ makes mkinitcpio report an incomplete ARM64 image.

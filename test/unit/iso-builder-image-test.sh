@@ -19,19 +19,17 @@ STUB
 cat >"$work/stubs/sudo" <<'STUB'
 #!/bin/bash
 printf '%s\n' "$*" >>"$TEST_SUDO_LOG"
-if [[ $1 == "docker" ]]; then
+if [[ $1 == "podman" ]]; then
   shift
-  exec docker "$@"
+  exec podman "$@"
 fi
 STUB
 
-cat >"$work/stubs/docker" <<'STUB'
+cat >"$work/stubs/podman" <<'STUB'
 #!/bin/bash
-if [[ $1 == "version" ]]; then
-  [[ ${TEST_DOCKER_NEEDS_SUDO:-0} == 0 ]]
-elif [[ $1 == "run" ]]; then
-  printf '%s\n' "$@" >>"$TEST_DOCKER_LOG"
-  if [[ ${TEST_DOCKER_FAIL:-0} == 1 ]]; then
+if [[ $1 == "run" ]]; then
+  printf '%s\n' "$@" >>"$TEST_PODMAN_LOG"
+  if [[ ${TEST_PODMAN_FAIL:-0} == 1 ]]; then
     exit 23
   fi
   printf 'fake iso\n' >"$TEST_RELEASE/omarchy-test-x86_64.iso"
@@ -39,7 +37,7 @@ fi
 STUB
 
 chmod +x "$work/stubs"/*
-export TEST_DOCKER_LOG="$work/docker.log" TEST_SUDO_LOG="$work/sudo.log"
+export TEST_PODMAN_LOG="$work/podman.log" TEST_SUDO_LOG="$work/sudo.log"
 export TEST_GIT_LOG="$work/git.log" TEST_RELEASE="$work/repo/release"
 image="docker.io/archlinux/archlinux@sha256:a1cd6a460b8c8d2c9e9482d7853b7acab4888f448a7914fdc676ce037ff0a5dc"
 
@@ -49,7 +47,7 @@ fail() {
 }
 
 run_builder() {
-  : >"$TEST_DOCKER_LOG"
+  : >"$TEST_PODMAN_LOG"
   : >"$TEST_SUDO_LOG"
   : >"$TEST_GIT_LOG"
   rm -f "$TEST_RELEASE"/*.iso
@@ -58,39 +56,37 @@ run_builder() {
 }
 
 assert_pinned_run() {
-  [[ $(head -n1 "$TEST_DOCKER_LOG") == "run" ]] || fail "docker run was not captured"
-  [[ $(grep -cFx 'run' "$TEST_DOCKER_LOG") == 1 ]] || fail "builder launched another container"
-  [[ $(grep -cFx "$image" "$TEST_DOCKER_LOG") == 1 ]] || fail "builder image is not the exact pin"
-  [[ $(tail -n1 "$TEST_DOCKER_LOG") == "/builder/build-iso.sh" ]] || fail "builder command changed"
-  grep -qxF -- '--privileged' "$TEST_DOCKER_LOG" || fail "privileged build flag changed"
+  [[ $(head -n1 "$TEST_PODMAN_LOG") == "run" ]] || fail "podman run was not captured"
+  [[ $(grep -cFx 'run' "$TEST_PODMAN_LOG") == 1 ]] || fail "builder launched another container"
+  [[ $(grep -cFx "$image" "$TEST_PODMAN_LOG") == 1 ]] || fail "builder image is not the exact pin"
+  [[ $(tail -n1 "$TEST_PODMAN_LOG") == "/builder/build-iso.sh" ]] || fail "builder command changed"
+  grep -qxF -- '--privileged' "$TEST_PODMAN_LOG" || fail "privileged build flag changed"
   [[ $(cat "$TEST_GIT_LOG") == "submodule update --init --recursive --jobs=8" ]] || fail "submodule setup changed"
 }
 
 run_builder || fail "warm builder launch failed"
 assert_pinned_run
-if grep -qxF -- '--pull=always' "$TEST_DOCKER_LOG"; then fail "warm build pulled unconditionally"; fi
+if grep -qxF -- '--pull=always' "$TEST_PODMAN_LOG"; then fail "warm build pulled unconditionally"; fi
 [[ -f $TEST_RELEASE/omarchy-test-x86_64-quattro.iso ]] || fail "warm build did not finish"
 printf 'ok - warm build uses pinned image\n'
 
 run_builder --no-cache || fail "cold builder launch failed"
 assert_pinned_run
-grep -qxF -- '--pull=always' "$TEST_DOCKER_LOG" || fail "cold build lost pull behavior"
+grep -qxF -- '--pull=always' "$TEST_PODMAN_LOG" || fail "cold build lost pull behavior"
 [[ -f $TEST_RELEASE/omarchy-test-x86_64-quattro.iso ]] || fail "cold build did not finish"
 printf 'ok - cold build refreshes pinned image\n'
 
-TEST_DOCKER_NEEDS_SUDO=1 run_builder || fail "sudo builder launch failed"
-assert_pinned_run
-[[ $(cat "$TEST_SUDO_LOG") == docker\ run* ]] || fail "sudo docker fallback changed"
-printf 'ok - socket denial uses sudo with pinned image\n'
+[[ $(cat "$TEST_SUDO_LOG") == podman\ run* ]] || fail "the pinned image must run under rootful Podman"
+printf 'ok - builder uses sudo Podman with the pinned image\n'
 
-if TEST_DOCKER_FAIL=1 run_builder; then fail "failed warm docker launch returned success"; fi
+if TEST_PODMAN_FAIL=1 run_builder; then fail "failed warm Podman launch returned success"; fi
 assert_pinned_run
-if grep -qxF -- '--pull=always' "$TEST_DOCKER_LOG"; then fail "failed warm build pulled unconditionally"; fi
+if grep -qxF -- '--pull=always' "$TEST_PODMAN_LOG"; then fail "failed warm build pulled unconditionally"; fi
 [[ ! -e $TEST_RELEASE/omarchy-test-x86_64-quattro.iso ]] || fail "failed warm launch produced an ISO"
-printf 'ok - failed warm docker launch stops without image fallback\n'
+printf 'ok - failed warm Podman launch stops without image fallback\n'
 
-if TEST_DOCKER_FAIL=1 run_builder --no-cache; then fail "failed cold docker launch returned success"; fi
+if TEST_PODMAN_FAIL=1 run_builder --no-cache; then fail "failed cold Podman launch returned success"; fi
 assert_pinned_run
-grep -qxF -- '--pull=always' "$TEST_DOCKER_LOG" || fail "failed cold build lost pull behavior"
+grep -qxF -- '--pull=always' "$TEST_PODMAN_LOG" || fail "failed cold build lost pull behavior"
 [[ ! -e $TEST_RELEASE/omarchy-test-x86_64-quattro.iso ]] || fail "failed cold launch produced an ISO"
 printf 'ok - failed cold pull stops without image fallback\n'

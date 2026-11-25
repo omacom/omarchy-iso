@@ -41,3 +41,32 @@ grep -q "no preset xx; the presets are: cn" "$work/err" || fail "an unknown pres
 [[ ! -e $work/reached ]] || fail "a refused bundle got as far as: $(cat "$work/reached")"
 
 echo "ok - an OEM bundle that is refused stops omarchy-iso-make before it builds anything"
+
+# A valid preset reaches the container with its configuration and separate
+# build caches. Capture the actual invocation without starting a builder.
+cat >"$work/bin/git" <<'STUB'
+#!/bin/bash
+if [[ $1 == submodule ]]; then exit 0; fi
+exec /usr/bin/git "$@"
+STUB
+cat >"$work/bin/sudo" <<'STUB'
+#!/bin/bash
+printf '%s\0' "$@" >"$PRESET_CAPTURE"
+exit 99
+STUB
+mkdir -p "$work/home"
+export PRESET_CAPTURE="$work/preset-args"
+(cd "$ROOT" && HOME="$work/home" bash "$make" --preset cn) >"$work/preset.log" 2>&1 && fail "the stubbed builder unexpectedly succeeded"
+[[ -s $PRESET_CAPTURE ]] || fail "the preset did not reach the builder: $(cat "$work/preset.log")"
+python3 - "$PRESET_CAPTURE" "$ROOT/presets/cn.json" <<'PY'
+from pathlib import Path
+import sys
+argv = Path(sys.argv[1]).read_bytes().decode().split('\0')
+assert argv[:2] == ['podman', 'run'], argv
+assert 'OMARCHY_PRESET=cn' in argv
+assert sys.argv[2] + ':/preset.json:ro' in argv
+assert any(arg.endswith(':/var/cache/omarchy-offline-cache') for arg in argv)
+assert any('builder_pkg_stable_x86_64:/var/cache/pacman/pkg' in arg for arg in argv), argv
+assert '/var/cache/pacman/pkg:/var/cache/pacman/pkg' not in argv
+PY
+echo "ok - the Podman builder gets the preset and its own caches"

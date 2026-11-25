@@ -1623,19 +1623,75 @@ def _write_phase_progress(ctx: InstallContext, fraction: float) -> None:
         pass
 
 
+# ── boot loader choice ───────────────────────────────────────────────────────
+
+SYSTEMD_BOOT_LABEL = "Omarchy Boot"
+SYSTEMD_BOOT_STACK = "omarchy-boot-systemd"
+
+
+def _boot_loader(ctx: InstallContext) -> str:
+    """The boot loader this install sets up: systemd-boot, the one Secure Boot
+    needs, on UEFI machines; Limine on BIOS firmware, which systemd-boot cannot
+    start. (Apple Silicon is never installed from this image.) Intel Macs keep
+    Limine too, as omarchy-boot-switch keeps them: their firmware needs testing
+    with systemd-boot first. OMARCHY_ISO_BOOT_LOADER=limine keeps a UEFI
+    install on Limine, and an ISO whose mirror has no omarchy-boot-systemd has
+    no other choice. Decided once per install."""
+    state = getattr(ctx, "state", None)
+    loader = state.get("boot_loader") if isinstance(state, dict) else None
+    if loader is None:
+        loader = "limine"
+        kernels = (getattr(ctx, "user_configuration", None) or {}).get("kernels") or []
+        if (
+            os.environ.get("OMARCHY_ISO_BOOT_LOADER", "systemd-boot") != "limine"
+            and platform.machine() in ("x86_64", "aarch64")
+            and any(not p.name.endswith(".sig") for p in OFFLINE_MIRROR.glob(f"{SYSTEMD_BOOT_STACK}-[0-9]*.pkg.tar.*"))
+            and arch.has_uefi()
+            and "linux-t2" not in kernels
+            and not _is_apple_t2_hardware()
+        ):
+            loader = "systemd-boot"
+        if isinstance(state, dict):
+            state["boot_loader"] = loader
+    return loader
+
+
+def _install_systemd_boot_stack(ctx: InstallContext) -> None:
+    """The image boots through omarchy-boot, Limine's stack. omarchy-boot-systemd
+    replaces it and conflicts with its packages (omarchy-boot,
+    limine-mkinitcpio-hook, limine-snapper-sync); --ask=4 answers pacman's
+    "remove them?" with yes. Runs while the deferred boot hooks are masked, so
+    nothing builds an initramfs yet: omarchy-boot-switch install does, at the
+    end. Limine itself, which nothing needs any more, goes too."""
+    with _time_step("BOOT.install omarchy-boot-systemd (replaces the Limine stack)"):
+        subprocess.run(
+            ["pacman", "--root", str(ctx.target), "--cachedir", str(ctx.target / "var/cache/pacman/pkg"),
+             "--noconfirm", "--ask=4", "-S", "--needed", SYSTEMD_BOOT_STACK],
+            check=True,
+        )
+        subprocess.run(
+            ["pacman", "--root", str(ctx.target), "--noconfirm", "-R", "limine"],
+            check=False, capture_output=True,
+        )
+
+
 def _configure_limine_boot(ctx: InstallContext, installer, config) -> None:
     if not arch.bootloader_enabled(config):
         return
     if not arch.is_limine(config):
         raise RuntimeError("Omarchy installs only support Limine bootloader setup")
 
-    info("› installing bootloader (Limine)")
+    if _boot_loader(ctx) == "systemd-boot":
+        info("› installing bootloader (systemd-boot)")
+        _install_systemd_boot_stack(ctx)
+    else:
+        info("› installing bootloader (Limine)")
     if arch.is_pre_mount(config):
         _install_pre_mounted_limine(ctx)
     else:
         _install_limine_omarchy(ctx, installer, config)
 
-    info("› writing Limine config")
+    info("› writing boot config")
     if arch.is_pre_mount(config):
         _write_pre_mounted_limine_defaults(ctx)
     else:
@@ -1734,6 +1790,13 @@ def _install_limine_efi(
         esp_path = "/EFI/BOOT"
         efi_binary = f"BOOT{_efi_arch_suffix()}.EFI"
 
+    if _boot_loader(ctx) == "systemd-boot":
+        _install_systemd_boot_efi(
+            ctx, esp_mount=esp_mount, disk=disk, part=part, removable=removable,
+            pre_state=pre_state, replaced_guids=replaced_guids,
+        )
+        return
+
     limine_path = ctx.target / "usr" / "share" / "limine"
     source_name = f"BOOT{_efi_arch_suffix()}.EFI"
     target_dir = Path(esp_mount) / esp_path.lstrip("/")
@@ -1752,6 +1815,35 @@ def _install_limine_efi(
     )
 
 
+def _install_systemd_boot_efi(
+    ctx: InstallContext,
+    *,
+    esp_mount: str,
+    disk: Path,
+    part: int,
+    removable: bool = False,
+    pre_state: dict | None = None,
+    replaced_guids: set[str] | None = None,
+) -> None:
+    """systemd-boot at \\EFI\\systemd\\, where omarchy-boot-switch install keeps
+    it, with its "Omarchy Boot" entry first. A removable install takes only the
+    fallback path, which install writes, and no NVRAM entry."""
+    arch_name = _efi_arch_suffix().lower()
+    source = ctx.target / "usr" / "lib" / "systemd" / "boot" / "efi" / f"systemd-boot{arch_name}.efi"
+    if removable:
+        _copy_required(source, ctx.target / esp_mount.lstrip("/") / "EFI" / "BOOT" / f"BOOT{_efi_arch_suffix()}.EFI")
+        return
+    _copy_required(source, ctx.target / esp_mount.lstrip("/") / "EFI" / "systemd" / f"systemd-boot{arch_name}.efi")
+    _register_limine_efi_entry(
+        disk, part, _systemd_boot_loader(), pre_state=pre_state, label=SYSTEMD_BOOT_LABEL,
+        replaced_guids=replaced_guids,
+    )
+
+
+def _systemd_boot_loader() -> str:
+    return f"\\EFI\\systemd\\systemd-boot{_efi_arch_suffix().lower()}.efi"
+
+
 def _limine_efi_loader(esp_path: str, efi_binary: str) -> str:
     """The loader path a "Limine" boot entry starts, as efibootmgr --loader
     takes it: \\EFI\\limine\\limine_x64.efi for the default esp_path."""
@@ -1764,6 +1856,7 @@ def _register_limine_efi_entry(
     loader: str,
     *,
     pre_state: dict | None = None,
+    label: str = "Limine",
     replaced_guids: set[str] | None = None,
 ) -> None:
     pre_state = pre_state or _read_efibootmgr()
@@ -1771,7 +1864,8 @@ def _register_limine_efi_entry(
         # Every write below would be refused the same way.
         _warn_boot_entry_refused(
             f"The EFI variable store cannot be read ({pre_state['unreadable']}), "
-            "so no boot entry can be written"
+            "so no boot entry can be written",
+            label,
         )
         return
     # An entry identical to the one a create would add (active, labelled
@@ -1790,12 +1884,12 @@ def _register_limine_efi_entry(
     stale = [
         num
         for num, text in pre_state["entries"].items()
-        if _is_stale_limine_entry(text, replaced, esp)
+        if _is_stale_limine_entry(text, replaced, esp, labels=("Limine", SYSTEMD_BOOT_LABEL))
     ]
     identical = [
         num
         for num, text in pre_state["entries"].items()
-        if _is_limine_entry_for(text, esp, loader) and num not in pre_state.get("inactive", ())
+        if _is_limine_entry_for(text, esp, loader, label) and num not in pre_state.get("inactive", ())
     ]
     deleted: list[str] = []
     if stale:
@@ -1810,9 +1904,9 @@ def _register_limine_efi_entry(
                 deleted.append(num)
     if identical:
         limine_num = identical[0]
-        info(f"› Reusing the 'Limine' boot entry Boot{limine_num}, which already starts this loader")
+        info(f"› Reusing the '{label}' boot entry Boot{limine_num}, which already starts this loader")
     else:
-        created = _create_limine_efi_entry(disk, part, loader)
+        created = _create_limine_efi_entry(disk, part, loader, label)
         detail = (created.stderr or "").strip()
         if created.returncode != 0:
             # Attach the reason to the failure. efibootmgr's stderr did reach
@@ -1821,7 +1915,7 @@ def _register_limine_efi_entry(
             # status, so the traceback people paste into a report says nothing
             # about why.
             reason = f"efibootmgr --create exited {created.returncode}"
-            _warn_boot_entry_refused(f"{reason}: {detail}" if detail else reason)
+            _warn_boot_entry_refused(f"{reason}: {detail}" if detail else reason, label)
             return
         if detail:
             error(f"efibootmgr: {detail}")
@@ -1836,21 +1930,23 @@ def _register_limine_efi_entry(
         if post_state.get("unreadable"):
             _warn_boot_entry_refused(
                 "efibootmgr --create exited 0 but the boot entries cannot be read back "
-                f"({post_state['unreadable']}), so BootOrder and BootNext are left alone"
+                f"({post_state['unreadable']}), so BootOrder and BootNext are left alone",
+                label,
             )
             return
         new_limine = sorted(
             [
                 num
-                for num in _find_label_entries(post_state["entries"], "Limine")
+                for num in _find_label_entries(post_state["entries"], label)
                 if num not in pre_state["entries"] or num in deleted
             ],
-            key=lambda num: not _is_limine_entry_for(post_state["entries"][num], esp, loader),
+            key=lambda num: not _is_limine_entry_for(post_state["entries"][num], esp, loader, label),
         )
         if not new_limine:
             _warn_boot_entry_refused(
-                "efibootmgr --create exited 0 but no 'Limine' entry is registered, so this "
-                "firmware discarded the variable as soon as it was written"
+                f"efibootmgr --create exited 0 but no '{label}' entry is registered, so this "
+                "firmware discarded the variable as soon as it was written",
+                label,
             )
             return
         limine_num = new_limine[0]
@@ -1891,7 +1987,7 @@ def _register_limine_efi_entry(
             # of the list, not its boot route.
             order_detail = (ordered.stderr or "").strip() or f"exit status {ordered.returncode}"
             error(
-                "Warning: the 'Limine' boot entry was registered but this firmware would "
+                f"Warning: the '{label}' boot entry was registered but this firmware would "
                 f"not reorder BootOrder to put it first ({order_detail}). Omarchy is reachable "
                 "from the firmware boot menu (F11, F12 or Esc on most boards); move it to "
                 "the top of the firmware's own boot priority list to make it the default."
@@ -1907,20 +2003,20 @@ def _register_limine_efi_entry(
     if nexted.returncode != 0:
         next_detail = (nexted.stderr or "").strip() or f"exit status {nexted.returncode}"
         error(
-            f"Warning: this firmware would not set BootNext to the 'Limine' entry ({next_detail}). "
+            f"Warning: this firmware would not set BootNext to the '{label}' entry ({next_detail}). "
             "If the first reboot starts another system, pick Omarchy from the firmware "
             "boot menu (F11, F12 or Esc on most boards)."
         )
 
 
-def _create_limine_efi_entry(disk: Path, part: int, loader: str) -> subprocess.CompletedProcess:
+def _create_limine_efi_entry(disk: Path, part: int, loader: str, label: str = "Limine") -> subprocess.CompletedProcess:
     return subprocess.run(
         [
             "efibootmgr",
             "--create",
             "--disk", str(disk),
             "--part", str(part),
-            "--label", "Limine",
+            "--label", label,
             "--loader", loader,
             "--unicode",
             "--verbose",
@@ -1932,7 +2028,7 @@ def _create_limine_efi_entry(disk: Path, part: int, loader: str) -> subprocess.C
     )
 
 
-def _warn_boot_entry_refused(reason: str) -> None:
+def _warn_boot_entry_refused(reason: str, label: str = "Limine") -> None:
     """Registration failed. Report it and carry on to the removable-media route.
 
     Firmware that refuses a boot-variable write still boots this install from
@@ -1944,7 +2040,7 @@ def _warn_boot_entry_refused(reason: str) -> None:
     refuses to finish when both routes are missing.
     """
     error(
-        f"Warning: this firmware would not register a 'Limine' UEFI boot entry. {reason}. "
+        f"Warning: this firmware would not register a '{label}' UEFI boot entry. {reason}. "
         f"The install continues: where Omarchy writes EFI/BOOT/BOOT{_efi_arch_suffix()}.EFI on an EFI "
         "partition of its own, firmware takes that path when nothing in NVRAM matches. "
         "The boot check at the end of the install stops an install that ends up with "
@@ -2052,6 +2148,12 @@ def _write_limine_defaults(
             f"pre-built UKI could not unlock the root: {cmdline!r}"
         )
 
+    if _boot_loader(ctx) == "systemd-boot":
+        # /etc/kernel/cmdline is the whole cmdline there: no Limine drop-in
+        # adds the console parameter, so the complete value goes in.
+        _write_systemd_boot_cmdline(ctx, kernel_cmdline_val, esp_mount=esp_mount, enable_fallback=enable_fallback)
+        return
+
     default_text = _limine_template(ctx, "default.conf").read_text()
     default_text = default_text.replace("@@CMDLINE@@", cmdline)
     default_text = re.sub(r'^ESP_PATH=.*$', f'ESP_PATH="{esp_mount}"', default_text, flags=re.MULTILINE)
@@ -2083,6 +2185,26 @@ def _write_limine_defaults(
     limine_conf = ctx.target / esp_mount.lstrip("/") / "limine.conf"
     limine_conf.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(_limine_template(ctx, "limine.conf"), limine_conf)
+
+
+def _write_systemd_boot_cmdline(
+    ctx: InstallContext, cmdline: str, *, esp_mount: str, enable_fallback: bool | None
+) -> None:
+    """systemd-boot's boot images take /etc/kernel/cmdline, then every
+    /etc/cmdline.d/*.conf (omarchy-boot-sync). Where the ESP is mounted and
+    whether the firmware's fallback path is this install's wait for
+    finalize_systemd_boot, as Limine's ESP_PATH waits in /etc/default/limine."""
+    kernel_cmdline = ctx.target / "etc" / "kernel" / "cmdline"
+    kernel_cmdline.parent.mkdir(parents=True, exist_ok=True)
+    kernel_cmdline.write_text(cmdline + "\n")
+    ctx.state["boot_fallback"] = True if enable_fallback is None else enable_fallback
+    ctx.state["boot_esp_mount"] = esp_mount
+
+    if platform.machine() == "aarch64":
+        # As on Limine: the console on the screen, not the firmware's serial port.
+        console_conf = ctx.target / "etc" / "cmdline.d" / AARCH64_CONSOLE_CONF
+        console_conf.parent.mkdir(parents=True, exist_ok=True)
+        console_conf.write_text("console=tty0 acpi=nospcr\n")
 
 
 def _installer_esp_mount(installer) -> str:
@@ -2130,6 +2252,14 @@ DEFERRED_BOOT_HOOKS = (
 # The kernel-removal hooks stay live: they only prune Limine entries, which is
 # exactly what ptl-kernel.sh's "pacman -Rdd linux" needs.
 TARGET_DEFERRED_BOOT_HOOKS = ("90-mkinitcpio-install.hook",)
+# On systemd-boot the removal hook is omarchy-boot-systemd's, which updates the
+# boot store: that store does not exist until finalize_systemd_boot, so the
+# hook could only fail (n1x.sh drops the stock kernels), and is deferred too.
+SYSTEMD_BOOT_DEFERRED_HOOKS = TARGET_DEFERRED_BOOT_HOOKS + ("60-mkinitcpio-remove.hook",)
+
+
+def _target_deferred_boot_hooks(ctx: InstallContext) -> tuple[str, ...]:
+    return SYSTEMD_BOOT_DEFERRED_HOOKS if _boot_loader(ctx) == "systemd-boot" else TARGET_DEFERRED_BOOT_HOOKS
 
 
 def _drop_archinstall_zram_conf(ctx: InstallContext) -> None:
@@ -2466,7 +2596,7 @@ def _find_label_entries(entries: dict[str, str], needle: str) -> list[str]:
     return [num for num, label in entries.items() if needle.lower() in label.lower()]
 
 
-def _is_limine_entry_for(entry: str, guid: str, loader: str) -> bool:
+def _is_limine_entry_for(entry: str, guid: str, loader: str, label_name: str = "Limine") -> bool:
     """Whether a `efibootmgr --verbose` entry is the one
     _register_limine_efi_entry creates: labelled "Limine", starting `loader`
     from the partition with GPT GUID `guid`. The listing reads
@@ -2477,7 +2607,7 @@ def _is_limine_entry_for(entry: str, guid: str, loader: str) -> bool:
     label, _, path = entry.lower().partition("\t")
     loader = re.escape(loader.lower())
     return (
-        label.strip() == "limine"
+        label.strip() == label_name.lower()
         and bool(guid) and guid in path
         and re.search(rf"(\)/{loader}|file\({loader}\))(?![\w.-])", path) is not None
     )
@@ -2499,14 +2629,17 @@ def _disk_partition_guids(disk: Path) -> set[str]:
     return {line.strip().lower() for line in res.stdout.splitlines() if line.strip()}
 
 
-def _is_stale_limine_entry(entry: str, replaced_guids: set[str], current_esp: str) -> bool:
-    """Whether an entry is a "Limine" boot entry pointing to a GPT partition
-    that this install just wiped on the target disk (never touching entries for
-    other or temporarily disconnected disks)."""
+def _is_stale_limine_entry(
+    entry: str, replaced_guids: set[str], current_esp: str, *, labels: tuple[str, ...] = ("Limine",)
+) -> bool:
+    """Whether an entry is a "Limine" boot entry (or one labelled any of
+    `labels`, such as an earlier systemd-boot install's "Omarchy Boot")
+    pointing to a GPT partition that this install just wiped on the target disk
+    (never touching entries for other or temporarily disconnected disks)."""
     if not replaced_guids:
         return False
     label, _, _ = entry.lower().partition("\t")
-    if label.strip() != "limine":
+    if label.strip() not in {name.lower() for name in labels}:
         return False
     guid = _entry_partition_guid(entry)
     return bool(guid) and guid != current_esp and guid in replaced_guids
@@ -2875,11 +3008,12 @@ def run_system_finalizer(ctx: InstallContext) -> None:
     if _runtime_populates_target_keyring(ctx.target):
         stop_target_keyring_init(ctx)
 
-    _mask_mkinitcpio_pacman_hooks(ctx, ctx.target, TARGET_DEFERRED_BOOT_HOOKS)
+    deferred = _target_deferred_boot_hooks(ctx)
+    _mask_mkinitcpio_pacman_hooks(ctx, ctx.target, deferred)
     try:
         _run_target_setup_command(ctx, cmd)
     finally:
-        _unmask_mkinitcpio_pacman_hooks(ctx, ctx.target, TARGET_DEFERRED_BOOT_HOOKS)
+        _unmask_mkinitcpio_pacman_hooks(ctx, ctx.target, deferred)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2994,16 +3128,36 @@ def run_oem_setup(ctx: InstallContext) -> None:
     shutil.rmtree(staged, ignore_errors=True)
     staged.mkdir(parents=True)
     staged.chmod(0o700)
+    systemd_boot = _boot_loader(ctx) == "systemd-boot"
     try:
         for script in oem_scripts(ctx):
             info(f"› OEM setup: {script.name}")
             shutil.copyfile(script, staged / script.name)
+            command = ["/bin/bash", f"/{OEM_SCRIPTS_TARGET_DIR}/{script.name}"]
             try:
-                _run_target_setup_command(ctx, ["/bin/bash", f"/{OEM_SCRIPTS_TARGET_DIR}/{script.name}"])
+                if systemd_boot:
+                    _run_target_setup_command(ctx, _with_boot_store(ctx, command), private_mounts=True)
+                else:
+                    _run_target_setup_command(ctx, command)
             except subprocess.CalledProcessError as exc:
                 raise RuntimeError(f"OEM setup script {script.name} exited with status {exc.returncode}") from exc
     finally:
         shutil.rmtree(staged, ignore_errors=True)
+
+
+def _with_boot_store(ctx: InstallContext, command: list[str]) -> list[str]:
+    """A target command that runs with the boot store mounted, as it is on the
+    booted system. omarchy-boot-systemd's pacman hooks rebuild the boot images
+    into it when a package changes what they are built from (a kernel,
+    firmware, a DKMS module), and fail without it while pacman still exits 0:
+    the machine would ship boot images without the change. finalize_systemd_boot's
+    omarchy-boot-switch install unmounted the store again. Run with
+    private_mounts, so the mount goes with the command's mount namespace."""
+    return [
+        "env", f"OMARCHY_BOOT_ESP={_systemd_boot_esp_mount(ctx)}", "/bin/bash", "-c",
+        'mount /var/lib/omarchy/boot || { echo "the boot store at /var/lib/omarchy/boot would not mount" >&2; exit 1; }; exec "$@"',
+        "with-boot-store", *command,
+    ]
 
 
 # build-iso.sh bundles the build for the CPU the ISO runs on, and only for a
@@ -3058,11 +3212,16 @@ def _stage_provisioning_luks_unlock(ctx: InstallContext, provisioning_dir) -> No
     keyfile.write_text(password)
     keyfile.chmod(0o600)
 
-    cmdline_dropin = ctx.target / "etc/limine-entry-tool.d/99-omarchy-provisioning-unlock.conf"
-    cmdline_dropin.parent.mkdir(parents=True, exist_ok=True)
-    cmdline_dropin.write_text(
-        'KERNEL_CMDLINE[default]+=" cryptkey=rootfs:/etc/omarchy/provisioning.key"\n'
-    )
+    if _boot_loader(ctx) == "systemd-boot":
+        cmdline_dropin = ctx.target / "etc/cmdline.d/99-omarchy-provisioning-unlock.conf"
+        cmdline_dropin.parent.mkdir(parents=True, exist_ok=True)
+        cmdline_dropin.write_text("cryptkey=rootfs:/etc/omarchy/provisioning.key\n")
+    else:
+        cmdline_dropin = ctx.target / "etc/limine-entry-tool.d/99-omarchy-provisioning-unlock.conf"
+        cmdline_dropin.parent.mkdir(parents=True, exist_ok=True)
+        cmdline_dropin.write_text(
+            'KERNEL_CMDLINE[default]+=" cryptkey=rootfs:/etc/omarchy/provisioning.key"\n'
+        )
 
     files_dropin = ctx.target / PROVISION_KEY_DROPIN
     files_dropin.parent.mkdir(parents=True, exist_ok=True)
@@ -3230,6 +3389,70 @@ def _drop_initramfs_modules_the_kernel_lacks(ctx: InstallContext) -> None:
     )
 
 
+def finalize_boot(ctx: InstallContext) -> None:
+    if _boot_loader(ctx) == "systemd-boot":
+        finalize_systemd_boot(ctx)
+    else:
+        finalize_limine_boot(ctx)
+
+
+def _skip_unused_t2_preset(ctx: InstallContext) -> None:
+    selected_kernels = ctx.user_configuration.get("kernels") or []
+    if "linux-t2" not in selected_kernels and not _is_apple_t2_hardware():
+        for preset in ("linux-t2.preset",):
+            path = ctx.target / "etc" / "mkinitcpio.d" / preset
+            if path.exists():
+                path.unlink()
+                info(f"› not Apple T2 hardware: skipped {preset}")
+
+
+def _systemd_boot_esp_mount(ctx: InstallContext) -> str:
+    """The ESP where this install mounted it: /efi for an unencrypted install
+    into free space. The runtime finds it there itself from then on."""
+    return ctx.state.get("boot_esp_mount") or _boot_intent(ctx)["esp_mount"]
+
+
+def finalize_systemd_boot(ctx: InstallContext) -> None:
+    """Build and publish the boot images once target setup has written every
+    boot drop-in (hibernation, hardware quirks, the provisioning unlock).
+    omarchy-boot-switch install does it in the target, the way a factory reset
+    of this install will: the boot store, mkinitcpio, a UKI per kernel with
+    snapshot profiles, loader.conf and the fallback loader. The pre-built UKI
+    is Limine's fast path and isn't used: the boot images carry Omarchy's own
+    snapshot and restore hooks, which it lacks."""
+    _skip_unused_t2_preset(ctx)
+
+    snapper_root = ctx.target / "etc" / "snapper" / "configs" / "root"
+    if not snapper_root.exists():
+        raise RuntimeError(f"{snapper_root} missing")
+    kernel_cmdline = ctx.target / "etc" / "kernel" / "cmdline"
+    if "root=" not in (kernel_cmdline.read_text() if kernel_cmdline.is_file() else ""):
+        raise RuntimeError(f"{kernel_cmdline} has no root=")
+
+    _drop_initramfs_modules_the_kernel_lacks(ctx)
+
+    command = ["arch-chroot", str(ctx.target), "env", f"OMARCHY_BOOT_ESP={_systemd_boot_esp_mount(ctx)}",
+               "omarchy-boot-switch", "install", "--no-efi-register"]
+    if not ctx.state.get("boot_fallback", True):
+        command.append("--no-fallback")
+    # A selected kernel other than the image's boots first, as on Limine.
+    prebuilt_kernel_file = ctx.target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki.kernel"
+    image_kernel = prebuilt_kernel_file.read_text().strip() if prebuilt_kernel_file.is_file() else "linux-omarchy"
+    selected_kernels = ctx.user_configuration.get("kernels") or []
+    selected = next((k for k in selected_kernels if k != image_kernel and k in _installed_kernels(ctx)), None)
+    if selected:
+        command += ["--prefer", selected]
+        info(f"› {selected} boots first")
+    with _time_step("BOOT.omarchy-boot-switch install (boot images built on this machine)"):
+        subprocess.run(command, check=True)
+
+    subprocess.run(
+        ["btrfs", "quota", "disable", str(ctx.target)],
+        check=False,
+        capture_output=True,
+    )
+
+
 def finalize_limine_boot(ctx: InstallContext) -> None:
     """Finalize Limine after target system setup has written all dynamic
     boot drop-ins (hibernation, hardware quirks, protected-mode ESP settings).
@@ -3239,12 +3462,7 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
 
     # Skip the linux-t2 mkinitcpio work on machines that did not select it.
     selected_kernels = ctx.user_configuration.get("kernels") or []
-    if "linux-t2" not in selected_kernels and not _is_apple_t2_hardware():
-        for preset in ("linux-t2.preset",):
-            path = ctx.target / "etc" / "mkinitcpio.d" / preset
-            if path.exists():
-                path.unlink()
-                info(f"› not Apple T2 hardware: skipped {preset}")
+    _skip_unused_t2_preset(ctx)
 
     default_limine = ctx.target / "etc" / "default" / "limine"
     if not default_limine.exists():
@@ -3511,7 +3729,7 @@ def finalize_boot_and_user(ctx: InstallContext) -> None:
     The user finalizer's chroot runs in a private mount namespace so the two
     arch-chroots do not tear down each other's /proc, /sys and /dev."""
     if ctx.defer_provisioning or os.environ.get("OMARCHY_SERIAL_FINALIZE") == "1":
-        finalize_limine_boot(ctx)
+        finalize_boot(ctx)
         run_chroot_finalizer(ctx)
         return
 
@@ -3528,7 +3746,7 @@ def finalize_boot_and_user(ctx: InstallContext) -> None:
 
     errors: list[BaseException] = []
     with ThreadPoolExecutor(max_workers=2) as pool:
-        boot = pool.submit(finalize_limine_boot, ctx)
+        boot = pool.submit(finalize_boot, ctx)
         user = pool.submit(_run_user_buffered)
         for future in (boot, user):
             try:
@@ -3899,8 +4117,91 @@ def validate_boot(ctx: InstallContext) -> None:
 
     boot = _boot_intent(ctx)
     storage = _storage_intent(ctx)
-    esp_mount = ctx.target / boot["esp_mount"].lstrip("/")
+    if _boot_loader(ctx) == "systemd-boot":
+        _validate_systemd_boot(ctx, boot, storage, ctx.target / _systemd_boot_esp_mount(ctx).lstrip("/"))
+    else:
+        _validate_limine_boot(ctx, boot, storage, ctx.target / boot["esp_mount"].lstrip("/"))
 
+    if ctx.is_protected:
+        _validate_pre_mounted_filesystems(ctx)
+
+    if ctx.defer_provisioning:
+        _validate_provisioning_state(ctx)
+
+    _validate_package_signing(ctx)
+    _join_luks_keyslot_enroll(ctx)
+
+
+def _systemd_boot_ukis(ctx: InstallContext, esp_mount: Path) -> list[Path]:
+    """This install's boot images on the ESP: omarchy-<machine-id prefix>-*.efi
+    (omarchy-boot-sync)."""
+    machine_id = (ctx.target / "etc" / "machine-id").read_text().strip()
+    return sorted((esp_mount / "EFI" / "Linux").glob(f"omarchy-{machine_id[:8]}-*.efi"))
+
+
+def _systemd_boot_uki_cmdlines(ctx: InstallContext, esp_mount: Path) -> list[str]:
+    """Every boot image's embedded cmdline. An image whose cmdline cannot be
+    read is a damaged one, and refused rather than skipped."""
+    from .uki_cmdline import read_cmdline
+    cmdlines = []
+    for uki in _systemd_boot_ukis(ctx, esp_mount):
+        cmdline = read_cmdline(uki) if uki.stat().st_size else None
+        if not cmdline:
+            raise RuntimeError(f"{uki} is empty or has no readable cmdline")
+        cmdlines.append(cmdline)
+    return cmdlines
+
+
+def _validate_systemd_boot(ctx: InstallContext, boot: dict, storage: dict, esp_mount: Path) -> None:
+    """omarchy-boot-switch install verified the boot images against the
+    installed kernels; this checks what the firmware will find: systemd-boot,
+    its config, a boot image for the kernel this install boots carrying the
+    install's cmdline, the boot store's fstab line, and a route to the loader."""
+    if not arch.has_uefi():
+        raise RuntimeError("systemd-boot install on BIOS firmware")
+    # omarchy-boot-switch install always puts it there, and the "Omarchy Boot"
+    # entry starts it. The fallback path can't stand in: on a shared ESP it may
+    # be another system's loader.
+    loader = esp_mount / "EFI" / "systemd" / f"systemd-boot{_efi_arch_suffix().lower()}.efi"
+    if not (loader.is_file() and loader.stat().st_size):
+        raise RuntimeError(f"{loader} missing or empty")
+    if not (esp_mount / "loader" / "loader.conf").is_file():
+        raise RuntimeError(f"{esp_mount / 'loader' / 'loader.conf'} missing")
+
+    kernel = storage.get("kernel") or (ctx.user_configuration.get("kernels") or ["linux-omarchy"])[0]
+    installed_kernels = _installed_kernels(ctx)
+    candidates = [kernel] if kernel in installed_kernels else installed_kernels or [kernel]
+    machine_id = (ctx.target / "etc" / "machine-id").read_text().strip()
+    names = tuple(f"omarchy-{machine_id[:8]}-{name}-" for name in candidates)
+    ukis = [uki for uki in _systemd_boot_ukis(ctx, esp_mount) if uki.stat().st_size]
+    if not any(uki.name.startswith(names) for uki in ukis):
+        raise RuntimeError(f"no boot image for {' / '.join(candidates)} in {esp_mount / 'EFI' / 'Linux'}")
+
+    cmdlines = _systemd_boot_uki_cmdlines(ctx, esp_mount)
+    if not cmdlines or not all("root=" in cmdline for cmdline in cmdlines):
+        raise RuntimeError("a boot image carries no cmdline with root=")
+    # As on Limine: every N1x entry keeps the console off the SPCR serial port.
+    if _installed_arm_platform(ctx) == "n1x":
+        for cmdline in cmdlines:
+            missing = [param for param in N1X_REQUIRED_CMDLINE if param not in cmdline.split()]
+            if missing:
+                raise RuntimeError(f"a boot image's cmdline lacks {' '.join(missing)}; its console would go to the SPCR serial port")
+    if ctx.encrypt and not all("cryptdevice=" in cmdline for cmdline in cmdlines):
+        raise RuntimeError("encrypted install but a boot image's cmdline has no cryptdevice=")
+
+    fstab = ctx.target / "etc" / "fstab"
+    if "/var/lib/omarchy/boot" not in (fstab.read_text() if fstab.is_file() else ""):
+        raise RuntimeError(f"{fstab} does not mount the boot store at /var/lib/omarchy/boot")
+
+    _validate_uefi_boot_routes(
+        esp_mount,
+        loader=_systemd_boot_loader(),
+        fallback_is_ours=not ctx.is_protected or bool(boot.get("enable_fallback")),
+        label=SYSTEMD_BOOT_LABEL,
+    )
+
+
+def _validate_limine_boot(ctx: InstallContext, boot: dict, storage: dict, esp_mount: Path) -> None:
     limine_conf = esp_mount / "limine.conf"
     if not limine_conf.exists():
         raise RuntimeError(f"{limine_conf} missing")
@@ -3955,15 +4256,6 @@ def validate_boot(ctx: InstallContext) -> None:
             ),
             fallback_is_ours=not ctx.is_protected or bool(boot.get("enable_fallback")),
         )
-
-    if ctx.is_protected:
-        _validate_pre_mounted_filesystems(ctx)
-
-    if ctx.defer_provisioning:
-        _validate_provisioning_state(ctx)
-
-    _validate_package_signing(ctx)
-    _join_luks_keyslot_enroll(ctx)
 
 
 OFFLINE_MIRROR = Path("/var/cache/omarchy/mirror/offline")
@@ -4138,7 +4430,7 @@ def _validate_linux_boot_entry(esp_mount: Path, config_text: str, encrypted: boo
     raise RuntimeError(f"{esp_mount / 'limine.conf'} has no bootable Omarchy Linux entry with a kernel and initramfs")
 
 
-def _validate_uefi_boot_routes(esp_mount: Path, *, loader: str, fallback_is_ours: bool) -> None:
+def _validate_uefi_boot_routes(esp_mount: Path, *, loader: str, fallback_is_ours: bool, label: str = "Limine") -> None:
     """Check the two ways firmware can reach this install, and insist on one.
 
     The named "Limine" boot variable is the route we prefer and the one
@@ -4173,15 +4465,15 @@ def _validate_uefi_boot_routes(esp_mount: Path, *, loader: str, fallback_is_ours
         if num in state.get("inactive", ()):
             return False
         if esp:
-            return _is_limine_entry_for(entries[num], esp, loader)
-        label, _, path = entries[num].lower().partition("\t")
-        return label.strip() == "limine" and (not path or loader.lower() in path)
+            return _is_limine_entry_for(entries[num], esp, loader, label)
+        name, _, path = entries[num].lower().partition("\t")
+        return name.strip() == label.lower() and (not path or loader.lower() in path)
 
     has_entry = any(starts_this_install(num) for num in entries)
 
     no_entry = (
         f"the EFI variable store cannot be read ({state['unreadable']})"
-        if state.get("unreadable") else "efibootmgr has no 'Limine' entry"
+        if state.get("unreadable") else f"efibootmgr has no '{label}' entry"
     )
     if not has_entry and not has_fallback:
         fallback_state = "is not written by this install" if fallback_present else "is missing or empty"
@@ -4192,7 +4484,7 @@ def _validate_uefi_boot_routes(esp_mount: Path, *, loader: str, fallback_is_ours
 
     if not has_entry and state.get("unreadable"):
         error(
-            f"Warning: {no_entry}, so this install has no 'Limine' UEFI boot entry. "
+            f"Warning: {no_entry}, so this install has no '{label}' UEFI boot entry. "
             f"Omarchy boots from {fallback_binary.name} on its own EFI partition, "
             "which firmware takes when nothing in NVRAM matches."
         )
@@ -4200,7 +4492,7 @@ def _validate_uefi_boot_routes(esp_mount: Path, *, loader: str, fallback_is_ours
 
     if not has_entry:
         error(
-            "Warning: this firmware discarded the 'Limine' UEFI boot entry during "
+            f"Warning: this firmware discarded the '{label}' UEFI boot entry during "
             f"the install. Omarchy still boots from {fallback_binary.name} on its "
             "own EFI partition. If the machine starts another OS instead, pick the "
             "Omarchy disk from the firmware boot menu (F11, F12 or Esc on most "
@@ -4213,16 +4505,15 @@ def _validate_uefi_boot_routes(esp_mount: Path, *, loader: str, fallback_is_ours
     if not has_fallback and fallback_present:
         error(
             f"Warning: {fallback_binary} belongs to another system on this shared EFI "
-            "partition and was left alone, so this install depends on the 'Limine' "
+            f"partition and was left alone, so this install depends on the '{label}' "
             "UEFI boot entry alone. It boots now. If firmware later clears NVRAM, "
             "re-add the entry with efibootmgr from a live session."
         )
     elif not has_fallback:
         error(
             f"Warning: {fallback_binary} was not deployed, so this install depends "
-            "on the 'Limine' UEFI boot entry alone. It boots now. If firmware "
-            "later clears NVRAM, reinstall the loader from a live session with "
-            "'limine-install --fallback'."
+            f"on the '{label}' UEFI boot entry alone. It boots now. If firmware "
+            "later clears NVRAM, re-add the entry with efibootmgr from a live session."
         )
 
 
@@ -4253,11 +4544,16 @@ def _validate_provisioning_state(ctx: InstallContext) -> None:
         for required in (provisioning_dir / "luks-key", ctx.target / PROVISION_KEYFILE):
             if not required.exists():
                 raise RuntimeError(f"encrypted deferred-provisioning install but {required} is missing")
-        limine_conf_text = (
-            ctx.target / _boot_intent(ctx)["esp_mount"].lstrip("/") / "limine.conf"
-        ).read_text()
-        if "cryptkey=rootfs:" not in limine_conf_text:
-            raise RuntimeError("encrypted deferred-provisioning install but limine.conf has no cryptkey= for auto-unlock")
+        if _boot_loader(ctx) == "systemd-boot":
+            esp_mount = ctx.target / _systemd_boot_esp_mount(ctx).lstrip("/")
+            if not any("cryptkey=rootfs:" in cmdline for cmdline in _systemd_boot_uki_cmdlines(ctx, esp_mount)):
+                raise RuntimeError("encrypted deferred-provisioning install but no boot image has cryptkey= for auto-unlock")
+        else:
+            limine_conf_text = (
+                ctx.target / _boot_intent(ctx)["esp_mount"].lstrip("/") / "limine.conf"
+            ).read_text()
+            if "cryptkey=rootfs:" not in limine_conf_text:
+                raise RuntimeError("encrypted deferred-provisioning install but limine.conf has no cryptkey= for auto-unlock")
 
 
 def _assert_boot_hooks_restored(ctx: InstallContext) -> None:
@@ -4270,7 +4566,7 @@ def _assert_boot_hooks_restored(ctx: InstallContext) -> None:
     cleanup_target_hook_masks(ctx)
 
     hooks_dir = ctx.target / "etc/pacman.d/hooks"
-    for name in TARGET_DEFERRED_BOOT_HOOKS:
+    for name in _target_deferred_boot_hooks(ctx):
         path = hooks_dir / name
         if _is_devnull_symlink(path):
             raise RuntimeError(f"{path} is still masked to /dev/null")
@@ -4446,6 +4742,7 @@ FACTORY_SCRUB_PATHS = (
     "var/lib/omarchy/provisioning/luks-key",
     "etc/omarchy/provisioning.key",
     "etc/limine-entry-tool.d/99-omarchy-provisioning-unlock.conf",
+    "etc/cmdline.d/99-omarchy-provisioning-unlock.conf",
     "etc/mkinitcpio.conf.d/99-omarchy-provisioning-key.conf",
     "etc/tailscale/authkey",
     "etc/systemd/system/omarchy-tailscale-join.service",
@@ -4513,8 +4810,9 @@ def cleanup_target_hook_masks(ctx: InstallContext) -> None:
     """Restore the target's deferred boot hooks. Idempotent, and a no-op when
     nothing was masked, so main()'s finally can call it on any exit path: an
     interrupt must never leave the installed system with its UKI rebuild hook
-    pointing at /dev/null."""
-    _unmask_mkinitcpio_pacman_hooks(ctx, ctx.target, TARGET_DEFERRED_BOOT_HOOKS)
+    pointing at /dev/null. Every hook either boot loader defers: a hook
+    that was not masked is left as it is."""
+    _unmask_mkinitcpio_pacman_hooks(ctx, ctx.target, SYSTEMD_BOOT_DEFERRED_HOOKS)
 
 
 def cleanup_protected_state(ctx: InstallContext) -> None:

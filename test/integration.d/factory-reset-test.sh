@@ -35,6 +35,11 @@ base_image_ready || { echo "No base image; run this through ./test/integration" 
 fixture_shared_esp() {
   OLD_ID=$(ssh_guest "cat /etc/machine-id" | tr -d '\r\n')
   [[ $OLD_ID =~ ^[0-9a-f]{32}$ ]] || { echo "unexpected machine-id: $OLD_ID" >&2; return 1; }
+  LOADER=$(installed_boot_loader)
+  if [[ $LOADER == systemd-boot ]]; then
+    fixture_shared_esp_systemd_boot
+    return
+  fi
 
   ssh_sudo "cp /boot/limine.conf /boot/limine.conf.pretest" >/dev/null
   ssh_sudo "
@@ -66,6 +71,48 @@ CONF
   FOREIGN_UKIS=$(ssh_sudo "ls /boot/EFI/Linux/foreign_*.efi" | tr '\r\n' '  ')
   [[ $FOREIGN_UKIS == *foreign_* ]] || { echo "the fixture planted no foreign UKI" >&2; return 1; }
   log "ESP fixtured as a shared dual-boot ESP (old machine-id $OLD_ID)"
+}
+
+# systemd-boot finds boot images on the ESP rather than in a menu file, so the
+# other systems are their files: Windows' loader, another Linux's UKI and
+# another Omarchy's (its own machine-id prefix), copies of this install's.
+fixture_shared_esp_systemd_boot() {
+  ssh_sudo "
+    set -euo pipefail
+    mkdir -p /boot/EFI/Microsoft/Boot
+    echo windows-payload >/boot/EFI/Microsoft/Boot/bootmgfw.efi
+    uki=\$(ls /boot/EFI/Linux/omarchy-${OLD_ID:0:8}-*.efi | head -1)
+    cp \"\$uki\" /boot/EFI/Linux/foreign-linux.efi
+    cp \"\$uki\" /boot/EFI/Linux/omarchy-${FOREIGN_ID:0:8}-linux-omarchy-foreign.efi
+  " >/dev/null
+  OLD_STORE_UUID=$(ssh_sudo "btrfs subvolume show /var/lib/omarchy/boot" | awk '/^[[:space:]]*UUID:/ { print $2; exit }' | tr -d '\r')
+  [[ -n $OLD_STORE_UUID ]] || { echo "the boot store has no subvolume UUID" >&2; return 1; }
+  FOREIGN_UKIS="/boot/EFI/Linux/foreign-linux.efi /boot/EFI/Linux/omarchy-${FOREIGN_ID:0:8}-linux-omarchy-foreign.efi"
+  ssh_sudo "ls -l /boot/EFI/Linux" >"$RUN_DIR/esp-linux.fixtured" || true
+  log "ESP fixtured as a shared dual-boot ESP for systemd-boot (old machine-id $OLD_ID)"
+}
+
+# What staging and the first boot have to leave on a systemd-boot ESP: the
+# other systems' files, none of the old owner's boot images, and boot images
+# for the identity that boots next.
+check_systemd_boot_esp() {
+  local when=$1 new_prefix=${2:-}
+  check "windows boot payload survives $when" \
+    ssh_sudo "grep -q windows-payload /boot/EFI/Microsoft/Boot/bootmgfw.efi"
+  check "foreign UKIs survive $when" \
+    ssh_sudo "for u in $FOREIGN_UKIS; do test -f \$u || exit 1; done"
+  check "the old owner's boot images are gone $when" \
+    ssh_sudo "! ls /boot/EFI/Linux/omarchy-${OLD_ID:0:8}-*.efi >/dev/null 2>&1"
+  if [[ -n $new_prefix ]]; then
+    check "the new identity owns a boot image $when" \
+      ssh_sudo "ls /boot/EFI/Linux/omarchy-$new_prefix-*.efi >/dev/null"
+  else
+    check "a fresh omarchy boot image exists $when" \
+      ssh_sudo "ls /boot/EFI/Linux/omarchy-*.efi | grep -v -e '-${OLD_ID:0:8}-' -e '-${FOREIGN_ID:0:8}-' | grep -q ."
+  fi
+  check "systemd-boot stays on the ESP $when" \
+    ssh_sudo "test -s /boot/EFI/systemd/systemd-bootx64.efi -a -f /boot/loader/loader.conf"
+  ssh_sudo "ls -l /boot/EFI/Linux" >"$RUN_DIR/esp-linux.${when// /-}" || true
 }
 
 # ------------------------------------------------------------- reset driver
@@ -156,6 +203,9 @@ reset_phase() {
   reset_output >"$RUN_DIR/reset.out"
   log "Reset staged. Asserting on the shared ESP before rebooting."
 
+  if [[ $LOADER == systemd-boot ]]; then
+    check_systemd_boot_esp "staging"
+  else
   check "windows entry survives staging" \
     ssh_sudo "grep -q '^/Windows' /boot/limine.conf"
   check "windows boot payload survives staging" \
@@ -174,6 +224,7 @@ reset_phase() {
     ssh_sudo "grep -o 'machine-id=[0-9a-f]\{32\}' /boot/limine.conf | grep -qv 'machine-id=$FOREIGN_ID'"
 
   ssh_sudo "cat /boot/limine.conf" >"$RUN_DIR/limine.conf.staged" || true
+  fi
   ssh_sudo "cat /var/log/omarchy-system-factory-reset.log" >"$RUN_DIR/factory-reset.log" || true
   capture_console "success-reset-staged"
 
@@ -319,6 +370,13 @@ first_boot_phase() {
   # ID would make the boot-entry grep below match the wrong entry.
   check "the reset minted a fresh machine identity" \
     bash -c "[[ '$new_id' =~ ^[0-9a-f]{32}\$ && '$new_id' != '$OLD_ID' && '$new_id' != '$FOREIGN_ID' ]]"
+  if [[ $LOADER == systemd-boot ]]; then
+    check_systemd_boot_esp "the first boot" "${new_id:0:8}"
+    check "systemd-boot started the first boot" \
+      ssh_sudo "bootctl status 2>/dev/null | grep -q 'Product: systemd-boot'"
+    check "the boot store is a fresh one, not the old owner's" \
+      ssh_sudo "grep -qx phase=active /var/lib/omarchy/boot/state && uuid=\$(btrfs subvolume show /var/lib/omarchy/boot | awk '/^[[:space:]]*UUID:/ { print \$2; exit }') && [[ -n \$uuid && \$uuid != '$OLD_STORE_UUID' ]]"
+  else
   check "windows entry survives the first boot" \
     ssh_sudo "grep -q '^/Windows' /boot/limine.conf"
   check "windows boot payload survives the first boot" \
@@ -335,6 +393,7 @@ first_boot_phase() {
     ssh_sudo "grep -q 'machine-id=$new_id' /boot/limine.conf"
 
   ssh_sudo "cat /boot/limine.conf" >"$RUN_DIR/limine.conf.final" || true
+  fi
   capture_console "success-final"
 }
 

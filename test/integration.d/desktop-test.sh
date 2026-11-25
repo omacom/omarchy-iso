@@ -340,8 +340,6 @@ browser_launch_phase() {
 
 # ------------------------------------------------------- reaching the desktop
 
-ssh_ready() { ssh_guest true; }
-
 # The base was provisioned at install time (cidata created the owner), so it
 # boots straight to a graphical login -- the Omarchy logo over a password field
 # -- rendered by a Wayland greeter running as its own user, not the first-boot
@@ -390,7 +388,16 @@ reach_desktop() {
   # Every step is a tap assertion (wait_for_guest_state prints ok/not ok and
   # feeds FAILURES), so a stall here is visible and fails the job instead of
   # being masked by the known-failures filter.
-  wait_for_guest_state "the installed system boots and answers SSH" "$BOOT_TIMEOUT" ssh_ready || return 1
+  # An encrypted install stops at the disk passphrase first: wait_for_ssh
+  # types it, as it does for every other scenario's boot. It waits by itself,
+  # says why it gave up and stops when the VM is gone, so it isn't polled.
+  if wait_for_ssh "$BOOT_TIMEOUT"; then
+    printf 'ok - %s\n' "the installed system boots and answers SSH"
+  else
+    printf 'not ok - %s\n' "the installed system boots and answers SSH"
+    ((FAILURES += 1))
+    return 1
+  fi
   if ! wait_for_guest_state "the graphical login is ready" 300 login_ready; then
     diagnose_login
     return 1

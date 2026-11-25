@@ -62,3 +62,20 @@ def embed_cmdline(uki: Path, cmdline: str) -> bool:
         image.seek(offset)
         image.write(data.ljust(room, b" "))
     return True
+
+
+def read_cmdline(uki: Path) -> str | None:
+    """The UKI's embedded cmdline: in a multi-profile UKI the first .cmdline,
+    which is the base every profile without its own boots with. None if the
+    image has none or cannot be read, or ends inside it: a cmdline cut short
+    can still name the root while missing what follows it."""
+    with uki.open("rb") as image:
+        found = _cmdline_section(image.read(4096))
+        if found is None:
+            return None
+        offset, length = found
+        image.seek(offset)
+        data = image.read(length)
+        if len(data) < length:
+            return None
+        return data.rstrip(b"\0").decode(errors="replace").strip()

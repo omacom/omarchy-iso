@@ -505,6 +505,13 @@ ssh_sudo() {
   ssh_guest "echo $GUEST_PASSWORD | sudo -S -p '' bash -c $(printf %q "$1")"
 }
 
+# The boot loader the installed system runs. An Omarchy that predates
+# omarchy-boot-backend (an ISO built from packages without the systemd-boot
+# stack, as CI's edge builds are until it is published) can only be on Limine.
+installed_boot_loader() {
+  ssh_guest "if command -v omarchy-boot-backend >/dev/null; then omarchy-boot-backend; else echo limine; fi" | tr -d '\r\n'
+}
+
 # Answer an encrypted boot's LUKS prompt, given what OCR read off the screen.
 # The busybox encrypt hook asks "A password is required to access the root
 # volume"; systemd-cryptsetup (the pre-built UKI's initramfs) asks "Please
@@ -901,9 +908,9 @@ detect_packages() {
 }
 
 # The firmware names what it starts on the serial port: the ISO's medium while
-# the installer runs, the installed disk's Limine once the install is over.
+# the installer runs, the installed disk's boot loader once the install is over.
 installed_system_started() {
-  grep -aq 'starting Boot.*"Limine"' "$1" 2>/dev/null
+  grep -aqE 'starting Boot.*"(Limine|Omarchy Boot)"' "$1" 2>/dev/null
 }
 
 # Wait out an unattended cidata install to its reboot into the installed

@@ -230,26 +230,34 @@ def calibrated_command(command: list[str]) -> list[str]:
     return command[:index] + options + command[index + 2:]
 
 
+def can_defer_keyslot() -> bool:
+    """Whether this machine has enough CPUs and memory headroom to overlap
+    Argon2id slot-0 enrollment with post-image-write setup."""
+    return (
+        os.environ.get("OMARCHY_LUKS_ASYNC_KEYSLOT", "1") == "1"
+        and (os.cpu_count() or 1) >= ASYNC_MIN_CPUS
+        and memory_total() >= 4 * 1024 * 1024
+        and memory_available() >= ASYNC_MIN_MEMORY
+    )
+
+
 def deferred_format_command(
     command: list[str],
     volume_key: Path,
     temp_keyfile: Path,
 ) -> tuple[list[str], list[str], list[str]] | None:
-    """Split a calibrated LUKS2/Argon2id format into a fast temporary slot-1
-    format (~20 ms) plus background slot-0 Argon2id enrollment and slot-1
-    removal.
+    """Split a LUKS2/Argon2id format into a fast temporary slot-1 format
+    (~20 ms) plus background slot-0 Argon2id enrollment and slot-1 removal.
 
     The fast format installs a random tmpfs keyfile into slot 1 with minimal
     PBKDF2 cost so the installer can unlock immediately via --volume-key-file
     and run omarchy-image-write at full speed. Once the image write finishes,
     the background job enrolls the user's real passphrase into slot 0 with the
-    exact calibrated Argon2id parameters and kills slot 1. Returns None when
+    boot's calibrated Argon2id parameters (or --iter-time when boot calibration
+    had not finished before format) and kills slot 1. Returns None when
     conditions are not met, leaving the caller on the synchronous path.
     """
-    if (os.environ.get("OMARCHY_LUKS_ASYNC_KEYSLOT", "1") != "1"
-            or (os.cpu_count() or 1) < ASYNC_MIN_CPUS
-            or memory_total() < 4 * 1024 * 1024
-            or memory_available() < ASYNC_MIN_MEMORY):
+    if not can_defer_keyslot():
         return None
     if (not command or command[0] != "cryptsetup" or "luksFormat" not in command
             or any(flag in command for flag in (
@@ -270,11 +278,13 @@ def deferred_format_command(
     if value("--type") != "luks2" or value("--pbkdf") != "argon2id":
         return None
     try:
-        options = cached_options(int(value("--iter-time")), int(value("--key-size")))
+        iter_time = int(value("--iter-time"))
+        key_size = int(value("--key-size"))
     except (ValueError, TypeError):
         return None
-    if not options:
+    if iter_time != ITER_TIME or key_size != KEY_SIZE:
         return None
+    options = cached_options(iter_time, key_size) or ["--iter-time", str(iter_time)]
 
     hash_alg = value("--hash")
     fast_cmd = with_sector_size(command)

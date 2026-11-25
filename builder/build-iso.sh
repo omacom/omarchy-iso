@@ -1241,6 +1241,7 @@ run_root_image_build() {
   OMARCHY_IMAGE_LOCALDB_COPY="$image_localdb" OMARCHY_IMAGE_SYNC_DBS=/tmp/offlinedb/sync \
     OMARCHY_RENAMED_PACKAGES="$renamed_list" OMARCHY_UNRESOLVED_PACKAGES="$unresolved_list" \
     OMARCHY_SNAPDRAGON="${OMARCHY_SNAPDRAGON:-}" \
+    OMARCHY_HARDWARE_LAYERS="$build_cache_dir/airootfs/usr/share/omarchy-iso/hardware-layers" \
     bash /builder/build-root-image.sh "$image_pacman_conf" "$root_image" "${image_packages[@]}"
   echo "[timing] root image end $(date +%s)"
 }

@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# The N1x layer (builder/build-root-image.sh write_n1x_layer) is the overlay's
+# The N1x layer (builder/build-root-image.sh write_layer) is the overlay's
 # upper directory after the NVIDIA stack is pacstrapped over the image, packed
 # for the installer to extract over the written image
 # (phases_impl._apply_platform_layer). It must carry the packages, their pacman
@@ -15,15 +15,15 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-eval "$(sed -n '/^n1x_layer_path() {$/,/^}$/p' "$builder")"
-eval "$(sed -n '/^write_n1x_layer() {$/,/^}$/p' "$builder")"
-declare -F write_n1x_layer >/dev/null || fail "the builder has no write_n1x_layer"
+eval "$(sed -n '/^layer_path() {$/,/^}$/p' "$builder")"
+eval "$(sed -n '/^write_layer() {$/,/^}$/p' "$builder")"
+declare -F write_layer >/dev/null || fail "the builder has no write_layer"
 
 # The layer sits next to the root image, under the name the installer looks
 # for: omarchy-layer.<hw_platform>.tar.zst.
 output="$work/iso/omarchy-root.img.zst"
 mkdir -p "$work/iso"
-[[ $(n1x_layer_path) == "$work/iso/omarchy-layer.aarch64-n1x.tar.zst" ]] || fail "layer path: $(n1x_layer_path)"
+[[ $(layer_path aarch64-n1x) == "$work/iso/omarchy-layer.aarch64-n1x.tar.zst" ]] || fail "layer path: $(layer_path aarch64-n1x)"
 echo "ok - the N1x layer is written next to the root image as omarchy-layer.aarch64-n1x.tar.zst"
 
 upper="$work/upper"
@@ -42,8 +42,8 @@ echo db >"$upper/var/lib/pacman/sync/extra.db"
 echo key >"$upper/etc/pacman.d/gnupg/pubring.gpg"
 echo tmp >"$upper/tmp/scratch"
 
-write_n1x_layer "$upper" >/dev/null || fail "write_n1x_layer failed on a plain upper directory"
-layer=$(n1x_layer_path)
+write_layer "$upper" aarch64-n1x >/dev/null || fail "write_layer failed on a plain upper directory"
+layer=$(layer_path aarch64-n1x)
 [[ -s $layer ]] || fail "no layer written"
 
 listing=$(tar --zstd -tf "$layer")
@@ -74,7 +74,7 @@ echo "ok - the installer's extraction lands the layer over the image"
 # tarball cannot express. Making one needs root.
 if ((EUID == 0)); then
   mknod "$upper/usr/lib/removed" c 0 0
-  if write_n1x_layer "$upper" >/dev/null 2>"$work/err"; then fail "a layer with a whiteout was packed"; fi
+  if write_layer "$upper" aarch64-n1x >/dev/null 2>"$work/err"; then fail "a layer with a whiteout was packed"; fi
   grep -q "deletes files" "$work/err" || fail "the refusal does not say why: $(cat "$work/err")"
   echo "ok - an upper directory with a whiteout is refused"
 fi

@@ -133,6 +133,17 @@ check "disk and host-hibernate units are masked" try_ssh \
   'for u in systemd-hibernate-clear.service lvm2-monitor.service lvm2-lvmpolld.socket systemd-boot-random-seed.service; do [ "$(systemctl is-enabled "$u" 2>/dev/null || true)" = masked ] || exit 1; done'
 check "nothing on the machine's disk is mounted" try_ssh '! lsblk -nro MOUNTPOINTS /dev/vda | grep -q .'
 # The session has no password, so nothing may ask for one.
+# Try asks no questions, so it keeps its clock right by itself: NTP, and the
+# timezone geo.omarchy.org gives for this network. It never writes the
+# machine's RTC: timesyncd keeps the kernel's STA_UNSYNC set, which turns off
+# the kernel's 11-minute RTC write (kernel/time/ntp.c). NTPSynchronized
+# ignores that bit; it reads the kernel's maximum error.
+check "the clock synchronizes over NTP" try_ssh \
+  'timeout 90 bash -c "until [ \"\$(timedatectl show -p NTPSynchronized --value)\" = yes ]; do sleep 2; done"'
+check "NTP never writes the machine's RTC" try_ssh \
+  '[ "$(timedatectl show -p LocalRTC --value)" = yes ] && python3 -c "import ctypes; t = ctypes.create_string_buffer(256); ctypes.CDLL(None).adjtimex(t); raise SystemExit(0 if int.from_bytes(t[40:44], \"little\") & 0x40 else 1)"'
+check "the timezone is the one geo.omarchy.org gives" try_ssh \
+  'for i in 1 2 3 4 5; do geo=$(curl -fsS --max-time 10 https://geo.omarchy.org/ | jq -r ".timezone // empty") && [ -n "$geo" ] && break; sleep 3; done; [ -n "$geo" ] && timeout 90 bash -c "until [ \"\$(readlink -f /etc/localtime)\" = \"/usr/share/zoneinfo/\$1\" ]; do sleep 2; done" _ "$geo"'
 check "no lock is asked for before a suspend" try_ssh \
   '[ "$(systemctl --user show -p ConditionResult --value omarchy-sleep-lock.service)" = no ]'
 check "a logout logs straight back in" relogin_after 'uwsm stop'

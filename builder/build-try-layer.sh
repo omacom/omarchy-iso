@@ -178,6 +178,48 @@ install -Dm644 /dev/stdin "$merged/etc/systemd/user/omarchy-sleep-lock.service.d
 ConditionPathExists=/etc/pam.d/omarchy-lock-password
 EOF
 
+# The clock. An install turns NTP on and takes its timezone from the setup
+# form, which suggests what geo.omarchy.org answers (Omarchy's
+# install/provisioning/setup-form.sh). Try asks nothing, so it keeps NTP on
+# and takes that answer itself once a network is up. Until then, and without
+# a network, the session runs on UTC.
+#
+# Try must leave the machine's clock alone. With an RTC in UTC, timesyncd lets
+# the kernel write the system time to the RTC every 11 minutes, and Windows
+# keeps its RTC in local time. Declaring the RTC local makes timesyncd keep
+# the kernel from writing it (systemd's timesyncd-manager.c). timedated would
+# then write the RTC on set-timezone, so the dispatcher script links
+# /etc/localtime itself and restarts a running timedated, which would keep
+# reporting the zone it read at start. It runs from no-wait.d, so its retries
+# hold up no other dispatcher script.
+in_try systemctl enable systemd-timesyncd.service >/dev/null
+printf '0.0 0 0\n0\nLOCAL\n' >"$merged/etc/adjtime"
+install -Dm755 /dev/stdin "$merged/etc/NetworkManager/dispatcher.d/no-wait.d/50-omarchy-try-timezone" <<'EOF'
+#!/bin/bash
+# Try Omarchy: the timezone from geo.omarchy.org, the first time a network
+# comes up (builder/build-try-layer.sh).
+action=$2
+[[ $action == "up" || ($action == "connectivity-change" && ${CONNECTIVITY_STATE:-} == "FULL") ]] || exit 0
+[[ -e /etc/localtime ]] && exit 0
+timezone=""
+for attempt in 1 2 3 4 5 6; do
+  # One whole answer per attempt: curl's own retries would append to a part.
+  if answer=$(curl -fsS --max-time 5 https://geo.omarchy.org/ 2>/dev/null) &&
+    timezone=$(jq -r '.timezone // empty' <<<"$answer" 2>/dev/null) && [[ -n $timezone ]]; then
+    break
+  fi
+  timezone=""
+  ((attempt < 6)) && sleep 5
+done
+[[ $timezone =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$ && -f /usr/share/zoneinfo/$timezone ]] || exit 0
+# The user may have picked a timezone during the lookup.
+[[ -e /etc/localtime ]] && exit 0
+ln -s "../usr/share/zoneinfo/$timezone" /etc/localtime
+systemctl try-restart systemd-timedated.service
+exit 0
+EOF
+ln -s no-wait.d/50-omarchy-try-timezone "$merged/etc/NetworkManager/dispatcher.d/50-omarchy-try-timezone"
+
 # Guard Hyprland's NVIDIA env script for cards that run Try on nouveau
 # (Maxwell-Volta GPUs, which have no 580xx layer, and non-T2 Macs booting
 # linux-t2). default/hypr/nvidia.lua checks sysfs PCI IDs rather than the

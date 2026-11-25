@@ -42,11 +42,12 @@ from the start.
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Callable, Iterable, Iterator
 
 # Imports are top-level so a missing/incompatible archinstall surfaces at
 # orchestrator startup, not deep inside a phase.
@@ -102,6 +103,7 @@ check_archinstall_version()
 
 from . import luks_tuning  # noqa: E402 - patches archinstall only after the check
 luks_tuning.apply()
+defer_argon2_keyslot = luks_tuning.defer_argon2_keyslot
 
 
 def load_arch_config(config_path: Path, creds_path: Path) -> ArchConfigHandler:
@@ -122,9 +124,42 @@ def load_arch_config(config_path: Path, creds_path: Path) -> ArchConfigHandler:
         "--creds", str(creds_path),
     ]
     try:
-        return ArchConfigHandler()
+        handler = ArchConfigHandler()
     finally:
         sys.argv = saved_argv
+    _verify_disk_modifications_loaded(config_path, handler.config)
+    return handler
+
+
+def _verify_disk_modifications_loaded(config_path: Path, arch_config: ArchConfig) -> None:
+    """Refuse to proceed if archinstall silently dropped a configured disk.
+
+    archinstall's DiskLayoutConfiguration.parse_arg skips any device_modification
+    whose device path is absent from DeviceHandler's map without raising, so
+    FilesystemHandler later logs "No modifications required" and the install
+    spills into the live ISO's root.
+    """
+    raw = json.loads(config_path.read_text())
+    expected = [
+        mod["device"]
+        for mod in (raw.get("disk_config") or {}).get("device_modifications") or []
+        if isinstance(mod, dict) and mod.get("device")
+    ]
+    if not expected:
+        return
+    disk_config = getattr(arch_config, "disk_config", None)
+    parsed = getattr(disk_config, "device_modifications", None) or []
+    parsed_paths = {
+        str(mod.device.device_info.path)
+        for mod in parsed
+        if getattr(getattr(mod, "device", None), "device_info", None)
+        and getattr(mod.device.device_info, "path", None)
+    }
+    missing = [dev for dev in expected if dev not in parsed_paths]
+    if missing:
+        raise RuntimeError(
+            f"archinstall dropped configured install device(s): {', '.join(missing)}"
+        )
 
 
 def make_mirror_handler(offline: bool = True) -> MirrorListHandler:
@@ -181,7 +216,7 @@ def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
     instance_patches: list[str] = []
     luks_originals: dict[str, object] = {}
     commit_original = None
-    settle = {"calls": 0, "seconds": 0.0}
+    settle = {"calls": 0, "seconds": 0.0, "durations": []}
     settle_originals: dict[object, object] = {}
 
     def timed(original, label):
@@ -216,8 +251,10 @@ def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
             try:
                 return original(*args, **kwargs)
             finally:
+                elapsed = time.monotonic() - started
                 settle["calls"] += 1
-                settle["seconds"] += time.monotonic() - started
+                settle["seconds"] += elapsed
+                settle["durations"].append(elapsed)
         return wrapper
 
     def commit_wrapper(original):
@@ -272,29 +309,28 @@ def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
         for module, function in settle_originals.items():
             module.udev_sync = function
         if settle["seconds"] >= 0.05:
-            info(f"[step] FS.udevadm settle ({settle['calls']} calls): {settle['seconds']:.6f}s")
+            per_call = ", ".join(f"{d:.3f}s" for d in settle["durations"])
+            info(f"[step] FS.udevadm settle ({settle['calls']} calls: {per_call}): {settle['seconds']:.6f}s")
 
 
-def _write_locale_conf_for_prebuilt(installer, locale_config) -> None:
-    """Write /etc/locale.conf when archinstall's set_locale declined to.
+def _write_locale_conf_for_prebuilt(installer, locale_config) -> bool:
+    """Write /etc/locale.conf when the root image already compiled this locale.
 
-    set_locale finds the chosen locale by matching a *commented* line in
-    /etc/locale.gen (`re.compile(rf'#{lang}(\\.{encoding})?{modifier} {encoding}')`),
+    archinstall's set_locale finds the chosen locale by matching a *commented*
+    line in /etc/locale.gen (`re.compile(rf'#{lang}(\\.{encoding})?{modifier} {encoding}')`),
     uncomments it, runs locale-gen, and only then writes locale.conf. The
     root image ships en_US.UTF-8 already uncommented and already compiled
     (build-root-image.sh does that to save 0.77 s of locale-gen at install), so
-    the match fails, set_locale logs "Invalid locale" and returns False, and
-    locale.conf is never written. The installed system then falls back to
-    systemd's LANG=C.UTF-8 instead of the locale it just generated.
+    calling set_locale first logs "ERROR - Invalid locale" and returns False.
 
-    So: if the locale is present and *enabled* in locale.gen, the image already
-    did set_locale's work and only the last line is missing. Anything else is a
-    genuine failure and is left alone for the caller's error to stand.
+    Check locale.gen first: if the locale is already enabled there, write
+    /etc/locale.conf directly and skip set_locale. Anything else falls through
+    to archinstall's set_locale to uncomment and compile it.
     """
     target = Path(installer.target)
     locale_gen = target / "etc" / "locale.gen"
     if not locale_gen.is_file():
-        return
+        return False
     lang, encoding = locale_config.sys_lang, locale_config.sys_enc
     # sys_lang may or may not already carry the encoding ("en_US" vs
     # "en_US.UTF-8"); accept the entry either way, as set_locale's regex does.
@@ -305,9 +341,10 @@ def _write_locale_conf_for_prebuilt(installer, locale_config) -> None:
         None,
     )
     if not enabled:
-        return
+        return False
     (target / "etc" / "locale.conf").write_text(f"LANG={enabled}\n")
     info(f"› locale {enabled} is already compiled into the image; wrote locale.conf directly")
+    return True
 
 
 def perform_filesystem_operations(arch_config: ArchConfig, throwaway_root_fs: bool = False) -> None:
@@ -342,7 +379,11 @@ def perform_filesystem_operations(arch_config: ArchConfig, throwaway_root_fs: bo
     attempts = 3
     with _filesystem_step_tweaks(throwaway_root_fs):
         for attempt in range(1, attempts + 1):
+            t0 = time.monotonic()
             udev_sync()
+            elapsed = time.monotonic() - t0
+            if elapsed >= 0.05:
+                info(f"[step] FS.pre_attempt_udev_sync: {elapsed:.6f}s")
             try:
                 handler.perform_filesystem_operations(**fs_kwargs)
                 return
@@ -367,7 +408,13 @@ class OmarchyInstaller(Installer):
 
     def __exit__(self, exc_type, exc_value, traceback):
         if exc_type is None:
-            return super().__exit__(exc_type, exc_value, traceback)
+            started = time.monotonic()
+            try:
+                return super().__exit__(exc_type, exc_value, traceback)
+            finally:
+                elapsed = time.monotonic() - started
+                if elapsed >= 0.05:
+                    info(f"[step] STEP.installer_exit (sync + post_install_check): {elapsed:.6f}s")
         sync_log = getattr(self, "sync_log_to_install_medium", None)
         if sync_log is not None:
             sync_log()
@@ -525,7 +572,7 @@ def install_base_delta(
         pacman_conf.apply()
 
     with _time_step("DELTA.vconsole"):
-        if locale_config:
+        if locale_config and locale_config.kb_layout:
             installer.set_vconsole(locale_config)
 
     with _time_step("DELTA.package_delta"):
@@ -549,9 +596,10 @@ def install_base_delta(
 
     with _time_step("DELTA.locale_and_keyboard"):
         if locale_config:
-            if not installer.set_locale(locale_config):
-                _write_locale_conf_for_prebuilt(installer, locale_config)
-            installer.set_keyboard_language(locale_config.kb_layout)
+            if not _write_locale_conf_for_prebuilt(installer, locale_config):
+                installer.set_locale(locale_config)
+            if locale_config.kb_layout:
+                installer.set_keyboard_language(locale_config.kb_layout)
 
     installer._helper_flags["base"] = True
 
@@ -659,7 +707,13 @@ def _method_accepts_users(method) -> bool:
     return _method_accepts(method, "users")
 
 
-def install_applications(installer: Installer, arch_config: ArchConfig) -> None:
+def install_applications(
+    installer: Installer,
+    arch_config: ArchConfig,
+    *,
+    before_strap: Callable[[], None] | None = None,
+    skip_packages: Iterable[str] = (),
+) -> None:
     """Install archinstall application selections such as PipeWire audio.
 
     The configurator still writes archinstall's audio_config. We own phase
@@ -674,20 +728,27 @@ def install_applications(installer: Installer, arch_config: ArchConfig) -> None:
     users = arch_config.auth_config.users if arch_config.auth_config else None
     handler = _application_handler()
     install_applications_method = handler.install_applications
+    skipped = set(skip_packages)
 
     # The application installers strap their package sets unconditionally.
     # The root image already carries those (PipeWire and friends) and the
     # offline mirror no longer does, and pacstrap --needed still has to
     # resolve every target before it can skip it. Strap only what the target
-    # lacks (the hardware-detected firmware), through the installer instance
-    # the handlers call into.
+    # lacks (the hardware-detected firmware), minus any packages deferred to
+    # Omarchy's own hardware setup, through the installer instance the handlers
+    # call into.
     original_strap = installer.add_additional_packages
 
     def strap_missing(packages: str | list[str]) -> None:
         if isinstance(packages, str):
             packages = [packages]
-        missing = target_missing_packages(installer.target, packages)
+        wanted = [pkg for pkg in packages if pkg not in skipped]
+        if not wanted:
+            return
+        missing = target_missing_packages(installer.target, wanted)
         if missing:
+            if before_strap is not None:
+                before_strap()
             original_strap(missing)
 
     installer.add_additional_packages = strap_missing  # type: ignore[method-assign]

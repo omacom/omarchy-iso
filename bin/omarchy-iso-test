@@ -412,8 +412,13 @@ ocr_screen() {
   [[ -s $shot ]] || return 0
   # Black on white: the negated grays alone read the focused button on the
   # finished install, dark text on a light bar, as "Reboot Nou".
-  magick "$shot" -colorspace gray -negate -resize 150% -threshold "${OCR_THRESHOLD:-50}%" "$prepped" 2>/dev/null || return 0
-  tesseract "$prepped" - --psm 6 2>/dev/null || true
+  # Gray by the brightest channel, not by luminance: kmscon draws the form's
+  # purple headings and prompts as dark as gum asks for them, where the console
+  # brightened them to its palette, and by luminance they fall with the dim
+  # hints the harness must not read. --psm 4, a column of lines: as one block
+  # of text (6) a lone thin prompt under the logo is dropped.
+  magick "$shot" -grayscale Brightness -negate -resize 150% -threshold "${OCR_THRESHOLD:-50}%" "$prepped" 2>/dev/null || return 0
+  tesseract "$prepped" - --psm 4 2>/dev/null || true
 }
 
 # Wait until the console shows the given text. Saves the offending screen as
@@ -954,9 +959,9 @@ drive_configurator() {
   capture_console "success-installer-04-password"
   press ret
 
-  # The same cursor, the other phase: while it covers the placeholder's first
-  # letter, OCR misreads "Must match"; "you just typed" reads either way.
-  wait_for_screen_any "Must match" "you just typed" 60
+  # The prompt, or its placeholder: kmscon draws the placeholder too dim to
+  # read, and on the console the cursor covers its first letter in one phase.
+  wait_for_screen_any "Conf *irm>" "you just typed" 60
   type_text "$GUEST_PASSWORD"
   capture_console "success-installer-05-password-confirmation"
   press ret
@@ -1208,7 +1213,9 @@ wait_for_install() {
   while true; do
     text=$(ocr_screen)
 
-    if grep -qi "Reboot Now" <<<"$text"; then
+    # The button, or the line above it: dark on its light bar, the button is
+    # the one thing on the screen OCR drops in some fonts.
+    if grep -qi "Reboot Now\|Installed Omarchy in" <<<"$text"; then
       log "Install finished. Confirming the reboot prompt."
       capture_console "success-installer-15-reboot"
       press ret

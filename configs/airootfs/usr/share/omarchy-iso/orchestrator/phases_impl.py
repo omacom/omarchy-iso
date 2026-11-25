@@ -2,9 +2,10 @@
 
 Phase ordering (full-disk and protected/pre-mounted):
 
-    prepare_live           → disk cleanup when wiping, load configurator
-                             handlers (archinstall patch happens in the
-                             wrapper before Python imports it)
+    prepare_live           → start the staged per-machine pacman keyring unit
+                             in tmpfs, disk cleanup when wiping, load
+                             configurator handlers (archinstall patch happens
+                             in the wrapper before Python imports it)
     prepare_install_target → everything that can fail before the disk is
                              touched: the pre-mounted target/ESP when the JSON
                              uses pre_mounted_config (a freshly made btrfs,
@@ -15,9 +16,8 @@ Phase ordering (full-disk and protected/pre-mounted):
     arch_install_system    → one archinstall flow for partition/mount-or-use,
                              root image write, per-machine
                              package delta, Limine setup, useradd, fstab; the
-                             per-machine pacman keyring starts as a transient
-                             systemd unit after the last pacstrap
-    configure_hibernation  → root-owned swap/resume drop-ins
+                             staged keyring keeps building in tmpfs without
+                             blocking pacstrap and lands on target at join time
     run_system_finalizer   → arch-chroot root omarchy-apply-system, including Snapper
     finalize_limine_boot   → final Limine config/UKI build after hardware drop-ins
     run_chroot_finalizer   → arch-chroot -u user omarchy-provision-user
@@ -40,11 +40,14 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -266,6 +269,14 @@ def _copy_firmware_stage_into_target(ctx: InstallContext) -> None:
 
 
 def prepare_live(ctx: InstallContext) -> None:
+    # Start the target's per-machine pacman keyring in tmpfs right away so it
+    # overlaps disk cleanup, medium verification, image writing, and setup.
+    # The live ISO carries the same keyring packages as the root image; if a
+    # test or custom environment lacks them, arch_install_system starts the
+    # unit from the target's keyrings once the image is mounted.
+    if _live_keyrings_ready():
+        _start_target_keyring_init(ctx, keyrings_dir=LIVE_KEYRINGS_DIR)
+
     _stage_qualcomm_firmware()
     if ctx.is_protected:
         info("› protected mode: skipping whole-disk cleanup")
@@ -273,7 +284,8 @@ def prepare_live(ctx: InstallContext) -> None:
         disk = _install_disk(ctx)
         if disk:
             info(f"› cleaning up holders on install disk: {disk}")
-            result = capture(["omarchy-iso-cleanup-disk", disk])
+            with _time_step("LIVE.cleanup_disk"):
+                result = capture(["omarchy-iso-cleanup-disk", disk])
             for line in (result.stdout + result.stderr).splitlines():
                 info(f"  {line}")
             if result.returncode != 0:
@@ -282,10 +294,11 @@ def prepare_live(ctx: InstallContext) -> None:
                 raise RuntimeError(lines[-1] if lines else f"Could not release {disk}")
 
     info("› loading configurator output")
-    ctx.state["arch_config_handler"] = arch.load_arch_config(
-        ctx.arch_config_path, ctx.creds_path
-    )
-    ctx.state["mirror_handler"] = arch.make_mirror_handler(offline=True)
+    with _time_step("LIVE.load_arch_config"):
+        ctx.state["arch_config_handler"] = arch.load_arch_config(
+            ctx.arch_config_path, ctx.creds_path
+        )
+        ctx.state["mirror_handler"] = arch.make_mirror_handler(offline=True)
 
 
 def _install_disk(ctx: InstallContext) -> str | None:
@@ -617,14 +630,27 @@ def arch_install_system(ctx: InstallContext) -> None:
     pre_mounted = arch.is_pre_mount(config)
 
     if not pre_mounted:
+        replaced_guids: set[str] = set()
+        if config.disk_config:
+            for mod in getattr(config.disk_config, "device_modifications", ()):
+                if getattr(mod, "wipe", False):
+                    dev_info = getattr(getattr(mod, "device", None), "device_info", None)
+                    dev_path = getattr(dev_info, "path", None)
+                    if dev_path:
+                        replaced_guids |= _disk_partition_guids(Path(dev_path))
+        ctx.state["replaced_partition_guids"] = replaced_guids
+
         info("› partitioning + formatting + encrypting")
         with _time_step("STEP.perform_filesystem_operations"):
             # The btrfs archinstall makes here is overwritten by the root
             # image a moment later, so it need not TRIM the device first.
-            arch.perform_filesystem_operations(
-                config,
-                throwaway_root_fs=True,
-            )
+            with arch.defer_argon2_keyslot() as deferred_keyslots:
+                arch.perform_filesystem_operations(
+                    config,
+                    throwaway_root_fs=True,
+                )
+            if deferred_keyslots:
+                ctx.state["luks_deferred_keyslots"] = deferred_keyslots
 
     info("› opening installer context")
     with arch.open_installer(config, ctx.target, silent=True) as installer:
@@ -637,7 +663,15 @@ def arch_install_system(ctx: InstallContext) -> None:
 
         with _time_step("STEP.install_root_image"):
             _install_root_image(ctx)
+        # Start Argon2id slot-0 enrollment now, after the 8-thread image write
+        # finishes, so it overlaps single-threaded setup without contending for
+        # CPU or memory bandwidth with omarchy-image-write.
+        _start_luks_keyslot_enroll(ctx)
         _apply_platform_layer(ctx)
+        # Fallback if prepare_live did not already start the staged keyring
+        # unit (e.g., when live /usr/share/pacman/keyrings was incomplete or
+        # arch_install_system was invoked directly). No-op if already running.
+        _start_target_keyring_init(ctx)
 
         if not pre_mounted and arch.is_encrypted(config):
             installer.generate_key_files()
@@ -700,20 +734,26 @@ def arch_install_system(ctx: InstallContext) -> None:
                     arch.setup_zram_swap(installer)
                     _drop_archinstall_zram_conf(ctx)
 
-            with _time_step("STEP.configure_limine_boot (mkinitcpio + ukify + limine-install)"):
+            with _time_step("STEP.configure_limine_boot (Limine EFI + config)"):
                 _configure_limine_boot(ctx, installer, config)
 
             info("› creating user (with /etc/skel populated)")
             if config.auth_config and config.auth_config.users:
                 with _time_step("STEP.create_users"):
-                    installer.create_users(config.auth_config.users)
+                    _create_users_with_reflink_skel(ctx, installer, config.auth_config.users)
 
             if config.app_config:
-                # The image carries the PipeWire packages; this adds the audio
-                # firmware archinstall's hardware detection asks for and wires
-                # the per-user PipeWire units.
+                # The image carries the PipeWire packages; this adds any audio
+                # firmware archinstall's hardware detection asks for (except
+                # sof-firmware when Omarchy's own Intel SOF script handles it
+                # in Phase 4) and wires the per-user PipeWire units.
                 info("› applying archinstall application selections")
-                arch.install_applications(installer, config)
+                with _time_step("STEP.install_applications"):
+                    arch.install_applications(
+                        installer,
+                        config,
+                        skip_packages=_app_packages_deferred_to_hardware(ctx),
+                    )
 
             _write_language_marker(ctx)
             _write_region_marker(ctx)
@@ -729,23 +769,22 @@ def arch_install_system(ctx: InstallContext) -> None:
             _unmask_mkinitcpio_pacman_hooks(ctx)
             _unmount_offline_package_cache(ctx)
 
-        # After the last pacstrap: each one runs its own pacman-key --init on
-        # the target's gnupg dir. Runs on while the phases below configure the
-        # target; create_factory_snapshot joins it.
-        _start_target_keyring_init(ctx)
-
         # Standard arch finishers.
         if config.timezone:
-            installer.set_timezone(config.timezone)
+            with _time_step("STEP.set_timezone"):
+                installer.set_timezone(config.timezone)
         if config.ntp:
-            installer.activate_time_synchronization()
+            with _time_step("STEP.activate_time_sync"):
+                installer.activate_time_synchronization()
         if root := arch.root_user(config):
-            installer.set_user_password(root)
+            with _time_step("STEP.set_root_password"):
+                installer.set_user_password(root)
 
-        if pre_mounted:
-            _write_pre_mounted_fstab(ctx)
-        else:
-            installer.genfstab()
+        with _time_step("STEP.genfstab"):
+            if pre_mounted:
+                _write_pre_mounted_fstab(ctx)
+            else:
+                installer.genfstab()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -997,7 +1036,8 @@ def _medium_bytes_read() -> int | None:
         return None
 
 
-def _write_root_image_frames(image: Path, device: str) -> bool:
+def _write_root_image_frames(image: Path, device: str,
+                              on_progress: Callable[[float], None] | None = None) -> bool:
     """Write the image with omarchy-image-write (builder/omarchy-image-write.c):
     the ISO packs it as independent 256 KiB zstd frames with a seek table,
     which N threads decode and pwrite with O_DIRECT, so the drive sees N
@@ -1008,16 +1048,33 @@ def _write_root_image_frames(image: Path, device: str) -> bool:
     (in use, too small) or the write failed partway."""
     if not IMAGE_WRITE.is_file():
         return False
+    # The tool reports the frames it has taken to a file while it writes,
+    # which goes on to the progress bar: from a slow USB stick the write is
+    # minutes of the install.
+    progress = Path(tempfile.mkdtemp(prefix="omarchy-image-write-")) / "progress"
+    env = {**os.environ, "OMARCHY_IMAGE_WRITE_PROGRESS": str(progress)}
     with _time_step("F1.image_write (parallel frames, O_DIRECT)"):
-        proc = subprocess.run([str(IMAGE_WRITE), "write", str(image), device],
-                              stderr=subprocess.PIPE, text=True, check=False)
-    for line in proc.stderr.splitlines():
+        proc = subprocess.Popen([str(IMAGE_WRITE), "write", str(image), device],
+                                stderr=subprocess.PIPE, text=True, env=env)
+        while True:
+            try:
+                _, stderr = proc.communicate(timeout=0.5)
+                break
+            except subprocess.TimeoutExpired:
+                if on_progress:
+                    try:
+                        done, total = (int(n) for n in progress.read_text().split())
+                        on_progress(done / total)
+                    except (OSError, ValueError, ZeroDivisionError):
+                        pass  # not written yet, or caught between two samples
+    shutil.rmtree(progress.parent, ignore_errors=True)
+    for line in stderr.splitlines():
         info(f"› {line}")
     if proc.returncode == 2:
         info("› image-write refused the image; writing it through zstdcat | dd")
         return False
     if proc.returncode != 0:
-        raise subprocess.CalledProcessError(proc.returncode, proc.args, stderr=proc.stderr)
+        raise subprocess.CalledProcessError(proc.returncode, proc.args, stderr=stderr)
     return True
 
 
@@ -1090,7 +1147,10 @@ def _place_root_image(ctx: InstallContext) -> None:
     # the page cache: near zero when the verify left it all cached, up to the
     # whole image on a machine whose RAM could not hold it.
     medium_before = _medium_bytes_read()
-    if not _write_root_image_frames(raw_image, device):
+    # The rest of the placement after the write takes moments; it gets the
+    # last few percent.
+    if not _write_root_image_frames(raw_image, device,
+                                    lambda done: _write_phase_progress(ctx, 0.95 * done)):
         _write_root_image_pipe(raw_image, device)
     medium_after = _medium_bytes_read()
     if medium_before is not None and medium_after is not None:
@@ -1218,64 +1278,145 @@ def _apply_platform_layer(ctx: InstallContext, layer: Path | None = None) -> Non
 
 def _finish_root_image(ctx: InstallContext) -> None:
     """What the written image owes the rest of the install: it carries
-    the packages the phases assume, and the target has a machine-id (the
+    the packages the phases assume, the target has a machine-id (the
     image deliberately ships an empty one) before limine-entry-tool and the
-    factory snapshot read it."""
+    factory snapshot read it, and /var/log/journal is pre-created with NOCOW
+    so first-boot journald writes system.journal without btrfs CoW."""
     target = ctx.target
     installed = arch.target_package_names(target)
     missing = [pkg for pkg in _root_image_required_packages() if pkg not in installed]
     if missing:
         raise RuntimeError(f"root image lacks required packages: {', '.join(missing)}")
     subprocess.run(["systemd-machine-id-setup", f"--root={target}"], check=True, capture_output=True)
+    # Arch's systemd defaults to Storage=persistent, so systemd-journal-flush
+    # creates /var/log/journal and system.journal before systemd-tmpfiles-setup
+    # applies journal-nocow.conf. Pre-creating the empty directory with +C lets
+    # initial journal files inherit NOCOW while tmpfiles still owns permissions
+    # and ACLs on first boot.
+    journal_dir = target / "var" / "log" / "journal"
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(["chattr", "+C", str(journal_dir)], check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
+        info(f"› could not set NOCOW on {journal_dir}: {detail}")
 
 
 # Transient systemd unit that initialises the target's pacman keyring.
 TARGET_KEYRING_UNIT = "omarchy-target-keyring"
+LIVE_KEYRINGS_DIR = Path("/usr/share/pacman/keyrings")
 
 
-def _start_target_keyring_init(ctx: InstallContext) -> None:
-    """Initialise and populate the target's per-machine pacman keyring, as a
-    transient systemd unit that runs on while the install continues.
+def _app_packages_deferred_to_hardware(ctx: InstallContext) -> tuple[str, ...]:
+    """Application packages that Omarchy's Phase 4 hardware setup handles more
+    accurately (and in one batched pacman transaction).
+
+    archinstall's PipeWire handler adds sof-firmware whenever any snd_sof
+    module is loaded — including AMD ACP70 (snd_sof_amd_acp), even though
+    sof-firmware only ships /usr/lib/firmware/intel/. Omarchy's own
+    install/hardware/intel/sof-firmware.sh checks Intel audio PCI IDs and
+    queues sof-firmware for helpers/flush-packages.sh, so skip it in
+    install_applications whenever the target runtime ships that script.
+    """
+    if (ctx.target / "usr/share/omarchy/install/hardware/intel/sof-firmware.sh").is_file():
+        return ("sof-firmware",)
+    return ()
+
+
+def _target_keyring_stage_dir(ctx: InstallContext) -> Path:
+    state_dir = getattr(ctx, "state_dir", None)
+    base = Path(state_dir) if isinstance(state_dir, (str, os.PathLike)) else Path("/run/omarchy-install")
+    return base / "target-gnupg"
+
+
+def _live_keyrings_ready(keyrings_dir: Path | None = None) -> bool:
+    keyrings_dir = LIVE_KEYRINGS_DIR if keyrings_dir is None else keyrings_dir
+    return all((keyrings_dir / f"{name}.gpg").is_file() for name in _target_keyrings())
+
+
+def _ignore_keyring_sockets(directory: str, names: list[str]) -> set[str]:
+    ignored: set[str] = set()
+    for name in names:
+        try:
+            mode = os.lstat(os.path.join(directory, name)).st_mode
+        except OSError:
+            continue
+        if stat.S_ISSOCK(mode):
+            ignored.add(name)
+    return ignored
+
+
+def _install_staged_target_keyring(staged: Path, dest: Path) -> None:
+    """Copy a completed tmpfs keyring staging dir into the target's
+    /etc/pacman.d/gnupg, replacing anything pacstrap may have left there."""
+    if not staged.is_dir():
+        return
+    if dest.is_dir() and not dest.is_symlink() and shutil.which("gpgconf"):
+        subprocess.run(
+            ["gpgconf", "--homedir", str(dest), "--kill", "all"],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp_dest = dest.parent / f"{dest.name}.omarchy-tmp"
+    shutil.rmtree(tmp_dest, ignore_errors=True)
+    shutil.copytree(staged, tmp_dest, symlinks=True, ignore=_ignore_keyring_sockets)
+    os.chmod(tmp_dest, 0o700)
+    if dest.is_symlink() or dest.is_file():
+        dest.unlink()
+    elif dest.is_dir():
+        shutil.rmtree(dest)
+    os.replace(tmp_dest, dest)
+    shutil.rmtree(staged, ignore_errors=True)
+
+
+def _start_target_keyring_init(ctx: InstallContext, *, keyrings_dir: Path | None = None) -> None:
+    """Initialise and populate the target's per-machine pacman keyring in a
+    tmpfs staging directory, as a transient systemd unit that runs on while
+    the install continues.
 
     The image ships no /etc/pacman.d/gnupg: its master key would be the same
     on every install, and a shared signing key must never be distributed. On
     a target pacstrapped directly, pacstrap -K initialised the keyring and
     the keyring packages' scriptlets populated it; here those packages come
     from the image, where their scriptlets ran with no keyring to populate.
-    The delta pacstrap's -K still ran --init (generating the master key), and
-    --init is idempotent, so run it again for installs that pacstrapped
-    nothing, then populate from the target's own keyring files. Chroot-free:
-    --gpgdir and --populate-from address the target directly, so no API
-    mounts are held.
+    Staging under state_dir (tmpfs in /run) avoids btrfs/dm-crypt write
+    overhead for ~150 gpg trustdb updates, lets the unit start in prepare_live
+    using the live ISO's matching /usr/share/pacman/keyrings before the disk
+    is even touched, and keeps it completely isolated from any pacstrap that
+    touches /mnt/etc/pacman.d/gnupg during arch_install_system.
 
-    Started after the last pacstrap (each runs its own --init on this dir)
-    and joined by create_factory_snapshot: on x86_64 nothing in between
-    reads the keyring (the offline repo is SigLevel = Never) or writes it,
-    and the snapshot must not capture it half-written. Where the runtime's
-    post-install inits and populates it itself, no unit starts: the
-    finalizer had to wait for it before doing the same work again. Apple
-    Silicon, whose image brings its keyrings, keeps it, and
-    run_system_finalizer joins it there first. A unit rather than a plain
+    Joined before any phase that reads or snapshots the target keyring
+    (run_oem_setup, _validate_package_signing, or create_factory_snapshot),
+    where the finished staged directory atomically replaces
+    /mnt/etc/pacman.d/gnupg. When called from prepare_live (keyrings_dir set),
+    the unit starts right away on every architecture; if the target later turns
+    out to carry an older aarch64 runtime that cannot honour
+    OMARCHY_KEYRING_MANAGED_BY_ISO=1, run_system_finalizer stops the unit and
+    leaves the keyring to that runtime instead. A unit rather than a plain
     child process: pacman-key leaves a gpg-agent and dirmngr behind, which
     systemd kills with the rest of the unit's cgroup the moment pacman-key
-    exits (sockets under the target's gnupg dir would otherwise block the
-    unmount); the dashboard's process-group kill does not reach it, while
-    `systemctl stop` still does (stop_target_keyring_init); and its output
-    is in the journal whatever happens to the orchestrator. --wait --pipe
-    give a child to join with the unit's exit status and output.
+    exits; the dashboard's process-group kill does not reach it, while
+    `systemctl stop` still does (stop_target_keyring_init); and its output is
+    in the journal whatever happens to the orchestrator. --wait --pipe give a
+    child to join with the unit's exit status and output.
     """
-    if _runtime_populates_target_keyring():
+    if keyrings_dir is None and _runtime_populates_target_keyring(ctx.target):
         return
-    gpgdir = shlex.quote(str(ctx.target / "etc" / "pacman.d" / "gnupg"))
-    keyrings = shlex.quote(str(ctx.target / "usr" / "share" / "pacman" / "keyrings"))
+    if ctx.state.get("target_keyring_proc") is not None or ctx.state.get("target_keyring_installed"):
+        return
+    staged = _target_keyring_stage_dir(ctx)
+    keyrings = keyrings_dir or (ctx.target / "usr" / "share" / "pacman" / "keyrings")
+    staged_q = shlex.quote(str(staged))
+    keyrings_q = shlex.quote(str(keyrings))
     script = (
-        f"pacman-key --gpgdir {gpgdir} --init && "
-        f"pacman-key --gpgdir {gpgdir} --populate-from {keyrings} --populate {' '.join(_target_keyrings())}"
+        f"rm -rf {staged_q} && mkdir -m 700 -p {staged_q} && "
+        f"pacman-key --gpgdir {staged_q} --init && "
+        f"pacman-key --gpgdir {staged_q} --populate-from {keyrings_q} --populate {' '.join(_target_keyrings())}"
     )
     info("› initializing per-machine pacman keyring (background unit)")
     # A failed unit from an earlier attempt would hold the name (--collect
     # releases it, but not for a unit started without it).
     subprocess.run(["systemctl", "reset-failed", TARGET_KEYRING_UNIT], check=False, capture_output=True)
+    ctx.state["target_keyring_stage"] = staged
     ctx.state["target_keyring_proc"] = subprocess.Popen(
         ["systemd-run", "--wait", "--pipe", "--collect", "--quiet",
          f"--unit={TARGET_KEYRING_UNIT}", "sh", "-c", script],
@@ -1285,11 +1426,26 @@ def _start_target_keyring_init(ctx: InstallContext) -> None:
     )
 
 
-def _runtime_populates_target_keyring() -> bool:
-    """Whether omarchy-apply-system inits and populates the target keyring
-    itself (omarchy's install/post-install/pacman.sh): every aarch64 platform
-    but Apple Silicon."""
-    return platform.machine() == "aarch64" and hw_platform() != "aarch64-apple"
+def _target_supports_iso_managed_keyring(target: Path) -> bool:
+    """Whether the target's pacman-keyring.sh skips rebuilding the keyring when
+    OMARCHY_KEYRING_MANAGED_BY_ISO=1 is set in the environment."""
+    helper = target / "usr" / "share" / "omarchy" / "install" / "helpers" / "pacman-keyring.sh"
+    try:
+        text = helper.read_text()
+    except OSError:
+        return False
+    return re.search(r"^\s*[^#\s].*\bOMARCHY_KEYRING_MANAGED_BY_ISO\b", text, re.MULTILINE) is not None
+
+
+def _runtime_populates_target_keyring(target: Path | None = None) -> bool:
+    """Whether omarchy-apply-system must init and populate the target keyring
+    itself (omarchy's install/post-install/pacman.sh): non-Apple aarch64
+    runtimes that do not yet honour OMARCHY_KEYRING_MANAGED_BY_ISO=1."""
+    if platform.machine() != "aarch64" or hw_platform() == "aarch64-apple":
+        return False
+    if target is not None and _target_supports_iso_managed_keyring(target):
+        return False
+    return True
 
 
 def _target_keyrings() -> list[str]:
@@ -1303,16 +1459,32 @@ def _target_keyrings() -> list[str]:
 
 
 def _join_target_keyring_init(ctx: InstallContext, *, raise_on_error: bool = True) -> None:
-    """Wait for the keyring unit if one is running; no-op otherwise."""
+    """Wait for the keyring unit if one is running and move the staged keyring
+    into the target; no-op otherwise."""
     proc = ctx.state.pop("target_keyring_proc", None)
+    staged = ctx.state.pop("target_keyring_stage", None)
     if proc is None:
+        if staged is not None:
+            shutil.rmtree(staged, ignore_errors=True)
         return
-    out, _ = proc.communicate()
-    if raise_on_error and proc.returncode != 0:
-        raise RuntimeError(
-            f"per-machine pacman keyring init failed (exit {proc.returncode}):\n"
-            f"{(out or '').strip()}"
-        )
+    with _time_step("STEP.join_target_keyring"):
+        out, _ = proc.communicate()
+    if proc.returncode != 0:
+        if staged is not None:
+            shutil.rmtree(staged, ignore_errors=True)
+        if raise_on_error:
+            raise RuntimeError(
+                f"per-machine pacman keyring init failed (exit {proc.returncode}):\n"
+                f"{(out or '').strip()}"
+            )
+        return
+    if raise_on_error:
+        if staged is not None:
+            with _time_step("STEP.install_target_keyring"):
+                _install_staged_target_keyring(staged, ctx.target / "etc" / "pacman.d" / "gnupg")
+        ctx.state["target_keyring_installed"] = True
+    elif staged is not None:
+        shutil.rmtree(staged, ignore_errors=True)
 
 
 def stop_target_keyring_init(ctx: InstallContext) -> None:
@@ -1323,6 +1495,105 @@ def stop_target_keyring_init(ctx: InstallContext) -> None:
         return
     subprocess.run(["systemctl", "stop", TARGET_KEYRING_UNIT], check=False, capture_output=True)
     _join_target_keyring_init(ctx, raise_on_error=False)
+
+
+def _start_luks_keyslot_enroll(ctx: InstallContext) -> None:
+    state = getattr(ctx, "state", None)
+    if not state:
+        return
+    for entry in state.get("luks_deferred_keyslots") or ():
+        entry.start()
+
+
+def _join_luks_keyslot_enroll(ctx: InstallContext, *, raise_on_error: bool = True) -> None:
+    state = getattr(ctx, "state", None)
+    entries = state.get("luks_deferred_keyslots") if state else None
+    if not entries:
+        return
+    with _time_step("STEP.join_luks_keyslot"):
+        errors: list[Exception] = []
+        try:
+            for entry in entries:
+                try:
+                    entry.join(raise_on_error=raise_on_error)
+                except Exception as exc:  # noqa: BLE001 - finish cleaning up every entry
+                    errors.append(exc)
+        except BaseException:
+            for entry in entries:
+                entry.abort()
+            raise
+        finally:
+            state.pop("luks_deferred_keyslots", None)
+        if errors and raise_on_error:
+            raise errors[0]
+
+
+def stop_luks_keyslot_enroll(ctx: InstallContext) -> None:
+    """Exit path: terminate any in-flight LUKS keyslot thread and delete its
+    temporary key files from /run without masking the install's own error."""
+    state = getattr(ctx, "state", None)
+    entries = state.pop("luks_deferred_keyslots", None) if state else None
+    if not entries:
+        return
+    for entry in entries:
+        entry.abort()
+
+
+def _target_passwd_entry(target: Path, username: str) -> tuple[int, int, str] | None:
+    passwd = target / "etc" / "passwd"
+    if not passwd.is_file():
+        return None
+    for line in passwd.read_text().splitlines():
+        parts = line.split(":")
+        if len(parts) >= 6 and parts[0] == username:
+            return int(parts[2]), int(parts[3]), parts[5]
+    return None
+
+
+def _create_users_with_reflink_skel(ctx: InstallContext, installer, users) -> None:
+    """Create users with an empty skel and reflink-copy /etc/skel from the
+    host across btrfs subvolumes, avoiding useradd's byte-by-byte copy of
+    ~79 MiB / ~10k files."""
+    skel = ctx.target / "etc" / "skel"
+    if (os.environ.get("OMARCHY_LUKS_TUNING", "1") != "1"
+            or not skel.is_dir()
+            or _findmnt_value(ctx.target, "FSTYPE") != "btrfs"):
+        installer.create_users(users)
+        return
+
+    entries = list(skel.iterdir())
+    if not entries:
+        installer.create_users(users)
+        return
+
+    tmp_dir = ctx.target / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    empty_skel = Path(tempfile.mkdtemp(prefix="omarchy-empty-skel-", dir=tmp_dir))
+    try:
+        installer._omarchy_empty_skel = "/" + str(empty_skel.relative_to(ctx.target))
+        installer.create_users(users)
+    finally:
+        if hasattr(installer, "_omarchy_empty_skel"):
+            delattr(installer, "_omarchy_empty_skel")
+        shutil.rmtree(empty_skel, ignore_errors=True)
+
+    for user in users:
+        username = getattr(user, "username", str(user))
+        entry = _target_passwd_entry(ctx.target, username)
+        if entry is None:
+            continue
+        uid, gid, home_dir = entry
+        target_home = ctx.target / home_dir.lstrip("/")
+        if not target_home.is_dir():
+            continue
+        subprocess.run(
+            ["cp", "-a", "--reflink=auto", "--", *(str(p) for p in entries), str(target_home) + "/"],
+            check=True,
+        )
+        subprocess.run(
+            ["chown", "-hR", f"{uid}:{gid}", str(target_home)],
+            check=True,
+        )
 
 
 def _umount_tree(root: Path, attempts: int = 20) -> None:
@@ -1450,6 +1721,7 @@ def _install_limine_omarchy(ctx: InstallContext, installer, config) -> None:
             disk=arch.parent_device_path(efi_partition.safe_dev_path),
             part=int(efi_partition.partn),
             removable=bootloader_removable,
+            replaced_guids=ctx.state.get("replaced_partition_guids"),
         )
     else:
         _install_limine_bios(ctx, boot_partition)
@@ -1506,6 +1778,7 @@ def _install_limine_efi(
     esp_path: str = "/EFI/limine",
     efi_binary: str | None = None,
     pre_state: dict | None = None,
+    replaced_guids: set[str] | None = None,
 ) -> None:
     if efi_binary is None:
         efi_binary = _default_limine_efi_binary()
@@ -1514,7 +1787,10 @@ def _install_limine_efi(
         efi_binary = f"BOOT{_efi_arch_suffix()}.EFI"
 
     if _boot_loader(ctx) == "systemd-boot":
-        _install_systemd_boot_efi(ctx, esp_mount=esp_mount, disk=disk, part=part, removable=removable, pre_state=pre_state)
+        _install_systemd_boot_efi(
+            ctx, esp_mount=esp_mount, disk=disk, part=part, removable=removable,
+            pre_state=pre_state, replaced_guids=replaced_guids,
+        )
         return
 
     limine_path = ctx.target / "usr" / "share" / "limine"
@@ -1526,7 +1802,13 @@ def _install_limine_efi(
     hook_command = f"/usr/bin/cp /usr/share/limine/{source_name} {target_path}"
     _write_limine_pacman_hook(ctx.target, hook_command)
 
-    _register_limine_efi_entry(disk, part, _limine_efi_loader(esp_path, efi_binary), pre_state=pre_state)
+    _register_limine_efi_entry(
+        disk,
+        part,
+        _limine_efi_loader(esp_path, efi_binary),
+        pre_state=pre_state,
+        replaced_guids=replaced_guids,
+    )
 
 
 def _install_systemd_boot_efi(
@@ -1537,6 +1819,7 @@ def _install_systemd_boot_efi(
     part: int,
     removable: bool = False,
     pre_state: dict | None = None,
+    replaced_guids: set[str] | None = None,
 ) -> None:
     """systemd-boot at \\EFI\\systemd\\, where omarchy-boot-switch install keeps
     it, with its "Omarchy Boot" entry first. A removable install takes only the
@@ -1549,6 +1832,7 @@ def _install_systemd_boot_efi(
     _copy_required(source, ctx.target / esp_mount.lstrip("/") / "EFI" / "systemd" / f"systemd-boot{arch_name}.efi")
     _register_limine_efi_entry(
         disk, part, _systemd_boot_loader(), pre_state=pre_state, label=SYSTEMD_BOOT_LABEL,
+        replaced_guids=replaced_guids,
     )
 
 
@@ -1569,6 +1853,7 @@ def _register_limine_efi_entry(
     *,
     pre_state: dict | None = None,
     label: str = "Limine",
+    replaced_guids: set[str] | None = None,
 ) -> None:
     pre_state = pre_state or _read_efibootmgr()
     if pre_state.get("unreadable"):
@@ -1591,11 +1876,28 @@ def _register_limine_efi_entry(
     # An efibootmgr that prints no paths matches nothing, and a reinstall
     # onto the same ESP then leaves one duplicate behind, which is harmless.
     esp = _partition_guid(disk, part)
+    replaced = {g.lower() for g in (replaced_guids or ())}
+    stale = [
+        num
+        for num, text in pre_state["entries"].items()
+        if _is_stale_limine_entry(text, replaced, esp, labels=("Limine", label))
+    ]
     identical = [
         num
         for num, text in pre_state["entries"].items()
         if _is_limine_entry_for(text, esp, loader, label) and num not in pre_state.get("inactive", ())
     ]
+    deleted: list[str] = []
+    if stale:
+        # Remove dead "Limine" entries pointing to wiped/non-existent GPT
+        # partitions before creating a new one: avoids duplicate-label warnings
+        # and frees NVRAM slots without touching any live install's entry.
+        for num in stale:
+            if subprocess.run(
+                ["efibootmgr", "--bootnum", num, "--delete-bootnum"],
+                check=False, capture_output=True,
+            ).returncode == 0:
+                deleted.append(num)
     if identical:
         limine_num = identical[0]
         info(f"› Reusing the '{label}' boot entry Boot{limine_num}, which already starts this loader")
@@ -1632,7 +1934,7 @@ def _register_limine_efi_entry(
             [
                 num
                 for num in _find_label_entries(post_state["entries"], label)
-                if num not in pre_state["entries"]
+                if num not in pre_state["entries"] or num in deleted
             ],
             key=lambda num: not _is_limine_entry_for(post_state["entries"][num], esp, loader, label),
         )
@@ -1647,14 +1949,14 @@ def _register_limine_efi_entry(
 
     # Duplicates of the reused entry go, never the reused one. One whose
     # delete fails is still a working copy, and stays in BootOrder.
-    deleted = [
+    deleted.extend(
         num
         for num in identical[1:]
         if subprocess.run(
             ["efibootmgr", "--bootnum", num, "--delete-bootnum"],
             check=False, capture_output=True,
         ).returncode == 0
-    ]
+    )
 
     keep = [
         num
@@ -1809,7 +2111,14 @@ def _write_limine_defaults(
         raise RuntimeError(f"Computed cmdline has no root=: {cmdline!r}")
     # Every variant's cmdline passes through here (archinstall-derived and
     # pre-mounted alike), so this is where the console parameter goes.
-    if CONSOLE_NO_ANSI_QUERY not in cmdline.split():
+    # Avoid duplicating it in /etc/default/limine when a shipped drop-in
+    # under /etc/limine-entry-tool.d/ already adds it, while still keeping
+    # /etc/kernel/cmdline complete.
+    dropin_cmdline = _limine_kernel_cmdline(_limine_combined_config_text(ctx, ""))
+    kernel_cmdline_val = cmdline
+    if CONSOLE_NO_ANSI_QUERY not in kernel_cmdline_val.split():
+        kernel_cmdline_val = f"{kernel_cmdline_val} {CONSOLE_NO_ANSI_QUERY}"
+    if CONSOLE_NO_ANSI_QUERY not in dropin_cmdline.split() and CONSOLE_NO_ANSI_QUERY not in cmdline.split():
         cmdline = f"{cmdline} {CONSOLE_NO_ANSI_QUERY}"
     # And the sd-encrypt spelling of cryptdevice=. Added on the
     # archinstall-derived path only, it would leave an encrypted install into
@@ -1819,6 +2128,7 @@ def _write_limine_defaults(
     # No VM scenario installs into free space.
     from .luks_tuning import with_cmdline_options
     cmdline = with_cmdline_options(cmdline)
+    kernel_cmdline_val = with_cmdline_options(kernel_cmdline_val)
     if "cryptdevice=" in cmdline and "rd.luks.name=" not in cmdline:
         raise RuntimeError(
             f"encrypted cmdline has cryptdevice= but no rd.luks.name=; the "
@@ -1826,7 +2136,9 @@ def _write_limine_defaults(
         )
 
     if _boot_loader(ctx) == "systemd-boot":
-        _write_systemd_boot_cmdline(ctx, cmdline, enable_fallback=enable_fallback)
+        # /etc/kernel/cmdline is the whole cmdline there: no Limine drop-in
+        # adds the console parameter, so the complete value goes in.
+        _write_systemd_boot_cmdline(ctx, kernel_cmdline_val, enable_fallback=enable_fallback)
         return
 
     default_text = _limine_template(ctx, "default.conf").read_text()
@@ -1843,7 +2155,7 @@ def _write_limine_defaults(
 
     kernel_cmdline = ctx.target / "etc" / "kernel" / "cmdline"
     kernel_cmdline.parent.mkdir(parents=True, exist_ok=True)
-    kernel_cmdline.write_text(cmdline + "\n")
+    kernel_cmdline.write_text(kernel_cmdline_val + "\n")
 
     if platform.machine() == "aarch64":
         # arm64 firmware commonly publishes an ACPI serial console (SPCR), which
@@ -2276,6 +2588,38 @@ def _is_limine_entry_for(entry: str, guid: str, loader: str, label_name: str = "
     )
 
 
+def _entry_partition_guid(entry: str) -> str:
+    """The GPT partition GUID named by a `efibootmgr --verbose` entry, lower
+    case, or "" if the entry has no GPT HD(...) device path."""
+    _, _, path = entry.lower().partition("\t")
+    match = re.search(r"hd\(\d+,gpt,([0-9a-f-]+),", path)
+    return match.group(1) if match else ""
+
+
+def _disk_partition_guids(disk: Path) -> set[str]:
+    """Every GPT partition GUID currently on `disk`, lower case."""
+    res = capture(["lsblk", "-nlo", "PARTUUID", str(disk)])
+    if res.returncode != 0:
+        return set()
+    return {line.strip().lower() for line in res.stdout.splitlines() if line.strip()}
+
+
+def _is_stale_limine_entry(
+    entry: str, replaced_guids: set[str], current_esp: str, *, labels: tuple[str, ...] = ("Limine",)
+) -> bool:
+    """Whether an entry is a "Limine" boot entry (or one labelled any of
+    `labels`, such as an earlier systemd-boot install's "Omarchy Boot")
+    pointing to a GPT partition that this install just wiped on the target disk
+    (never touching entries for other or temporarily disconnected disks)."""
+    if not replaced_guids:
+        return False
+    label, _, _ = entry.lower().partition("\t")
+    if label.strip() not in {name.lower() for name in labels}:
+        return False
+    guid = _entry_partition_guid(entry)
+    return bool(guid) and guid != current_esp and guid in replaced_guids
+
+
 def _partition_guid(disk: Path, part: int) -> str:
     """The GPT partition GUID of partition `part` on `disk`, lower case, as
     efibootmgr prints it in a boot entry's device path; "" if unknown."""
@@ -2308,27 +2652,6 @@ def _split_partition_device(part_dev: str) -> tuple[str, int]:
     if not part_num:
         raise RuntimeError(f"could not find partition number for {part_dev}")
     return f"/dev/{parent}", int(part_num)
-
-
-def configure_hibernation(ctx: InstallContext) -> None:
-    """Configure swap/resume in the target as root before user setup.
-
-    Hibernation is system boot configuration, not per-user setup. The final
-    Limine UKI build still happens later in finalize_limine_boot after this
-    writes the resume hook and kernel cmdline drop-in.
-    """
-    setup = ctx.target / "usr" / "bin" / "omarchy-hibernation-setup"
-    if not setup.exists():
-        _debug_log(ctx, "skipping hibernation: /usr/bin/omarchy-hibernation-setup is not installed")
-        return
-
-    subprocess.run([
-        "arch-chroot", str(ctx.target),
-        "env",
-        "OMARCHY_PATH=/usr/share/omarchy",
-        "OMARCHY_INSTALL_LOG_FILE=/var/log/omarchy-install.log",
-        "/usr/bin/omarchy-hibernation-setup", "--force", "--no-rebuild",
-    ], check=True)
 
 
 def _install_debug_enabled() -> bool:
@@ -2384,14 +2707,45 @@ def _debug_run(ctx: InstallContext, cmd: list[str]) -> None:
 #  4. arch-chroot as user → omarchy-provision-user --first-install
 # ─────────────────────────────────────────────────────────────────────────────
 
+OFFLINE_MIRROR_DIR = "/var/cache/omarchy/mirror/offline"
+
+
+def _write_offline_target_pacman_conf(source: Path, dest: Path) -> None:
+    """Copy the live ISO's offline pacman.conf into the target with CacheDir
+    pointed at the bind-mounted offline mirror.
+
+    Without CacheDir, pacman copies every hardware package installed during
+    target setup from file:///var/cache/omarchy/mirror/offline/ into
+    /mnt/var/cache/pacman/pkg/ (~20 MiB on Intel laptops) before extracting it,
+    and leaves those copies behind. post-install/pacman.sh replaces this
+    temporary config with the online pacman.conf once offline installs finish.
+    """
+    text = source.read_text()
+    cache_line = f"CacheDir = {OFFLINE_MIRROR_DIR}/"
+    if not re.search(rf"^\s*{re.escape(cache_line)}\s*$", text, flags=re.MULTILINE):
+        text, count = re.subn(
+            r"^(\[options\][^\n]*\n)",
+            rf"\1{cache_line}\n",
+            text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        if count == 0:
+            text = f"[options]\n{cache_line}\n{text}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(text)
+
+
 def _prepare_target_setup(ctx: InstallContext) -> None:
     if ctx.state.get("target_setup_prepared"):
         return
 
-    shutil.copy("/etc/pacman.conf", str(ctx.target / "etc" / "pacman.conf"))
+    _write_offline_target_pacman_conf(
+        Path("/etc/pacman.conf"), ctx.target / "etc" / "pacman.conf"
+    )
 
     bind_mounts = [
-        ("/var/cache/omarchy/mirror/offline", "/var/cache/omarchy/mirror/offline"),
+        (OFFLINE_MIRROR_DIR, OFFLINE_MIRROR_DIR),
     ]
     # build-iso.sh bundles Node only for a runtime whose setup still unpacks it.
     if NODE_PACKAGES_DIR.is_dir():
@@ -2411,10 +2765,30 @@ def _prepare_target_setup(ctx: InstallContext) -> None:
     ctx.state["target_setup_prepared"] = True
 
 
+def _format_target_time(ctx: InstallContext, epoch: int) -> str:
+    """Format an epoch timestamp in the target system's timezone when known,
+    so the orchestrator's setup header matches the timestamps logged inside
+    the chroot instead of jumping by the UTC offset."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    tz_name = None
+    handler = ctx.state.get("arch_config_handler")
+    if handler is not None and getattr(handler, "config", None) is not None:
+        tz_name = getattr(handler.config, "timezone", None)
+    if tz_name:
+        try:
+            return datetime.fromtimestamp(epoch, tz=ZoneInfo(tz_name)).strftime("%Y-%m-%d %H:%M:%S")
+        except ZoneInfoNotFoundError:
+            pass
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(epoch))
+
+
 def _ensure_finalizer_log_started(ctx: InstallContext) -> tuple[str, int]:
     if "omarchy_start_time" not in ctx.state:
-        ctx.state["omarchy_start_epoch"] = int(time.time())
-        ctx.state["omarchy_start_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        epoch = int(time.time())
+        ctx.state["omarchy_start_epoch"] = epoch
+        ctx.state["omarchy_start_time"] = _format_target_time(ctx, epoch)
 
     ctx.log_path.parent.mkdir(parents=True, exist_ok=True)
     ctx.log_path.touch(exist_ok=True)
@@ -2456,7 +2830,12 @@ def _target_user_env(ctx: InstallContext, user: str) -> list[str]:
 _OMARCHY_SCRIPT_LINE = re.compile(rb"^\[[0-9: -]+\] (Starting|Completed|Failed): (\S+)")
 
 
-def _run_timing_scripts(cmd: list[str]) -> None:
+# Per-thread output buffer used by parallel workers (e.g. finalize_boot_and_user)
+# so chroot setup logs don't interleave on stdout while still timing lines live.
+_THREAD_LOG_BUFFER = threading.local()
+
+
+def _run_timing_scripts(cmd: list[str], *, log_buffer: list[bytes] | None = None) -> None:
     """Run cmd with its output passed through line by line, and after each
     Omarchy install script it runs, add a [step] line with its duration in
     microseconds.
@@ -2465,19 +2844,26 @@ def _run_timing_scripts(cmd: list[str]) -> None:
     for a phase that runs about 50 scripts in 3 s. It prints them unbuffered as
     each script starts and ends, so the time they arrive here is the script's
     own. The output goes where it went before, stderr folded into stdout as
-    the dashboard already merges them.
+    the dashboard already merges them. When log_buffer (or the current thread's
+    buffer) is set, lines and their live-measured [step] lines are collected
+    there so a parallel worker does not interleave with another thread's stdout.
 
     An interrupt or a failed write stops and reaps the child before it
     propagates, as subprocess.run does: the caller unmounts the log and tears
     the target down next, which must not race a setup still running."""
+    if log_buffer is None:
+        log_buffer = getattr(_THREAD_LOG_BUFFER, "chunks", None)
     out = sys.stdout.buffer
     started: dict[bytes, float] = {}
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as proc:
         try:
             for line in proc.stdout:
                 now = time.monotonic()
-                out.write(line)
-                out.flush()
+                if log_buffer is not None:
+                    log_buffer.append(line)
+                else:
+                    out.write(line)
+                    out.flush()
                 match = _OMARCHY_SCRIPT_LINE.match(line)
                 if not match:
                     continue
@@ -2486,7 +2872,11 @@ def _run_timing_scripts(cmd: list[str]) -> None:
                     started[script] = now
                 elif script in started:
                     name = script.decode(errors="replace").removeprefix("/usr/share/omarchy/install/")
-                    info(f"[step] {name}: {now - started.pop(script):.6f}s")
+                    step_msg = f"[step] {name}: {now - started.pop(script):.6f}s"
+                    if log_buffer is not None:
+                        log_buffer.append(f"\n    {step_msg}\n".encode())
+                    else:
+                        info(step_msg)
         except BaseException:
             proc.kill()
             proc.wait()
@@ -2537,7 +2927,11 @@ def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str 
         # declarations; the first real use of a tool installs it later, with a
         # network. MISE_OFFLINE blocks every HTTP request.
         "MISE_OFFLINE=1",
+        "MISE_LOG_LEVEL=error",
     ]
+    if (ctx.state.get("target_keyring_proc") is not None
+            or ctx.state.get("target_keyring_installed")):
+        env_extras.append("OMARCHY_KEYRING_MANAGED_BY_ISO=1")
     if _install_debug_enabled():
         env_extras.append("OMARCHY_INSTALL_DEBUG=1")
         _debug_log(ctx, "running target setup command: " + " ".join(cmd))
@@ -2581,12 +2975,13 @@ def run_system_finalizer(ctx: InstallContext) -> None:
     else:
         cmd = ["/usr/bin/omarchy-apply-system", "--install-user", ctx.username, "--first-install"]
 
-    # On aarch64 the runtime runs pacman-key --init and --populate on the
-    # target (omarchy's install/post-install/pacman.sh). Two pacman-keys on
-    # one gnupg dir break each other's writes, so the keyring unit finishes
-    # first; on x86_64 it keeps running alongside.
-    if platform.machine() == "aarch64":
-        _join_target_keyring_init(ctx)
+    # When the target carries an older aarch64 runtime that cannot skip its own
+    # keyring rebuild via OMARCHY_KEYRING_MANAGED_BY_ISO=1, stop any tmpfs unit
+    # started in prepare_live instead of waiting for work the runtime would
+    # overwrite. Otherwise the tmpfs unit keeps overlapping system setup and
+    # lands in _validate_package_signing / create_factory_snapshot.
+    if _runtime_populates_target_keyring(ctx.target):
+        stop_target_keyring_init(ctx)
 
     _mask_mkinitcpio_pacman_hooks(ctx, ctx.target, TARGET_DEFERRED_BOOT_HOOKS)
     try:
@@ -2848,7 +3243,8 @@ def _prebuilt_uki_keymap_stale(target: Path) -> str:
     UKI that is only copied. The LUKS passphrase prompt runs from that
     initramfs: leaving it stale is upstream omarchy#8196, where a passphrase
     enrolled under AZERTY cannot be typed at a QWERTY prompt and the owner is
-    locked out of a fresh install with no recovery but reinstalling.
+    locked out of a fresh install with no recovery but reinstalling. The
+    caller writes the choice into the UKI (uki_vconsole.py), or builds one.
 
     An image that records nothing is assumed to have built in "us", and that
     covers two cases:
@@ -3002,7 +3398,7 @@ def finalize_systemd_boot(ctx: InstallContext) -> None:
         subprocess.run(command, check=True)
 
     subprocess.run(
-        ["arch-chroot", str(ctx.target), "btrfs", "quota", "disable", "/"],
+        ["btrfs", "quota", "disable", str(ctx.target)],
         check=False,
         capture_output=True,
     )
@@ -3094,19 +3490,25 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
         info(f"› hardware setup added initramfs modules ({'; '.join(added_modules)}); "
              "building the UKI on this machine instead of using the pre-built one")
 
-    # Same reasoning for the console keymap: the pre-built initramfs has the
-    # image's, and the LUKS prompt types with it.
+    # The console keymap is the image's too, and the LUKS prompt types with
+    # it. An image that reserved room for it takes this install's keyboard
+    # settings in place (uki_vconsole.py); one that did not is built here.
     stale_keymap = _prebuilt_uki_keymap_stale(ctx.target)
+    vconsole = ctx.target / "etc" / "vconsole.conf"
+    keymap_fits = False
     if prebuilt_uki.is_file() and stale_keymap:
-        info(f"› keyboard layout {stale_keymap} differs from the pre-built UKI's; "
-             "building the UKI on this machine so the LUKS prompt uses it")
+        from .uki_vconsole import vconsole_fits
+        keymap_fits = vconsole_fits(prebuilt_uki, vconsole)
+        if not keymap_fits:
+            info(f"› keyboard layout {stale_keymap} differs from the pre-built UKI's, which has no room for it; "
+                 "building the UKI on this machine so the LUKS prompt uses it")
     # And for an encrypted deferred install: its first boot unlocks with the
     # provisioning key, which only an initramfs built here carries.
     provisioning_key = _initramfs_carries_provisioning_key(ctx.target)
     if prebuilt_uki.is_file() and provisioning_key:
         info("› the first boot unlocks with the provisioning key; "
              "building the UKI on this machine so its initramfs carries it")
-    skip_prebuilt = bool(added_modules) or bool(stale_keymap) or provisioning_key
+    skip_prebuilt = bool(added_modules) or (bool(stale_keymap) and not keymap_fits) or provisioning_key
 
     # A selected kernel other than the image's boots first, as in omarchy's own
     # kernel migration. Written before any UKI is built so the entries sort by it.
@@ -3136,6 +3538,14 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
             shutil.copy2(prebuilt_uki, esp_uki)
             info(f"› deployed pre-built UKI ({prebuilt_uki.stat().st_size >> 20} MiB)")
         # Before --add-uki: the Limine entry pins the UKI's BLAKE2B hash.
+        if stale_keymap:
+            with _time_step("LIMINE.embed_vconsole (keyboard layout into the pre-built UKI)"):
+                from .uki_vconsole import embed_vconsole
+                # It fit a moment ago, in the copy's source. A prompt in the
+                # wrong layout locks the owner out, so nothing boots without it.
+                if not embed_vconsole(esp_uki, vconsole):
+                    raise RuntimeError(f"could not write keyboard layout {stale_keymap} into {esp_uki}")
+                info(f"› UKI carries keyboard layout {stale_keymap} for the console and the LUKS prompt")
         with _time_step("LIMINE.embed_cmdline (pre-built UKI boots without a loader)"):
             from .uki_cmdline import embed_cmdline
             if embed_cmdline(esp_uki, cmdline):
@@ -3173,7 +3583,7 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
             )
 
     subprocess.run(
-        ["arch-chroot", str(ctx.target), "btrfs", "quota", "disable", "/"],
+        ["btrfs", "quota", "disable", str(ctx.target)],
         check=False,
         capture_output=True,
     )
@@ -3276,15 +3686,45 @@ def finalize_boot_and_user(ctx: InstallContext) -> None:
 
     from concurrent.futures import ThreadPoolExecutor
 
+    user_log: list[bytes] = []
+
+    def _run_user_buffered() -> None:
+        _THREAD_LOG_BUFFER.chunks = user_log
+        try:
+            run_chroot_finalizer(ctx, private_mounts=True)
+        finally:
+            _THREAD_LOG_BUFFER.chunks = None
+
+    errors: list[BaseException] = []
     with ThreadPoolExecutor(max_workers=2) as pool:
         boot = pool.submit(finalize_boot, ctx)
-        user = pool.submit(run_chroot_finalizer, ctx, private_mounts=True)
-        errors: list[BaseException] = []
+        user = pool.submit(_run_user_buffered)
         for future in (boot, user):
             try:
                 future.result()
             except BaseException as exc:  # noqa: BLE001 - re-raised below
                 errors.append(exc)
+    if user_log:
+        # Refresh the target's saved log BEFORE flushing user_log to stdout so
+        # we don't race the dashboard's stdout pipe: target_log gets everything
+        # written to ctx.log_path so far (including boot finalization) plus the
+        # buffered user output and [step] timings, even when a branch failed.
+        target = getattr(ctx, "target", None)
+        log_path = getattr(ctx, "log_path", None)
+        if target is not None:
+            target_log = Path(target) / "var" / "log" / "omarchy-install.log"
+            try:
+                target_log.parent.mkdir(parents=True, exist_ok=True)
+                if log_path is not None and Path(log_path).is_file():
+                    shutil.copy2(log_path, target_log)
+                with target_log.open("ab") as saved:
+                    for chunk in user_log:
+                        saved.write(re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", chunk))
+                target_log.chmod(0o644)
+            except OSError:
+                pass
+        sys.stdout.buffer.writelines(user_log)
+        sys.stdout.buffer.flush()
     if errors:
         raise errors[0]
 
@@ -3319,6 +3759,39 @@ def _read_omarchy_mirror() -> str:
 # boundary; unencrypted installs leave SDDM as the auth screen.
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _target_group_gid(target: Path, group: str) -> int | None:
+    group_file = target / "etc" / "group"
+    if not group_file.is_file():
+        return None
+    for line in group_file.read_text().splitlines():
+        parts = line.split(":")
+        if len(parts) >= 3 and parts[0] == group:
+            try:
+                return int(parts[2])
+            except ValueError:
+                return None
+    return None
+
+
+def _sddm_service_enabled(target: Path) -> bool:
+    """Whether sddm.service is already enabled as display-manager.service in
+    target (as install/config/enable-services.sh does) and not masked."""
+    etc_systemd = target / "etc" / "systemd" / "system"
+    unit = target / "usr" / "lib" / "systemd" / "system" / "sddm.service"
+    if not unit.is_file():
+        return False
+    override = etc_systemd / "sddm.service"
+    if override.is_symlink() and os.readlink(override) == "/dev/null":
+        return False
+    dm_link = etc_systemd / "display-manager.service"
+    if not dm_link.is_symlink():
+        return False
+    return os.readlink(dm_link) in (
+        "/usr/lib/systemd/system/sddm.service",
+        "/lib/systemd/system/sddm.service",
+    )
+
+
 def configure_login(ctx: InstallContext) -> None:
     sddm_dir = ctx.target / "etc" / "sddm.conf.d"
     sddm_dir.mkdir(parents=True, exist_ok=True)
@@ -3342,22 +3815,39 @@ def configure_login(ctx: InstallContext) -> None:
     if not ctx.defer_provisioning:
         state_dir = ctx.target / "var" / "lib" / "sddm"
         state_dir.mkdir(parents=True, exist_ok=True)
-        (state_dir / "state.conf").write_text(
+        state_file = state_dir / "state.conf"
+        state_file.write_text(
             f"[Last]\nSession=omarchy.desktop\nUser={ctx.username}\n"
         )
-        subprocess.run(
-            ["arch-chroot", str(ctx.target), "chown", "sddm:sddm",
-             "/var/lib/sddm", "/var/lib/sddm/state.conf"],
-            check=False, capture_output=True,
-        )
+        sddm_entry = _target_passwd_entry(ctx.target, "sddm")
+        sddm_gid = _target_group_gid(ctx.target, "sddm")
+        if (sddm_entry is not None and sddm_gid is not None
+                and not state_dir.is_symlink() and not state_file.is_symlink()):
+            uid = sddm_entry[0]
+            try:
+                os.chown(state_dir, uid, sddm_gid, follow_symlinks=False)
+                os.chown(state_file, uid, sddm_gid, follow_symlinks=False)
+            except OSError:
+                subprocess.run(
+                    ["arch-chroot", str(ctx.target), "chown", "sddm:sddm",
+                     "/var/lib/sddm", "/var/lib/sddm/state.conf"],
+                    check=False, capture_output=True,
+                )
+        else:
+            subprocess.run(
+                ["arch-chroot", str(ctx.target), "chown", "sddm:sddm",
+                 "/var/lib/sddm", "/var/lib/sddm/state.conf"],
+                check=False, capture_output=True,
+            )
 
     autologin = ctx.target / "etc" / "systemd" / "system" / "getty@tty1.service.d" / "autologin.conf"
     autologin.unlink(missing_ok=True)
 
-    subprocess.run(
-        ["arch-chroot", str(ctx.target), "systemctl", "enable", "sddm.service"],
-        check=False, capture_output=True,
-    )
+    if not _sddm_service_enabled(ctx.target):
+        subprocess.run(
+            ["systemctl", f"--root={ctx.target}", "enable", "sddm.service"],
+            check=False, capture_output=True,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3592,6 +4082,7 @@ def validate_boot(ctx: InstallContext) -> None:
         _validate_provisioning_state(ctx)
 
     _validate_package_signing(ctx)
+    _join_luks_keyslot_enroll(ctx)
 
 
 def _systemd_boot_ukis(ctx: InstallContext, esp_mount: Path) -> list[Path]:
@@ -4142,6 +4633,7 @@ def _mark_updates_applied(ctx: InstallContext) -> None:
 def create_factory_snapshot(ctx: InstallContext) -> None:
     # The keyring unit writes into @; the snapshot must not catch it midway.
     _join_target_keyring_init(ctx)
+    _join_luks_keyslot_enroll(ctx)
     _mark_updates_applied(ctx)
 
     fstype = _findmnt_value(ctx.target, "FSTYPE")

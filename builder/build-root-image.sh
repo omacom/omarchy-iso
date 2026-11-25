@@ -21,6 +21,9 @@
 #   package...      Packages to pacstrap into the image.
 #
 # Environment:
+#   OMARCHY_FAST_COMPRESSION    When 1, build with minimal zstd compression
+#                               (btrfs compress-force=zstd:1 directly without staging,
+#                               N1x layer zstd -1) for faster test builds.
 #   OMARCHY_IMAGE_LOCALDB_COPY  Directory to copy the image's pacman local db
 #                               into, so the caller can resolve the per-machine
 #                               delta against what the image already holds.
@@ -79,7 +82,8 @@ n1x_layer_path() {
 # are left out: mount points, caches and logs, the sync databases (the image
 # ships its own), and the keyring the installer creates per machine.
 write_n1x_layer() {
-  local upper=$1 layer
+  local upper=$1 layer zstd_level=15
+  [[ ${OMARCHY_FAST_COMPRESSION:-} == 1 ]] && zstd_level=1
   layer=$(n1x_layer_path)
 
   # tar has no way to say "delete": an overlay whiteout (a 0:0 character
@@ -97,7 +101,7 @@ write_n1x_layer() {
     --exclude=./run --exclude=./tmp --exclude=./var/cache --exclude=./var/log \
     --exclude=./var/tmp --exclude=./var/lib/pacman/sync \
     --exclude=./etc/pacman.d/gnupg \
-    -cf - . | zstd -q -T0 -15 -o "$layer" || return 1
+    -cf - . | zstd -q -T0 "-$zstd_level" -o "$layer" || return 1
   echo "N1x layer: $(du -h "$layer" | cut -f1) at $layer"
 }
 
@@ -112,7 +116,7 @@ build_n1x_uki_in() {
   # install them (_platform_delta_packages), from the same mirror.
   mapfile -t n1x_packages < <(grep -hv '^\s*#\|^\s*$' "$merged/usr/share/omarchy/install/omarchy-aarch64-n1x.packages")
   ((${#n1x_packages[@]})) || return 1
-  pacstrap -C "$pacman_conf" -c -G -M "$merged" --needed "${n1x_packages[@]}" || return 1
+  pacstrap -C "$effective_pacman_conf" -c -G -M "$merged" --needed "${n1x_packages[@]}" || return 1
 
   # What the installed system's pacman hooks would have left, whether or not
   # the building system has those hooks: the module index and linker cache
@@ -220,22 +224,51 @@ if [[ ! -r $pacman_conf ]]; then
   exit 1
 fi
 
-# Forced zstd at a higher level than the installer's own compress=zstd (level
-# 3): btrfs's incompressibility heuristic declines a lot of data in this tree
-# that zstd handles fine, and the level only costs build time. The image is
-# written to the target as it is, so neither choice affects install speed; the
-# installed system writes new data at its own mount option either way.
+# Forced zstd at level 15 by default: btrfs's incompressibility heuristic
+# declines a lot of data in this tree that zstd handles fine, and the image is
+# written to the target as it is. To avoid stalling single-threaded pacstrap on
+# btrfs writeback, pacstrap and pre-build steps run in an uncompressed staging
+# root and copy-tree-parallel.py then populates the mounted btrfs across every
+# CPU. Under OMARCHY_FAST_COMPRESSION=1 (omarchy-iso-make --fast), mount btrfs
+# at compress-force=zstd:1 up front and pacstrap directly into it.
+#
+# Forced in both modes for correctness, not just size: omarchy-image-write
+# (and the dd fallback's conv=sparse) skips every all-zero frame, leaving
+# whatever the target's LUKS volume held there. Only forced compression
+# guarantees no file data is stored as a raw run of zeros. Without it, a file
+# btrfs's heuristic marks incompressible keeps its zero padding raw, and the
+# installed copy fails its checksum (EIO reading prebuilt-uki-n1x.efi).
 IMAGE_COMPRESS="compress-force=zstd:15"
+if [[ ${OMARCHY_FAST_COMPRESSION:-} == 1 ]]; then
+  IMAGE_COMPRESS="compress-force=zstd:1"
+fi
 # Name of the image's one subvolume. The installer renames it to @ after the
 # write (phases_impl.ROOT_IMAGE_SUBVOLUME).
 IMAGE_SUBVOLUME="omarchy-root"
 
+mount_root_btrfs() {
+  truncate -s "${OMARCHY_IMAGE_SIZE:-24G}" "$backing"
+  # Docker fills the container's /dev once, at start. A loop device the kernel
+  # creates afterwards (loop-control hands one out on demand, loading the module
+  # on a host that had none) exists on the host but has no node in here, so make
+  # the nodes ourselves when they are missing.
+  [[ -e /dev/loop-control ]] || mknod /dev/loop-control c 10 237
+  # losetup reports a device whose node is missing as "/dev/loopN (lost)".
+  loop=$(losetup --find | awk '{ print $1 }')
+  [[ $loop == /dev/loop[0-9]* ]] || { echo "ERROR: no free loop device: $loop" >&2; exit 1; }
+  [[ -b $loop ]] || mknod "$loop" b 7 "${loop#/dev/loop}"
+  losetup "$loop" "$backing"
+  mkfs.btrfs -q -L omarchy-root-image "$loop"
+  mkdir -p "$mnt"
+  mount -o "$IMAGE_COMPRESS,noatime,commit=600" "$loop" "$mnt"
+  btrfs subvolume create "$mnt/$IMAGE_SUBVOLUME" >/dev/null
+}
+
 # Boot-image pacman hooks that must not run while the image is built: there is
-# no kernel in the image and no ESP to deploy to. pacstrap reads hooks from the
-# building system's /etc/pacman.d/hooks (pacman.conf(5): HookDir is absolute,
-# the target root is not prepended), so mask them here, the same way the
-# orchestrator masks the live ISO's around its pacstrap. Keep in step with
-# DEFERRED_BOOT_HOOKS in
+# no kernel in the image and no ESP to deploy to. Point HookDir at a private
+# directory in $work rather than mutating /etc/pacman.d/hooks globally, so
+# concurrent pacstrap runs (like mkarchiso) are unaffected and a crash leaves
+# no stale masks behind. Keep in step with DEFERRED_BOOT_HOOKS in
 # configs/airootfs/usr/share/omarchy-iso/orchestrator/phases_impl.py.
 deferred_boot_hooks=(
   60-mkinitcpio-remove.hook
@@ -246,31 +279,33 @@ deferred_boot_hooks=(
 )
 
 work=$(mktemp -d /tmp/omarchy-root-image.XXXXXX)
+stage="$work/stage"
 backing="$work/image.btrfs"
 mnt="$work/mnt"
 loop=""
-masked_hooks=()
 
 # Anything that touches a keyring under the image (pacman-key in a scriptlet,
 # say) starts a gpg-agent for that homedir and leaves it running; until it is
 # gone the image cannot be unmounted. Nothing should, as no keyring exists in
 # the image, but kill whatever did.
 stop_image_gpg_agents() {
-  gpgconf --homedir "$mnt/$IMAGE_SUBVOLUME/etc/pacman.d/gnupg" --kill all 2>/dev/null || true
-  pkill -f "$mnt/$IMAGE_SUBVOLUME/etc/pacman.d/gnupg" 2>/dev/null || true
+  local dir
+  for dir in "$stage" "$mnt/$IMAGE_SUBVOLUME"; do
+    [[ -d "$dir/etc/pacman.d/gnupg" ]] || continue
+    gpgconf --homedir "$dir/etc/pacman.d/gnupg" --kill all 2>/dev/null || true
+    pkill -f "$dir/etc/pacman.d/gnupg" 2>/dev/null || true
+  done
 }
 
 cleanup() {
   local status=$?
   set +e
-  for hook in "${masked_hooks[@]}"; do
-    rm -f "/etc/pacman.d/hooks/$hook"
-    if [[ -e "/etc/pacman.d/hooks/$hook.omarchy-backup" ]]; then
-      mv -f "/etc/pacman.d/hooks/$hook.omarchy-backup" "/etc/pacman.d/hooks/$hook"
-    fi
-  done
+  stop_image_gpg_agents
+  if mountpoint -q "$stage" 2>/dev/null; then
+    sleep 1
+    umount -R "$stage" || echo "WARNING: $stage is still mounted; leaving $work in place" >&2
+  fi
   if mountpoint -q "$mnt" 2>/dev/null; then
-    stop_image_gpg_agents
     sleep 1
     if ! umount -R "$mnt"; then
       echo "WARNING: $mnt is still mounted; leaving $work in place" >&2
@@ -285,42 +320,27 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p /etc/pacman.d/hooks
+mkdir -p "$work/hooks" "$stage"
 for hook in "${deferred_boot_hooks[@]}"; do
-  path="/etc/pacman.d/hooks/$hook"
-  # Already masked: an earlier run died before its cleanup. Moving the mask
-  # over that run's backup would lose the real hook for good, so leave both
-  # for it to be restored by hand (the orchestrator's _is_devnull_symlink
-  # makes the same call).
-  if [[ -L $path && $(readlink "$path") == /dev/null ]]; then
-    echo "WARNING: $path is already masked; leaving it and any backup alone" >&2
-    continue
-  fi
-  if [[ -e $path || -L $path ]]; then
-    mv -f "$path" "$path.omarchy-backup"
-  fi
-  ln -s /dev/null "$path"
-  masked_hooks+=("$hook")
+  ln -s /dev/null "$work/hooks/$hook"
 done
+effective_pacman_conf="$work/pacman.conf"
+sed "/^\[options\]/a HookDir = $work/hooks/" "$pacman_conf" >"$effective_pacman_conf"
+
+if [[ ${OMARCHY_FAST_COMPRESSION:-} == 1 ]]; then
+  mount_root_btrfs
+  root="$mnt/$IMAGE_SUBVOLUME"
+else
+  # Stage in tmpfs when ample memory is free so pacstrap avoids disk I/O before
+  # the parallel copy into the compressed btrfs image.
+  mem_avail_kb=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null || echo 0)
+  if (( mem_avail_kb >= 20 * 1024 * 1024 )); then
+    mount -t tmpfs -o size=16G,mode=0755 omarchy-root-stage "$stage" 2>/dev/null || true
+  fi
+  root="$stage"
+fi
 
 echo "Building root image with ${#packages[@]} packages"
-truncate -s "${OMARCHY_IMAGE_SIZE:-24G}" "$backing"
-# Docker fills the container's /dev once, at start. A loop device the kernel
-# creates afterwards (loop-control hands one out on demand, loading the module
-# on a host that had none) exists on the host but has no node in here, so make
-# the nodes ourselves when they are missing.
-[[ -e /dev/loop-control ]] || mknod /dev/loop-control c 10 237
-# losetup reports a device whose node is missing as "/dev/loopN (lost)".
-loop=$(losetup --find | awk '{ print $1 }')
-[[ $loop == /dev/loop[0-9]* ]] || { echo "ERROR: no free loop device: $loop" >&2; exit 1; }
-[[ -b $loop ]] || mknod "$loop" b 7 "${loop#/dev/loop}"
-losetup "$loop" "$backing"
-mkfs.btrfs -q -L omarchy-root-image "$loop"
-mkdir -p "$mnt"
-mount -o "$IMAGE_COMPRESS" "$loop" "$mnt"
-btrfs subvolume create "$mnt/$IMAGE_SUBVOLUME" >/dev/null
-root="$mnt/$IMAGE_SUBVOLUME"
-
 # -c: packages come straight from the config's CacheDir (the offline mirror),
 #     so nothing is copied into the image's own cache first.
 # -G: no pacman keyring in the image, neither the builder's copied in nor one
@@ -331,7 +351,7 @@ root="$mnt/$IMAGE_SUBVOLUME"
 #     packages' scriptlets did when the target was pacstrapped directly.
 # -M: the builder's mirrorlist means nothing to an installed system; the
 #     installer writes the target's own.
-pacstrap -C "$pacman_conf" -c -G -M "$root" "${packages[@]}"
+pacstrap -C "$effective_pacman_conf" -c -G -M "$root" "${packages[@]}"
 stop_image_gpg_agents
 # The keyring packages' scriptlets only populate an existing keyring, so with
 # -G they have nothing to do; remove whatever a scriptlet may have seeded
@@ -371,6 +391,17 @@ if grep -q '^#en_US.UTF-8 UTF-8' "$root/etc/locale.gen"; then
   arch-chroot "$root" locale-gen >/dev/null && echo "en_US.UTF-8 compiled into the image's locale archive"
 fi
 
+# Pre-bake the static UFW + ufw-docker rules into the root image while keeping
+# UFW disabled (ENABLED=no in ufw.conf) so chroot ufw calls during install
+# never reload the live ISO's kernel firewall. At install time firewall.sh sees
+# its stamp and only flips ENABLED=yes and enables ufw.service.
+firewall_sh="$root/usr/share/omarchy/install/config/firewall.sh"
+if [[ -f $firewall_sh ]] && grep -q 'OMARCHY_FIREWALL_RULES_ONLY' "$firewall_sh"; then
+  arch-chroot "$root" env OMARCHY_FIREWALL_RULES_ONLY=1 /bin/bash -eE -c 'source /usr/share/omarchy/install/config/firewall.sh'
+  rm -f "$root"/etc/ufw/after*.rules-ufw-docker~*
+  echo "Pre-baked static UFW + ufw-docker firewall rules"
+fi
+
 # The runtime's install log helper forks `date` twice per script it runs
 # (131 forks in a traced install, about 0.5 s). bash formats the same
 # timestamp itself. Same output, no fork; patched here until the runtime
@@ -382,6 +413,18 @@ if [[ -f $logging_sh ]] && grep -q "date '+%Y-%m-%d %H:%M:%S'" "$logging_sh"; th
     -e 's/\$(date +%s)/$EPOCHSECONDS/g' \
     "$logging_sh"
   bash -n "$logging_sh" && echo "logging.sh: timestamps without forking date"
+fi
+
+# When the ISO builds the target's per-machine pacman keyring in tmpfs from
+# prepare_live, let the runtime skip rebuilding it on btrfs during Phase 4
+# (~3 s on aarch64). TODO: drop this patch once the runtime package carries it.
+keyring_helper_sh="$root/usr/share/omarchy/install/helpers/pacman-keyring.sh"
+if [[ -f $keyring_helper_sh ]] && ! grep -q 'OMARCHY_KEYRING_MANAGED_BY_ISO' "$keyring_helper_sh"; then
+  sed -i \
+    -e '/^omarchy_pacman_keyring_start() {/a\  [[ ${OMARCHY_KEYRING_MANAGED_BY_ISO:-0} == "1" ]] && return 0' \
+    -e '/^omarchy_pacman_keyring_finish() {/a\  [[ ${OMARCHY_KEYRING_MANAGED_BY_ISO:-0} == "1" ]] && return 0' \
+    "$keyring_helper_sh"
+  bash -n "$keyring_helper_sh" && echo "pacman-keyring.sh: honour OMARCHY_KEYRING_MANAGED_BY_ISO"
 fi
 
 # Package names no repository offers any more: follow the known renames in the
@@ -439,8 +482,9 @@ else
   # practice nothing, so mkinitcpio falls back to us. The installer writes the
   # user's choice into the target's /etc/vconsole.conf afterwards, which cannot
   # reach an initramfs that is only copied, so an install picking another
-  # layout has to build its own UKI exactly as one adding modules does.
-  # Recording the value is what lets the installer tell the difference.
+  # layout writes it into the room reserved below, or builds its own UKI
+  # where an image has none. Recording the value is what lets the installer
+  # tell the difference.
   #
   # The LUKS passphrase prompt runs from this initramfs, so a stale `us` makes
   # a passphrase enrolled under another layout untypeable and locks the owner
@@ -536,13 +580,46 @@ UNIT
   # (omacom/omarchy#5980), as a 241 MiB initramfs does GRUB (#128). Without
   # kms, Plymouth's LUKS prompt draws on the firmware framebuffer (simpledrm);
   # the installed system's own rebuilds autodetect and keep kms.
+  # Room for the installer to write the install's keyboard layout into the
+  # UKI in place (orchestrator/uki_vconsole.py), as for the cmdline below: an
+  # install on another layout than us then has no UKI to build, 4.7 s of the
+  # install. The initramfs gets every console keymap (1.3 MB), since
+  # sd-vconsole adds only the one vconsole.conf names at build time, and an
+  # /etc/vconsole.conf of one 512-byte comment line. add_file_early puts that
+  # file in the early cpio, the uncompressed archive at the start of the
+  # initramfs, where the installer finds its bytes and overwrites them. Until
+  # then it is a comment, and the initramfs comes up in us as before.
+  cat >"$root/usr/lib/initcpio/install/omarchy-vconsole-room" <<'INSTALL'
+#!/usr/bin/env bash
+build() {
+    add_full_dir /usr/share/kbd/keymaps
+    add_file_early /etc/vconsole.conf.prebuilt-uki /etc/vconsole.conf 644
+}
+INSTALL
+  chmod 0755 "$root/usr/lib/initcpio/install/omarchy-vconsole-room"
+  vconsole_room="# omarchy.vconsole_room "
+  printf '%s%s\n' "$vconsole_room" "$(printf '%*s' $((512 - ${#vconsole_room} - 1)) '' | tr ' ' '#')" \
+    >"$root/etc/vconsole.conf.prebuilt-uki"
+
   cat >"$root/etc/mkinitcpio-prebuilt-uki.conf" <<'CONF'
 MODULES=(thunderbolt)
 BINARIES=()
 FILES=()
-HOOKS=(base systemd plymouth autodetect microcode modconf keyboard sd-vconsole block sd-encrypt filesystems fsck sd-btrfs-overlayfs)
+HOOKS=(base systemd plymouth autodetect microcode modconf keyboard sd-vconsole omarchy-vconsole-room block sd-encrypt filesystems fsck sd-btrfs-overlayfs)
 COMPRESSION="zstd"
+COMPRESSION_OPTIONS=(-T0)
 CONF
+
+  # Bundle the mount-event burst override into the pre-built systemd initramfs:
+  # mkinitcpio's systemd hook does not copy /etc/systemd/system.conf.d/, so PID 1
+  # in the initrd otherwise hits the default 5/s mount-monitor-dispatch rate
+  # limit and stalls sysroot.mount for 1.0 s (systemd/systemd#28264). The N1x
+  # UKI derives its config from this file and inherits FILES automatically.
+  if [[ -f $root/etc/systemd/system.conf.d/20-mount-events.conf ]]; then
+    echo 'FILES+=(/etc/systemd/system.conf.d/20-mount-events.conf)' >>"$root/etc/mkinitcpio-prebuilt-uki.conf"
+  else
+    echo "WARNING: /etc/systemd/system.conf.d/20-mount-events.conf missing from image; initrd mount rate limit override skipped"
+  fi
 
   # Room for the installer to write the real cmdline into the UKI in place
   # (orchestrator/uki_cmdline.py): one placeholder parameter pads .cmdline to
@@ -595,7 +672,25 @@ CONF
   fi
 
   # Only this build uses these; the installed system has no use for them.
-  rm -f "$root/etc/mkinitcpio-prebuilt-uki.conf" "$root/etc/kernel/cmdline.prebuilt-uki"
+  rm -f "$root/etc/mkinitcpio-prebuilt-uki.conf" "$root/etc/kernel/cmdline.prebuilt-uki" \
+    "$root/etc/vconsole.conf.prebuilt-uki" "$root/usr/lib/initcpio/install/omarchy-vconsole-room"
+fi
+
+if [[ ${OMARCHY_FAST_COMPRESSION:-} != 1 ]]; then
+  # Now create the compressed btrfs filesystem and populate it in parallel across
+  # every CPU so zstd:15 runs at full host parallelism, then free the staging tree
+  # before shrinking and packing.
+  mount_root_btrfs
+
+  echo "Populating btrfs root image with $IMAGE_COMPRESS across $(nproc) CPUs"
+  copy_start=$(date +%s)
+  python3 "$(dirname -- "${BASH_SOURCE[0]}")/copy-tree-parallel.py" "$stage" "$mnt/$IMAGE_SUBVOLUME"
+  sync
+  echo "Populated btrfs root image in $(( $(date +%s) - copy_start ))s"
+  if mountpoint -q "$stage" 2>/dev/null; then
+    umount -R "$stage"
+  fi
+  rm -rf "$stage"
 fi
 
 # The image is the loop backing file itself: the same on-disk bytes, written
@@ -604,7 +699,6 @@ fi
 # Shrink the filesystem and truncate the backing file first: xorriso stores a
 # file at its apparent size, so a sparse 24 GiB backing file would overflow
 # the medium even with 5 GiB in use.
-sync
 # Size it from the bytes actually in use, plus slack. `btrfs inspect-internal
 # min-dev-size` is unreliable (Debian bug #921038: off by gigabytes in both
 # directions). Too large is harmless, because the installer grows the
@@ -629,6 +723,7 @@ fstrim -v "$mnt" || echo "WARNING: fstrim failed; free space ships as whatever i
 sync
 umount "$mnt"
 losetup -d "$loop"
+loop=""
 truncate -s "${shrink_mb}M" "$backing"
 
 # Compress the image for the ISO. zstd collapses the unused space; the data

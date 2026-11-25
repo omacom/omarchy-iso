@@ -71,6 +71,9 @@ export GUM_CONFIRM_UNSELECTED_BACKGROUND="${GUM_CONFIRM_UNSELECTED_BACKGROUND:-0
 
 child_pid=""
 child_pgid=""
+sanitizer_pid=""
+sanitizer_dir=""
+sanitizer_fifo=""
 
 tips=(
   progress.tip.menu
@@ -94,6 +97,7 @@ tips=(
 )
 
 cleanup() {
+  [[ -n ${sanitizer_dir:-} ]] && rm -rf "$sanitizer_dir" 2>/dev/null || true
   printf '%s%s' "$RESET" "$SHOW_CURSOR" >"$TTY_PATH" 2>/dev/null || true
 }
 
@@ -102,22 +106,30 @@ dashboard_log() {
 }
 
 stop_child() {
-  [[ -n ${child_pid:-} ]] || return 0
-  if kill -0 "$child_pid" 2>/dev/null; then
-    if [[ -n ${child_pgid:-} ]]; then
-      kill -- -"$child_pgid" 2>/dev/null || true
-    fi
-    kill "$child_pid" 2>/dev/null || true
-    for _ in {1..20}; do
-      kill -0 "$child_pid" 2>/dev/null || break
-      sleep 0.05
-    done
+  if [[ -n ${child_pid:-} ]]; then
     if kill -0 "$child_pid" 2>/dev/null; then
-      [[ -n ${child_pgid:-} ]] && kill -9 -- -"$child_pgid" 2>/dev/null || true
-      kill -9 "$child_pid" 2>/dev/null || true
+      if [[ -n ${child_pgid:-} ]]; then
+        kill -- -"$child_pgid" 2>/dev/null || true
+      fi
+      kill "$child_pid" 2>/dev/null || true
+      for _ in {1..20}; do
+        kill -0 "$child_pid" 2>/dev/null || break
+        sleep 0.05
+      done
+      if kill -0 "$child_pid" 2>/dev/null; then
+        [[ -n ${child_pgid:-} ]] && kill -9 -- -"$child_pgid" 2>/dev/null || true
+        kill -9 "$child_pid" 2>/dev/null || true
+      fi
     fi
+    wait "$child_pid" 2>/dev/null || true
+    child_pid=""
+    child_pgid=""
   fi
-  wait "$child_pid" 2>/dev/null || true
+  if [[ -n ${sanitizer_pid:-} ]]; then
+    kill "$sanitizer_pid" 2>/dev/null || true
+    wait "$sanitizer_pid" 2>/dev/null || true
+    sanitizer_pid=""
+  fi
 }
 
 interrupt() {
@@ -178,13 +190,14 @@ FINISH_TOP_ROW=2
 #   floor  lo + (span-1) * t / (t+tau), on time since this process saw the
 #          phase. Asymptotic, so it approaches the band end without reaching it.
 #          tau is a shape constant, not a duration prediction.
-#   work   packages installed / PKG_TOTAL, for the package phase only (~85% of
-#          the install). libalpm makes one directory per package under
-#          <target>/var/lib/pacman/local; the denominator comes from
-#          build-iso.sh, so there is no second package list to drift.
-#          The root image unpack that precedes the package delta publishes
-#          phase_progress (stream bytes consumed) in the state file; it drives
-#          the same band until the local db fills in when the unpack lands.
+#   work   phase_progress from the state file where a phase publishes one:
+#          the boot-time hash of the medium in "Preparing install target",
+#          and the root image landing in "Installing Arch + Omarchy". That
+#          phase also counts packages installed / PKG_TOTAL: libalpm makes
+#          one directory per package under <target>/var/lib/pacman/local,
+#          and the denominator comes from build-iso.sh. The image brings
+#          almost all of them at once, so the count marks the image landing
+#          rather than moving package by package.
 #
 # Per-mille because a whole-percent asymptote over a 2-point band has two
 # reachable values and stops moving. No give-up predicate: two discontinuous
@@ -212,8 +225,6 @@ fi
 
 PKG_BONUS_MAX_PM=100   # cap on how far progress may run ahead of the count
 PKG_TAIL_PM=40         # band held back so stalled progress has somewhere to go
-PKG_FLOOR_TAU=900      # with a work signal, time is only a backstop until the
-                       # first package, so slow it until it cannot outrun data
 
 POS=10                 # position, per-mille, monotonic
 PROGRESS_PM=10
@@ -228,6 +239,7 @@ PKG_BASE=-1            # package count when the phase started
 PKG_SEEN=0             # running max of packages since PKG_BASE
 PKG_LAST_CHANGE=0
 PKG_BONUS=0
+SIGNAL_BASE=-1         # POS when this phase's phase_progress first arrived
 
 # Monotonic clock: tzupdate and systemd-timesyncd can step the wall clock
 # mid-install, which would jump every time-driven band to its ceiling.
@@ -305,7 +317,7 @@ count_packages() {
 # here would land on the TTY between the cursor escape and the drawing.
 install_progress() {
   local phase finished index total target
-  local lo hi tau span t pos work gap n pkg_signal=0 progress_pm
+  local lo hi tau span t pos work top gap n pkg_signal=0 progress_pm
   local -a state
 
   PROGRESS_PM=$POS
@@ -342,23 +354,28 @@ install_progress() {
     PKG_SEEN=0
     PKG_BONUS=0
     PKG_LAST_CHANGE=$NOW
+    SIGNAL_BASE=-1
   fi
 
-  # Bands in per-mille, plus tau. The tail bands are wide relative to what they
-  # cost on NVMe: run_system_finalizer can DKMS-build a driver and
-  # finalize_limine_boot rebuilds every UKI, so they vary most on real hardware.
-  # Over-allotting costs a step at a boundary; under-allotting costs a stall.
+  # Bands in per-mille, plus tau, sized to where an install spends its time.
+  # An encrypted install measured 34 s in the VM test: preparing the target
+  # (waiting out the boot-time hash of the medium) 7.7 s, installing 17.2 s
+  # (LUKS format and open 11.7 s, the image write 3.7 s), finalizing boot and
+  # user 5.7 s. On a USB stick the hash wait and the image write are longer
+  # still. tau is about the time a phase takes, so the floor keeps moving
+  # through steps that publish nothing, like the LUKS format; where a phase
+  # publishes progress, that leads (see below). Over-allotting costs a step at
+  # a boundary; under-allotting costs a stall.
   case "$phase" in
-    "Starting installation")      lo=10  hi=25   tau=5   ;;
-    "Preparing live environment") lo=25  hi=50   tau=25  ;;
-    "Preparing install target")   lo=50  hi=65   tau=20  ;;
-    "Installing Arch + Omarchy")  lo=65  hi=700  tau=150 pkg_signal=1 ;;
-    "Configuring hibernation")    lo=700 hi=720  tau=10  ;;
-    "Configuring system")         lo=720 hi=850  tau=120 ;;
-    "Staging provisioning")          lo=850 hi=855  tau=5   ;;
-    "Finalizing Limine boot")     lo=855 hi=950  tau=90  ;;
-    "Finalizing user")            lo=950 hi=978  tau=30  ;;
-    "Finalizing boot and user")   lo=855 hi=978  tau=90  ;;
+    "Starting installation")      lo=10  hi=20   tau=2   ;;
+    "Preparing live environment") lo=20  hi=40   tau=2   ;;
+    "Preparing install target")   lo=40  hi=260  tau=8   ;;
+    "Installing Arch + Omarchy")  lo=260 hi=760  tau=18  pkg_signal=1 ;;
+    "Configuring system")         lo=760 hi=830  tau=3   ;;
+    "Staging provisioning")       lo=830 hi=835  tau=2   ;;
+    "Finalizing Limine boot")     lo=835 hi=935  tau=3   ;;
+    "Finalizing user")            lo=935 hi=978  tau=2   ;;
+    "Finalizing boot and user")   lo=835 hi=978  tau=3   ;;
     "Configuring login")          lo=978 hi=988  tau=5   ;;
     "Configuring DNS resolver")   lo=988 hi=994  tau=5   ;;
     "Running OEM setup")          lo=994 hi=997  tau=60  ;;
@@ -379,8 +396,6 @@ install_progress() {
       ;;
   esac
 
-  (( pkg_signal && PKG_TOTAL > 0 )) || pkg_signal=0
-  (( pkg_signal )) && tau=$PKG_FLOOR_TAU
 
   t=$(( NOW - PHASE_T0 ))
   (( t < 0 )) && t=0
@@ -389,6 +404,28 @@ install_progress() {
   (( tau < 1 )) && tau=1
 
   pos=$(( lo + (span - 1) * t / (t + tau) ))
+
+  # Until the install phase publishes anything (the LUKS format comes before
+  # the image write does), the clock covers at most 40% of its band, so the
+  # write still has most of it to move through, however long it takes.
+  (( pkg_signal && progress_pm < 0 && pos > lo + span * 2 / 5 )) && pos=$(( lo + span * 2 / 5 ))
+
+  (( pkg_signal && PKG_TOTAL > 0 )) || pkg_signal=0
+
+  # A phase's published progress drives the rest of its band from where the
+  # bar stood when it first arrived (the LUKS format before the image write
+  # publishes nothing), and the clock may run at most the tail ahead of it:
+  # from a slow USB stick a hash or a write takes minutes, and the floor's
+  # few-second tau would otherwise reach the band's end and stand there.
+  if (( progress_pm >= 0 )); then
+    (( progress_pm > 1000 )) && progress_pm=1000
+    (( SIGNAL_BASE < 0 )) && SIGNAL_BASE=$POS
+    top=$(( hi - 1 - PKG_TAIL_PM ))
+    (( top < SIGNAL_BASE )) && top=$SIGNAL_BASE
+    work=$(( SIGNAL_BASE + (top - SIGNAL_BASE) * progress_pm / 1000 ))
+    (( pos > work + PKG_TAIL_PM )) && pos=$(( work + PKG_TAIL_PM ))
+    (( work > pos )) && pos=$work
+  fi
 
   if (( pkg_signal )); then
     PKG_DB_DIR="$target/var/lib/pacman/local"
@@ -410,12 +447,6 @@ install_progress() {
     work=$(( lo + (span - 1 - PKG_TAIL_PM) * PKG_SEEN / PKG_TOTAL + PKG_BONUS ))
     (( work > pos )) && pos=$work
   fi
-  if (( progress_pm >= 0 )); then
-    (( progress_pm > 1000 )) && progress_pm=1000
-    work=$(( lo + (span - 1 - PKG_TAIL_PM) * progress_pm / 1000 ))
-    (( work > pos )) && pos=$work
-  fi
-
   (( pos > hi - 1 )) && pos=$(( hi - 1 ))
   (( pos > POS )) && POS=$pos
   (( POS > 1000 )) && POS=1000
@@ -539,14 +570,20 @@ render_finish() {
     # the way the greeter does, since the console reduces indexed codes well and
     # truecolor ones badly. It settles on indexed 2, the Tokyo Night green used
     # throughout the installer. The laser and sparks keep their own hot palette.
+    # kmscon draws indexed codes as xterm's own colours and 24-bit ones as
+    # given, so there the effect settles on that green by its value.
+    local colors=(--xterm-colors) green=2
+    if [[ ${OMARCHY_KMSCON:-} == 1 ]]; then
+      colors=() green=9ece6a
+    fi
     timeout 8s ttfx -i "$LOGO_PATH" \
       --canvas-width "$effect_canvas_width" \
       --anchor-text c \
       --frame-rate 260 \
       --reuse-canvas \
-      --xterm-colors \
+      "${colors[@]}" \
       laseretch \
-      --final-gradient-stops 2 \
+      --final-gradient-stops "$green" \
       >"$TTY_PATH" 2>/dev/null || {
         dashboard_log "logo effect skipped (ttfx exited $?)"
         { printf '%s%d;1H' "$CSI" "$FINISH_TOP_ROW"; render_logo; } >"$TTY_PATH"
@@ -602,7 +639,7 @@ warm_reboot_path() {
   # still ahead of the moment the user is invited to pull the stick.
   # kmscon too when it draws this screen: it repaints from the medium-backed
   # live root on every frame of the effect and the button.
-  for binary in systemctl ttfx gum timeout stty ${OMARCHY_ISO_KMSCON:+kmscon}; do
+  for binary in systemctl ttfx gum timeout stty ${OMARCHY_KMSCON:+kmscon}; do
     path=$(command -v "$binary" 2>/dev/null) || continue
     cat "$path" >/dev/null 2>&1 || true
     while IFS= read -r dep; do
@@ -903,8 +940,15 @@ sanitize_child_output() {
 
 launch_child() {
   mkdir -p "$(dirname "$LOG_FILE")"
+  sanitizer_dir=$(mktemp -d)
+  sanitizer_fifo="$sanitizer_dir/child-output.fifo"
+  mkfifo "$sanitizer_fifo"
+  # Start the sanitizer as a direct child of the dashboard so we can wait on
+  # its PID after the installer exits and guarantee $LOG_FILE has drained.
+  sanitize_child_output <"$sanitizer_fifo" >>"$LOG_FILE" &
+  sanitizer_pid=$!
   # Child is non-interactive. All visible UI belongs to this supervisor.
-  PYTHONUNBUFFERED=1 setsid "${INSTALL_CMD[@]}" </dev/null > >(sanitize_child_output >>"$LOG_FILE") 2>&1 &
+  PYTHONUNBUFFERED=1 setsid "${INSTALL_CMD[@]}" </dev/null >"$sanitizer_fifo" 2>&1 &
   child_pid=$!
   child_pgid=$child_pid
 }
@@ -930,9 +974,26 @@ done
 set +e
 wait "$child_pid"
 status=$?
+# Wait for the sanitizer process to drain EOF into $LOG_FILE before copying.
+if [[ -n ${sanitizer_pid:-} ]]; then
+  wait "$sanitizer_pid" 2>/dev/null
+fi
 set -e
 child_pid=""
 child_pgid=""
+sanitizer_pid=""
+if [[ -n ${sanitizer_dir:-} ]]; then
+  rm -rf "$sanitizer_dir" 2>/dev/null || true
+  sanitizer_dir=""
+  sanitizer_fifo=""
+fi
+
+# Refresh the target's copy of the log once the sanitizer pipe has drained so
+# it never misses trailing boot/user lines or failure output before unmount.
+if [[ -f $LOG_FILE && -d /mnt/var/log ]] && mountpoint -q /mnt 2>/dev/null; then
+  cp -f "$LOG_FILE" /mnt/var/log/omarchy-install.log 2>/dev/null || true
+  chmod 0644 /mnt/var/log/omarchy-install.log 2>/dev/null || true
+fi
 
 dashboard_log "installer child exited with status $status"
 

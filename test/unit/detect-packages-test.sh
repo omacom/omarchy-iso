@@ -28,6 +28,8 @@ expect omarchy-2026.11.10-x86_64-edge.iso omarchy-dev omarchy-settings-dev
 expect omarchy-2026.11.10-x86_64-local.iso omarchy-dev omarchy-settings-dev
 expect omarchy-2026.11.10-x86_64-dev.iso omarchy-dev omarchy-settings-dev
 expect omarchy-2026.11.10-aarch64-devssh-edge.iso omarchy-dev omarchy-settings-dev
+expect omarchy-2026.11.10-x86_64-fast-edge.iso omarchy-dev omarchy-settings-dev
+expect omarchy-2026.11.10-x86_64-fast-quattro.iso omarchy omarchy-settings
 expect omarchy-2026.11.10-x86_64-rc.iso omarchy omarchy-settings
 expect omarchy-2026.11.10-x86_64-quattro.iso omarchy omarchy-settings
 expect omarchy-4.5.0-x86.iso omarchy omarchy-settings

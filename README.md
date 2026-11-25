@@ -53,7 +53,7 @@ The rest of this file covers building, testing and publishing the ISO.
 
 | What | Where | When |
 | --- | --- | --- |
-| Release ISO | `https://iso.omarchy.org/omarchy-<version>-x86.iso` and `-aarch64.iso` (before 4.5.0: `omarchy-<version>.iso`) | Each release |
+| Release ISO | `https://iso.omarchy.org/omarchy-<version>-x86.iso`, `-aarch64.iso` and `-snapdragon.iso` (before 4.5.0: `omarchy-<version>.iso`) | Each release |
 | Edge ISO | `https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.iso` | Every night |
 | VM image of edge | `https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.qcow2` | Every night |
 | VM image of the latest release | `https://nightly.omarchy.org/stable/<version>/<run>/omarchy-<version>.qcow2` | Once per release |
@@ -444,17 +444,18 @@ A preset goes with the channel flags (`--preset cn --edge`) and with `--oem`. `-
 
 ```bash
 ./bin/omarchy-iso-make --arch aarch64 --edge --local-source ../omarchy-installer ../omarchy-pkgs
+./bin/omarchy-iso-make --snapdragon --edge --local-source ../omarchy-installer ../omarchy-pkgs
 ```
 
-One aarch64 image serves every board that installs from a USB stick. Apple Silicon Macs are not among them, since they are installed from macOS. The build chooses nothing. The installer asks the machine which platform it is on, with the runtime's own `omarchy-hw-platform`, and installs that platform's packages from the offline mirror, which carries them for every platform.
+There are two aarch64 images. The plain one (`--arch aarch64`) serves the NVIDIA boards, the Raspberry Pi and every other board that installs from a USB stick. The Snapdragon one (`--snapdragon`, released as `omarchy-<version>-snapdragon.iso`) is the same image plus what only Snapdragon laptops need: their live UKI, `linux-firmware-qcom` and `qcom-firmware-extract`, the Qualcomm platform packages, and every OEM's signed firmware package, over 1 GiB, which the plain image leaves out. Apple Silicon Macs install from neither, since they are installed from macOS. The build chooses nothing else. The installer asks the machine which platform it is on, with the runtime's own `omarchy-hw-platform`, and installs that platform's packages from the offline mirror, which carries them for every platform.
 
 An aarch64 image is built from the stable channel unless `--rc` or `--edge` names another, as on x86_64: Omarchy's aarch64 repository for that channel and its mirror of Arch Linux ARM (`arm-stable-mirror.omarchy.org`, `arm-rc-mirror.omarchy.org`, `arm-mirror.omarchy.org`), from `configs/pacman-online-aarch64-<channel>.conf`.
 
 The kernel is `linux-omarchy`, as on x86_64, and it is the only one an aarch64 image is built on. It comes from the channel's aarch64 repository. A package bundle (`--package-dir`) can put a kernel under test or pinned packages ahead of it, as [N1X.md](N1X.md) describes.
 
-Snapdragon laptops get no device tree from their firmware, so the live system also carries a UKI with one for every supported laptop, built from the device trees the kernel package ships. GRUB boots it by default where the processor is a Snapdragon, and systemd-stub picks the device tree by the machine's SMBIOS data. Every other machine boots the kernel directly.
+Snapdragon laptops get no device tree from their firmware, so the Snapdragon image's live system also carries a UKI with one for every supported laptop, built from the device trees the kernel package ships. GRUB boots it by default where the processor is a Snapdragon, and systemd-stub picks the device tree by the machine's SMBIOS data. Every other machine boots the kernel directly. The plain aarch64 image has no UKI, so a Snapdragon laptop does not boot it.
 
-The runtime the image installs must have the platform detector and the Snapdragon hardware setup (`install/hardware/qualcomm/`), which lists those device trees for the installed system's own UKI. The build refuses a runtime without them. On a laptop that still has Windows, the installer copies the vendor-signed firmware off the Windows partition before the disk is written.
+The runtime an aarch64 image installs must have the platform detector, and for the Snapdragon image the Snapdragon hardware setup (`install/hardware/qualcomm/`), which lists those device trees for the installed system's own UKI. The build refuses a runtime without them. On a laptop that still has Windows, the installer copies the vendor-signed firmware off the Windows partition before the disk is written.
 
 ## Testing the ISO
 

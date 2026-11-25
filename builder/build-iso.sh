@@ -6,6 +6,11 @@ OMARCHY_ISO_REF="${OMARCHY_ISO_REF:-quattro}"
 OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
 OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
 OMARCHY_KERNEL="${OMARCHY_KERNEL:-linux-omarchy}"
+# A Snapdragon image (--snapdragon) is the aarch64 image plus what only the
+# Snapdragon laptops need: the live UKI with their device trees, the Qualcomm
+# firmware and its tools, and every OEM's signed firmware package, over 1 GiB.
+# The plain aarch64 image, for NVIDIA and Raspberry Pi boards, carries none of it.
+OMARCHY_SNAPDRAGON="${OMARCHY_SNAPDRAGON:-}"
 # profiledef.sh reads these in the mkarchiso environment.
 export OMARCHY_ARCH OMARCHY_KERNEL OMARCHY_OEM_INSTALL OMARCHY_PRESET OMARCHY_FAST_COMPRESSION
 
@@ -44,6 +49,10 @@ case "$OMARCHY_ARCH" in
     exit 1
     ;;
 esac
+if [[ -n $OMARCHY_SNAPDRAGON && $OMARCHY_ARCH != aarch64 ]]; then
+  echo "ERROR: a Snapdragon image is an aarch64 image (got '$OMARCHY_ARCH')" >&2
+  exit 1
+fi
 
 # Edge, dev, and local-source ISOs install the dev packages explicitly. Those
 # package recipes track the quattro branch. This avoids relying on pacman's
@@ -286,25 +295,27 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # The N1x firmware's SPCR serial console would take the console from the
   # panel, hence console=tty0 acpi=nospcr.
   kernel_options="console=tty0 acpi=nospcr initramfs_async=0"
-  # Snapdragon firmware hands the kernel no device tree. Once the live kernel
-  # and initramfs exist, wrap them in a UKI that carries the device trees the
-  # kernel package ships; GRUB chainloads it where there is one
-  # (configs/grub/grub.cfg).
-  install -Dm0644 /builder/qualcomm/live-uki.sh "$build_cache_dir/airootfs/root/qualcomm-live-uki.sh"
-  # Into the live root's customize_airootfs.sh, ahead of its pruning of the
-  # mirror, which can end the script early.
-  customize="$build_cache_dir/airootfs/root/customize_airootfs.sh"
-  grep -qx 'set -euo pipefail' "$customize" || { echo "ERROR: $customize has no 'set -euo pipefail' line to start after" >&2; exit 1; }
-  sed -i "0,/^set -euo pipefail\$/s||set -euo pipefail\\n\\n# The Snapdragon laptops' live UKI.\\nbash /root/qualcomm-live-uki.sh $OMARCHY_KERNEL\\nrm -f /root/qualcomm-live-uki.sh|" "$customize"
-  # Keep the existing late-start path when early firmware is unavailable.
-  install -Dm0755 /builder/qualcomm/omarchy-live-dsp "$build_cache_dir/airootfs/usr/local/bin/omarchy-live-dsp"
-  install -Dm0644 /builder/qualcomm/omarchy-live-dsp.service "$build_cache_dir/airootfs/etc/systemd/system/omarchy-live-dsp.service"
-  mkdir -p "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants"
-  ln -sf /etc/systemd/system/omarchy-live-dsp.service "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/omarchy-live-dsp.service"
-  printf '%s\n' 'file_permissions["/usr/local/bin/omarchy-live-dsp"]="0:0:755"' >>"$build_cache_dir/profiledef.sh"
-  install -Dm0755 /builder/qualcomm/early-startup-install "$build_cache_dir/airootfs/usr/lib/initcpio/install/qcom_early_startup"
-  install -Dm0755 /builder/qualcomm/early-startup "$build_cache_dir/airootfs/usr/lib/initcpio/hooks/qcom_early_startup"
-  install -Dm0644 /builder/qualcomm/early-firmware.py "$build_cache_dir/airootfs/usr/lib/initcpio/qcom-early-firmware.py"
+  if [[ -n $OMARCHY_SNAPDRAGON ]]; then
+    # Snapdragon firmware hands the kernel no device tree. Once the live kernel
+    # and initramfs exist, wrap them in a UKI that carries the device trees the
+    # kernel package ships; GRUB chainloads it where there is one
+    # (configs/grub/grub.cfg).
+    install -Dm0644 /builder/qualcomm/live-uki.sh "$build_cache_dir/airootfs/root/qualcomm-live-uki.sh"
+    # Into the live root's customize_airootfs.sh, ahead of its pruning of the
+    # mirror, which can end the script early.
+    customize="$build_cache_dir/airootfs/root/customize_airootfs.sh"
+    grep -qx 'set -euo pipefail' "$customize" || { echo "ERROR: $customize has no 'set -euo pipefail' line to start after" >&2; exit 1; }
+    sed -i "0,/^set -euo pipefail\$/s||set -euo pipefail\\n\\n# The Snapdragon laptops' live UKI.\\nbash /root/qualcomm-live-uki.sh $OMARCHY_KERNEL\\nrm -f /root/qualcomm-live-uki.sh|" "$customize"
+    # Keep the existing late-start path when early firmware is unavailable.
+    install -Dm0755 /builder/qualcomm/omarchy-live-dsp "$build_cache_dir/airootfs/usr/local/bin/omarchy-live-dsp"
+    install -Dm0644 /builder/qualcomm/omarchy-live-dsp.service "$build_cache_dir/airootfs/etc/systemd/system/omarchy-live-dsp.service"
+    mkdir -p "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants"
+    ln -sf /etc/systemd/system/omarchy-live-dsp.service "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/omarchy-live-dsp.service"
+    printf '%s\n' 'file_permissions["/usr/local/bin/omarchy-live-dsp"]="0:0:755"' >>"$build_cache_dir/profiledef.sh"
+    install -Dm0755 /builder/qualcomm/early-startup-install "$build_cache_dir/airootfs/usr/lib/initcpio/install/qcom_early_startup"
+    install -Dm0755 /builder/qualcomm/early-startup "$build_cache_dir/airootfs/usr/lib/initcpio/hooks/qcom_early_startup"
+    install -Dm0644 /builder/qualcomm/early-firmware.py "$build_cache_dir/airootfs/usr/lib/initcpio/qcom-early-firmware.py"
+  fi
   install -Dm0755 /builder/qualcomm/quiet-efivars-install "$build_cache_dir/airootfs/usr/lib/initcpio/install/omarchy_quiet_efivars"
   rm -rf "$build_cache_dir/syslinux" "$build_cache_dir/efiboot"
 else
@@ -414,10 +425,14 @@ fi
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # Plymouth stays out of the live initramfs (archiso-aarch64-mkinitcpio.sh);
   # openssh and pciutils serve the recovery entry and remote debugging.
+  arch_packages=("$OMARCHY_KERNEL" archlinuxarm-keyring git gum jq openssl openssh pciutils plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted python kmscon noto-fonts-cjk ttf-jetbrains-mono-nerd-basic)
   # For the Snapdragon laptops: ukify builds the live UKI on systemd-stub-omarchy's
-  # stub, whose header holds every device tree, and the installer
-  # saves a laptop's signed firmware from Windows with qcom-firmware-extract.
-  arch_packages=("$OMARCHY_KERNEL" archlinuxarm-keyring git gum jq openssl openssh pciutils plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted systemd-ukify systemd-stub-omarchy linux-firmware-qcom qcom-firmware-extract python kmscon noto-fonts-cjk ttf-jetbrains-mono-nerd-basic)
+  # stub, whose header holds every device tree, its initramfs takes the ADSP
+  # firmware from linux-firmware-qcom, and the installer saves a laptop's signed
+  # firmware from Windows with qcom-firmware-extract.
+  if [[ -n $OMARCHY_SNAPDRAGON ]]; then
+    arch_packages+=(systemd-ukify systemd-stub-omarchy linux-firmware-qcom qcom-firmware-extract)
+  fi
 else
   # linux-t2 is the live kernel on a Mac (configs/grub/grub.cfg).
   arch_packages=("$OMARCHY_KERNEL" linux-t2 git gum jq openssl plymouth ttfx terminus-font tzupdate omarchy-keyring "$OMARCHY_SETTINGS_PACKAGE" lvm2 cryptsetup parted kmscon noto-fonts-cjk ttf-jetbrains-mono-nerd-basic)
@@ -508,9 +523,11 @@ fi
 # with, and a GB10 or an N1x would get none of its own packages.
 platform_lists=()
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
-  for required in bin/omarchy-hw-platform install/hardware/qualcomm/dtb-uki.sh \
-    install/omarchy-aarch64-qualcomm.packages install/omarchy-aarch64-n1x.packages \
-    install/omarchy-aarch64-gb10.packages; do
+  required_platform_files=(bin/omarchy-hw-platform install/omarchy-aarch64-n1x.packages install/omarchy-aarch64-gb10.packages)
+  if [[ -n $OMARCHY_SNAPDRAGON ]]; then
+    required_platform_files+=(install/hardware/qualcomm/dtb-uki.sh install/omarchy-aarch64-qualcomm.packages)
+  fi
+  for required in "${required_platform_files[@]}"; do
     if [[ -d /omarchy-source ]]; then
       [[ -f /omarchy-source/$required ]]
     else
@@ -537,7 +554,8 @@ fi
 # with no aarch64 build anywhere (its x86_64-only list). The installer asks the
 # machine which platform it is on and installs that platform's set, so the image
 # carries one list per platform and the plain aarch64 one for every other
-# machine. Apple Silicon is installed from macOS, never from this image.
+# machine. Apple Silicon is installed from macOS, never from this image, and a
+# Snapdragon laptop only from the Snapdragon one.
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   pkglist_dir=$(dirname "${base_pkg_lists[0]}")
   aarch64_default_set() {
@@ -554,6 +572,7 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   mkdir -p "$platform_base_dir"
   for platform_list in "$pkglist_dir"/omarchy-aarch64-*.packages; do
     [[ -f $platform_list && $platform_list != */omarchy-aarch64-apple.packages ]] || continue
+    [[ -n ${OMARCHY_SNAPDRAGON:-} || $platform_list != */omarchy-aarch64-qualcomm.packages ]] || continue
     platform_lists+=("$platform_list")
     platform=${platform_list##*/omarchy-}
     aarch64_default_set "${aarch64_lists[@]}" "$platform_list" 2>/dev/null >"$platform_base_dir/omarchy-base.${platform%.packages}.packages"
@@ -815,10 +834,11 @@ fi
 # package list still names the old one. Drop the names nothing offers in the
 # synced databases above, and warn. A builder cache that still holds the old
 # file hides the failure.
-# aarch64: every Snapdragon OEM firmware package, found by the
-# qcom-firmware-<folder> name it provides. Omarchy installs a machine's
-# package by that name during the install, so the mirror carries all of them.
-if [[ $OMARCHY_ARCH == aarch64 ]]; then
+# Snapdragon: every OEM firmware package, found by the qcom-firmware-<folder>
+# name it provides. Omarchy installs a machine's package by that name during
+# the install, so the mirror carries all of them.
+qcom_oem_firmware=()
+if [[ -n $OMARCHY_SNAPDRAGON ]]; then
   source /builder/qcom-oem-firmware.sh
   mapfile -t qcom_oem_firmware < <(qcom_oem_firmware_packages /tmp/offlinedb/sync/*.db)
   echo "aarch64: adding ${#qcom_oem_firmware[@]} Snapdragon OEM firmware packages: ${qcom_oem_firmware[*]}" >&2
@@ -1229,7 +1249,7 @@ finalize_root_image_metadata() {
     sha256sum "${root_image##*/}" omarchy-layer.*.tar.zst >"$root_image.sha256"
   )
 
-  # aarch64: each Snapdragon laptop's ADSP firmware, as plain files next to the
+  # Snapdragon: each laptop's ADSP firmware, as plain files next to the
   # root image with a SHA256SUMS list. The live UKI holds only linux-firmware's;
   # the OEM packages' ADSP files are over 300 MiB, and GRUB has to place the
   # whole UKI in memory (omarchy-iso#128). Without its ADSP a laptop never
@@ -1238,7 +1258,7 @@ finalize_root_image_metadata() {
   # board names from here, checked against SHA256SUMS, before it starts the ADSP.
   # Which files to stage comes from the kernel's device trees
   # (qualcomm/stage-medium-firmware.sh).
-  if [[ $OMARCHY_ARCH == aarch64 ]]; then
+  if [[ -n $OMARCHY_SNAPDRAGON ]]; then
     # -Sp prints dependencies too; keep only the packages named here.
     qcom_kernel_file=''
     qcom_tree_packages=()

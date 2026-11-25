@@ -34,10 +34,14 @@ grep -Eq '^ *CONTAINER_IMAGE=ghcr\.io/menci/archlinuxarm@sha256:[0-9a-f]{64}$' "
 grep -Eq 'requires? (--package-dir DIR|the package bundle)' "$ROOT/bin/omarchy-iso-make" "$ROOT/builder/build-iso.sh" \
   && fail "an aarch64 build still requires a package bundle, though edge publishes linux-omarchy"
 grep -Fq 'ships no $required' "$ROOT/builder/build-iso.sh" || fail "a runtime without the platform support is not refused"
-for required in bin/omarchy-hw-platform install/hardware/qualcomm/dtb-uki.sh install/omarchy-aarch64-qualcomm.packages \
-  install/omarchy-aarch64-n1x.packages install/omarchy-aarch64-gb10.packages; do
-  sed -n '/^  for required in /,/; do$/p' "$ROOT/builder/build-iso.sh" | grep -Fq -- "$required" \
-    || fail "a runtime without $required is not refused"
+required_lines=$(sed -n '/^  required_platform_files=(/,/^  for required in /p' "$ROOT/builder/build-iso.sh")
+for required in bin/omarchy-hw-platform install/omarchy-aarch64-n1x.packages install/omarchy-aarch64-gb10.packages; do
+  grep -Fq -- "$required" <<<"${required_lines%%if *}" || fail "a runtime without $required is not refused"
+done
+# The Snapdragon setup is required only of the runtime a Snapdragon image installs.
+for required in install/hardware/qualcomm/dtb-uki.sh install/omarchy-aarch64-qualcomm.packages; do
+  grep -Fq -- "$required" <<<"${required_lines%%if *}" && fail "the plain aarch64 image requires the Snapdragon setup $required"
+  grep -Fq -- "$required" <<<"$required_lines" || fail "a Snapdragon image takes a runtime without $required"
 done
 grep -Fq 'sha256sum --check --strict --quiet SHA256SUMS' "$ROOT/bin/omarchy-iso-make" || fail "bundle checksums are not verified on the host"
 grep -Fq -- '-v "$PACKAGE_DIR:/packages:ro"' "$ROOT/bin/omarchy-iso-make" || fail "bundle is not mounted read-only at /packages"
@@ -274,15 +278,29 @@ make_refuses 'only valid with --arch aarch64' --package-dir /tmp
 make_refuses 'Unknown option: --platform' --arch aarch64 --platform n1x --edge
 
 # The live UKI that carries the Snapdragon laptops' device trees, since their
-# firmware provides none. Every image tries to build one from its own kernel.
+# firmware provides none. Only the Snapdragon image builds one, and only it
+# carries their firmware and its tools.
 uki="$ROOT/builder/qualcomm/live-uki.sh"
 bash -n "$uki"
-grep -Fq 'parted systemd-ukify systemd-stub-omarchy linux-firmware-qcom qcom-firmware-extract python ' "$ROOT/builder/build-iso.sh" \
-  || fail "the live image lacks ukify or the Snapdragon firmware tools"
+grep -Fq '    arch_packages+=(systemd-ukify systemd-stub-omarchy linux-firmware-qcom qcom-firmware-extract)' "$ROOT/builder/build-iso.sh" \
+  || fail "the Snapdragon live image lacks ukify or the Snapdragon firmware tools"
+grep -E '^  arch_packages=\("\$OMARCHY_KERNEL" archlinuxarm-keyring ' "$ROOT/builder/build-iso.sh" | grep -Eq 'qcom|ukify|systemd-stub' \
+  && fail "the plain aarch64 live image carries the Snapdragon firmware or tools"
+# Each Snapdragon block, from its if to the fi at the same indentation.
+snapdragon_blocks=$(awk '
+  !indent && /^ *if \[\[ -n \$OMARCHY_SNAPDRAGON \]\]; then$/ { match($0, /^ */); indent = RLENGTH + 1 }
+  indent { print; if ($0 ~ "^ {" indent - 1 "}fi$") indent = 0 }
+' "$ROOT/builder/build-iso.sh")
+for gated in 'live-uki.sh "$build_cache_dir' 'early-startup "$build_cache_dir' 'omarchy-live-dsp "$build_cache_dir' \
+  'source /builder/qcom-oem-firmware.sh' 'bash /builder/qualcomm/stage-medium-firmware.sh'; do
+  (( $(grep -Fc -- "$gated" <<<"$snapdragon_blocks") > 0 )) || fail "$gated is not limited to the Snapdragon image"
+  (( $(grep -Fc -- "$gated" "$ROOT/builder/build-iso.sh") == $(grep -Fc -- "$gated" <<<"$snapdragon_blocks") )) \
+    || fail "$gated also runs outside the Snapdragon image"
+done
 # The UKI is built in the image's customize step, once pacstrap has made the
 # kernel and initramfs it wraps: the builder's own lines, run against the live
 # root's customize_airootfs.sh.
-insert_uki=$(sed -n '/^  customize="\$build_cache_dir\/airootfs\/root\/customize_airootfs.sh"$/,/ "\$customize"$/p' "$ROOT/builder/build-iso.sh")
+insert_uki=$(sed -n '/^    customize="\$build_cache_dir\/airootfs\/root\/customize_airootfs.sh"$/,/ "\$customize"$/p' "$ROOT/builder/build-iso.sh")
 [[ $(wc -l <<<"$insert_uki") == 3 ]] || fail "the builder no longer adds the live UKI step to customize_airootfs.sh: $insert_uki"
 mkdir -p "$fixture/cache/airootfs/root"
 live_customize="$fixture/cache/airootfs/root/customize_airootfs.sh"
@@ -397,7 +415,7 @@ printf '%s\n' '# qualcomm' vulkan-freedreno >"$fixture/lists/omarchy-aarch64-qua
 printf '%s\n' '# apple' asahi-audio >"$fixture/lists/omarchy-aarch64-apple.packages"
 composed=$(
   base_pkg_lists=("$fixture/lists/omarchy-base.packages")
-  OMARCHY_ARCH=aarch64
+  OMARCHY_ARCH=aarch64 OMARCHY_SNAPDRAGON=1
   eval "$(sed -n '/^# aarch64 takes the runtime/,/^fi$/p' "$ROOT/builder/build-iso.sh")" 2>/dev/null
   cat "${base_pkg_lists[0]}"
   echo "--"
@@ -411,6 +429,18 @@ composed=$(
 )
 [[ $composed == $'base-one\nbase-two\nzram-generator\nrtkit\n--\nbase-one\nbase-two\nzram-generator\nrtkit\nlinux-omarchy\n--\nbase-one\nbase-two\nzram-generator\nrtkit\nvulkan-freedreno\n--\nomarchy-base.aarch64-n1x.packages\nomarchy-base.aarch64-qualcomm.packages\n--\nomarchy-aarch64-n1x.packages\nomarchy-aarch64-qualcomm.packages' ]] \
   || fail "aarch64 does not get the base list plus its architecture's additions, and one set per platform apart from Apple Silicon: $composed"
+# The plain aarch64 image installs no Snapdragon laptop, so it carries no
+# Qualcomm set and none of the firmware that set pulls into the mirror.
+composed=$(
+  base_pkg_lists=("$fixture/lists/omarchy-base.packages")
+  OMARCHY_ARCH=aarch64
+  eval "$(sed -n '/^# aarch64 takes the runtime/,/^fi$/p' "$ROOT/builder/build-iso.sh")" 2>/dev/null
+  ls "$platform_base_dir"
+  echo "--"
+  printf '%s\n' "${platform_lists[@]##*/}"
+)
+[[ $composed == $'omarchy-base.aarch64-n1x.packages\n--\nomarchy-aarch64-n1x.packages' ]] \
+  || fail "the plain aarch64 image carries the Snapdragon set: $composed"
 composed=$(
   rm "$fixture/lists"/omarchy-aarch64*.packages "$fixture/lists/omarchy-x86_64-only.packages"
   base_pkg_lists=("$fixture/lists/omarchy-base.packages")

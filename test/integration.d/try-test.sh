@@ -30,6 +30,25 @@ pick_try() {
   press ret
 }
 
+# After a pick GRUB's last frame stays on screen until Plymouth draws. Its
+# terminal window must be the theme's background then, not a black box
+# (configs/grub/grub.cfg). The menu itself has no pure black pixel, nor does
+# Plymouth's splash, so the blackest of the frames in the first 3 s counts.
+no_black_box_after_pick() {
+  local shot="$RUN_DIR/.after-pick.ppm" black worst=0 i
+  for i in $(seq 1 10); do
+    sleep 0.3
+    screendump "$shot" || return 1
+    black=$(magick "$shot" -fill white +opaque '#000000' -format '%[fx:1-mean]' info:) || return 1
+    if awk -v black="$black" -v worst="$worst" 'BEGIN { exit !(black > worst) }'; then
+      worst=$black
+      magick "$shot" "$RUN_DIR/after-pick.png" 2>/dev/null || true
+    fi
+  done
+  log "Pure black after the pick, at most: $worst of the screen"
+  awk -v worst="$worst" 'BEGIN { exit !(worst < 0.05) }'
+}
+
 # Omarchy's first-login notifications: any of them is the desktop. They are
 # light text on dark cards over the wallpaper, which the harness's
 # thresholded OCR turns to noise once the wallpaper is up; read the plain
@@ -100,6 +119,7 @@ start_vm "$disk" "$RUN_DIR/serial.log" \
   -drive "file=$ISO,media=cdrom,if=none,format=raw,id=cdrom0" \
   -device ide-cd,drive=cdrom0,bootindex=2
 check "GRUB offers Just try within its countdown" pick_try
+check "the pick leaves no black box on screen" no_black_box_after_pick
 check "Try Omarchy reaches the desktop" wait_for_desktop
 capture_console "success-try-desktop"
 

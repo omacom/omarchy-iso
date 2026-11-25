@@ -1,6 +1,7 @@
 # Omarchy's boot menu, in Tokyo Night: Plymouth's background (#1a1b26) and
-# its logo where Plymouth centres it, so after a pick only the menu goes
-# away. builder/boot-menu-theme.sh makes the fonts, the pixmaps and logo.png;
+# its logo where Plymouth centres it. After a pick, the screen keeps that
+# background until Plymouth draws (configs/grub/grub.cfg).
+# builder/boot-menu-theme.sh makes the fonts, the pixmaps and logo.png;
 # configs/grub/theme.cfg loads them.
 #
 # GRUB paints components in the reverse of the order listed here, so what is

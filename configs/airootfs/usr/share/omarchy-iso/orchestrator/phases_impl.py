@@ -477,6 +477,7 @@ def verify_install_medium(ctx: InstallContext) -> None:
         result = subprocess.run(
             [ROOT_IMAGE_VERIFY_HELPER],
             capture_output=True, text=True, check=False,
+            env={**os.environ, "OMARCHY_INSTALL_STATE_DIR": str(ctx.state_dir)},
         )
     except OSError as exc:
         raise RuntimeError(f"could not run {ROOT_IMAGE_VERIFY_HELPER}: {exc}") from exc

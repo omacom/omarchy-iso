@@ -15,6 +15,9 @@ usage() {
 (( $# >= 4 )) || usage
 LOG_FILE="$1"
 STATE_FILE="$2"
+MEDIUM_CONFIRM_REQUEST="$(dirname -- "$STATE_FILE")/medium-confirm"
+MEDIUM_CONFIRM_ANSWER="$(dirname -- "$STATE_FILE")/medium-confirm.answer"
+MEDIUM_CONFIRM_MONITOR="$(dirname -- "$STATE_FILE")/medium-confirm.dashboard"
 shift 2
 [[ ${1:-} == "--" ]] || usage
 shift
@@ -98,6 +101,7 @@ tips=(
 
 cleanup() {
   [[ -n ${sanitizer_dir:-} ]] && rm -rf "$sanitizer_dir" 2>/dev/null || true
+  rm -f "$MEDIUM_CONFIRM_MONITOR" 2>/dev/null || true
   printf '%s%s' "$RESET" "$SHOW_CURSOR" >"$TTY_PATH" 2>/dev/null || true
 }
 
@@ -707,6 +711,30 @@ reboot_prompt() {
     "" <"$TTY_PATH" >"$TTY_PATH" 2>&1
 }
 
+# The medium verifier can ask whether to continue after a transient read error
+# and a clean second read. It writes the question into the state directory and
+# waits; the dashboard is the only interactive owner of the terminal, so it is
+# the one that asks. A non-interactive install answers no.
+medium_confirm() {
+  local question
+
+  question=$(cat "$MEDIUM_CONFIRM_REQUEST" 2>/dev/null || true)
+  rm -f "$MEDIUM_CONFIRM_ANSWER"
+  if interactive; then
+    printf '%s' "$CLEAR" >"$TTY_PATH"
+    if gum confirm --show-help=false --affirmative "Continue" \
+      --negative "Stop installation" "$question" <"$TTY_PATH" >"$TTY_PATH" 2>&1; then
+      printf 'yes\n' >"$MEDIUM_CONFIRM_ANSWER"
+    else
+      printf 'no\n' >"$MEDIUM_CONFIRM_ANSWER"
+    fi
+  else
+    printf 'no\n' >"$MEDIUM_CONFIRM_ANSWER"
+  fi
+  rm -f "$MEDIUM_CONFIRM_REQUEST"
+  render_static >"$TTY_PATH" 2>/dev/null || true
+}
+
 # Cut to width columns, not characters: a CJK character takes two.
 truncate_for_width() {
   local text="$1" width="$2" cut columns
@@ -966,6 +994,11 @@ launch_child() {
 }
 
 [[ -e $TTY_PATH ]] || exit 2
+# The medium verifier checks this marker before it asks the dashboard a
+# question. Without it (a manual orchestrator run) the helper falls back to
+# /dev/tty or stops instead of waiting for a dashboard that is not there.
+mkdir -p "$(dirname -- "$STATE_FILE")" 2>/dev/null || true
+printf '%s\n' "$$" >"$MEDIUM_CONFIRM_MONITOR" 2>/dev/null || true
 printf '%s' "$HIDE_CURSOR" >"$TTY_PATH"
 render_static >"$TTY_PATH"
 set_now
@@ -976,6 +1009,8 @@ launch_child
 
 frame=0
 while jobs -pr | grep -qx "$child_pid"; do
+  # The medium verifier pauses on this file while it waits for an answer.
+  [[ -f $MEDIUM_CONFIRM_REQUEST ]] && medium_confirm
   # Keep package counting/state reads at 2 Hz; animate the trace at 10 Hz.
   (( frame % 5 == 0 )) && update_progress
   render_dynamic >"$TTY_PATH" 2>/dev/null || true

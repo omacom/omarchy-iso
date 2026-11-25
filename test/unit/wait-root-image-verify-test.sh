@@ -286,9 +286,28 @@ EOF
   [[ -n ${WITH_HASHER_PROC:-}${WITH_LAYER_HASHER:-}${WITH_MIRROR_HASHER:-} ]] && progress_env=(OMARCHY_VERIFY_PROGRESS="$box/progress")
   [[ -n ${INDENT:-} ]] && progress_env+=(OMARCHY_VERIFY_PROGRESS_INDENT="$INDENT")
 
+  # CONFIRM_ANSWER=yes|no: stand in for the dashboard's answer file when the
+  # read-error prompt asks whether to continue.
+  local confirm_env=()
+  if [[ -n ${CONFIRM_ANSWER:-} ]]; then
+    mkdir -p "$box/state"
+    confirm_env=(OMARCHY_INSTALL_STATE_DIR="$box/state")
+    # A live PID stands in for the dashboard's marker.
+    printf '%s\n' "$$" >"$box/state/medium-confirm.dashboard"
+    (
+      for _ in {1..100}; do
+        [[ -f "$box/state/medium-confirm" ]] && break
+        sleep 0.05
+      done
+      [[ -f "$box/state/medium-confirm" ]] &&
+        printf '%s\n' "$CONFIRM_ANSWER" >"$box/state/medium-confirm.answer"
+    ) &
+  fi
+
   set +e
   OUT=$(PATH="$box/bin:$PATH" OMARCHY_VERIFY_RETRY_SECONDS=0 OMARCHY_VERIFY_STALL_SECONDS="${STALL:-60}" \
-    env "${progress_env[@]}" "$REAL_TIMEOUT" 120 bash "$shim" 2>&1)
+    OMARCHY_UI_INTERACTIVE=no \
+    env "${progress_env[@]}" "${confirm_env[@]}" "$REAL_TIMEOUT" 120 bash "$shim" 2>&1)
   RC=$?
   set -e
   PROGRESS_OUT=$(cat "$box/progress" 2>/dev/null || true)
@@ -560,6 +579,21 @@ check "two read errors keep the unit verdict" 1 "$RC" "install medium is corrupt
 [[ $OUT != *"reads are unstable"* ]] && echo "ok: two read errors do not claim unstable reads" ||
   { echo "FAIL: two read errors claimed unstable reads: $OUT"; fails=1; }
 
+# The dashboard's answer file can continue after a transient read error; a
+# declined answer keeps the unstable verdict and stops the install.
+SUMS_EXPECTED=$IMAGE_HASH SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
+SUMS_RC1=1 SUMS_OUT2="$IMAGE_HASH  omarchy-root.img.zst" CONFIRM_ANSWER=yes \
+  run_helper loaded "failed" 0
+check "a confirmed transient read error continues the install" 0 "$RC" "" "$OUT"
+[[ $OUT == *"warning: first cold read had a read error"* ]] &&
+  echo "ok: the continued read error is logged" ||
+  { echo "FAIL: continued read-error warning missing: $OUT"; fails=1; }
+
+SUMS_EXPECTED=$IMAGE_HASH SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
+SUMS_RC1=1 SUMS_OUT2="$IMAGE_HASH  omarchy-root.img.zst" CONFIRM_ANSWER=no \
+  run_helper loaded "failed" 0
+check "a declined transient read error stays unstable" 1 "$RC" "install medium reads are unstable" "$OUT"
+
 # The report is capped so a broadly damaged mirror cannot print one line per
 # file. Two mismatches with a cap of one shows the first and the count.
 SUMS_EXPECTED=$IMAGE_HASH SUMS_LAYER_EXPECTED=$LAYER_HASH \
@@ -572,6 +606,9 @@ $LAYER_WRONG1  omarchy-layer.aarch64-n1x.tar.zst" \
 check "a multi-file corrupt report is capped" 1 "$RC" "install medium is corrupt: re-flash it" "$OUT"
 [[ $OUT == *"... and 1 more"* ]] && echo "ok: the report cap summarizes the rest" ||
   { echo "FAIL: report cap missing: $OUT"; fails=1; }
+[[ $OUT == *"cold evidence: "* && $OUT == *"expected $IMAGE_HASH"* && $OUT == *"expected $LAYER_HASH"* ]] &&
+  echo "ok: the full report reaches stdout while the failure message is capped" ||
+  { echo "FAIL: full support report missing: $OUT"; fails=1; }
 
 # Without drop_caches there is nothing to re-read cold with: the unit's own
 # verdict stands, with no forensics grafted on.

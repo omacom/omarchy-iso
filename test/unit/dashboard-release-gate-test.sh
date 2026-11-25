@@ -68,6 +68,10 @@ cat >"$BOX/bin/ttfx" <<'EOF'
 #!/bin/bash
 exit 0
 EOF
+cat >"$BOX/bin/gum" <<'EOF'
+#!/bin/bash
+exit "${GUM_CONFIRM_RC:-0}"
+EOF
 # Just enough jq that the test does not hinge on the host having the real
 # one: the target query answers from the state file, anything else answers
 # empty (install_duration then falls through to its log parsing).
@@ -152,6 +156,23 @@ check_has "a released target reboots without stop jobs" "systemctl reboot -ff" "
 scenario reboot_now 1
 check_has "a held target reboots gracefully" "systemctl reboot" "$CALLS"
 check_absent "a held target keeps its stop jobs" "-ff" "$CALLS"
+
+# ── The medium read-error confirmation ──────────────────────────────────────
+# The verifier writes the question next to the state file and waits; the
+# dashboard answers yes/no there. A headless install answers no.
+printf 'Continue after the read error?\n' >"$BOX/medium-confirm"
+GUM_CONFIRM_RC=0 scenario medium_confirm 0
+check "a confirmed medium prompt answers yes" "yes" "$(cat "$BOX/medium-confirm.answer")"
+[[ ! -e $BOX/medium-confirm ]] && echo "ok: the medium prompt request is cleared" ||
+  { echo "FAIL: the medium prompt request remains"; fails=1; }
+
+printf 'Continue after the read error?\n' >"$BOX/medium-confirm"
+GUM_CONFIRM_RC=1 scenario medium_confirm 0
+check "a declined medium prompt answers no" "no" "$(cat "$BOX/medium-confirm.answer")"
+
+printf 'Continue after the read error?\n' >"$BOX/medium-confirm"
+OMARCHY_UI_INTERACTIVE=no scenario medium_confirm 0
+check "a headless medium prompt answers no" "no" "$(cat "$BOX/medium-confirm.answer")"
 
 if (( fails )); then
   echo "dashboard release gate: FAILED"

@@ -27,6 +27,12 @@
 # happy path is untouched.
 set -uo pipefail
 
+# The failure message on stderr is capped for the dashboard; the full cold
+# evidence goes to stdout, which the orchestrator puts in the install log for
+# support. fd 3 keeps those lines out of the command substitution that
+# collects the cold verdict.
+exec 3>&1
+
 UNIT=omarchy-root-image-verify.service
 MIRROR_UNIT=omarchy-mirror-verify.service
 MIRROR_SUMS=/usr/share/omarchy-iso/offline-mirror.sha256
@@ -199,6 +205,46 @@ cold_expected() {
   done
 }
 
+# Ask to continue when only the first cold read failed with a read error and
+# the second matched every checksum. The full-disk install's dashboard owns
+# the terminal, so the helper leaves a request in the orchestrator's state
+# directory and waits for its answer there; the free-space configurator has
+# no dashboard and prompts /dev/tty itself. Headless, a declined answer, and
+# no answer within the timeout all stop: the medium is still suspect even when
+# the second read looked clean.
+confirm_read_error_continue() {
+  local state_dir=${OMARCHY_INSTALL_STATE_DIR:-} request answer waited=0 limit=${OMARCHY_VERIFY_CONFIRM_TIMEOUT:-300}
+  local question='The first cold read of the install medium had a read error, but the second read matched every checksum. Continuing may write a bad install; a different USB stick or port is safer.'
+  if [[ -n $state_dir && -d $state_dir ]]; then
+    local monitor="$state_dir/medium-confirm.dashboard" dashboard_pid
+    # Only the running dashboard can answer the request. Without its marker,
+    # fall through to /dev/tty (a manual run) rather than wait out the timeout
+    # for an answer that cannot come.
+    if [[ -f $monitor ]]; then
+      dashboard_pid=$(cat "$monitor" 2>/dev/null || true)
+      [[ $dashboard_pid =~ ^[0-9]+$ ]] && kill -0 "$dashboard_pid" 2>/dev/null || return 1
+      request="$state_dir/medium-confirm"
+      answer="$state_dir/medium-confirm.answer"
+      rm -f "$answer"
+      printf '%s\n' "$question" >"$request" 2>/dev/null || return 1
+      while [[ ! -f $answer ]]; do
+        kill -0 "$dashboard_pid" 2>/dev/null || { rm -f "$request"; return 1; }
+        ((waited++ >= limit)) && { rm -f "$request"; return 1; }
+        sleep 1
+      done
+      answer=$(cat "$answer" 2>/dev/null || true)
+      rm -f "$request" "$answer"
+      [[ $answer == yes ]]
+      return
+    fi
+  fi
+  [[ ${OMARCHY_UI_INTERACTIVE:-} == no ]] && return 1
+  [[ -r /dev/tty && -w /dev/tty ]] || return 1
+  printf '\n%s\nContinue the installation? [y/N] ' "$question" >/dev/tty
+  IFS= read -r answer </dev/tty || answer=
+  case $answer in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
 # One cold pass over every listed file. Prints sha256sum's vector; 124 when
 # the size-based timeout expires; 1 when a listed file cannot be read (the
 # caller retries that, as a read error can be transient too).
@@ -212,11 +258,12 @@ cold_vector() { # $1: seconds
 
 # Per-file differences for the failure message. $1: corrupt|unstable|single,
 # $2: expected vector, $3: first cold vector, $4: second cold vector. The
-# report is capped at COLD_REPORT_MAX (8) lines so a broadly damaged mirror
-# cannot turn one failure into hundreds of lines; the rest is summarized.
+# complete report goes to stdout (fd 3) for the support log; the failure
+# message is capped at COLD_REPORT_MAX (8) lines so a broadly damaged mirror
+# cannot turn one failure into hundreds of screen lines.
 cold_report() {
-  local mode=$1 expected=$2 first=$3 second=$4 max=${COLD_REPORT_MAX:-8}
-  awk -v mode="$mode" '
+  local mode=$1 expected=$2 first=$3 second=$4 max=${COLD_REPORT_MAX:-8} full
+  full=$(awk -v mode="$mode" '
     BEGIN { FS=OFS="  " }
     FNR == 1 { src++ }
     src == 1 { want[$2] = $1; next }
@@ -233,8 +280,10 @@ cold_report() {
         }
       }
     }
-  ' <(printf '%s\n' "$expected") <(printf '%s\n' "$first") <(printf '%s\n' "$second") |
-    sort |
+  ' <(printf '%s\n' "$expected") <(printf '%s\n' "$first") <(printf '%s\n' "$second") | sort)
+  [[ -n $full ]] || return 0
+  printf '%s\n' "$full" | sed 's/^/cold evidence: /' >&3
+  printf '%s\n' "$full" |
     awk -v max="$max" '
       { lines[NR] = $0 }
       END {
@@ -301,6 +350,13 @@ cold_recheck() {
     elif (( rc1 == 1 || rc2 == 1 )); then
       # One read could not produce a vector. Both read errors keep the unit's
       # verdict; one bad read and one vector are reads that disagree.
+      if (( rc1 == 1 && rc2 == 0 )) && [[ $second == "$expected" ]]; then
+        if confirm_read_error_continue; then
+          printf '%s\n' "warning: first cold read had a read error; second matched every checksum; continued by user" >&3
+          echo pass
+          return 0
+        fi
+      fi
       if (( rc1 == 1 && rc2 == 1 )); then
         echo unknown; return 0
       elif (( rc1 == 1 )); then
@@ -352,7 +408,10 @@ await_verdict() {
   # exits, so it runs in the background: the wait below must watch the hash
   # for a stall while it does. Until it returns, the job may still be queued.
   if [[ "$(unit_prop ActiveState)" == inactive ]]; then
-    systemctl start "$UNIT" >/dev/null 2>&1 &
+    # 3>&-: the support-log copy of stdout must not be inherited by the
+    # background start, or a caller capturing the helper would wait for the
+    # unit's whole hash before seeing the helper exit.
+    systemctl start "$UNIT" >/dev/null 2>&1 3>&- &
     starting=$!
   fi
 

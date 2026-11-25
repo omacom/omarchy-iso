@@ -40,11 +40,13 @@ class SystemdBootInstallTest(unittest.TestCase):
             user_configuration={}, encrypt=True, is_protected=False, defer_provisioning=False,
         )
         self.has_uefi = True
+        self.apple = False
         self.commands = []
         for patch in (
             mock.patch.object(phases, "OFFLINE_MIRROR", self.mirror),
             mock.patch.object(phases.platform, "machine", return_value="x86_64"),
             mock.patch.object(phases.arch, "has_uefi", lambda: self.has_uefi, create=True),
+            mock.patch.object(phases, "_is_apple_t2_hardware", lambda: self.apple),
             mock.patch.object(phases.subprocess, "run", self.record),
             mock.patch.dict(phases.os.environ, {}, clear=False),
         ):
@@ -94,6 +96,16 @@ class SystemdBootInstallTest(unittest.TestCase):
             lambda: setattr(self, "has_uefi", False),
             lambda: phases.os.environ.__setitem__("OMARCHY_ISO_BOOT_LOADER", "limine"),
             lambda: (self.mirror / "omarchy-boot-systemd-1-1-x86_64.pkg.tar.zst").unlink(),
+        ):
+            with self.subTest(setup=setup):
+                self.setUp()
+                setup()
+                self.assertEqual(phases._boot_loader(self.ctx), "limine")
+
+    def test_intel_macs_keep_limine_as_omarchy_boot_switch_keeps_them(self):
+        for setup in (
+            lambda: setattr(self, "apple", True),
+            lambda: self.ctx.user_configuration.__setitem__("kernels", ["linux-t2"]),
         ):
             with self.subTest(setup=setup):
                 self.setUp()

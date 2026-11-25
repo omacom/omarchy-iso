@@ -1632,19 +1632,23 @@ SYSTEMD_BOOT_STACK = "omarchy-boot-systemd"
 def _boot_loader(ctx: InstallContext) -> str:
     """The boot loader this install sets up: systemd-boot, the one Secure Boot
     needs, on UEFI machines; Limine on BIOS firmware, which systemd-boot cannot
-    start. (Apple Silicon is never installed from this image.)
-    OMARCHY_ISO_BOOT_LOADER=limine keeps a UEFI install on Limine, and an ISO
-    whose mirror has no omarchy-boot-systemd has no other choice. Decided once
-    per install."""
+    start. (Apple Silicon is never installed from this image.) Intel Macs keep
+    Limine too, as omarchy-boot-switch keeps them: their firmware needs testing
+    with systemd-boot first. OMARCHY_ISO_BOOT_LOADER=limine keeps a UEFI
+    install on Limine, and an ISO whose mirror has no omarchy-boot-systemd has
+    no other choice. Decided once per install."""
     state = getattr(ctx, "state", None)
     loader = state.get("boot_loader") if isinstance(state, dict) else None
     if loader is None:
         loader = "limine"
+        kernels = (getattr(ctx, "user_configuration", None) or {}).get("kernels") or []
         if (
             os.environ.get("OMARCHY_ISO_BOOT_LOADER", "systemd-boot") != "limine"
             and platform.machine() in ("x86_64", "aarch64")
             and any(not p.name.endswith(".sig") for p in OFFLINE_MIRROR.glob(f"{SYSTEMD_BOOT_STACK}-[0-9]*.pkg.tar.*"))
             and arch.has_uefi()
+            and "linux-t2" not in kernels
+            and not _is_apple_t2_hardware()
         ):
             loader = "systemd-boot"
         if isinstance(state, dict):

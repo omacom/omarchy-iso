@@ -127,10 +127,8 @@ build_prebuilt_initramfs() {
 
   printf '%s\n' "$image_kernel" >"$root$dir/prebuilt-initramfs.kernel"
   printf '%s\n' "$image_kver" >"$root$dir/prebuilt-initramfs.kver"
-  # As for the UKI: the early-loading modules, which a machine's hardware
-  # scripts add to, and the console keymap the keymap hook compiled in.
-  { grep -hE '^\s*MODULES\s*\+?=' "$root"/etc/mkinitcpio.conf.d/*.conf 2>/dev/null || true; } |
-    sed -E 's/\s+/ /g; s/^ //; s/ $//' | sort -u >"$root$dir/prebuilt-initramfs.modules"
+  # The console keymap the keymap hook compiled in, which the hashed inputs
+  # below don't cover (vconsole.conf).
   ( [ -f "$root/etc/vconsole.conf" ] && . "$root/etc/vconsole.conf"; printf '%s\n' "${KEYMAP:-}" ) \
     >"$root$dir/prebuilt-initramfs.keymap"
   initramfs_inputs "$root" >"$root$dir/prebuilt-initramfs.inputs"
@@ -753,7 +751,11 @@ CONF
   # otherwise. A Snapdragon ISO installs only Snapdragon laptops, whose
   # platform builds its own, so it ships none.
   rm -f "$root"/var/lib/omarchy-iso/prebuilt-initramfs.*
-  if [[ -z ${OMARCHY_SNAPDRAGON:-} ]]; then
+  # An image whose omarchy-boot-rebuild can't take it (an older omarchy) gets
+  # none: installs build theirs, as before.
+  if ! grep -q -- '--initramfs' "$root/usr/bin/omarchy-boot-rebuild" 2>/dev/null; then
+    echo "omarchy-boot-rebuild takes no pre-built initramfs; none is built"
+  elif [[ -z ${OMARCHY_SNAPDRAGON:-} ]]; then
     echo "Pre-building systemd-boot's initramfs in the image (kver=$image_kver, the image's hooks, no autodetect, no kms)"
     if build_prebuilt_initramfs; then
       echo "Pre-built initramfs: $(du -h "$root/var/lib/omarchy-iso/prebuilt-initramfs.img" | cut -f1)"

@@ -297,8 +297,7 @@ class SystemdBootInstallTest(unittest.TestCase):
 class PrebuiltInitramfsTest(unittest.TestCase):
     """The image's pre-built initramfs stands in for mkinitcpio on the image's
     kernel when the machine changed nothing it is built from, under the
-    conditions Limine's pre-built UKI has, and only where the target's
-    omarchy-boot-switch takes it."""
+    conditions Limine's pre-built UKI has, and goes once the boot is set up."""
 
     ARGUMENT = "linux-omarchy=/var/lib/omarchy-iso/prebuilt-initramfs.img"
     record = SystemdBootInstallTest.record
@@ -309,7 +308,6 @@ class PrebuiltInitramfsTest(unittest.TestCase):
         self.write("etc/snapper/configs/root", "")
         self.write("etc/kernel/cmdline", CMDLINE + "\n")
         self.write("usr/lib/modules/7.2.1-omarchy/pkgbase", "linux-omarchy\n")
-        self.write("usr/bin/omarchy-boot-switch", "install [--prefer PKGBASE] [--initramfs PKGBASE=FILE]\n")
         self.write("etc/mkinitcpio.conf", "HOOKS=()\n")
         self.write("etc/mkinitcpio.conf.d/thunderbolt_module.conf", "  MODULES+=(thunderbolt)\n")
         self.write("etc/mkinitcpio.conf.d/00-omarchy-hooks.conf", "HOOKS=(base udev encrypt omarchy-restore)\n")
@@ -320,7 +318,6 @@ class PrebuiltInitramfsTest(unittest.TestCase):
         self.write(f"{records}/prebuilt-initramfs.img", b"\0" * 4096)
         self.write(f"{records}/prebuilt-initramfs.kernel", "linux-omarchy\n")
         self.write(f"{records}/prebuilt-initramfs.kver", "7.2.1-omarchy\n")
-        self.write(f"{records}/prebuilt-initramfs.modules", "MODULES+=(thunderbolt)\n")
         self.write(f"{records}/prebuilt-initramfs.keymap", "\n")
         self.write(f"{records}/prebuilt-initramfs.inputs", "".join(
             f"{digest}  {path}\n" for path, digest in sorted(phases._initramfs_inputs(self.root).items())))
@@ -355,7 +352,11 @@ class PrebuiltInitramfsTest(unittest.TestCase):
         self.assert_fast()
 
     def test_what_every_machine_writes_keeps_the_fast_path(self):
-        self.write(f"etc/mkinitcpio.conf.d/{phases.INITRAMFS_MODULES_CONF}", "_omarchy_absent=(thunderbolt)\n")
+        # What _drop_initramfs_modules_the_kernel_lacks writes, word for word.
+        self.write(f"etc/mkinitcpio.conf.d/{phases.INITRAMFS_MODULES_CONF}", (
+            "_omarchy_absent=(thunderbolt)\n_omarchy_kept=()\n"
+            'for _omarchy_module in "${MODULES[@]}"; do\n  _omarchy_kept+=("$_omarchy_module")\ndone\n'
+            'MODULES=("${_omarchy_kept[@]}")\nunset _omarchy_absent _omarchy_kept _omarchy_module\n'))
         self.write("etc/modprobe.d/omarchy-toprow.conf", "options hid_apple fnmode=1\n")
         self.write("etc/vconsole.conf", "KEYMAP=us\nXKBLAYOUT=us\nFONT=default8x16\n")
         self.assert_fast()
@@ -372,9 +373,19 @@ class PrebuiltInitramfsTest(unittest.TestCase):
         self.assertNotIn("--initramfs", command)
         self.assertIn("built on this machine", self.label)
 
-    def test_an_omarchy_boot_switch_without_the_option_builds_here(self):
-        self.write("usr/bin/omarchy-boot-switch", "install [--prefer PKGBASE]\n")
-        self.assert_built_here("takes no pre-built initramfs")
+    def test_an_esp_shared_with_another_system_builds_here(self):
+        self.ctx.is_protected = True
+        self.assert_built_here("shared with another system")
+
+    def test_the_pre_built_initramfs_goes_once_the_boot_is_set_up(self):
+        for loader in ("systemd-boot", "limine"):
+            with self.subTest(loader=loader):
+                self.setUp()
+                if loader == "systemd-boot":
+                    phases.finalize_boot(self.ctx)
+                else:
+                    phases._remove_prebuilt_initramfs(self.ctx)
+                self.assertEqual(list((self.root / "var/lib/omarchy-iso").glob("prebuilt-initramfs.*")), [])
 
     def test_another_build_of_the_image_s_kernel_builds_here(self):
         (self.root / "usr/lib/modules/7.2.1-omarchy").rename(self.root / "usr/lib/modules/7.2.2-omarchy")
@@ -382,7 +393,7 @@ class PrebuiltInitramfsTest(unittest.TestCase):
 
     def test_modules_a_hardware_script_added_build_here(self):
         self.write("etc/mkinitcpio.conf.d/nvidia.conf", "MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)\n")
-        self.assert_built_here("hardware setup added initramfs modules (MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm))")
+        self.assert_built_here("differs from the image's (etc/mkinitcpio.conf.d/nvidia.conf)")
 
     def test_another_keyboard_layout_builds_here(self):
         self.write("etc/vconsole.conf", "KEYMAP=fr\nXKBLAYOUT=fr\n")
@@ -390,7 +401,7 @@ class PrebuiltInitramfsTest(unittest.TestCase):
 
     def test_the_provisioning_key_builds_here(self):
         self.write(phases.PROVISION_KEY_DROPIN, "FILES+=(/etc/omarchy/provisioning.key)\n")
-        self.assert_built_here("provisioning key")
+        self.assert_built_here(f"differs from the image's ({phases.PROVISION_KEY_DROPIN})")
 
     def test_a_board_with_a_platform_of_its_own_builds_here(self):
         with mock.patch.object(phases.platform, "machine", return_value="aarch64"), \

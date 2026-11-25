@@ -408,6 +408,18 @@ if [[ -f $logging_sh ]] && grep -q "date '+%Y-%m-%d %H:%M:%S'" "$logging_sh"; th
   bash -n "$logging_sh" && echo "logging.sh: timestamps without forking date"
 fi
 
+# When the ISO builds the target's per-machine pacman keyring in tmpfs from
+# prepare_live, let the runtime skip rebuilding it on btrfs during Phase 4
+# (~3 s on aarch64). TODO: drop this patch once the runtime package carries it.
+keyring_helper_sh="$root/usr/share/omarchy/install/helpers/pacman-keyring.sh"
+if [[ -f $keyring_helper_sh ]] && ! grep -q 'OMARCHY_KEYRING_MANAGED_BY_ISO' "$keyring_helper_sh"; then
+  sed -i \
+    -e '/^omarchy_pacman_keyring_start() {/a\  [[ ${OMARCHY_KEYRING_MANAGED_BY_ISO:-0} == "1" ]] && return 0' \
+    -e '/^omarchy_pacman_keyring_finish() {/a\  [[ ${OMARCHY_KEYRING_MANAGED_BY_ISO:-0} == "1" ]] && return 0' \
+    "$keyring_helper_sh"
+  bash -n "$keyring_helper_sh" && echo "pacman-keyring.sh: honour OMARCHY_KEYRING_MANAGED_BY_ISO"
+fi
+
 # Package names no repository offers any more: follow the known renames in the
 # image's install scripts, refuse to ship one that still asks for a dropped name.
 bash "$(dirname -- "${BASH_SOURCE[0]}")/follow-renamed-packages.sh" "$root/usr/share/omarchy/install" \

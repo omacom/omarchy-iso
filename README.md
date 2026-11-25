@@ -421,7 +421,7 @@ For local development, build the ISO from sibling checkouts:
 
 Despite the local folder name, the first argument is the Omarchy source checkout (runtime commands, configs, setup scripts, themes, shell, migrations). The installer itself lives in this ISO repo.
 
-Use `--dev` or `--rc` to build against those package channels. Both `--dev` and `--edge` select the dev packages from the edge mirror.
+Use `--dev` or `--rc` to build against those package channels. Both `--dev` and `--edge` select the dev packages from the edge mirror. Pass `--fast` for test builds to trade ISO size for faster builds with minimal zstd compression (`-fast-<ref>.iso`, which `omarchy-iso-release` never selects).
 
 ### Preset ISOs
 

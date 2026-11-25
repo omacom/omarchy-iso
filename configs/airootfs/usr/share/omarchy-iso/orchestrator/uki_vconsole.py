@@ -43,18 +43,25 @@ def vconsole_is_nonlatin(vconsole: Path) -> bool:
 
     Matches omarchy_hooks.conf and omarchy_vconsole.conf, which leave
     /etc/vconsole.conf out of the initramfs for these layouts so the LUKS
-    prompt uses US.
+    prompt uses US, while preserving Latin variants such as rs(latin)
+    (Serbian Latin, sr-latin).
     """
     try:
         lines = vconsole.read_text().splitlines()
     except OSError:
         return False
     layout = ""
+    variant = ""
     for line in lines:
         line = line.strip()
         if line.startswith("XKBLAYOUT="):
-            value = line.partition("=")[2].strip().strip("\"'")
+            value = line.partition("=")[2].split("#", 1)[0].strip().strip("\"'")
             layout = value.split(",", 1)[0]
+        elif line.startswith("XKBVARIANT="):
+            value = line.partition("=")[2].split("#", 1)[0].strip().strip("\"'")
+            variant = value.split(",", 1)[0]
+    if layout == "rs" and variant.startswith("latin"):
+        return False
     return layout in NON_LATIN_LAYOUTS
 
 

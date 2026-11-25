@@ -6,10 +6,20 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/repo/bin" "$work/repo/configs" "$work/repo/release" "$work/stubs" "$work/home" "$work/src" "$work/pkgs"
-cp "$ROOT/bin/omarchy-iso-make" "$work/repo/bin/"
+cp "$ROOT/bin/omarchy-iso-make" "$ROOT/bin/omarchy-iso-release" "$work/repo/bin/"
 cp "$ROOT/configs/profiledef.sh" "$work/repo/configs/"
 
 cat >"$work/stubs/git" <<'STUB'
+#!/bin/bash
+exit 0
+STUB
+
+cat >"$work/stubs/omarchy-iso-sign" <<'STUB'
+#!/bin/bash
+exit 0
+STUB
+
+cat >"$work/stubs/omarchy-iso-upload" <<'STUB'
 #!/bin/bash
 exit 0
 STUB
@@ -52,20 +62,34 @@ grep -qxF -- 'OMARCHY_FAST_COMPRESSION=1' "$TEST_DOCKER_LOG" || fail "--fast did
 [[ -f $TEST_RELEASE/omarchy-test-x86_64-fast-edge.iso ]] || fail "--fast did not tag ISO name with -fast-<ref>"
 echo "ok - --fast passes OMARCHY_FAST_COMPRESSION=1 and names output -fast-<ref>.iso"
 
-# --fast works on --rc and --rehearsal test builds, and omarchy-iso-release's
-# release glob never matches a -fast-<ref>.iso.
+# --fast works on --rc and --rehearsal test builds, and omarchy-iso-release
+# ignores newer -fast-<ref>.iso builds when selecting a release ISO.
 run_make --rc --fast || fail "--fast --rc failed"
 [[ -f $TEST_RELEASE/omarchy-test-x86_64-fast-rc.iso ]] || fail "--fast --rc did not name output -fast-rc.iso"
 run_make --local-source "$work/src" "$work/pkgs" --rehearsal --fast || fail "--fast --rehearsal failed"
 [[ -f $TEST_RELEASE/omarchy-test-x86_64-fast-rehearsal.iso ]] || fail "--fast --rehearsal did not name output -fast-rehearsal.iso"
 
-for ref in quattro rc; do
-  name="omarchy-2026.11.25-x86_64-fast-$ref.iso"
-  if [[ $name == omarchy-[0-9]*"x86_64-$ref".iso ]]; then
-    fail "omarchy-iso-release glob would match $name"
-  fi
-done
-echo "ok - --fast works for rc/rehearsal tests and is excluded from omarchy-iso-release's glob"
+rm -f "$TEST_RELEASE"/*.iso "$TEST_RELEASE"/*.sha256
+printf 'normal-quattro\n' >"$TEST_RELEASE/omarchy-2026.11.24-x86_64-quattro.iso"
+printf 'fast-quattro\n'   >"$TEST_RELEASE/omarchy-2026.11.25-x86_64-fast-quattro.iso"
+touch -t 202611240000 "$TEST_RELEASE/omarchy-2026.11.24-x86_64-quattro.iso"
+touch -t 202611250000 "$TEST_RELEASE/omarchy-2026.11.25-x86_64-fast-quattro.iso"
+PATH="$work/stubs:$PATH" "$work/repo/bin/omarchy-iso-release" --no-make 4.5.0 >/dev/null || fail "omarchy-iso-release failed with normal + fast ISO"
+[[ $(<"$TEST_RELEASE/omarchy-4.5.0-x86.iso") == "normal-quattro" ]] || fail "omarchy-iso-release picked the fast ISO over the normal ISO"
+
+printf 'normal-rc\n' >"$TEST_RELEASE/omarchy-2026.11.24-x86_64-rc.iso"
+printf 'fast-rc\n'   >"$TEST_RELEASE/omarchy-2026.11.25-x86_64-fast-rc.iso"
+touch -t 202611240000 "$TEST_RELEASE/omarchy-2026.11.24-x86_64-rc.iso"
+touch -t 202611250000 "$TEST_RELEASE/omarchy-2026.11.25-x86_64-fast-rc.iso"
+PATH="$work/stubs:$PATH" "$work/repo/bin/omarchy-iso-release" --no-make --rc 4.5.0rc1 >/dev/null || fail "omarchy-iso-release --rc failed with normal + fast ISO"
+[[ $(<"$TEST_RELEASE/omarchy-4.5.0rc1-x86.iso") == "normal-rc" ]] || fail "omarchy-iso-release --rc picked the fast ISO over the normal ISO"
+
+rm -f "$TEST_RELEASE"/*.iso "$TEST_RELEASE"/*.sha256
+printf 'fast-only\n' >"$TEST_RELEASE/omarchy-2026.11.25-x86_64-fast-quattro.iso"
+if PATH="$work/stubs:$PATH" "$work/repo/bin/omarchy-iso-release" --no-make 4.5.0 >/dev/null 2>&1; then
+  fail "omarchy-iso-release accepted a fast-only ISO"
+fi
+echo "ok - --fast works for rc/rehearsal tests and omarchy-iso-release ignores -fast-<ref>.iso"
 
 # build-iso.sh exports OMARCHY_FAST_COMPRESSION to profiledef.sh.
 grep -Eq '^export .*OMARCHY_FAST_COMPRESSION' "$ROOT/builder/build-iso.sh" || fail "build-iso.sh does not export OMARCHY_FAST_COMPRESSION"

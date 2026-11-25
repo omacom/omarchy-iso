@@ -42,6 +42,7 @@ from the start.
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import time
 from contextlib import contextmanager
@@ -123,9 +124,42 @@ def load_arch_config(config_path: Path, creds_path: Path) -> ArchConfigHandler:
         "--creds", str(creds_path),
     ]
     try:
-        return ArchConfigHandler()
+        handler = ArchConfigHandler()
     finally:
         sys.argv = saved_argv
+    _verify_disk_modifications_loaded(config_path, handler.config)
+    return handler
+
+
+def _verify_disk_modifications_loaded(config_path: Path, arch_config: ArchConfig) -> None:
+    """Refuse to proceed if archinstall silently dropped a configured disk.
+
+    archinstall's DiskLayoutConfiguration.parse_arg skips any device_modification
+    whose device path is absent from DeviceHandler's map without raising, so
+    FilesystemHandler later logs "No modifications required" and the install
+    spills into the live ISO's root.
+    """
+    raw = json.loads(config_path.read_text())
+    expected = [
+        mod["device"]
+        for mod in (raw.get("disk_config") or {}).get("device_modifications") or []
+        if isinstance(mod, dict) and mod.get("device")
+    ]
+    if not expected:
+        return
+    disk_config = getattr(arch_config, "disk_config", None)
+    parsed = getattr(disk_config, "device_modifications", None) or []
+    parsed_paths = {
+        str(mod.device.device_info.path)
+        for mod in parsed
+        if getattr(getattr(mod, "device", None), "device_info", None)
+        and getattr(mod.device.device_info, "path", None)
+    }
+    missing = [dev for dev in expected if dev not in parsed_paths]
+    if missing:
+        raise RuntimeError(
+            f"archinstall dropped configured install device(s): {', '.join(missing)}"
+        )
 
 
 def make_mirror_handler(offline: bool = True) -> MirrorListHandler:

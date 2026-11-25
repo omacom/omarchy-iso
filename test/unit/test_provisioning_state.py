@@ -205,6 +205,17 @@ class ContextDeferProvisioningTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "install device does not exist"):
             self.from_env()
 
+    def test_non_block_install_device_fails_before_archinstall(self):
+        regular_file = self.dir / "not-a-disk"
+        regular_file.touch()
+        config = self.base_config()
+        config["disk_config"]["device_modifications"] = [{"device": str(regular_file), "wipe": True}]
+        self.write_config(config)
+        self.write_creds({"users": [{"username": "jeff"}]})
+
+        with self.assertRaisesRegex(RuntimeError, "install device is not a block device"):
+            self.from_env()
+
 
 def make_ctx(target, **overrides):
     defaults = dict(

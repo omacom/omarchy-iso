@@ -103,8 +103,16 @@ class InstallContext:
             if encryption_password:
                 user_credentials["encryption_password"] = encryption_password
 
+        if defer_provisioning:
+            # Encrypted deferred-provisioning installs have no user password to protect LUKS
+            # with. Generate a throwaway passphrase (staged for first-boot
+            # re-key by the stage_provisioning_state phase) and hand it to archinstall
+            # through both places it may look: the disk_encryption block and
+            # the credentials file.
+            _inject_provisioning_encryption_password(user_configuration, user_credentials)
+
         # Keep the persistent identity from cidata for cleanup/support, but
-        # feed archinstall canonical /dev names.  Archinstall 4.4 indexes its
+        # feed archinstall canonical /dev names. Archinstall indexes its
         # BlockDevice objects by canonical kernel path and silently drops a
         # layout whose device is a valid /dev/disk/by-id symlink.
         arch_configuration = copy.deepcopy(user_configuration)
@@ -122,18 +130,6 @@ class InstallContext:
         state_dir.mkdir(parents=True, exist_ok=True)
 
         if defer_provisioning:
-            # Encrypted deferred-provisioning installs have no user password to protect LUKS
-            # with. Generate a throwaway passphrase (staged for first-boot
-            # re-key by the stage_provisioning_state phase) and hand it to archinstall
-            # through both places it may look: the disk_encryption block and
-            # the credentials file.
-            generated_password = _inject_provisioning_encryption_password(
-                arch_configuration, user_credentials
-            )
-            if generated_password:
-                user_configuration["disk_config"]["disk_encryption"][
-                    "encryption_password"
-                ] = generated_password
             creds_path = state_dir / "provisioning-user_credentials.json"
             creds_path.write_text(json.dumps(user_credentials, indent=2) + "\n")
             creds_path.chmod(0o600)
@@ -213,24 +209,24 @@ def _canonicalize_install_devices(arch_configuration: dict) -> None:
         path = Path(device)
         try:
             canonical = path.resolve(strict=True)
-        except OSError as exc:
+        except FileNotFoundError as exc:
             raise RuntimeError(f"install device does not exist: {device}") from exc
+        except OSError as exc:
+            raise RuntimeError(f"cannot resolve install device {device}: {exc.strerror or exc}") from exc
         if not canonical.is_block_device():
             raise RuntimeError(f"install device is not a block device: {device} -> {canonical}")
         modification["device"] = str(canonical)
 
 
-def _inject_provisioning_encryption_password(
-    arch_configuration: dict, user_credentials: dict
-) -> str | None:
+def _inject_provisioning_encryption_password(user_configuration: dict, user_credentials: dict) -> None:
     """Ensure an encrypted deferred-provisioning install has a LUKS passphrase archinstall can
     use. Reuse one the input already carries (an autoinstall rig may supply
-    its own); otherwise generate a throwaway. Return the effective passphrase
-    so the caller can explicitly mirror it into the separate persistent install
-    context used by stage_provisioning_state."""
-    disk_encryption = (arch_configuration.get("disk_config") or {}).get("disk_encryption")
+    its own); otherwise generate a throwaway. Mutates user_configuration before
+    arch_configuration is copied from it, so both archinstall and
+    stage_provisioning_state see the effective passphrase."""
+    disk_encryption = (user_configuration.get("disk_config") or {}).get("disk_encryption")
     if disk_encryption is None:
-        return None
+        return
 
     password = disk_encryption.get("encryption_password") or user_credentials.get("encryption_password")
     if not password:
@@ -238,7 +234,6 @@ def _inject_provisioning_encryption_password(
 
     disk_encryption["encryption_password"] = password
     user_credentials["encryption_password"] = password
-    return password
 
 
 # One aarch64 image serves every board, so the installer asks the machine which

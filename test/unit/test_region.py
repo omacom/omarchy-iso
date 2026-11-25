@@ -160,6 +160,21 @@ class RegionSelectionTest(unittest.TestCase):
         marker = target / "etc/omarchy/region"
         self.assertEqual(marker.read_text(), "cn\n")
         self.assertEqual(marker.stat().st_mode & 0o777, 0o644)
+        self.assertFalse((target / "etc/omarchy/form-defaults").exists())
+
+    def test_a_deferred_install_leaves_its_region_for_first_boot(self):
+        # First-boot setup (configure_region) settles REGION against the
+        # owner's timezone; global media must say so too, or a Shanghai owner
+        # would keep the global region.
+        for selected, marker in (("global", None), ("cn", "cn\n")):
+            with self.subTest(region=selected):
+                target = self.root / selected
+                phases_impl._write_region_marker(types.SimpleNamespace(target=target, region=selected, defer_provisioning=True))
+                defaults = target / "etc/omarchy/form-defaults"
+                self.assertEqual(defaults.read_text(), f"REGION={selected}\n")
+                self.assertEqual(defaults.stat().st_mode & 0o777, 0o644)
+                path = target / "etc/omarchy/region"
+                self.assertEqual(path.read_text() if path.exists() else None, marker)
 
     def test_region_survives_root_image_install_without_changing_package_delta(self):
         cases = (

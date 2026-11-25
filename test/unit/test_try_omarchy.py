@@ -191,6 +191,16 @@ class BuildTryLayerTest(unittest.TestCase):
         self.assertIn("browser-policy.sh", self.text)
         self.assertIn("theme-system.sh", self.text)
 
+    def test_hardens_sddm_autologin_state_greeter_and_session_wrapper(self):
+        self.assertIn("sddm.service.d/10-omarchy-try-udev.conf", self.text)
+        self.assertIn("udevadm settle --timeout=10", self.text)
+        self.assertIn("Current=omarchy-try", self.text)
+        self.assertIn("Relogin=true", self.text)
+        self.assertIn("/var/lib/sddm/state.conf", self.text)
+        self.assertIn("chown sddm:sddm /var/lib/sddm /var/lib/sddm/state.conf", self.text)
+        self.assertIn("omarchy-try-session", self.text)
+        self.assertIn('sddm.login("$TRY_USER", "", root.sessionIndex)', self.text)
+
 
 class DedupAndBuildIsoTest(unittest.TestCase):
     def test_dedup_keeps_firmware_dbus_polkit_and_creates_missing_keep_dirs(self):

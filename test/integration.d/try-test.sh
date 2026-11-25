@@ -136,6 +136,8 @@ check "nothing on the machine's disk is mounted" try_ssh '! lsblk -nro MOUNTPOIN
 check "no lock is asked for before a suspend" try_ssh \
   '[ "$(systemctl --user show -p ConditionResult --value omarchy-sleep-lock.service)" = no ]'
 check "a logout logs straight back in" relogin_after 'uwsm stop'
+check "SDDM state and passwordless Try theme are installed" try_ssh \
+  'sudo grep -qx "User=omarchy" /var/lib/sddm/state.conf && grep -qx "Current=omarchy-try" /etc/sddm.conf.d/99-omarchy-login.conf && [ -x /usr/local/bin/omarchy-try-session ]'
 # Nothing waits for the keyring at boot; wait for it here.
 check "the session made its own pacman keyring" try_ssh \
   'timeout 120 bash -c "while systemctl is-active -q omarchy-try-keyring; do sleep 1; done" && [ "$(systemctl show -p Result --value omarchy-try-keyring)" = success ]'

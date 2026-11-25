@@ -266,25 +266,145 @@ EOF
 in_try systemctl enable omarchy-try-keyring.service >/dev/null 2>&1
 
 # SDDM straight into the session, as configure_login does for an encrypted
-# install.
+# install, with four guards so Try never strands the user on a password prompt
+# or a black screen:
+#   1. Wait up to 10 s for udev to settle before starting SDDM: the live
+#      initramfs carries no kms hook, so GPU drivers (amdgpu, i915, xe,
+#      nvidia_drm) load asynchronously from the USB medium and unbind simpledrm
+#      after switch_root; launching Hyprland mid-handoff can kill the session.
+#   2. Seed /var/lib/sddm/state.conf (as configure_login does) so SDDM's last
+#      user is never empty if it falls back to its greeter before autologin
+#      writes state.conf.
+#   3. Use a passwordless omarchy-try greeter theme that auto-logs in as
+#      $TRY_USER after 500 ms instead of showing a password box.
+#   4. Wrap the Wayland session so exit code 1 is remapped to 2: SDDM's
+#      sddm-helper exits with the session's raw status, and Display maps 1 to
+#      HELPER_AUTH_ERROR and stops restarting the display (breaking Relogin).
+install -Dm644 /dev/stdin "$merged/etc/systemd/system/sddm.service.d/10-omarchy-try-udev.conf" <<'EOF'
+[Service]
+ExecStartPre=-/usr/bin/udevadm settle --timeout=10
+EOF
+
+try_theme="$merged/usr/share/sddm/themes/omarchy-try"
+install -d "$try_theme"
+for theme_file in metadata.desktop theme.conf logo.png; do
+  if [[ -f "$merged/usr/share/sddm/themes/omarchy/$theme_file" ]]; then
+    cp -a "$merged/usr/share/sddm/themes/omarchy/$theme_file" "$try_theme/$theme_file"
+  fi
+done
+if [[ -f "$try_theme/metadata.desktop" ]]; then
+  sed -i -e 's/^Name=.*/Name=omarchy-try/' -e 's/^Theme-Id=.*/Theme-Id=omarchy-try/' "$try_theme/metadata.desktop"
+else
+  cat >"$try_theme/metadata.desktop" <<'EOF'
+[SddmGreeterTheme]
+Name=omarchy-try
+Type=sddm-theme
+MainScript=Main.qml
+ConfigFile=theme.conf
+Theme-Id=omarchy-try
+Theme-API=2.0
+QtVersion=6
+EOF
+fi
+[[ -f "$try_theme/theme.conf" ]] || : >"$try_theme/theme.conf"
+cat >"$try_theme/Main.qml" <<EOF
+import QtQuick 2.0
+import SddmComponents 2.0
+
+Rectangle {
+  id: root
+  width: 640
+  height: 480
+  color: "#1a1b26"
+  focus: true
+
+  property int sessionIndex: {
+    for (var i = 0; i < sessionModel.rowCount(); i++) {
+      var name = (sessionModel.data(sessionModel.index(i, 0), Qt.DisplayRole) || "").toString()
+      if (name.indexOf("Omarchy") !== -1)
+        return i
+    }
+    for (var j = 0; j < sessionModel.rowCount(); j++) {
+      var fallback = (sessionModel.data(sessionModel.index(j, 0), Qt.DisplayRole) || "").toString()
+      if (fallback.indexOf("uwsm") !== -1)
+        return j
+    }
+    return sessionModel.lastIndex
+  }
+
+  Image {
+    source: "logo.png"
+    width: Math.min(sourceSize.width, root.width * 0.8)
+    height: sourceSize.width > 0 ? Math.round(width * sourceSize.height / sourceSize.width) : 0
+    fillMode: Image.PreserveAspectFit
+    anchors.centerIn: parent
+  }
+
+  Timer {
+    interval: 500
+    running: true
+    repeat: false
+    onTriggered: sddm.login("$TRY_USER", "", root.sessionIndex)
+  }
+
+  Keys.onPressed: {
+    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space) {
+      sddm.login("$TRY_USER", "", root.sessionIndex)
+      event.accepted = true
+    }
+  }
+}
+EOF
+
 install -d "$merged/etc/sddm.conf.d"
 cat >"$merged/etc/sddm.conf.d/99-omarchy-login.conf" <<EOF
 [Theme]
-Current=omarchy
+Current=omarchy-try
 
 [Users]
 RememberLastUser=true
 RememberLastSession=true
 EOF
 # Relogin: SDDM logs in by itself only once per boot. When the session ends
-# (Hyprland exits or crashes, or a logout), it shows its greeter, which asks
-# for a password the session never had.
+# (Hyprland exits or crashes, or a logout), it shows its greeter instead of
+# starting the session again.
 cat >"$merged/etc/sddm.conf.d/autologin.conf" <<EOF
 [Autologin]
 User=$TRY_USER
 Session=omarchy.desktop
 Relogin=true
 EOF
+
+install -d "$merged/var/lib/sddm"
+cat >"$merged/var/lib/sddm/state.conf" <<EOF
+[Last]
+Session=omarchy.desktop
+User=$TRY_USER
+EOF
+chmod 0644 "$merged/var/lib/sddm/state.conf"
+in_try chown sddm:sddm /var/lib/sddm /var/lib/sddm/state.conf
+
+session_desktop="$merged/usr/local/share/wayland-sessions/omarchy.desktop"
+if [[ -f $session_desktop ]]; then
+  session_exec=$(sed -n 's/^Exec=//p' "$session_desktop" | head -1)
+  if [[ -n $session_exec ]]; then
+    install -Dm755 /dev/stdin "$merged/usr/local/bin/omarchy-try-session" <<EOF
+#!/bin/bash
+start=\$(date +%s)
+trap '[[ -n \${child:-} ]] && kill -TERM "\$child" 2>/dev/null; wait "\$child" 2>/dev/null; exit 0' TERM INT
+$session_exec &
+child=\$!
+wait "\$child"
+rc=\$?
+if (( rc != 0 && \$(date +%s) - start < 5 )); then
+  sleep 1
+fi
+(( rc == 1 )) && exit 2
+exit "\$rc"
+EOF
+    sed -i 's|^Exec=.*|Exec=/usr/local/bin/omarchy-try-session|' "$session_desktop"
+  fi
+fi
 
 # Nothing in Try touches a disk or the host OS's boot/hibernate state.
 #   - Snapper and limine-snapper-sync work on the installed btrfs and its ESP;

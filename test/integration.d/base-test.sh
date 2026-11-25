@@ -395,7 +395,7 @@ ocr_screen() {
 }
 
 ocr_screen_once() {
-  local shot="$RUN_DIR/.screen.ppm" prepped="$RUN_DIR/.screen.png"
+  local shot="$RUN_DIR/.screen.ppm" prepped="$RUN_DIR/.screen.png" text
 
   screendump "$shot"
   [[ -s $shot ]] || return 0
@@ -413,7 +413,18 @@ ocr_screen_once() {
     gray=(-grayscale Brightness) psm=4
   fi
   magick "$shot" "${gray[@]}" -negate -resize 150% -threshold 50% "$prepped" 2>/dev/null || return 0
-  tesseract "$prepped" - --psm "$psm" 2>/dev/null || true
+  text=$(tesseract "$prepped" - --psm "$psm" 2>/dev/null || true)
+  # A second cut for DIM text: the failure screen draws its evidence in a gray
+  # whose negated luminance clears the 50% cut along with the background, so
+  # tesseract sees neither. At 75% the background stays white and the dim rows
+  # turn black. Both reads are returned, so the 50% cut that is tuned for the
+  # finished install and the wizard keeps working; only the failure screens
+  # opt in, because the extra tesseract run is per poll.
+  if [[ -n ${OCR_DIM:-} ]] &&
+    magick "$shot" "${gray[@]}" -negate -resize 150% -threshold 75% "$prepped" 2>/dev/null; then
+    text+=$'\n'"$(tesseract "$prepped" - --psm "$psm" 2>/dev/null || true)"
+  fi
+  printf '%s' "$text"
 }
 
 wait_for_screen() {

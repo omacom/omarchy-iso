@@ -166,11 +166,12 @@ install_from_slow_medium() {
 # ten idle minutes needs the unblank in ocr_screen to land, a repaint can be
 # caught half-done, and OCR of a single frame is not perfectly repeatable.
 # The pattern is an extended regex so a word broken by a hyphen can be
-# matched loosely.
+# matched loosely. OCR_DIM adds the 75% read: the failure screen draws its
+# summary and evidence with DIM, which the normal 50% cut erases.
 screen_shows() {
   local pattern="$1" deadline=$((SECONDS + 20))
 
-  until ocr_screen | grep -qiE "$pattern"; do
+  until OCR_DIM=1 ocr_screen | grep -qiE "$pattern"; do
     ((SECONDS >= deadline)) && return 1
     sleep 2
   done

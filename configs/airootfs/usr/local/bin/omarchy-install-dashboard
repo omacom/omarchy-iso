@@ -105,6 +105,12 @@ dashboard_log() {
   printf '[dashboard] %s\n' "$*" >>"$LOG_FILE" 2>/dev/null || true
 }
 
+# For the failure tail's own end: no prefix, so a line as long as the tail's
+# width still fits. The prefixed dashboard_log copy stays the support record.
+dashboard_log_raw() {
+  printf '%s\n' "$*" >>"$LOG_FILE" 2>/dev/null || true
+}
+
 stop_child() {
   if [[ -n ${child_pid:-} ]]; then
     if kill -0 "$child_pid" 2>/dev/null; then
@@ -841,7 +847,7 @@ render_media_diagnosis() {
 }
 
 render_failure() {
-  local status="$1" state_summary="${2:-}" media_diagnosis="${3:-}" line
+  local status="$1" state_summary="${2:-}" media_diagnosis="${3:-}" line dim
   printf '%s%s' "$SHOW_CURSOR" "$CLEAR"
   blank_line
   render_logo
@@ -858,8 +864,14 @@ render_failure() {
     # own line breaks, and an over-long line folds instead of losing its end.
     while IFS= read -r line; do
       [[ -n $line ]] || continue
+      # The failed phase's headline carries the action ("re-flash it", "too
+      # slow", "reads are unstable"): draw it at full brightness, not DIM, so
+      # it reads at a glance and survives OCR's dim-text cut. The forensics
+      # after it stay dim.
+      dim="$DIM"
+      [[ $line == "failed phase: "* ]] && dim=""
       while IFS= read -r part; do
-        center "${DIM}${part}${RESET}" "$CONTENT_WIDTH"
+        center "${dim}${part}${RESET}" "$CONTENT_WIDTH"
       done < <(fold -s -w "$CONTENT_WIDTH" <<<"$line")
     done <<<"$state_summary"
   fi
@@ -1008,6 +1020,7 @@ fi
 if (( status != 0 )); then
   failure_status="$status"
   failure_summary=""
+  failure_advice=""
   if [[ -f $STATE_FILE ]]; then
     failure_summary="$(jq -r '
       (.current_phase // empty | "last installer phase: \(.)"),
@@ -1019,6 +1032,15 @@ if (( status != 0 )); then
         [[ -n $line ]] && dashboard_log "$line"
       done <<<"$failure_summary"
     fi
+    failure_advice="$(jq -r '
+      ((.phases // []) | map(select(.status == "failed")) | last // empty
+        | .error // empty | split("\n")[0])
+    ' "$STATE_FILE" 2>/dev/null || true)"
+    # Deliberate second copy: the summary above is the user's headline, and
+    # this raw line is the tail's support copy. The prefix would push the
+    # longest advice (unstable reads, 77 columns) past the tail's width, so
+    # log it unprefixed; the prefixed summary line remains the full record.
+    [[ -n $failure_advice ]] && dashboard_log_raw "$failure_advice"
   fi
   failure_media_diagnosis="$(diagnose_media || true)"
   render_failure "$failure_status" "$failure_summary" "$failure_media_diagnosis" >"$TTY_PATH" 2>/dev/null || true

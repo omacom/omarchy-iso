@@ -345,6 +345,28 @@ next_row=$(visible_screen | sed -n "$((package_row + 1))p")
   fail "the screen breaks after the package" "next row was: $next_row"
 pass "the dashboard renders the diagnosis once, with the break, and logs it"
 
+# The failed phase's headline is the action, not just context: draw it at full
+# brightness. DIM (#414868 on #1A1B26) clears the OCR harness's 50% cut along
+# with the background, and the log-tail copy can be truncated before the
+# advice ("re-flash it") when the phase name is long.
+grep -qF $'\033[2mfailed phase:' "$screen" &&
+  fail "the failed phase's headline is still dim" "$(visible_screen | grep 'failed phase' | tail -n 3)"
+grep -qF "failed phase:" "$screen" ||
+  fail "the failed phase's headline is gone from the screen" "$(visible_screen | tail -n 25)"
+pass "the failed phase's headline is drawn at full brightness"
+
+# The tail is read from the end of the log: the advice has to be its own line
+# after the summary, or the prefixed, long headline is truncated away. It is
+# logged unprefixed so the longest advice (unstable reads, 77 columns) fits
+# the tail's width.
+summary_line=$(grep -nF "[dashboard] failed phase: Installing Arch + Omarchy:" "$dashboard_log" | tail -n 1 | cut -d: -f1 || true)
+advice_line=$(grep -nFx "Pacstrap failed. See /var/log/archinstall.log" "$dashboard_log" | tail -n 1 | cut -d: -f1 || true)
+[[ -n $summary_line && -n $advice_line ]] ||
+  fail "the failure summary and its advice are both logged" "$(tail -n 15 "$dashboard_log")"
+(( advice_line > summary_line )) ||
+  fail "the advice is logged after the summary for the tail" "summary $summary_line, advice $advice_line"
+pass "the advice is logged after the summary so the tail ends on it"
+
 # The diagnosis costs rows the log tail's budget knew nothing about, so a
 # screen carrying one scrolled its own logo off the top of the console. The
 # tail gives those rows back now, which is visible as a shorter tail: count the

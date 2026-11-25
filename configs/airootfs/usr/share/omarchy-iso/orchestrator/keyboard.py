@@ -2,18 +2,46 @@
 
 archinstall's set_keyboard_language boots the installed system in a
 systemd-nspawn container just to run localectl. systemd-firstboot --root
-produces the part of that output Omarchy actually consumes — KEYMAP for the
-console plus the XKB* settings in vconsole.conf that omarchy's
-detect-keyboard-layout.sh copies into Hyprland's kb_layout — without booting
-anything. The Xorg 00-keyboard.conf that localectl also writes is not
+produces the part of that output Omarchy actually consumes without booting
+anything. That part is KEYMAP for the console and the XKB* settings in
+vconsole.conf, which Omarchy's default/hypr/keyboard.lua reads for Hyprland's
+kb_layout. The Xorg 00-keyboard.conf that localectl also writes is not
 generated: nothing on an Omarchy system reads it.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from .command import capture
+
+
+def setup_form_path() -> Path | None:
+    """Find the shared setup form, as the configurator does."""
+    omarchy_path = os.environ.get("OMARCHY_PATH") or "/nonexistent"
+    candidates = (
+        os.environ.get("SETUP_FORM", ""),
+        "/usr/share/omarchy-iso/setup-form.sh",
+        str(Path(omarchy_path) / "install/provisioning/setup-form.sh"),
+    )
+    return next((Path(path) for path in candidates if path and Path(path).is_file()), None)
+
+
+def fallback_xkb_settings(keymap: str) -> str:
+    """Return the XKB lines that the Omarchy setup form gives a keymap.
+
+    systemd-firstboot writes XKBLAYOUT only for keymaps in kbd-model-map.
+    The setup form holds the settings for the keymaps that it lacks, and
+    first-boot setup adds the same lines. Returns an empty string for a keymap
+    that the form has no settings for, and when the form predates
+    omarchy_keymap_xkb_settings.
+    """
+    form = setup_form_path()
+    if form is None:
+        return ""
+    result = capture(["bash", "-c", 'source "$1" && omarchy_keymap_xkb_settings "$2"', "bash", str(form), keymap])
+    return result.stdout if result.returncode == 0 else ""
 
 
 def configure_keyboard(target: Path, language: str, input_method: str | None = None, xkb_layout: str = "") -> bool:
@@ -60,6 +88,13 @@ def configure_keyboard(target: Path, language: str, input_method: str | None = N
 
     if font:
         vconsole_path.write_text(vconsole_path.read_text() + font + "\n")
+
+    # Hyprland reads XKBLAYOUT from this file. Without it the desktop types US
+    # while the console and the disk password prompt use the chosen layout.
+    if not any(line.startswith("XKBLAYOUT=") and len(line) > len("XKBLAYOUT=") for line in vconsole_path.read_text().splitlines()):
+        extra = fallback_xkb_settings(language)
+        if extra:
+            vconsole_path.write_text(vconsole_path.read_text() + extra)
 
     preference = target / "etc/omarchy/input-method"
     preference.parent.mkdir(parents=True, exist_ok=True)

@@ -3312,8 +3312,19 @@ def _prebuilt_uki_keymap_stale(target: Path, record: str = "prebuilt-uki.keymap"
     """
     recorded = target / "var" / "lib" / "omarchy-iso" / record
     baked = (recorded.read_text().strip() if recorded.is_file() else "") or "us"
-    chosen = _keymap_of(target / "etc" / "vconsole.conf")
-    return chosen if chosen and chosen != baked else ""
+    vconsole = target / "etc" / "vconsole.conf"
+    chosen = _keymap_of(vconsole)
+    if not chosen:
+        return ""
+    # omarchy_hooks.conf and omarchy_vconsole.conf keep vconsole.conf out of the
+    # initramfs when the leading XKB layout is non-Latin, so the LUKS prompt
+    # stays on US. A pre-built UKI baked with us already matches that; embedding
+    # vconsole.conf into it would put Plymouth into Cyrillic/Greek/Hebrew until
+    # the first kernel update strips it.
+    from .uki_vconsole import vconsole_is_nonlatin
+    if vconsole_is_nonlatin(vconsole):
+        return "" if baked == "us" else chosen
+    return chosen if chosen != baked else ""
 
 
 def _is_apple_t2_hardware() -> bool:
@@ -3681,12 +3692,20 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     stale_keymap = _prebuilt_uki_keymap_stale(ctx.target)
     vconsole = ctx.target / "etc" / "vconsole.conf"
     keymap_fits = False
-    if prebuilt_uki.is_file() and stale_keymap:
-        from .uki_vconsole import vconsole_fits
-        keymap_fits = vconsole_fits(prebuilt_uki, vconsole)
-        if not keymap_fits:
-            info(f"› keyboard layout {stale_keymap} differs from the pre-built UKI's, which has no room for it; "
-                 "building the UKI on this machine so the LUKS prompt uses it")
+    if prebuilt_uki.is_file():
+        from .uki_vconsole import vconsole_fits, vconsole_is_nonlatin
+        if stale_keymap:
+            keymap_fits = vconsole_fits(prebuilt_uki, vconsole)
+            if not keymap_fits:
+                reason = (
+                    "uses a non-Latin layout that cannot be embedded in place"
+                    if vconsole_is_nonlatin(vconsole)
+                    else "differs from the pre-built UKI's, which has no room for it"
+                )
+                info(f"› keyboard layout {stale_keymap} {reason}; "
+                     "building the UKI on this machine so the LUKS prompt uses it")
+        elif vconsole_is_nonlatin(vconsole):
+            info("› non-Latin keyboard layout; keeping pre-built UKI on US for the LUKS prompt")
     # And for an encrypted deferred install: its first boot unlocks with the
     # provisioning key, which only an initramfs built here carries.
     provisioning_key = _initramfs_carries_provisioning_key(ctx.target)

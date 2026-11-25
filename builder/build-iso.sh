@@ -1495,19 +1495,26 @@ fi
 
 # The x86_64 ISO has to fit an 8 GB stick. Fail over 7.7 GB and warn over
 # 7.5 GB, so an image or mirror that grows shows up in the build that grew it.
-# ARM images are not limited to an 8 GB stick.
-iso_fail_bytes=7700000000
-iso_warn_bytes=7500000000
+# ARM images are not limited to an 8 GB stick. A fast build (--fast, which
+# pull-request CI makes) compresses the root image at zstd 1, not the shipped
+# 15: the same ISO measured 7.76 GB fast and 7.03 GB as shipped. So a fast
+# build only reports its size, and the nightly and release builds, at the
+# shipped compression, hold the limit.
+check_iso_size() {
+  local iso=$1 iso_bytes iso_fail_bytes=7700000000 iso_warn_bytes=7500000000
+  iso_bytes=$(stat -c %s "$iso") || return 1
+  echo "ISO ${iso##*/}: $iso_bytes bytes"
+  [[ $OMARCHY_ARCH == "x86_64" ]] || return 0
+  if [[ ${OMARCHY_FAST_COMPRESSION:-} == 1 ]]; then
+    echo "${iso##*/} is a fast build, larger than the shipped one; builds at the shipped compression hold the $iso_fail_bytes limit for an 8 GB stick"
+  elif (( iso_bytes > iso_fail_bytes )); then
+    echo "ERROR: ${iso##*/} is $iso_bytes bytes, over the $iso_fail_bytes limit for an 8 GB stick" >&2
+    return 1
+  elif (( iso_bytes > iso_warn_bytes )); then
+    echo "WARNING: ${iso##*/} is $iso_bytes bytes, over $iso_warn_bytes; $iso_fail_bytes fails the build" >&2
+  fi
+}
 for iso in "${built_isos[@]}"; do
   [[ -f $iso ]] || continue
-  iso_bytes=$(stat -c %s "$iso")
-  echo "ISO $(basename "$iso"): $iso_bytes bytes"
-  if [[ $OMARCHY_ARCH == "x86_64" ]]; then
-    if (( iso_bytes > iso_fail_bytes )); then
-      echo "ERROR: $(basename "$iso") is $iso_bytes bytes, over the $iso_fail_bytes limit for an 8 GB stick" >&2
-      exit 1
-    elif (( iso_bytes > iso_warn_bytes )); then
-      echo "WARNING: $(basename "$iso") is $iso_bytes bytes, over $iso_warn_bytes; $iso_fail_bytes fails the build" >&2
-    fi
-  fi
+  check_iso_size "$iso" || exit 1
 done

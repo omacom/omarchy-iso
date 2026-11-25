@@ -100,6 +100,12 @@ while [[ $# -gt 0 ]]; do
     OMARCHY_INSTALL_DEBUG=1
     shift
     ;;
+  --fast)
+    # DEV/TEST ONLY: trade ISO size for build speed with minimal zstd
+    # compression in the root image, squashfs, and N1x layer.
+    OMARCHY_FAST_COMPRESSION=1
+    shift
+    ;;
   --edge)
     OMARCHY_ISO_REF=edge
     OMARCHY_MIRROR=edge
@@ -141,8 +147,8 @@ while [[ $# -gt 0 ]]; do
     ;;
   *)
     echo "Unknown option: $1"
-    echo "Usage: $0 [--oem [--oem-config FILE] [--oem-script FILE]...] [--preset CODE] [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout> [--rehearsal]]"
-    echo "       $0 --arch aarch64 [--edge|--rc] [--package-dir DIR] [--dev-ssh <pubkey>] [--local-source <omarchy-checkout> <pkgs-checkout>] [...]"
+    echo "Usage: $0 [--oem [--oem-config FILE] [--oem-script FILE]...] [--preset CODE] [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--fast] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout> [--rehearsal]]"
+    echo "       $0 --arch aarch64 [--fast] [--edge|--rc] [--package-dir DIR] [--dev-ssh <pubkey>] [--local-source <omarchy-checkout> <pkgs-checkout>] [...]"
     exit 1
     ;;
   esac
@@ -294,6 +300,7 @@ DOCKER_ARGS=(
   -e "OMARCHY_OEM_INSTALL=${OMARCHY_OEM_INSTALL:-}"
   -e "OMARCHY_PRESET=$PRESET"
   -e "OMARCHY_INSTALL_DEBUG=${OMARCHY_INSTALL_DEBUG:-}"
+  -e "OMARCHY_FAST_COMPRESSION=${OMARCHY_FAST_COMPRESSION:-}"
   -e "OMARCHY_ARCH=$OMARCHY_ARCH"
   -e "OMARCHY_KERNEL=$OMARCHY_KERNEL"
   -e "OMARCHY_N1X_DEV_SSH=${N1X_DEV_SSH_KEY:+1}"
@@ -370,11 +377,7 @@ iso_name=omarchy
 [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]] && iso_name=omarchy-oem
 [[ -n $PRESET ]] && iso_name=$iso_name-$PRESET
 latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/"$iso_name"-*.iso | head -n1)
-if [[ $OMARCHY_ARCH == aarch64 ]]; then
-  iso_ref="${latest_iso%.*}${N1X_DEV_SSH_KEY:+-devssh}-$OMARCHY_ISO_REF.iso"
-else
-  iso_ref="${latest_iso%.*}-$OMARCHY_ISO_REF.iso"
-fi
+iso_ref="${latest_iso%.*}${N1X_DEV_SSH_KEY:+-devssh}${OMARCHY_FAST_COMPRESSION:+-fast}-$OMARCHY_ISO_REF.iso"
 mv -f "$latest_iso" "$iso_ref"
 
 if [[ -z "${NO_BOOT_OFFER:-}" ]]; then

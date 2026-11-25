@@ -1181,9 +1181,9 @@ run_root_image_build() {
 # Denominator for the install dashboard's progress bar: what the image holds
 # plus the kernel's closure on top of it, resolved against the image's own
 # local db with the pruned mirror, which is the question the installer's delta
-# pacstrap asks. Plus one for the microcode package every real machine gets.
-# phases.py records expected and actual in the timing JSON, so drift shows up
-# in acceptance runs.
+# pacstrap asks. Both x86 microcodes already live in the image, and aarch64
+# has none. phases.py records expected and actual in the timing JSON, so drift
+# shows up in acceptance runs.
 resolve_expected_packages() {
   # $1, if given: a platform's own default set, whose packages the installer
   # adds to the image's plain set on that platform.
@@ -1219,7 +1219,7 @@ resolve_expected_packages() {
     return 1
   fi
 
-  echo $(( image_count + $(printf '%s\n' "$resolved" | sort -u | grep -c .) + 1 ))
+  echo $(( image_count + $(printf '%s\n' "$resolved" | sort -u | grep -c .) ))
 }
 
 finalize_root_image_metadata() {

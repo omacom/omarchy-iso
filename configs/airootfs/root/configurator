@@ -115,7 +115,9 @@ draw_screen() {
   local screen
   screen=$(gum style --foreground 2 --padding "1 0 0 $PADDING_LEFT" "$(<"$LOGO_PATH")")
   [[ -z ${1:-} ]] || screen+=$'\n\n'$(gum style --padding "0 0 0 $PADDING_LEFT" "$1")
-  printf '\033[H%s\033[K\n\033[J' "${screen//$'\n'/$'\033[K\n'}"
+  # Purely visual screen redraws go straight to /dev/tty so the install log
+  # (which stdout is teed into) does not collect repeated ASCII banners.
+  printf '\033[H%s\033[K\n\033[J' "${screen//$'\n'/$'\033[K\n'}" >/dev/tty
 }
 
 # Vertically-centered welcome shown once before the keyboard step — the same
@@ -147,20 +149,24 @@ greeter() {
   tagline_row=$((top + logo_h + 2))
   hint_row=$((top + logo_h + 4))
 
-  printf '\033[?25l\033[H\033[2J'
+  # Purely visual welcome screen: draw straight to /dev/tty so the install log
+  # (which stdout is teed into) does not collect repeated ASCII banners.
+  {
+    printf '\033[?25l\033[H\033[2J'
 
-  printf '\033[%d;1H' "$logo_row"
-  gum style --foreground 2 --padding "0 0 0 $PADDING_LEFT" "$(<"$LOGO_PATH")"
+    printf '\033[%d;1H' "$logo_row"
+    gum style --foreground 2 --padding "0 0 0 $PADDING_LEFT" "$(<"$LOGO_PATH")"
 
-  tagline=$(t greeter.tagline)
-  tpad=$(((cols - $(display_width "$tagline")) / 2)); (( tpad < 0 )) && tpad=0
-  printf '\033[%d;%dH%s' "$tagline_row" "$((tpad + 1))" "$tagline"
-  (( tagline_row < rows )) && printf '\n'
+    tagline=$(t greeter.tagline)
+    tpad=$(((cols - $(display_width "$tagline")) / 2)); (( tpad < 0 )) && tpad=0
+    printf '\033[%d;%dH%s' "$tagline_row" "$((tpad + 1))" "$tagline"
+    (( tagline_row < rows )) && printf '\n'
 
-  hint=$(t greeter.hint)
-  hpad=$(((cols - $(display_width "$hint")) / 2)); (( hpad < 0 )) && hpad=0
-  printf '\033[%d;%dH\033[2m%s\033[0m' "$hint_row" "$((hpad + 1))" "$hint"
-  (( hint_row < rows )) && printf '\n'
+    hint=$(t greeter.hint)
+    hpad=$(((cols - $(display_width "$hint")) / 2)); (( hpad < 0 )) && hpad=0
+    printf '\033[%d;%dH\033[2m%s\033[0m' "$hint_row" "$((hpad + 1))" "$hint"
+    (( hint_row < rows )) && printf '\n'
+  } >/dev/tty
 
   # ColorShift the logo: a green base (indexed color 2) with a cyan accent (6)
   # drifting through, settling on green. Indexed ANSI colors, not hex — the
@@ -180,7 +186,7 @@ greeter() {
   if [[ ${OMARCHY_KMSCON:-} == 1 ]]; then
     colors=() green=9ece6a bright_green=9ece6a cyan=7dcfff
   fi
-  printf '\033[%d;1H\0337' "$((logo_row + logo_h))"
+  printf '\033[%d;1H\0337' "$((logo_row + logo_h))" >/dev/tty
   # Run ttfx directly (not inside a `while` subshell) so $anim is ttfx's own
   # PID: killing a wrapping subshell would orphan ttfx, which then keeps
   # painting the logo over the keyboard step. --cycles is high enough that it
@@ -221,7 +227,7 @@ greeter() {
   done
   # Reset the screen so the leftover animation frame doesn't linger under the
   # keyboard step that follows.
-  printf '\033[0m\033[H\033[2J\033[?25h'
+  printf '\033[0m\033[H\033[2J\033[?25h' >/dev/tty
 }
 
 abort() {

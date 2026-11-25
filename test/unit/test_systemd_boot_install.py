@@ -9,6 +9,7 @@ synthesised target and ESP, with pacman, arch-chroot and efibootmgr recorded
 instead of run.
 """
 
+import subprocess
 import sys
 import tempfile
 import types
@@ -25,6 +26,9 @@ from orchestrator.uki_cmdline import read_cmdline  # noqa: E402
 from test_uki_cmdline import uki  # noqa: E402
 
 MACHINE_ID = "0123456789abcdef0123456789abcdef"
+# The tests record subprocess.run instead of running it; the builder's own
+# shell is run for real.
+RUN = subprocess.run
 CMDLINE = "cryptdevice=PARTUUID=p:root root=/dev/mapper/root zswap.enabled=0 rootflags=subvol=@ rw rootfstype=btrfs"
 
 
@@ -288,6 +292,142 @@ class SystemdBootInstallTest(unittest.TestCase):
         )
         self.assertFalse((self.root / "etc/limine-entry-tool.d/99-omarchy-provisioning-unlock.conf").exists())
         self.assertIn("etc/cmdline.d/99-omarchy-provisioning-unlock.conf", phases.FACTORY_SCRUB_PATHS)
+
+
+class PrebuiltInitramfsTest(unittest.TestCase):
+    """The image's pre-built initramfs stands in for mkinitcpio on the image's
+    kernel when the machine changed nothing it is built from, under the
+    conditions Limine's pre-built UKI has, and only where the target's
+    omarchy-boot-switch takes it."""
+
+    ARGUMENT = "linux-omarchy=/var/lib/omarchy-iso/prebuilt-initramfs.img"
+    record = SystemdBootInstallTest.record
+    write = SystemdBootInstallTest.write
+
+    def setUp(self):
+        SystemdBootInstallTest.setUp(self)
+        self.write("etc/snapper/configs/root", "")
+        self.write("etc/kernel/cmdline", CMDLINE + "\n")
+        self.write("usr/lib/modules/7.2.1-omarchy/pkgbase", "linux-omarchy\n")
+        self.write("usr/bin/omarchy-boot-switch", "install [--prefer PKGBASE] [--initramfs PKGBASE=FILE]\n")
+        self.write("etc/mkinitcpio.conf", "HOOKS=()\n")
+        self.write("etc/mkinitcpio.conf.d/thunderbolt_module.conf", "  MODULES+=(thunderbolt)\n")
+        self.write("etc/mkinitcpio.conf.d/00-omarchy-hooks.conf", "HOOKS=(base udev encrypt omarchy-restore)\n")
+        self.write("etc/modprobe.d/omarchy-usb-autosuspend.conf", "options usbcore autosuspend=5\n")
+        self.write("usr/lib/modprobe.d/systemd.conf", "options bonding max_bonds=0\n")
+        self.write("etc/vconsole.conf", "KEYMAP=us\nFONT=default8x16\n")
+        records = "var/lib/omarchy-iso"
+        self.write(f"{records}/prebuilt-initramfs.img", b"\0" * 4096)
+        self.write(f"{records}/prebuilt-initramfs.kernel", "linux-omarchy\n")
+        self.write(f"{records}/prebuilt-initramfs.kver", "7.2.1-omarchy\n")
+        self.write(f"{records}/prebuilt-initramfs.modules", "MODULES+=(thunderbolt)\n")
+        self.write(f"{records}/prebuilt-initramfs.keymap", "\n")
+        self.write(f"{records}/prebuilt-initramfs.inputs", "".join(
+            f"{digest}  {path}\n" for path, digest in sorted(phases._initramfs_inputs(self.root).items())))
+        self.messages = []
+        for patch in (
+            mock.patch.object(phases, "_drop_initramfs_modules_the_kernel_lacks"),
+            mock.patch.object(phases, "info", self.messages.append),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def install_command(self):
+        self.commands.clear()
+        with mock.patch.object(phases, "_time_step", wraps=phases._time_step) as step:
+            phases.finalize_boot(self.ctx)
+        self.label = step.call_args.args[0]
+        return next(command for command in self.commands if "omarchy-boot-switch" in command)
+
+    def assert_fast(self):
+        command = self.install_command()
+        self.assertEqual(command[-2:], ["--initramfs", self.ARGUMENT])
+        self.assertIn("pre-built initramfs", self.label)
+        self.assertTrue(any("using the pre-built initramfs for linux-omarchy" in m for m in self.messages), self.messages)
+
+    def assert_built_here(self, message):
+        command = self.install_command()
+        self.assertNotIn("--initramfs", command)
+        self.assertIn("built on this machine", self.label)
+        self.assertTrue(any(message in m for m in self.messages), self.messages)
+
+    def test_a_machine_that_changed_nothing_takes_the_pre_built_initramfs(self):
+        self.assert_fast()
+
+    def test_what_every_machine_writes_keeps_the_fast_path(self):
+        self.write(f"etc/mkinitcpio.conf.d/{phases.INITRAMFS_MODULES_CONF}", "_omarchy_absent=(thunderbolt)\n")
+        self.write("etc/modprobe.d/omarchy-toprow.conf", "options hid_apple fnmode=1\n")
+        self.write("etc/vconsole.conf", "KEYMAP=us\nXKBLAYOUT=us\nFONT=default8x16\n")
+        self.assert_fast()
+
+    def test_another_kernel_preferred_still_takes_it_for_the_image_s_kernel(self):
+        self.write("usr/lib/modules/6.12-lts/pkgbase", "linux-lts\n")
+        self.ctx.user_configuration["kernels"] = ["linux-lts"]
+        command = self.install_command()
+        self.assertEqual(command[-4:], ["--prefer", "linux-lts", "--initramfs", self.ARGUMENT])
+
+    def test_an_image_without_one_builds_here(self):
+        (self.root / "var/lib/omarchy-iso/prebuilt-initramfs.img").unlink()
+        command = self.install_command()
+        self.assertNotIn("--initramfs", command)
+        self.assertIn("built on this machine", self.label)
+
+    def test_an_omarchy_boot_switch_without_the_option_builds_here(self):
+        self.write("usr/bin/omarchy-boot-switch", "install [--prefer PKGBASE]\n")
+        self.assert_built_here("takes no pre-built initramfs")
+
+    def test_another_build_of_the_image_s_kernel_builds_here(self):
+        (self.root / "usr/lib/modules/7.2.1-omarchy").rename(self.root / "usr/lib/modules/7.2.2-omarchy")
+        self.assert_built_here("isn't installed")
+
+    def test_modules_a_hardware_script_added_build_here(self):
+        self.write("etc/mkinitcpio.conf.d/nvidia.conf", "MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)\n")
+        self.assert_built_here("hardware setup added initramfs modules (MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm))")
+
+    def test_another_keyboard_layout_builds_here(self):
+        self.write("etc/vconsole.conf", "KEYMAP=fr\nXKBLAYOUT=fr\n")
+        self.assert_built_here("keyboard layout fr differs")
+
+    def test_the_provisioning_key_builds_here(self):
+        self.write(phases.PROVISION_KEY_DROPIN, "FILES+=(/etc/omarchy/provisioning.key)\n")
+        self.assert_built_here("provisioning key")
+
+    def test_a_board_with_a_platform_of_its_own_builds_here(self):
+        with mock.patch.object(phases.platform, "machine", return_value="aarch64"), \
+                mock.patch.object(phases, "hw_platform", return_value="aarch64-n1x"):
+            self.assert_built_here("platform's rules")
+
+    def test_a_generic_aarch64_machine_takes_it(self):
+        with mock.patch.object(phases.platform, "machine", return_value="aarch64"), \
+                mock.patch.object(phases, "hw_platform", return_value="aarch64"):
+            self.assert_fast()
+
+    def test_any_other_change_to_what_it_is_built_from_builds_here(self):
+        for name, change in (
+            ("etc/modprobe.d/hid_apple.conf", lambda path: self.write(path, "options hid_apple fnmode=2\n")),
+            ("etc/initcpio/install/omarchy-quiet-efivars", lambda path: self.write(path, "build() { :; }\n")),
+            ("etc/mkinitcpio.conf.d/omarchy_resume.conf", lambda path: self.write(path, "HOOKS+=(resume)\n")),
+            ("etc/mkinitcpio.conf.d/00-omarchy-hooks.conf", lambda path: self.write(path, "HOOKS=(base systemd)\n")),
+            ("etc/modprobe.d/omarchy-usb-autosuspend.conf", lambda path: (self.root / path).unlink()),
+            ("etc/modprobe.d/blacklist.conf", lambda path: (self.root / path).symlink_to("/dev/null")),
+        ):
+            with self.subTest(name=name):
+                self.setUp()
+                change(name)
+                self.assert_built_here(f"differs from the image's ({name})")
+
+    def test_the_builder_records_the_inputs_as_the_installer_reads_them(self):
+        self.write("etc/initcpio/hooks/omarchy-quiet-efivars", "run_hook() { :; }\n")
+        (self.root / "etc/modprobe.d/nouveau.conf").symlink_to("/dev/null")
+        builder = ROOT / "builder/build-root-image.sh"
+        script = (
+            "set -euo pipefail\n"
+            f"eval \"$(sed -n '/^initramfs_inputs() {{$/,/^}}$/p' {builder})\"\n"
+            'initramfs_inputs "$1"\n'
+        )
+        recorded = RUN(["bash", "-c", script, "_", str(self.root)], capture_output=True, text=True, check=True).stdout
+        self.assertIn("etc/initcpio/hooks/omarchy-quiet-efivars", recorded)
+        self.assertEqual(phases._recorded_initramfs_inputs(self.write("recorded", recorded)), phases._initramfs_inputs(self.root))
 
 
 if __name__ == "__main__":

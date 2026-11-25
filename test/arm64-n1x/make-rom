@@ -1,0 +1,50 @@
+#!/bin/bash
+#
+# Builds the PCI option ROM that makes a VM's firmware an NVIDIA N1x's, as far
+# as Omarchy can tell: the UEFI driver in n1x-firmware.c, with the SSDT in
+# nvda0200.asl inside it. QEMU's virt machine takes no ACPI tables from the
+# command line (-acpitable is for x86), so the table goes in the way a card's
+# firmware adds to a platform's: the firmware runs the ROM's driver while it
+# enumerates PCI.
+#
+#   test/arm64-n1x/make-rom <rom>
+#
+# Needs an arm64 host with acpica (iasl), gnu-efi, gcc, binutils and python.
+set -euo pipefail
+[[ $# -eq 1 ]] || { sed -n '2,12p' "$0" >&2; exit 2; }
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+rom=$(realpath -m "$1")
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+out=$(iasl -vs -p "$work/nvda0200" -tc "$here/nvda0200.asl" 2>&1) || { echo "$out" >&2; exit 1; }
+# gnu-efi's own way to build an aarch64 boot-service driver (its apps/Makefile).
+gcc -I"$work" -I/usr/include/efi -I/usr/include/efi/aarch64 -I/usr/include/efi/protocol -DCONFIG_aarch64 \
+  -std=c11 -O2 -Wall -Wextra -Werror -fPIE -fno-strict-aliasing -ffreestanding -fno-stack-protector \
+  -c "$here/n1x-firmware.c" -o "$work/n1x-firmware.o"
+ld -nostdlib --no-undefined --fatal-warnings -z norelro -z nocombreloc -z common-page-size=4096 -z max-page-size=4096 \
+  -pie -Bsymbolic --no-dynamic-linker -T /usr/lib/elf_aarch64_efi.lds /usr/lib/crt0-efi-aarch64.o "$work/n1x-firmware.o" \
+  -o "$work/n1x-firmware.so" -L/usr/lib -lefi -lgnuefi "$(gcc -print-libgcc-file-name)"
+objcopy -j .text -j .sdata -j .data -j .dynamic -j .rodata -j .rel -j .rela -j '.rel.*' -j '.rela.*' \
+  -j .areloc -j .reloc -O efi-bsdrv-aarch64 "$work/n1x-firmware.so" "$work/n1x-firmware.efi"
+
+# An EFI expansion ROM header, the PCI data structure, then the driver: UEFI
+# 2.10 sections 14.4.21 to 14.4.23 (tables 14.16 and 14.18), PCI Local Bus 2.2
+# section 6.3.1.2. The firmware reads the image type, machine and subsystem
+# from the header and checks the driver's own against them. The data
+# structure names the RNG the ROM rides on: QEMU's virtio-rng-pci, class
+# 0x00ff00.
+python3 - "$work/n1x-firmware.efi" "$rom" <<'PY'
+import struct, sys
+efi = open(sys.argv[1], "rb").read()
+pe = struct.unpack_from("<I", efi, 0x3C)[0]
+machine = struct.unpack_from("<H", efi, pe + 4)[0]
+subsystem = struct.unpack_from("<H", efi, pe + 24 + 68)[0]
+assert (machine, subsystem) == (0xAA64, 11), "not an aarch64 boot-service driver"
+offset = 0x40
+blocks = -(-(offset + len(efi)) // 512)
+header = struct.pack("<HHIHHH8xHH", 0xAA55, blocks, 0x0EF1, subsystem, machine, 0, offset, 0x1C)
+pcir = struct.pack("<4sHHHHB3sHHBBH", b"PCIR", 0x1AF4, 0x1005, 0, 0x18, 0, b"\x00\xff\x00", blocks, 0, 3, 0x80, 0)
+rom = (header.ljust(0x1C, b"\0") + pcir).ljust(offset, b"\0") + efi
+open(sys.argv[2], "wb").write(rom.ljust(blocks * 512, b"\0"))
+PY

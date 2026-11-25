@@ -1,0 +1,21 @@
+--- mkarchiso
++++ mkarchiso
+@@ -430,11 +430,17 @@
+ 
+ # Copy kernel and initramfs to ISO 9660
+ _make_boot_on_iso9660() {
+-    local ucode_image
++    local ucode_image uki
+     _msg_info "Preparing kernel and initramfs for the ISO 9660 file system..."
+     install -d -m 0755 -- "${isofs_dir}/${install_dir}/boot/${arch}"
+     install -m 0644 -- "${pacstrap_dir}/boot/initramfs-"*".img" "${isofs_dir}/${install_dir}/boot/${arch}/"
+     install -m 0644 -- "${pacstrap_dir}/boot/vmlinuz-"* "${isofs_dir}/${install_dir}/boot/${arch}/"
++    # A unified kernel image built into /boot travels with the kernel it wraps,
++    # where a GRUB entry can chainload it.
++    for uki in "${pacstrap_dir}/boot/"*.efi; do
++        [[ -e "${uki}" ]] || continue
++        install -m 0644 -- "${uki}" "${isofs_dir}/${install_dir}/boot/${arch}/"
++    done
+ 
+     if (( need_external_ucodes )); then
+         for ucode_image in "${ucodes[@]}"; do

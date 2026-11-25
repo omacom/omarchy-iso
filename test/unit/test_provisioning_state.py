@@ -48,7 +48,7 @@ class ContextDeferProvisioningTest(unittest.TestCase):
     def from_env(self, **extra_env):
         env = {**self.env, **extra_env}
         with mock.patch.dict(os.environ, env, clear=False):
-            for key in ("OMARCHY_INSTALL_DEFER_PROVISIONING_FILE",):
+            for key in ("OMARCHY_INSTALL_DEFER_PROVISIONING_FILE", "OMARCHY_INSTALL_OEM_DIR"):
                 if key not in env:
                     os.environ.pop(key, None)
             return InstallContext.from_env()
@@ -85,6 +85,19 @@ class ContextDeferProvisioningTest(unittest.TestCase):
         ctx = self.from_env(OMARCHY_INSTALL_DEFER_PROVISIONING_FILE=str(self.dir / "missing-defer_provisioning"))
         self.assertFalse(ctx.defer_provisioning)
         self.assertEqual(ctx.username, "jeff")
+
+    def test_an_oem_bundle_is_taken_only_by_an_install_for_another_owner(self):
+        # Its branding and agreement are for the owner first boot sets up; an
+        # install that creates its user has nobody to show them to.
+        oem = self.dir / "oem"
+        oem.mkdir()
+        self.write_config(self.base_config(defer_provisioning=True))
+        self.assertEqual(self.from_env(OMARCHY_INSTALL_OEM_DIR=str(oem)).oem_dir, oem)
+        self.assertIsNone(self.from_env(OMARCHY_INSTALL_OEM_DIR=str(self.dir / "no-bundle")).oem_dir)
+
+        self.write_config(self.base_config())
+        self.write_creds({"users": [{"username": "jeff"}]})
+        self.assertIsNone(self.from_env(OMARCHY_INSTALL_OEM_DIR=str(oem)).oem_dir)
 
     def test_missing_credentials_without_defer_provisioning_raises(self):
         self.write_config(self.base_config())
@@ -204,6 +217,8 @@ def make_ctx(target, **overrides):
         user_credentials={"users": []},
         state_dir=target / "state",
         authorized_keys_path=None,
+        oem_dir=None,
+        state={},
     )
     defaults.update(overrides)
     return types.SimpleNamespace(**defaults)
@@ -220,13 +235,15 @@ class StageProvisioningStateTest(unittest.TestCase):
         info_patch.start()
         self.addCleanup(info_patch.stop)
 
-        # A fake bundled Node tarball on the "live ISO".
+        # The live ISO's /opt/packages: empty unless a test bundles Node.
         self.packages = Path(self.tmp.name) / "opt-packages"
         self.packages.mkdir()
-        (self.packages / "node-v24.0.0-linux-x64.tar.gz").write_bytes(b"node")
         node_patch = mock.patch.object(phases_impl, "NODE_PACKAGES_DIR", self.packages)
         node_patch.start()
         self.addCleanup(node_patch.stop)
+
+    def bundle_node(self):
+        (self.packages / "node-v24.0.0-linux-x64.tar.gz").write_bytes(b"node")
 
     def install_runtime_provisioning_support(self):
         service = self.target / "usr/share/omarchy/install/provisioning/omarchy-provision-owner.service"
@@ -239,33 +256,36 @@ class StageProvisioningStateTest(unittest.TestCase):
     def provisioning_dir(self):
         return self.target / "var/lib/omarchy/provisioning"
 
-    def test_normal_install_stages_only_the_node_tarball(self):
+    def test_normal_install_arms_nothing(self):
         ctx = make_ctx(self.target, defer_provisioning=False)
         phases_impl.stage_provisioning_state(ctx)
 
-        self.assertTrue((self.provisioning_dir() / "packages/node-v24.0.0-linux-x64.tar.gz").exists())
+        self.assertEqual(list(self.provisioning_dir().iterdir()), [])
         self.assertFalse((self.provisioning_dir() / "pending").exists())
         self.assertFalse((self.target / "etc/systemd/system/omarchy-provision-owner.service").exists())
+
+    def test_bundled_node_stays_on_the_target_for_a_later_factory_reset(self):
+        # A runtime that unpacks the bundled Node reads it from provisioning
+        # state once /opt/packages is gone, and factory reset carries it on.
+        self.bundle_node()
+        ctx = make_ctx(self.target, defer_provisioning=False)
+        phases_impl.stage_provisioning_state(ctx)
+
+        self.assertEqual((self.provisioning_dir() / "packages/node-v24.0.0-linux-x64.tar.gz").read_bytes(), b"node")
+        self.assertFalse((self.provisioning_dir() / "pending").exists())
+
+    def test_bundled_node_stays_on_the_target_for_first_boot_setup(self):
+        self.bundle_node()
+        self.install_runtime_provisioning_support()
+        ctx = make_ctx(self.target)
+        phases_impl.stage_provisioning_state(ctx)
+
+        self.assertEqual((self.provisioning_dir() / "packages/node-v24.0.0-linux-x64.tar.gz").read_bytes(), b"node")
+        self.assertTrue((self.provisioning_dir() / "pending").exists())
 
     def test_deferred_provisioning_against_runtime_without_support_fails_clearly(self):
         ctx = make_ctx(self.target)
         with self.assertRaisesRegex(RuntimeError, "does not ship"):
-            phases_impl.stage_provisioning_state(ctx)
-
-    def test_deferred_provisioning_without_node_tarball_fails(self):
-        for tarball in self.packages.glob("*.tar.gz"):
-            tarball.unlink()
-        self.install_runtime_provisioning_support()
-        ctx = make_ctx(self.target)
-        with self.assertRaisesRegex(RuntimeError, "Node tarball"):
-            phases_impl.stage_provisioning_state(ctx)
-
-    def test_missing_node_tarball_fails_normal_installs_too(self):
-        # The stash is what makes a later factory reset work offline.
-        for tarball in self.packages.glob("*.tar.gz"):
-            tarball.unlink()
-        ctx = make_ctx(self.target, defer_provisioning=False)
-        with self.assertRaisesRegex(RuntimeError, "Node tarball"):
             phases_impl.stage_provisioning_state(ctx)
 
     def test_deferred_provisioning_arms_first_boot_setup(self):
@@ -313,6 +333,117 @@ class StageProvisioningStateTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "passphrase"):
             phases_impl.stage_provisioning_state(ctx)
+
+    def oem_bundle(self, *names):
+        oem = Path(self.tmp.name) / "oem"
+        (oem / "scripts").mkdir(parents=True)
+        for name in names:
+            (oem / name).write_text(name)
+        return oem
+
+    def test_an_oem_bundle_is_laid_down_where_first_boot_setup_reads_it(self):
+        self.install_runtime_provisioning_support()
+        (self.target / "usr/share/omarchy/install/provisioning/oem.sh").write_text("")
+        oem = self.oem_bundle("oem.json", "logo.txt", "eula.txt", "scripts/01-setup.sh")
+        phases_impl.stage_provisioning_state(make_ctx(self.target, oem_dir=oem))
+
+        laid_down = self.target / "etc/omarchy/oem"
+        self.assertEqual(sorted(path.name for path in laid_down.iterdir()), ["eula.txt", "logo.txt", "oem.json"])
+        # Read by setup before the owner exists, and by the owner afterwards.
+        self.assertEqual({path.stat().st_mode & 0o777 for path in laid_down.iterdir()}, {0o644})
+        phases_impl._validate_provisioning_state(make_ctx(self.target, oem_dir=oem))
+
+        # Nor may an OEM script that rewrote it ship terms the build never checked.
+        (laid_down / "eula.txt").write_text("")
+        with self.assertRaisesRegex(RuntimeError, "eula.txt is no longer the eula.txt this ISO was built with"):
+            phases_impl._validate_provisioning_state(make_ctx(self.target, oem_dir=oem))
+
+        # An OEM script that lost the agreement must not ship a machine that never asks for it.
+        (laid_down / "eula.txt").unlink()
+        with self.assertRaisesRegex(RuntimeError, "eula.txt is missing"):
+            phases_impl._validate_provisioning_state(make_ctx(self.target, oem_dir=oem))
+
+    def test_laying_down_a_bundle_leaves_nothing_of_another(self):
+        self.install_runtime_provisioning_support()
+        (self.target / "usr/share/omarchy/install/provisioning/oem.sh").write_text("")
+        earlier = self.target / "etc/omarchy/oem"
+        earlier.mkdir(parents=True)
+        (earlier / "eula.txt").write_text("another OEM's terms")
+        phases_impl.stage_provisioning_state(make_ctx(self.target, oem_dir=self.oem_bundle("oem.json")))
+        self.assertEqual([path.name for path in earlier.iterdir()], ["oem.json"])
+
+    def test_an_oem_bundle_against_a_runtime_that_cannot_show_it_fails_clearly(self):
+        # Without this the machine would ship with no agreement asked, silently.
+        self.install_runtime_provisioning_support()
+        oem = self.oem_bundle("oem.json", "eula.txt")
+        with self.assertRaisesRegex(RuntimeError, "does not ship install/provisioning/oem.sh"):
+            phases_impl.stage_provisioning_state(make_ctx(self.target, oem_dir=oem))
+
+    def test_oem_scripts_alone_need_nothing_from_the_runtime(self):
+        self.install_runtime_provisioning_support()
+        oem = self.oem_bundle("scripts/01-setup.sh")
+        phases_impl.stage_provisioning_state(make_ctx(self.target, oem_dir=oem))
+        self.assertFalse((self.target / "etc/omarchy/oem").exists())
+
+
+class OemSetupTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.target = Path(self.tmp.name) / "mnt"
+        self.target.mkdir()
+        self.oem = Path(self.tmp.name) / "oem"
+        (self.oem / "scripts").mkdir(parents=True)
+        self.ran = []
+        self.failing = None
+
+        for name, replacement in (("info", mock.DEFAULT), ("_join_target_keyring_init", mock.DEFAULT),
+                                  ("_run_target_setup_command", self.fake_target_command)):
+            patch = mock.patch.object(phases_impl, name, side_effect=None if replacement is mock.DEFAULT else replacement)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def fake_target_command(self, ctx, cmd):
+        # The script has to be inside the target when the chroot runs it.
+        interpreter, script = cmd
+        self.assertEqual(interpreter, "/bin/bash")
+        self.assertTrue((self.target / script.lstrip("/")).is_file(), script)
+        self.ran.append(Path(script).name)
+        if Path(script).name == self.failing:
+            raise phases_impl.subprocess.CalledProcessError(7, cmd)
+
+    def scripts(self, *names):
+        for name in names:
+            (self.oem / "scripts" / name).write_text("#!/bin/bash\n")
+        return make_ctx(self.target, oem_dir=self.oem)
+
+    def test_scripts_run_in_the_new_system_in_order_and_leave_nothing_behind(self):
+        ctx = self.scripts("02-second.sh", "01-first.sh", "10-last")
+        phases_impl.run_oem_setup(ctx)
+        self.assertEqual(self.ran, ["01-first.sh", "02-second.sh", "10-last"])
+        self.assertFalse((self.target / "var/lib/omarchy/oem-setup").exists())
+
+    def test_a_failing_script_stops_the_install_and_names_itself(self):
+        # At the factory, where the OEM sees it, not on a machine that ships half set up.
+        ctx = self.scripts("01-first.sh", "02-broken.sh", "03-never.sh")
+        self.failing = "02-broken.sh"
+        with self.assertRaisesRegex(RuntimeError, "02-broken.sh exited with status 7"):
+            phases_impl.run_oem_setup(ctx)
+        self.assertEqual(self.ran, ["01-first.sh", "02-broken.sh"])
+        self.assertFalse((self.target / "var/lib/omarchy/oem-setup").exists())
+
+    def test_the_phase_is_listed_only_where_there_are_scripts_and_before_the_checks(self):
+        from orchestrator import main
+
+        def phases(ctx):
+            return [name for name, _ in main.build_phases(ctx)]
+
+        self.assertNotIn("Running OEM setup", phases(make_ctx(self.target)))
+        self.assertNotIn("Running OEM setup", phases(make_ctx(self.target, oem_dir=self.oem)))
+        listed = phases(self.scripts("01-first.sh"))
+        self.assertLess(listed.index("Finalizing boot and user"), listed.index("Running OEM setup"))
+        self.assertLess(listed.index("Running OEM setup"), listed.index("Validating boot setup"))
+        self.assertLess(listed.index("Running OEM setup"), listed.index("Creating factory snapshot"))
 
 
 class ConfigureLoginDeferProvisioningTest(unittest.TestCase):

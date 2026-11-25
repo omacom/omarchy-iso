@@ -1,0 +1,41 @@
+#!/bin/bash
+# Runs an aarch64 test in the Arch Linux ARM container the ISO is built in,
+# with Arch's current QEMU: the same QEMU the x86_64 tests use, not whatever
+# the runner's own distribution ships (Ubuntu 24.04 has 8.2).
+#
+#   test/arm64-container <command> [args...]      e.g. ./test/arm64-install iso/x.iso evidence
+#
+# Needs Docker and a usable /dev/kvm. The working directory is mounted at /w.
+set -euo pipefail
+
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+# One place names the image: the build.
+image=$(sed -n 's/^ *CONTAINER_IMAGE=\(ghcr\.io\/menci\/archlinuxarm@sha256:[0-9a-f]*\)$/\1/p' "$here/bin/omarchy-iso-make")
+: "${image:?bin/omarchy-iso-make names no Arch Linux ARM image}"
+
+docker=(docker)
+docker version >/dev/null 2>&1 || docker=(sudo docker)
+"${docker[@]}" run --rm --device /dev/kvm -v "$PWD:/w" -w /w -e KERNEL -e PLATFORM -e MEM -e MACHINE "$image" bash -euo pipefail -c '
+  # A runner kernel without Landlock: pacman cannot fence its downloads there.
+  # Arch'"'"'s own x86_64 image ships this line; Arch Linux ARM'"'"'s does not.
+  sed -i "/^\[options\]/a DisableSandboxFilesystem" /etc/pacman.conf
+  echo "Server = https://arm-mirror.omarchy.org/\$arch/\$repo" >/etc/pacman.d/mirrorlist
+  pacman-key --init >/dev/null 2>&1 && pacman-key --populate archlinuxarm >/dev/null 2>&1
+  for attempt in 1 2 3; do
+    pacman -Syu --noconfirm --needed qemu-system-aarch64 qemu-hw-display-virtio-gpu qemu-hw-display-virtio-gpu-pci \
+      qemu-img mtools dosfstools jq openssl openssh \
+      python tesseract tesseract-data-eng libarchive curl ${PLATFORM:+acpica gnu-efi gcc binutils} >/dev/null && break
+    [ "$attempt" -lt 3 ] || { echo "arm64-container: could not install the test tools" >&2; exit 1; }
+    sleep 15
+  done
+  # UEFI firmware for the guest. Arch Linux ARM does not package it; Arch does,
+  # as an architecture-independent package, checked here against its database.
+  arch_mirror=https://mirror.omarchy.org/extra/os/x86_64
+  read -r file sum < <(curl -fsSL --retry 3 "$arch_mirror/extra.db" | bsdtar -xOf - "edk2-aarch64-*/desc" |
+    awk "/%FILENAME%/{getline; f=\$0} /%SHA256SUM%/{getline; s=\$0} END{print f, s}")
+  curl -fsSL --retry 3 -o "/tmp/$file" "$arch_mirror/$file"
+  echo "$sum  /tmp/$file" | sha256sum -c - >/dev/null
+  pacman -U --noconfirm "/tmp/$file" >/dev/null
+  qemu-system-aarch64 --version | head -1
+  exec "$@"
+' arm64-container "$@"

@@ -1,0 +1,29 @@
+[Unit]
+Description=Calibrate LUKS Argon2id while the installer wizard is open
+# Keep CPU/RAM calibration out of the boot-time hashing work, and out of the
+# boot: its result sets the cost of the disk password, and a benchmark that
+# shares the CPUs measures low. Run beside the hashes while the live system
+# booted, it chose 9-11 iterations in the VM tests where this ordering and a
+# quiet benchmark both chose 14. No installer unit depends on this optional
+# result; an install that reaches its format while the benchmark runs waits
+# for it (luks_calibration.stop_calibration), and one it does not finish for
+# uses cryptsetup's ordinary calibration instead.
+After=omarchy-mirror-verify.service omarchy-root-image-verify.service
+ConditionPathExists=/run/archiso/bootmnt
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/omarchy-luks-calibrate calibrate
+RuntimeDirectory=omarchy-luks-calibration
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
+TimeoutStopSec=2
+# CPU/RAM only: the benchmark must not access the host's disks.
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

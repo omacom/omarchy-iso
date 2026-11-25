@@ -2239,6 +2239,14 @@ DEFERRED_BOOT_HOOKS = (
 # The kernel-removal hooks stay live: they only prune Limine entries, which is
 # exactly what ptl-kernel.sh's "pacman -Rdd linux" needs.
 TARGET_DEFERRED_BOOT_HOOKS = ("90-mkinitcpio-install.hook",)
+# On systemd-boot the removal hook is omarchy-boot-systemd's, which updates the
+# boot store: that store does not exist until finalize_systemd_boot, so the
+# hook could only fail (n1x.sh drops the stock kernels), and is deferred too.
+SYSTEMD_BOOT_DEFERRED_HOOKS = TARGET_DEFERRED_BOOT_HOOKS + ("60-mkinitcpio-remove.hook",)
+
+
+def _target_deferred_boot_hooks(ctx: InstallContext) -> tuple[str, ...]:
+    return SYSTEMD_BOOT_DEFERRED_HOOKS if _boot_loader(ctx) == "systemd-boot" else TARGET_DEFERRED_BOOT_HOOKS
 
 
 def _drop_archinstall_zram_conf(ctx: InstallContext) -> None:
@@ -2987,11 +2995,12 @@ def run_system_finalizer(ctx: InstallContext) -> None:
     if _runtime_populates_target_keyring(ctx.target):
         stop_target_keyring_init(ctx)
 
-    _mask_mkinitcpio_pacman_hooks(ctx, ctx.target, TARGET_DEFERRED_BOOT_HOOKS)
+    deferred = _target_deferred_boot_hooks(ctx)
+    _mask_mkinitcpio_pacman_hooks(ctx, ctx.target, deferred)
     try:
         _run_target_setup_command(ctx, cmd)
     finally:
-        _unmask_mkinitcpio_pacman_hooks(ctx, ctx.target, TARGET_DEFERRED_BOOT_HOOKS)
+        _unmask_mkinitcpio_pacman_hooks(ctx, ctx.target, deferred)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3106,16 +3115,36 @@ def run_oem_setup(ctx: InstallContext) -> None:
     shutil.rmtree(staged, ignore_errors=True)
     staged.mkdir(parents=True)
     staged.chmod(0o700)
+    systemd_boot = _boot_loader(ctx) == "systemd-boot"
     try:
         for script in oem_scripts(ctx):
             info(f"› OEM setup: {script.name}")
             shutil.copyfile(script, staged / script.name)
+            command = ["/bin/bash", f"/{OEM_SCRIPTS_TARGET_DIR}/{script.name}"]
             try:
-                _run_target_setup_command(ctx, ["/bin/bash", f"/{OEM_SCRIPTS_TARGET_DIR}/{script.name}"])
+                if systemd_boot:
+                    _run_target_setup_command(ctx, _with_boot_store(ctx, command), private_mounts=True)
+                else:
+                    _run_target_setup_command(ctx, command)
             except subprocess.CalledProcessError as exc:
                 raise RuntimeError(f"OEM setup script {script.name} exited with status {exc.returncode}") from exc
     finally:
         shutil.rmtree(staged, ignore_errors=True)
+
+
+def _with_boot_store(ctx: InstallContext, command: list[str]) -> list[str]:
+    """A target command that runs with the boot store mounted, as it is on the
+    booted system. omarchy-boot-systemd's pacman hooks rebuild the boot images
+    into it when a package changes what they are built from (a kernel,
+    firmware, a DKMS module), and fail without it while pacman still exits 0:
+    the machine would ship boot images without the change. finalize_systemd_boot's
+    omarchy-boot-switch install unmounted the store again. Run with
+    private_mounts, so the mount goes with the command's mount namespace."""
+    return [
+        "env", f"OMARCHY_BOOT_ESP={_systemd_boot_esp_mount(ctx)}", "/bin/bash", "-c",
+        'mount /var/lib/omarchy/boot || { echo "the boot store at /var/lib/omarchy/boot would not mount" >&2; exit 1; }; exec "$@"',
+        "with-boot-store", *command,
+    ]
 
 
 # build-iso.sh bundles the build for the CPU the ISO runs on, and only for a
@@ -3364,6 +3393,12 @@ def _skip_unused_t2_preset(ctx: InstallContext) -> None:
                 info(f"› not Apple T2 hardware: skipped {preset}")
 
 
+def _systemd_boot_esp_mount(ctx: InstallContext) -> str:
+    """The ESP where this install mounted it: /efi for an unencrypted install
+    into free space. The runtime finds it there itself from then on."""
+    return _boot_intent(ctx)["esp_mount"]
+
+
 def finalize_systemd_boot(ctx: InstallContext) -> None:
     """Build and publish the boot images once target setup has written every
     boot drop-in (hibernation, hardware quirks, the provisioning unlock).
@@ -3383,10 +3418,7 @@ def finalize_systemd_boot(ctx: InstallContext) -> None:
 
     _drop_initramfs_modules_the_kernel_lacks(ctx)
 
-    # The ESP where this install mounted it: /efi for an unencrypted install
-    # into free space. The runtime finds it there itself from then on.
-    esp_mount = _boot_intent(ctx)["esp_mount"]
-    command = ["arch-chroot", str(ctx.target), "env", f"OMARCHY_BOOT_ESP={esp_mount}",
+    command = ["arch-chroot", str(ctx.target), "env", f"OMARCHY_BOOT_ESP={_systemd_boot_esp_mount(ctx)}",
                "omarchy-boot-switch", "install", "--no-efi-register"]
     if not ctx.state.get("boot_fallback", True):
         command.append("--no-fallback")
@@ -4521,7 +4553,7 @@ def _assert_boot_hooks_restored(ctx: InstallContext) -> None:
     cleanup_target_hook_masks(ctx)
 
     hooks_dir = ctx.target / "etc/pacman.d/hooks"
-    for name in TARGET_DEFERRED_BOOT_HOOKS:
+    for name in _target_deferred_boot_hooks(ctx):
         path = hooks_dir / name
         if _is_devnull_symlink(path):
             raise RuntimeError(f"{path} is still masked to /dev/null")
@@ -4765,8 +4797,9 @@ def cleanup_target_hook_masks(ctx: InstallContext) -> None:
     """Restore the target's deferred boot hooks. Idempotent, and a no-op when
     nothing was masked, so main()'s finally can call it on any exit path: an
     interrupt must never leave the installed system with its UKI rebuild hook
-    pointing at /dev/null."""
-    _unmask_mkinitcpio_pacman_hooks(ctx, ctx.target, TARGET_DEFERRED_BOOT_HOOKS)
+    pointing at /dev/null. Every hook either boot loader defers: a hook
+    that was not masked is left as it is."""
+    _unmask_mkinitcpio_pacman_hooks(ctx, ctx.target, SYSTEMD_BOOT_DEFERRED_HOOKS)
 
 
 def cleanup_protected_state(ctx: InstallContext) -> None:

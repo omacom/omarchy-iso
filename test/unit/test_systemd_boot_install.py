@@ -183,6 +183,43 @@ class SystemdBootInstallTest(unittest.TestCase):
         self.assertTrue(any("OMARCHY_BOOT_ESP=/efi" in command for command in self.commands))
         self.assertFalse(any("limine" in " ".join(command) for command in self.commands))
 
+    def test_system_setup_defers_both_of_omarchy_boot_systemd_s_hooks(self):
+        hooks = self.root / "etc/pacman.d/hooks"
+        for name in ("60-mkinitcpio-remove.hook", "90-mkinitcpio-install.hook"):
+            self.write(f"etc/pacman.d/hooks/{name}", "[Trigger]\n")
+        masked = []
+
+        def setup(_ctx, _cmd, **_kwargs):
+            masked.extend(sorted(p.name for p in hooks.iterdir() if phases._is_devnull_symlink(p)))
+
+        self.ctx.username = "omarchy"
+        with mock.patch.object(phases, "_runtime_populates_target_keyring", return_value=False), \
+                mock.patch.object(phases, "_run_target_setup_command", setup):
+            phases.run_system_finalizer(self.ctx)
+        self.assertEqual(masked, ["60-mkinitcpio-remove.hook", "90-mkinitcpio-install.hook"])
+        self.assertEqual((hooks / "60-mkinitcpio-remove.hook").read_text(), "[Trigger]\n")
+        phases._assert_boot_hooks_restored(self.ctx)
+
+    def test_oem_scripts_run_with_the_boot_store_mounted(self):
+        scripts = self.root.parent / "oem/scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "10-firmware.sh").write_text("pacman -S --noconfirm some-firmware\n")
+        self.ctx.oem_dir = scripts.parent
+        runs = []
+        with mock.patch.object(phases, "_join_target_keyring_init"), \
+                mock.patch.object(phases, "_run_target_setup_command",
+                                  lambda _ctx, cmd, **kwargs: runs.append((cmd, kwargs))):
+            phases.run_oem_setup(self.ctx)
+            self.ctx.state["boot_loader"] = "limine"
+            phases.run_oem_setup(self.ctx)
+        script = ["/bin/bash", f"/{phases.OEM_SCRIPTS_TARGET_DIR}/10-firmware.sh"]
+        (systemd_boot, kwargs), (limine, limine_kwargs) = runs
+        self.assertEqual(systemd_boot[:4], ["env", "OMARCHY_BOOT_ESP=/boot", "/bin/bash", "-c"])
+        self.assertIn("mount /var/lib/omarchy/boot", systemd_boot[4])
+        self.assertEqual(systemd_boot[-2:], script)
+        self.assertEqual(kwargs, {"private_mounts": True})
+        self.assertEqual((limine, limine_kwargs), (script, {}))
+
     def test_a_complete_install_validates(self):
         self.installed()
         self.validate()

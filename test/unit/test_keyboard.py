@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,6 +24,10 @@ SETUP_FORM_CANDIDATES = (
     ROOT.parent / "omarchy/install/provisioning/setup-form.sh",
     Path("/usr/share/omarchy/install/provisioning/setup-form.sh"),
 )
+
+
+def setup_form() -> Path | None:
+    return next((candidate for candidate in SETUP_FORM_CANDIDATES if candidate.is_file()), None)
 
 
 def supported_keymaps():
@@ -69,8 +74,8 @@ class KeyboardConfigurationTest(unittest.TestCase):
         return target
 
     def test_writes_keymap_and_xkb_settings_and_preserves_font(self):
-        # XKBLAYOUT is load-bearing: omarchy's detect-keyboard-layout.sh copies
-        # it into Hyprland's kb_layout on the installed system.
+        # XKBLAYOUT is load-bearing: Omarchy's default/hypr/keyboard.lua reads
+        # it for Hyprland's kb_layout on the installed system.
         with tempfile.TemporaryDirectory() as directory:
             target = self.target(directory)
             self.assertTrue(KEYBOARD.configure_keyboard(target, "us"))
@@ -89,6 +94,26 @@ class KeyboardConfigurationTest(unittest.TestCase):
                 lines = (target / "etc/vconsole.conf").read_text().splitlines()
                 self.assertIn(f"KEYMAP={keymap}", lines)
                 self.assertEqual(lines.count("FONT=default8x16"), 1)
+
+    def test_every_configurator_keymap_ends_with_an_xkb_layout(self):
+        # systemd-firstboot writes XKBLAYOUT only for keymaps in kbd-model-map.
+        # Without it Hyprland falls back to a US layout on the installed system.
+        # The XKB lines come from the same form as the layout list.
+        form = setup_form()
+        if SUPPORTED_KEYMAPS is None or form is None:
+            self.skipTest("no Omarchy runtime checkout to read the layout list from")
+        if "omarchy_keymap_xkb_settings" not in form.read_text():
+            self.skipTest("the Omarchy runtime predates omarchy_keymap_xkb_settings")
+        for keymap in SUPPORTED_KEYMAPS:
+            with self.subTest(keymap=keymap), tempfile.TemporaryDirectory() as directory, \
+                    mock.patch.dict(os.environ, {"SETUP_FORM": str(form)}):
+                target = self.target(directory)
+                self.assertTrue(KEYBOARD.configure_keyboard(target, keymap))
+                lines = (target / "etc/vconsole.conf").read_text().splitlines()
+                self.assertTrue(
+                    any(line.startswith("XKBLAYOUT=") and len(line) > 10 for line in lines),
+                    f"no XKBLAYOUT for {keymap}: {lines}",
+                )
 
     def test_unknown_and_empty_keymaps_match_archinstall_behavior(self):
         for keymap, expected in (("definitely-not-a-keymap", False), ("", True)):

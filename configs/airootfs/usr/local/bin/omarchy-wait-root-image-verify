@@ -200,19 +200,22 @@ cold_expected() {
 }
 
 # One cold pass over every listed file. Prints sha256sum's vector; 124 when
-# the size-based timeout expires; 2 when a listed file cannot be hashed.
+# the size-based timeout expires; 1 when a listed file cannot be read (the
+# caller retries that, as a read error can be transient too).
 cold_vector() { # $1: seconds
   local out rc=0
   out=$(cd "$COLD_DIR" && timeout "$1" sha256sum -- "${COLD_FILES[@]}" 2>/dev/null) || rc=$?
   if (( rc == 124 )); then echo TIMEOUT; return 124; fi
-  (( rc != 0 )) && return 2
+  (( rc != 0 )) && return 1
   printf '%s\n' "$out"
 }
 
-# Per-file differences for the failure message. $1: corrupt|unstable,
-# $2: expected vector, $3: first cold vector, $4: second cold vector.
+# Per-file differences for the failure message. $1: corrupt|unstable|single,
+# $2: expected vector, $3: first cold vector, $4: second cold vector. The
+# report is capped at COLD_REPORT_MAX (8) lines so a broadly damaged mirror
+# cannot turn one failure into hundreds of lines; the rest is summarized.
 cold_report() {
-  local mode=$1 expected=$2 first=$3 second=$4
+  local mode=$1 expected=$2 first=$3 second=$4 max=${COLD_REPORT_MAX:-8}
   awk -v mode="$mode" '
     BEGIN { FS=OFS="  " }
     FNR == 1 { src++ }
@@ -221,16 +224,25 @@ cold_report() {
     src == 3 { second[$2] = $1; next }
     END {
       for (f in want) {
-        if (mode == "corrupt") {
+        if (mode == "corrupt" || mode == "single") {
           if (want[f] == first[f]) continue
-          printf "%s: expected %s, computed %s (both cold reads)\n", f, want[f], first[f]
+          printf "%s: expected %s, computed %s%s\n", f, want[f], first[f], (mode == "corrupt" ? " (both cold reads)" : "")
         } else {
           if (want[f] == first[f] && want[f] == second[f]) continue
           printf "%s: expected %s, first cold read %s, second cold read %s (differ)\n", f, want[f], first[f], second[f]
         }
       }
     }
-  ' <(printf '%s\n' "$expected") <(printf '%s\n' "$first") <(printf '%s\n' "$second") | sort
+  ' <(printf '%s\n' "$expected") <(printf '%s\n' "$first") <(printf '%s\n' "$second") |
+    sort |
+    awk -v max="$max" '
+      { lines[NR] = $0 }
+      END {
+        n = NR
+        for (i = 1; i <= (n < max ? n : max); i++) print lines[i]
+        if (n > max) printf "... and %d more\n", n - max
+      }
+    '
 }
 
 # Bound for one cold read, mirroring the unit's size-based TimeoutStartSec
@@ -244,15 +256,15 @@ cold_timeout_for() { # $1: bytes -> seconds on stdout
 # in the checksum file is hashed, not just the root image: the file lists the
 # platform layers too, and the boot unit checks all of them. Prints the verdict
 # word on the first line -- pass (the first cold read matched every expected
-# hash), unstable (the two cold reads produced different hash vectors: two
-# different wrong answers, or one wrong and one right), corrupt (both cold
-# reads produced the same vector, and it is not the expected one), slow (a cold
-# read did not finish within its size-based timeout; after a first read that
-# did not, there is no second: it could only say the same), unknown (could not
-# re-read: no timeout helper, no permission, sums file malformed, a listed
-# file missing or unreadable) -- followed by the forensics lines for the
-# failure message (none unless corrupt, unstable or slow). Failure-path only:
-# the happy path returns from the active branch without ever coming here.
+# hash), unstable (the reads disagree: two different wrong vectors, one wrong
+# and one right, or one vector and one read error), corrupt (both cold reads
+# produced the same wrong vector), slow (a cold read did not finish within its
+# size-based timeout; after a first read that did not, there is no second: it
+# could only say the same), unknown (both cold reads failed, or no timeout
+# helper, no permission, sums file malformed, a listed file missing) --
+# followed by the forensics lines for the failure message (none unless corrupt,
+# unstable or slow). Failure-path only: the happy path returns from the active
+# branch without ever coming here.
 cold_recheck() {
   local sums dir expected first second lines verdict secs rc1 rc2
   if [[ $UNIT == "$MIRROR_UNIT" ]]; then
@@ -273,19 +285,39 @@ cold_recheck() {
   if (( rc1 == 124 )); then
     verdict=slow
     lines="a cold re-read timed out after ${secs}s"
-  elif (( rc1 != 0 )); then
+  elif (( rc1 > 1 )); then
     echo unknown; return 0
   else
-    # A read that came back wrong is only evidence: a second that then
-    # matches means the reads disagree (unstable), not that the medium is
-    # fine. A read that timed out already says what a second one would.
+    # rc1 is 0 (wrong vector) or 1 (read error). A read that came back wrong
+    # is only evidence, and a read error can be transient too: the second
+    # read decides whether the reads disagree.
     drop_page_cache || { echo unknown; return 0; }
     second=$(cold_vector "$secs"); rc2=$?
     if (( rc2 == 124 )); then
       verdict=slow
       lines="a cold re-read timed out after ${secs}s"
-    elif (( rc2 != 0 )); then
+    elif (( rc2 > 1 )); then
       echo unknown; return 0
+    elif (( rc1 == 1 || rc2 == 1 )); then
+      # One read could not produce a vector. Both read errors keep the unit's
+      # verdict; one bad read and one vector are reads that disagree.
+      if (( rc1 == 1 && rc2 == 1 )); then
+        echo unknown; return 0
+      elif (( rc1 == 1 )); then
+        [[ -n $second ]] || { echo unknown; return 0; }
+        verdict=unstable
+        lines="first cold read: read error"
+        if [[ $second == "$expected" ]]; then
+          lines+=$'\n'"second cold read: every checksum matched (the reads differ)"
+        else
+          lines+=$'\n'"second cold read differences:"$'\n'"$(cold_report single "$expected" "$second" "$second")"
+        fi
+      else
+        [[ -n $first ]] || { echo unknown; return 0; }
+        verdict=unstable
+        lines="second cold read: read error"$'\n'"first cold read differences:"$'\n'"$(cold_report single "$expected" "$first" "$first")"
+      fi
+      lines+=$'\n'"size $COLD_BYTES bytes"
     elif [[ -z $first || -z $second ]]; then
       echo unknown; return 0
     elif [[ $first == "$second" ]]; then

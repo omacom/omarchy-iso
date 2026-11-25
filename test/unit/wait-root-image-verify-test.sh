@@ -39,6 +39,10 @@ MIRROR_WRONG1_VECTOR=$(printf '%s  a.pkg.tar.zst\n%s  b.pkg.tar.zst\n%s  linux-t
   "$MIRROR_A_HASH" "$MIRROR_B_HASH" "$MIRROR_T2_WRONG1" "$MIRROR_DB_HASH")
 MIRROR_WRONG2_VECTOR=$(printf '%s  a.pkg.tar.zst\n%s  b.pkg.tar.zst\n%s  linux-t2.pkg.tar.zst\n%s  offline.db.tar.gz\n' \
   "$MIRROR_A_HASH" "$MIRROR_B_HASH" "$MIRROR_T2_WRONG2" "$MIRROR_DB_HASH")
+MIRROR_FILES=(a.pkg.tar.zst b.pkg.tar.zst linux-t2.pkg.tar.zst offline.db.tar.gz)
+# The real-sha256sum fixture: the linux-t2 content and the hash it produces.
+MIRROR_REAL_T2='mirror package linux-t2'
+REAL_T2_HASH=$(printf '%s\n' "$MIRROR_REAL_T2" | sha256sum | cut -d' ' -f1)
 
 fails=0
 check() { # desc, expected_rc, actual_rc, [needle in output], [output]
@@ -160,22 +164,35 @@ EOF
   printf '%s\n' "$loadstate" >"$box/load_seq"
   printf '%s\n' "${MIRROR_SEQ:-inactive}" >"$box/mirror_seq"
   # A valid mirror vector is the fixture for the pass and mismatch tests.
-  # MIRROR_SUMS_MALFORMED=1 writes the four-hex file the helper's parser must
-  # reject instead; that is the fail-closed test and never a clean mirror.
+  # MIRROR_REAL_SUMS=1 instead writes the real hashes of real file contents, so
+  # one case exercises the helper's real sha256sum output and vector parsing.
+  # MIRROR_REAL_CORRUPT=1 then changes linux-t2's expected hash. A malformed
+  # sums file is the fail-closed fixture and never a clean mirror.
   if [[ -n ${MIRROR_SEQ:-} ]]; then
-    if [[ -n ${MIRROR_SUMS_MALFORMED:-} ]]; then
+    mkdir -p "$box/mirror"
+    if [[ -n ${MIRROR_REAL_SUMS:-} ]]; then
+      printf '%s\n' "mirror package a" >"$box/mirror/a.pkg.tar.zst"
+      printf '%s\n' "mirror package b" >"$box/mirror/b.pkg.tar.zst"
+      printf '%s\n' "$MIRROR_REAL_T2" >"$box/mirror/linux-t2.pkg.tar.zst"
+      printf '%s\n' "mirror database" >"$box/mirror/offline.db.tar.gz"
+      (cd "$box/mirror" && sha256sum "${MIRROR_FILES[@]}") >"$box/sums"
+      if [[ -n ${MIRROR_REAL_CORRUPT:-} ]]; then
+        sed -i "s|^.*  linux-t2\.pkg\.tar\.zst$|$MIRROR_T2_WRONG1  linux-t2.pkg.tar.zst|" "$box/sums"
+      fi
+    elif [[ -n ${MIRROR_SUMS_MALFORMED:-} ]]; then
       printf '%s\n' "0000  a.pkg.tar.zst" "0000  b.pkg.tar.zst" \
         "0000  linux-t2.pkg.tar.zst" "0000  offline.db.tar.gz" >"$box/sums"
+      : >"$box/mirror/a.pkg.tar.zst"
+      : >"$box/mirror/b.pkg.tar.zst"
+      : >"$box/mirror/linux-t2.pkg.tar.zst"
+      : >"$box/mirror/offline.db.tar.gz"
     else
       printf '%s\n' "$MIRROR_VECTOR" >"$box/sums"
+      : >"$box/mirror/a.pkg.tar.zst"
+      : >"$box/mirror/b.pkg.tar.zst"
+      : >"$box/mirror/linux-t2.pkg.tar.zst"
+      : >"$box/mirror/offline.db.tar.gz"
     fi
-    # The cold pass hashes every listed file and stats them for the timeout,
-    # so all four must exist even when sha256sum is stubbed.
-    mkdir -p "$box/mirror"
-    : >"$box/mirror/a.pkg.tar.zst"
-    : >"$box/mirror/b.pkg.tar.zst"
-    : >"$box/mirror/linux-t2.pkg.tar.zst"
-    : >"$box/mirror/offline.db.tar.gz"
   fi
   # WITH_MIRROR_HASHER=1: the mirror hasher (pid 4343) has the third of the
   # four files open, so the packages line reads 50%.
@@ -183,7 +200,7 @@ EOF
   if [[ -n ${WITH_MIRROR_HASHER:-} ]]; then
     mirror_pid=4343
     mkdir -p "$box/mirror" "$box/proc/4343/fd" "$box/proc/4343/fdinfo"
-    : >"$box/mirror/linux-t2.pkg.tar.zst"
+    [[ -e $box/mirror/linux-t2.pkg.tar.zst ]] || : >"$box/mirror/linux-t2.pkg.tar.zst"
     ln -s "$box/mirror/linux-t2.pkg.tar.zst" "$box/proc/4343/fd/5"
     printf 'pos:\t100\nflags:\t0100000\n' >"$box/proc/4343/fdinfo/5"
   fi
@@ -513,6 +530,49 @@ $LAYER_HASH  omarchy-layer.aarch64-n1x.tar.zst" \
   run_helper loaded "failed" 0
 check "an intact image and layer clear the gate" 0 "$RC" "" "$OUT"
 
+# A read error on the first cold pass is retried; a clean second read is a
+# disagreement, not a pass.
+SUMS_EXPECTED=$IMAGE_HASH SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
+SUMS_RC1=1 SUMS_OUT2="$IMAGE_HASH  omarchy-root.img.zst" \
+  run_helper loaded "failed" 0
+check "a transient read error is retried and reported unstable" 1 "$RC" "install medium reads are unstable" "$OUT"
+[[ $OUT == *"first cold read: read error"* && $OUT == *"every checksum matched"* ]] &&
+  echo "ok: a read error and a clean read are both in the evidence" ||
+  { echo "FAIL: read-error evidence wrong: $OUT"; fails=1; }
+((COLD_READS == 2)) && echo "ok: a read error is retried" ||
+  { echo "FAIL: $COLD_READS cold reads after a read error"; fails=1; }
+
+# A wrong first read and a read error are also reads that disagree.
+SUMS_EXPECTED=$IMAGE_HASH SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
+SUMS_OUT1="$IMAGE_WRONG1  omarchy-root.img.zst" SUMS_RC2=1 \
+  run_helper loaded "failed" 0
+check "a wrong read then a read error is unstable" 1 "$RC" "install medium reads are unstable" "$OUT"
+[[ $OUT == *"second cold read: read error"* && $OUT == *"computed $IMAGE_WRONG1"* ]] &&
+  echo "ok: the wrong read and the read error are both in the evidence" ||
+  { echo "FAIL: wrong-read/read-error evidence wrong: $OUT"; fails=1; }
+
+# Two read errors cannot classify the medium; the unit's corrupt verdict
+# stands rather than inventing an unstable-read verdict.
+SUMS_EXPECTED=$IMAGE_HASH SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
+SUMS_RC1=1 SUMS_RC2=1 \
+  run_helper loaded "failed" 0
+check "two read errors keep the unit verdict" 1 "$RC" "install medium is corrupt: re-flash it" "$OUT"
+[[ $OUT != *"reads are unstable"* ]] && echo "ok: two read errors do not claim unstable reads" ||
+  { echo "FAIL: two read errors claimed unstable reads: $OUT"; fails=1; }
+
+# The report is capped so a broadly damaged mirror cannot print one line per
+# file. Two mismatches with a cap of one shows the first and the count.
+SUMS_EXPECTED=$IMAGE_HASH SUMS_LAYER_EXPECTED=$LAYER_HASH \
+SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 COLD_REPORT_MAX=1 \
+SUMS_OUT1="$IMAGE_WRONG1  omarchy-root.img.zst
+$LAYER_WRONG1  omarchy-layer.aarch64-n1x.tar.zst" \
+SUMS_OUT2="$IMAGE_WRONG1  omarchy-root.img.zst
+$LAYER_WRONG1  omarchy-layer.aarch64-n1x.tar.zst" \
+  run_helper loaded "failed" 0
+check "a multi-file corrupt report is capped" 1 "$RC" "install medium is corrupt: re-flash it" "$OUT"
+[[ $OUT == *"... and 1 more"* ]] && echo "ok: the report cap summarizes the rest" ||
+  { echo "FAIL: report cap missing: $OUT"; fails=1; }
+
 # Without drop_caches there is nothing to re-read cold with: the unit's own
 # verdict stands, with no forensics grafted on.
 SUMS_EXPECTED=40dd61f3d9a7e5d8cf86736a8e5a577e5217db65865ad7f895c025876b2f3f8d \
@@ -560,6 +620,22 @@ check "different wrong mirror bytes report unstable reads" 1 "$RC" "install medi
   { echo "FAIL: differing mirror hashes missing: $OUT"; fails=1; }
 [[ $OUT != *"install medium is corrupt: re-flash it"* ]] && echo "ok: unstable mirror reads do not say re-flash" ||
   { echo "FAIL: unstable mirror reads gave re-flash advice: $OUT"; fails=1; }
+
+# Real sha256sum over real mirror files: the helper's vector parsing must work
+# on the output coreutils actually prints, not only on the stub's vectors.
+MIRROR_SEQ=failed WITH_MIRROR_HASHER=1 MIRROR_REAL_SUMS=1 TIMEOUT_STUB=1 DROPCACHES=1 \
+  run_helper loaded "active" 0
+check "a real mirror hash vector clears the gate" 0 "$RC" "" "$OUT"
+
+# A real checksum mismatch: every byte is read twice and the real computed
+# vector is reported for the package whose expected hash is wrong.
+MIRROR_SEQ=failed WITH_MIRROR_HASHER=1 MIRROR_REAL_SUMS=1 MIRROR_REAL_CORRUPT=1 \
+TIMEOUT_STUB=1 DROPCACHES=1 \
+  run_helper loaded "active" 0
+check "a real mirror checksum mismatch stays corrupt" 1 "$RC" "sha256 mismatch on the package mirror" "$OUT"
+[[ $OUT == *"computed $REAL_T2_HASH"* && $OUT == *"expected $MIRROR_T2_WRONG1"* ]] &&
+  echo "ok: real computed and expected mirror hashes are in the evidence" ||
+  { echo "FAIL: real mirror hashes missing: $OUT"; fails=1; }
 
 # A sums file with a malformed line is rejected by the helper's parser
 # outright; that is a failed check, never a clean mirror. The sandbox writes

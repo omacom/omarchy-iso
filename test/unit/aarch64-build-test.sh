@@ -166,6 +166,10 @@ result=$(filter_aarch64_packages linux-omarchy linux linux-headers linux-omarchy
 # The N1x list names linux-omarchy, and keeps the name.
 result=$(filter_aarch64_packages linux-omarchy linux-omarchy linux-omarchy-headers 2>/dev/null | paste -sd' ')
 [[ $result == "linux-omarchy linux-omarchy-headers" ]] || fail "linux-omarchy lost its name on its own image: $result"
+# The Dell XPS 16's N1x haptic touchpad installs it (omacom/omarchy#20108);
+# it is an any-architecture package, so the mirror must carry it.
+result=$(filter_aarch64_packages linux-omarchy dell-xps-touchpad-haptics 2>/dev/null)
+[[ $result == dell-xps-touchpad-haptics ]] || fail "the N1x haptic touchpad package is dropped from aarch64: '$result'"
 
 grep -Fq -- '-e "OMARCHY_RUNTIME_PACKAGE=${OMARCHY_RUNTIME_PACKAGE:-}"' "$ROOT/bin/omarchy-iso-make" \
   || fail "the Omarchy package pair cannot be overridden for a --local-source build"

@@ -663,7 +663,7 @@ CONF
   n1x_script="$root/usr/share/omarchy/install/hardware/n1x.sh"
   # The output directory persists between builds: no layer from an older one.
   rm -f "$(n1x_layer_path)"
-  if [[ $(uname -m) == aarch64 && -f $n1x_script && -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
+  if [[ $(uname -m) == aarch64 && -z ${OMARCHY_SNAPDRAGON:-} && -f $n1x_script && -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
     build_n1x_prebuilt_uki "$n1x_script" || {
       echo "WARNING: no N1x pre-built UKI or layer; N1x installs build their own and pacstrap the NVIDIA stack"
       rm -f "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.modules" \

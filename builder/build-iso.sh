@@ -1058,8 +1058,15 @@ image_package_list() {
       grep -Fxv -f <(printf '%s\n' "${per_machine_packages[@]}") || true
     grep -hv '^#\|^$' /builder/image.packages
     ((${#image_arch_packages[@]} == 0)) || printf '%s\n' "${image_arch_packages[@]}"
-    # The shipped copy, which is what the install reads too.
-    grep -hv '^#\|^$' "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
+    # The shipped copy, which is what the install reads too. A Snapdragon ISO
+    # installs Snapdragon laptops only, so baking its platform set into the
+    # root image avoids pacstrapping ~600 MiB of firmware and tools at install
+    # time and drops them from the shipped mirror checksums.
+    if [[ -n ${OMARCHY_SNAPDRAGON:-} && -f $build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.aarch64-qualcomm.packages ]]; then
+      grep -hv '^#\|^$' "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.aarch64-qualcomm.packages"
+    else
+      grep -hv '^#\|^$' "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
+    fi
     printf '%s\n' "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"
   } | sort -u
 }
@@ -1233,6 +1240,7 @@ run_root_image_build() {
   echo "[timing] root image start $(date +%s)"
   OMARCHY_IMAGE_LOCALDB_COPY="$image_localdb" OMARCHY_IMAGE_SYNC_DBS=/tmp/offlinedb/sync \
     OMARCHY_RENAMED_PACKAGES="$renamed_list" OMARCHY_UNRESOLVED_PACKAGES="$unresolved_list" \
+    OMARCHY_SNAPDRAGON="${OMARCHY_SNAPDRAGON:-}" \
     bash /builder/build-root-image.sh "$image_pacman_conf" "$root_image" "${image_packages[@]}"
   echo "[timing] root image end $(date +%s)"
 }
@@ -1240,9 +1248,9 @@ run_root_image_build() {
 # Denominator for the install dashboard's progress bar: what the image holds
 # plus the kernel's closure on top of it, resolved against the image's own
 # local db with the pruned mirror, which is the question the installer's delta
-# pacstrap asks. Plus one for the microcode package every real machine gets.
-# phases.py records expected and actual in the timing JSON, so drift shows up
-# in acceptance runs.
+# pacstrap asks. Both x86 microcodes already live in the image, and aarch64
+# has none. phases.py records expected and actual in the timing JSON, so drift
+# shows up in acceptance runs.
 resolve_expected_packages() {
   # $1, if given: a platform's own default set, whose packages the installer
   # adds to the image's plain set on that platform.
@@ -1278,7 +1286,7 @@ resolve_expected_packages() {
     return 1
   fi
 
-  echo $(( image_count + $(printf '%s\n' "$resolved" | sort -u | grep -c .) + 1 ))
+  echo $(( image_count + $(printf '%s\n' "$resolved" | sort -u | grep -c .) ))
 }
 
 finalize_root_image_metadata() {

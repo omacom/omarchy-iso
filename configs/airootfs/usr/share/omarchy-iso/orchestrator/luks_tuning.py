@@ -160,12 +160,20 @@ def _with_calibration(original_encrypt):
         from archinstall.lib.disk import luks
         from .luks_calibration import (
             DeferredKeyslot,
+            can_defer_keyslot,
             deferred_format_command,
             format_command,
             new_volume_key,
             stop_calibration,
         )
-        stop_calibration()
+        # When deferring Argon2id enrollment, stop any in-flight calibration
+        # immediately rather than waiting ~2-3s for it: fast_cmd uses minimal
+        # PBKDF2, and the background enrollment after image-write uses either
+        # the cached result (if calibration already finished) or --iter-time.
+        if _deferred_keyslots is not None and can_defer_keyslot():
+            stop_calibration(wait=0)
+        else:
+            stop_calibration()
         original_run = luks.run
         volume_key = new_volume_key()
         temp_keyfile: Path | None = None

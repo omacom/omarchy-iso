@@ -305,9 +305,18 @@ EOF
   fi
 
   set +e
-  OUT=$(PATH="$box/bin:$PATH" OMARCHY_VERIFY_RETRY_SECONDS=0 OMARCHY_VERIFY_STALL_SECONDS="${STALL:-60}" \
-    OMARCHY_UI_INTERACTIVE=no \
-    env "${progress_env[@]}" "${confirm_env[@]}" "$REAL_TIMEOUT" 120 bash "$shim" 2>&1)
+  if [[ ${TTY_ANSWER+x} ]]; then
+    # The configurator has no dashboard: give the helper a real pseudo-tty
+    # through script so its /dev/tty prompt is exercised too.
+    OUT=$(PATH="$box/bin:$PATH" OMARCHY_VERIFY_RETRY_SECONDS=0 OMARCHY_VERIFY_STALL_SECONDS="${STALL:-60}" \
+      OMARCHY_UI_INTERACTIVE=yes \
+      env "${progress_env[@]}" "${confirm_env[@]}" \
+      script -qefc "$REAL_TIMEOUT 120 bash \"$shim\"" /dev/null 2>&1 <<<"$TTY_ANSWER")
+  else
+    OUT=$(PATH="$box/bin:$PATH" OMARCHY_VERIFY_RETRY_SECONDS=0 OMARCHY_VERIFY_STALL_SECONDS="${STALL:-60}" \
+      OMARCHY_UI_INTERACTIVE=no \
+      env "${progress_env[@]}" "${confirm_env[@]}" "$REAL_TIMEOUT" 120 bash "$shim" 2>&1)
+  fi
   RC=$?
   set -e
   PROGRESS_OUT=$(cat "$box/progress" 2>/dev/null || true)
@@ -593,6 +602,21 @@ SUMS_EXPECTED=$IMAGE_HASH SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
 SUMS_RC1=1 SUMS_OUT2="$IMAGE_HASH  omarchy-root.img.zst" CONFIRM_ANSWER=no \
   run_helper loaded "failed" 0
 check "a declined transient read error stays unstable" 1 "$RC" "install medium reads are unstable" "$OUT"
+
+# The free-space configurator has no dashboard: the helper's direct /dev/tty
+# prompt continues on y and keeps the unstable verdict on n.
+SUMS_EXPECTED=$IMAGE_HASH SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
+SUMS_RC1=1 SUMS_OUT2="$IMAGE_HASH  omarchy-root.img.zst" TTY_ANSWER=y \
+  run_helper loaded "failed" 0
+check "a tty-confirmed transient read error continues the install" 0 "$RC" "" "$OUT"
+[[ $OUT == *"warning: first cold read had a read error"* ]] &&
+  echo "ok: the tty-confirmed read error is logged" ||
+  { echo "FAIL: tty-confirmed read-error warning missing: $OUT"; fails=1; }
+
+SUMS_EXPECTED=$IMAGE_HASH SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
+SUMS_RC1=1 SUMS_OUT2="$IMAGE_HASH  omarchy-root.img.zst" TTY_ANSWER=n \
+  run_helper loaded "failed" 0
+check "a tty-declined transient read error stays unstable" 1 "$RC" "install medium reads are unstable" "$OUT"
 
 # The report is capped so a broadly damaged mirror cannot print one line per
 # file. Two mismatches with a cap of one shows the first and the count.

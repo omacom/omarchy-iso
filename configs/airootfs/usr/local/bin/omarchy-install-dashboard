@@ -716,14 +716,18 @@ reboot_prompt() {
 # waits; the dashboard is the only interactive owner of the terminal, so it is
 # the one that asks. A non-interactive install answers no.
 medium_confirm() {
-  local question
+  local question continue_label stop_label timeout_secs
 
   question=$(cat "$MEDIUM_CONFIRM_REQUEST" 2>/dev/null || true)
+  continue_label=$(t failure.continue)
+  stop_label=$(t failure.stopInstallation)
+  timeout_secs=${OMARCHY_VERIFY_CONFIRM_TIMEOUT:-300}
   rm -f "$MEDIUM_CONFIRM_ANSWER"
   if interactive; then
     printf '%s' "$CLEAR" >"$TTY_PATH"
-    if gum confirm --show-help=false --affirmative "Continue" \
-      --negative "Stop installation" "$question" <"$TTY_PATH" >"$TTY_PATH" 2>&1; then
+    if timeout "$timeout_secs" gum confirm --show-help=false \
+      --affirmative "$continue_label" --negative "$stop_label" "$question" \
+      <"$TTY_PATH" >"$TTY_PATH" 2>&1; then
       printf 'yes\n' >"$MEDIUM_CONFIRM_ANSWER"
     else
       printf 'no\n' >"$MEDIUM_CONFIRM_ANSWER"
@@ -988,6 +992,8 @@ launch_child() {
   sanitize_child_output <"$sanitizer_fifo" >>"$LOG_FILE" &
   sanitizer_pid=$!
   # Child is non-interactive. All visible UI belongs to this supervisor.
+  OMARCHY_VERIFY_CONFIRM_QUESTION="$(t failure.confirmReadError)" \
+  OMARCHY_VERIFY_CONFIRM_YN="$(t failure.confirmContinue "$(t common.yes)" "$(t common.no)")" \
   PYTHONUNBUFFERED=1 setsid "${INSTALL_CMD[@]}" </dev/null >"$sanitizer_fifo" 2>&1 &
   child_pid=$!
   child_pgid=$child_pid

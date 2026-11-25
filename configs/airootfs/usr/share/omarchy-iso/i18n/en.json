@@ -2,6 +2,7 @@
   "greeter.tagline": "Beautiful, Fun & Agentic Linux by DHH",
   "greeter.hint": "Press Return to Start Install",
   "common.yes": "Yes",
+  "common.no": "No",
   "common.back": "Back",
   "common.change": "No, change it",
   "language.header": "Language",
@@ -117,5 +118,9 @@
   "failure.pressEnter": "Press Enter to continue…",
   "failure.noUploader": "No log uploader is available in this environment.",
   "failure.installLog": "Install log: %1",
-  "failure.targetLog": "Target log: %1"
+  "failure.targetLog": "Target log: %1",
+  "failure.confirmReadError": "The first cold read of the install medium had a read error, but the second read matched every checksum. Continuing may write a bad install; a different USB stick or port is safer.",
+  "failure.confirmContinue": "Continue the installation? [%1/%2]",
+  "failure.continue": "Continue",
+  "failure.stopInstallation": "Stop installation"
 }

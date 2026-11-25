@@ -214,7 +214,8 @@ cold_expected() {
 # the second read looked clean.
 confirm_read_error_continue() {
   local state_dir=${OMARCHY_INSTALL_STATE_DIR:-} request answer waited=0 limit=${OMARCHY_VERIFY_CONFIRM_TIMEOUT:-300}
-  local question='The first cold read of the install medium had a read error, but the second read matched every checksum. Continuing may write a bad install; a different USB stick or port is safer.'
+  local question=${OMARCHY_VERIFY_CONFIRM_QUESTION:-'The first cold read of the install medium had a read error, but the second read matched every checksum. Continuing may write a bad install; a different USB stick or port is safer.'}
+  local yn=${OMARCHY_VERIFY_CONFIRM_YN:-'Continue the installation? [y/N]'}
   if [[ -n $state_dir && -d $state_dir ]]; then
     local monitor="$state_dir/medium-confirm.dashboard" dashboard_pid
     # Only the running dashboard can answer the request. Without its marker,
@@ -240,8 +241,8 @@ confirm_read_error_continue() {
   fi
   [[ ${OMARCHY_UI_INTERACTIVE:-} == no ]] && return 1
   [[ -r /dev/tty && -w /dev/tty ]] || return 1
-  printf '\n%s\nContinue the installation? [y/N] ' "$question" >/dev/tty
-  IFS= read -r answer </dev/tty || answer=
+  printf '\n%s\n%s ' "$question" "$yn" >/dev/tty
+  IFS= read -r -t "$limit" answer </dev/tty || answer=
   case $answer in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
 }
 

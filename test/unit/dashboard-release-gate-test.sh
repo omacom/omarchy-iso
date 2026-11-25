@@ -70,7 +70,14 @@ exit 0
 EOF
 cat >"$BOX/bin/gum" <<'EOF'
 #!/bin/bash
+printf '%s\n' "$*" >>"$BOX/gum_argv"
 exit "${GUM_CONFIRM_RC:-0}"
+EOF
+cat >"$BOX/bin/timeout" <<'EOF'
+#!/bin/bash
+[[ ${GUM_TIMEOUT_TEST:-} == 1 ]] && exit 124
+shift
+exec "$@"
 EOF
 # Just enough jq that the test does not hinge on the host having the real
 # one: the target query answers from the state file, anything else answers
@@ -99,6 +106,7 @@ scenario() { # function-to-call, release_rc  ->  sets TTY_OUT, LOG_OUT, CALLS
   echo "$release_rc" >"$BOX/release_rc"
   : >"$BOX/calls"
   : >"$BOX/install.log"
+  : >"$BOX/gum_argv"
   # The tty is a fifo, not a file: the dashboard reopens it with > for every
   # write, which a real console shrugs off and a regular file answers by
   # truncating away everything drawn before. An fd held open on the write end
@@ -126,6 +134,7 @@ scenario() { # function-to-call, release_rc  ->  sets TTY_OUT, LOG_OUT, CALLS
   LOG_OUT=$(cat "$BOX/install.log")
   CALLS=$(cat "$BOX/calls")
   RELEASED=$(cat "$BOX/released")
+  GUM_ARGS=$(cat "$BOX/gum_argv" 2>/dev/null || true)
 }
 
 # ── The verdict itself ───────────────────────────────────────────────────────
@@ -163,6 +172,8 @@ check_absent "a held target keeps its stop jobs" "-ff" "$CALLS"
 printf 'Continue after the read error?\n' >"$BOX/medium-confirm"
 GUM_CONFIRM_RC=0 scenario medium_confirm 0
 check "a confirmed medium prompt answers yes" "yes" "$(cat "$BOX/medium-confirm.answer")"
+check_has "the medium prompt uses localized labels" "failure.continue" "$GUM_ARGS"
+check_has "the medium prompt localizes the stop label" "failure.stopInstallation" "$GUM_ARGS"
 [[ ! -e $BOX/medium-confirm ]] && echo "ok: the medium prompt request is cleared" ||
   { echo "FAIL: the medium prompt request remains"; fails=1; }
 
@@ -173,6 +184,10 @@ check "a declined medium prompt answers no" "no" "$(cat "$BOX/medium-confirm.ans
 printf 'Continue after the read error?\n' >"$BOX/medium-confirm"
 OMARCHY_UI_INTERACTIVE=no scenario medium_confirm 0
 check "a headless medium prompt answers no" "no" "$(cat "$BOX/medium-confirm.answer")"
+
+printf 'Continue after the read error?\n' >"$BOX/medium-confirm"
+GUM_TIMEOUT_TEST=1 scenario medium_confirm 0
+check "a timed-out medium prompt answers no" "no" "$(cat "$BOX/medium-confirm.answer")"
 
 if (( fails )); then
   echo "dashboard release gate: FAILED"

@@ -38,4 +38,14 @@ format=$(line_of "call to run_partition_execute" '\s+run_partition_execute ')
 ((gate < format)) ||
   { echo "run_partition_execute runs before the verify gate (gate $gate, format $format): a corrupt install medium would be found only after the disk was partitioned"; exit 1; }
 
+# The full cold evidence is on the helper's stdout; the configurator must keep
+# it for the install log while only stderr supplies the abort headline.
+stdout_capture=$(line_of "verify stdout capture" '.*omarchy-wait-root-image-verify.*verify_stdout_file')
+stdout_log=$(line_of "verify stdout log append" '.*cat .*verify_stdout_file.*OMARCHY_INSTALL_LOG_FILE')
+prompt=$(line_of "localized verify prompt" '.*OMARCHY_VERIFY_CONFIRM_QUESTION=.*failure.confirmReadError')
+((gate == stdout_capture)) ||
+  { echo "the verify gate no longer captures stdout for the support log"; exit 1; }
+((prompt < gate && gate < stdout_log && stdout_log < format)) ||
+  { echo "the verify prompt/support log is out of order (prompt $prompt, log $stdout_log, format $format)"; exit 1; }
+
 echo "ok: the free-space path verifies the install medium before it formats"

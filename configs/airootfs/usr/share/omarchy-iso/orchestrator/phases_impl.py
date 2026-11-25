@@ -1385,20 +1385,21 @@ def _start_target_keyring_init(ctx: InstallContext, *, keyrings_dir: Path | None
     touches /mnt/etc/pacman.d/gnupg during arch_install_system.
 
     Joined before any phase that reads or snapshots the target keyring
-    (run_system_finalizer on aarch64, run_oem_setup, _validate_package_signing,
-    or create_factory_snapshot), where the finished staged directory atomically
-    replaces /mnt/etc/pacman.d/gnupg. Where the runtime's post-install inits
-    and populates it itself, no unit starts: the finalizer had to wait for it
-    before doing the same work again. Apple Silicon, whose image brings its
-    keyrings, keeps it, and run_system_finalizer joins it there first. A unit
-    rather than a plain child process: pacman-key leaves a gpg-agent and
-    dirmngr behind, which systemd kills with the rest of the unit's cgroup the
-    moment pacman-key exits; the dashboard's process-group kill does not reach
-    it, while `systemctl stop` still does (stop_target_keyring_init); and its
-    output is in the journal whatever happens to the orchestrator. --wait
-    --pipe give a child to join with the unit's exit status and output.
+    (run_oem_setup, _validate_package_signing, or create_factory_snapshot),
+    where the finished staged directory atomically replaces
+    /mnt/etc/pacman.d/gnupg. When called from prepare_live (keyrings_dir set),
+    the unit starts right away on every architecture; if the target later turns
+    out to carry an older aarch64 runtime that cannot honour
+    OMARCHY_KEYRING_MANAGED_BY_ISO=1, run_system_finalizer stops the unit and
+    leaves the keyring to that runtime instead. A unit rather than a plain
+    child process: pacman-key leaves a gpg-agent and dirmngr behind, which
+    systemd kills with the rest of the unit's cgroup the moment pacman-key
+    exits; the dashboard's process-group kill does not reach it, while
+    `systemctl stop` still does (stop_target_keyring_init); and its output is
+    in the journal whatever happens to the orchestrator. --wait --pipe give a
+    child to join with the unit's exit status and output.
     """
-    if _runtime_populates_target_keyring():
+    if keyrings_dir is None and _runtime_populates_target_keyring(ctx.target):
         return
     if ctx.state.get("target_keyring_proc") is not None or ctx.state.get("target_keyring_installed"):
         return
@@ -1425,11 +1426,26 @@ def _start_target_keyring_init(ctx: InstallContext, *, keyrings_dir: Path | None
     )
 
 
-def _runtime_populates_target_keyring() -> bool:
-    """Whether omarchy-apply-system inits and populates the target keyring
-    itself (omarchy's install/post-install/pacman.sh): every aarch64 platform
-    but Apple Silicon."""
-    return platform.machine() == "aarch64" and hw_platform() != "aarch64-apple"
+def _target_supports_iso_managed_keyring(target: Path) -> bool:
+    """Whether the target's pacman-keyring.sh skips rebuilding the keyring when
+    OMARCHY_KEYRING_MANAGED_BY_ISO=1 is set in the environment."""
+    helper = target / "usr" / "share" / "omarchy" / "install" / "helpers" / "pacman-keyring.sh"
+    try:
+        text = helper.read_text()
+    except OSError:
+        return False
+    return re.search(r"^\s*[^#\s].*\bOMARCHY_KEYRING_MANAGED_BY_ISO\b", text, re.MULTILINE) is not None
+
+
+def _runtime_populates_target_keyring(target: Path | None = None) -> bool:
+    """Whether omarchy-apply-system must init and populate the target keyring
+    itself (omarchy's install/post-install/pacman.sh): non-Apple aarch64
+    runtimes that do not yet honour OMARCHY_KEYRING_MANAGED_BY_ISO=1."""
+    if platform.machine() != "aarch64" or hw_platform() == "aarch64-apple":
+        return False
+    if target is not None and _target_supports_iso_managed_keyring(target):
+        return False
+    return True
 
 
 def _target_keyrings() -> list[str]:
@@ -2796,6 +2812,9 @@ def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str 
         "MISE_OFFLINE=1",
         "MISE_LOG_LEVEL=error",
     ]
+    if (ctx.state.get("target_keyring_proc") is not None
+            or ctx.state.get("target_keyring_installed")):
+        env_extras.append("OMARCHY_KEYRING_MANAGED_BY_ISO=1")
     if _install_debug_enabled():
         env_extras.append("OMARCHY_INSTALL_DEBUG=1")
         _debug_log(ctx, "running target setup command: " + " ".join(cmd))
@@ -2839,12 +2858,13 @@ def run_system_finalizer(ctx: InstallContext) -> None:
     else:
         cmd = ["/usr/bin/omarchy-apply-system", "--install-user", ctx.username, "--first-install"]
 
-    # On aarch64 the runtime runs pacman-key --init and --populate on the
-    # target (omarchy's install/post-install/pacman.sh). Two pacman-keys on
-    # one gnupg dir break each other's writes, so the keyring unit finishes
-    # first; on x86_64 it keeps running alongside.
-    if platform.machine() == "aarch64":
-        _join_target_keyring_init(ctx)
+    # When the target carries an older aarch64 runtime that cannot skip its own
+    # keyring rebuild via OMARCHY_KEYRING_MANAGED_BY_ISO=1, stop any tmpfs unit
+    # started in prepare_live instead of waiting for work the runtime would
+    # overwrite. Otherwise the tmpfs unit keeps overlapping system setup and
+    # lands in _validate_package_signing / create_factory_snapshot.
+    if _runtime_populates_target_keyring(ctx.target):
+        stop_target_keyring_init(ctx)
 
     _mask_mkinitcpio_pacman_hooks(ctx, ctx.target, TARGET_DEFERRED_BOOT_HOOKS)
     try:

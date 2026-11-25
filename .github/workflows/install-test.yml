@@ -12,6 +12,9 @@ name: Install test
 # variant's build, install and boot times are what every later change is
 # measured against in its own PR.
 #
+# A pull request runs only the architectures its paths build
+# (test/install-test-arches), and none for documentation or unit tests alone.
+#
 # Twice a day, and by hand, the rehearsal: the ISO quattro would be released
 # as now. omarchy and omarchy-settings are pinned to quattro's tip by the same
 # engine and against the same rc database as omarchy-release's next candidate
@@ -63,8 +66,14 @@ jobs:
   trust:
     name: "Is the author trusted to use our runners"
     runs-on: ubuntu-26.04
+    # pull-requests: read is for listing the files a pull request changes.
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       trusted: ${{ steps.gate.outputs.trusted }}
+      x86_64: ${{ steps.arches.outputs.x86_64 }}
+      aarch64: ${{ steps.arches.outputs.aarch64 }}
     steps:
       # A lookup that fails must not stop the test: the author is then
       # untrusted and the test runs on GitHub's runner.
@@ -93,6 +102,30 @@ jobs:
           echo "trusted=$trusted" >>"$GITHUB_OUTPUT"
           echo "$AUTHOR: $STATUS, trusted=$trusted" | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # A pull request tests the architectures its paths build
+      # (test/install-test-arches): a change to the Snapdragon live startup
+      # does not need the x86_64 matrix, nor documentation either. A push to
+      # quattro, the rehearsal and a manual run test both, as does a pull
+      # request whose files cannot be listed. A renamed file counts by its old
+      # path too: moving the ISO builder into plans/ still changes the ISO.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          sparse-checkout: test/install-test-arches
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - id: arches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [[ $GITHUB_EVENT_NAME == pull_request ]] &&
+            files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files?per_page=100" -q '.[] | .filename, (.previous_filename // empty)'); then
+            ./test/install-test-arches <<<"$files" | tee -a "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' x86_64=true aarch64=true | tee -a "$GITHUB_OUTPUT"
+          fi
+
   # One build job per architecture, both with the same steps, so that each
   # architecture's install jobs wait for their own ISO only: a job that needs
   # a matrix job waits for every leg, and one architecture's failed build
@@ -101,6 +134,7 @@ jobs:
   build-x86_64:
     name: "x86_64: build the ISO"
     needs: trust
+    if: needs.trust.outputs.x86_64 == 'true'
     runs-on: ${{ needs.trust.outputs.trusted != 'true' && 'ubuntu-26.04' || 'namespace-profile-linux-amd64-16x32' }}
     timeout-minutes: 60
     env:
@@ -188,7 +222,7 @@ jobs:
   build-aarch64:
     name: "aarch64: build the ISO"
     needs: trust
-    if: needs.trust.outputs.trusted == 'true'
+    if: needs.trust.outputs.trusted == 'true' && needs.trust.outputs.aarch64 == 'true'
     runs-on: namespace-profile-arm64-linux-apple-12x32
     timeout-minutes: 60
     env:
@@ -231,10 +265,8 @@ jobs:
             env: OMARCHY_INTEGRATION_ENCRYPT=true
           # The live ISO, without the shared install: pxe installs over the
           # network itself, the others stop before any disk is formatted.
-          - variant: live-pxe
-            scenarios: pxe
-            live: true
-          # pxe installs, so it runs encrypted too, as the encrypted job did.
+          # pxe runs encrypted only: the plain install's path is a subset of
+          # it, and the default job covers that path on local media.
           - variant: live-pxe-encrypted
             scenarios: pxe
             live: true
@@ -245,20 +277,18 @@ jobs:
           - variant: live-misc
             scenarios: luks-calibration
             live: true
-          - variant: kb-uk
-            scenarios: boot keymap-locale
-            env: OMARCHY_INTEGRATION_KB_LAYOUT=uk
-          # de, not uk: its y and z are swapped, so the passphrase omarchy
-          # only unlocks at boot if the LUKS prompt has the install's layout.
+          # One keyboard variant, the harder case: encrypted, and de, not uk:
+          # its y and z are swapped, so the passphrase omarchy only unlocks at
+          # boot if the LUKS prompt has the install's layout. keymap-locale
+          # checks the desktop's layout in the same install.
           - variant: encrypted-kb-de
             scenarios: boot keymap-locale
             env: OMARCHY_INTEGRATION_ENCRYPT=true OMARCHY_INTEGRATION_KB_LAYOUT=de
           - variant: small-disk
             scenarios: boot
             env: OMARCHY_INTEGRATION_DISK_GB=24
-          - variant: low-memory
-            scenarios: boot
-            memory: 4096
+          # One low-memory variant, the harder case: 2 GiB, with LUKS, whose
+          # key derivation needs memory of its own. usb2-4g installs in 4 GiB.
           - variant: low-memory-encrypted
             scenarios: boot
             memory: 2048

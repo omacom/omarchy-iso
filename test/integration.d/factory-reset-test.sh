@@ -35,7 +35,7 @@ base_image_ready || { echo "No base image; run this through ./test/integration" 
 fixture_shared_esp() {
   OLD_ID=$(ssh_guest "cat /etc/machine-id" | tr -d '\r\n')
   [[ $OLD_ID =~ ^[0-9a-f]{32}$ ]] || { echo "unexpected machine-id: $OLD_ID" >&2; return 1; }
-  LOADER=$(ssh_guest "omarchy-boot-backend" | tr -d '\r\n')
+  LOADER=$(installed_boot_loader)
   if [[ $LOADER == systemd-boot ]]; then
     fixture_shared_esp_systemd_boot
     return

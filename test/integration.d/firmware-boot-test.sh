@@ -45,7 +45,7 @@ verify_firmware_boot() {
     # unless the ISO had no omarchy-boot-systemd or was told to keep Limine
     # (OMARCHY_ISO_BOOT_LOADER=limine), as a shipped release ISO may be.
     local loader
-    loader=$(ssh_guest "omarchy-boot-backend" | tr -d '\r\n')
+    loader=$(installed_boot_loader)
     if [[ $loader == "limine" ]]; then
       check "a Limine EFI binary is on the ESP" \
         ssh_sudo "test -e /boot/EFI/limine/limine_x64.efi -o -e /boot/EFI/BOOT/BOOTX64.EFI"

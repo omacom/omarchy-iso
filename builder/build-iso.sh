@@ -18,6 +18,7 @@ source /builder/node-release.sh
 source /builder/arm64-kernel-image.sh
 source /builder/archiso-aarch64-mkinitcpio.sh
 source /builder/grub-platform.sh
+source /builder/try-kernel.sh
 source /builder/boot-menu-theme.sh
 source /builder/required-packages.sh
 
@@ -1485,6 +1486,12 @@ for live_initramfs in "$build_cache_dir/work/iso/${iso_subdir%/*}/boot/$OMARCHY_
     exit 1
   fi
 done
+
+# Just try runs the live kernel with the root image's modules
+# (builder/try-kernel.sh).
+if [[ -n $try_layer ]]; then
+  check_try_kernel "$build_cache_dir/work/$OMARCHY_ARCH/airootfs" "$image_localdb" "$OMARCHY_KERNEL" || exit 1
+fi
 
 # The x86_64 ISO has to fit an 8 GB stick. Fail over 7.7 GB and warn over
 # 7.5 GB, so an image or mirror that grows shows up in the build that grew it.

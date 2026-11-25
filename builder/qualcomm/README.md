@@ -1,5 +1,8 @@
 # Qualcomm live startup
 
+Everything here goes only into the Snapdragon image (`omarchy-iso-make
+--snapdragon`). The plain aarch64 image carries none of it.
+
 The live UKI uses its own initramfs, built by `live-uki.sh`. The direct-boot
 kernel/initramfs pair is unchanged. Only the Qualcomm GRUB entry enables the
 `qcom_early_startup` hook with `omarchy.qcom_early=1`.

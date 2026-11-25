@@ -24,7 +24,7 @@ terminal-border: "0"
 # show on every screen the logo fits.
 + boot_menu {
     left = 50%-150
-    top = 50%+134
+    top = 65%
     width = 300
     height = 84
     item_font = "Terminus 2x Bold 32"
@@ -44,11 +44,14 @@ terminal-border: "0"
     scrollbar_thumb = "scroll_thumb_*.png"
 }
 
-# Plymouth's layout(): the logo centred on the screen.
+# Centred on screen and sized proportionally so HiDPI panels (e.g. 3840x2400
+# laptops where UEFI GOP exposes only native mode) don't draw a tiny 800 px
+# logo. 50% x 20% stays within ~6% of the 800:188 aspect ratio on both 16:9
+# and 16:10 screens.
 + image {
-    left = 50%-400
-    top = 50%-94
-    width = 800
-    height = 188
+    left = 25%
+    top = 40%
+    width = 50%
+    height = 20%
     file = "logo.png"
 }

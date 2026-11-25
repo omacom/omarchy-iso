@@ -196,6 +196,13 @@ class Theme(unittest.TestCase):
         self.assertLess(theme_cfg.index('if [ -n "$omarchy_theme" ]; then'), set_at)
         self.assertIn("export theme", theme_cfg[set_at:])
 
+    def test_logo_scales_proportionally_for_hidpi(self):
+        image = self.theme[self.theme.index("+ image"):]
+        self.assertIn("left = 25%", image)
+        self.assertIn("width = 50%", image)
+        self.assertIn("height = 20%", image)
+        self.assertIn('-filter point -resize 50% PNG32:"$theme_dir/logo.png"', self.builder)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,11 +14,22 @@ build_grub_theme() {
   local theme_dir=$1 settings_archive=$2
   local pf2 part
 
-  if ! bsdtar -xOf "$settings_archive" usr/share/plymouth/themes/omarchy/logo.png >"$theme_dir/logo.png" ||
-    [[ ! -s $theme_dir/logo.png ]]; then
+  local raw_logo
+  raw_logo=$(mktemp --suffix=.png) || return 1
+  if ! bsdtar -xOf "$settings_archive" usr/share/plymouth/themes/omarchy/logo.png >"$raw_logo" ||
+    [[ ! -s $raw_logo ]]; then
+    rm -f "$raw_logo"
     echo "ERROR: $settings_archive has no Plymouth logo for the boot menu" >&2
     return 1
   fi
+  # Scale the pixel-art logo to 50% (400x94) with nearest-neighbor filtering:
+  # GRUB's gui_image.c reports raw_bitmap dimensions as its minimum size, so a
+  # smaller source lets width=50% / height=20% scale cleanly on every display
+  # from 800x600 up to 3840x2400 / 6K HiDPI panels.
+  magick "$raw_logo" -filter point -resize 50% PNG32:"$theme_dir/logo.png"
+  local logo_status=$?
+  rm -f "$raw_logo"
+  ((logo_status == 0)) || return 1
 
   # GRUB's own console and editor take the 16 px font as terminus-font ships
   # it for GRUB. The entries take it with every pixel doubled: Terminus keeps

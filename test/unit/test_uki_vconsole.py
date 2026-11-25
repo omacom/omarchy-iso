@@ -99,6 +99,20 @@ class EmbedVconsoleTest(unittest.TestCase):
                 self.assertFalse(embed_vconsole(self.uki, self.vconsole))
                 self.assertEqual(self.uki.read_bytes(), image)
 
+    def test_nonlatin_layouts_are_refused_so_the_prompt_stays_us(self):
+        before = self.uki.read_bytes()
+        for text in (
+            "KEYMAP=ua\nXKBLAYOUT=ua,us\nXKBMODEL=pc105\n",
+            "KEYMAP=bg-cp1251\nXKBLAYOUT=bg,us\nXKBVARIANT=phonetic,\n",
+            "KEYMAP=kyrgyz\nXKBLAYOUT=kg,us\n",
+            "KEYMAP=ru\nXKBLAYOUT=ru,us\n",
+        ):
+            with self.subTest(text=text):
+                self.vconsole.write_text(text)
+                self.assertFalse(vconsole_fits(self.uki, self.vconsole))
+                self.assertFalse(embed_vconsole(self.uki, self.vconsole))
+                self.assertEqual(self.uki.read_bytes(), before)
+
     def test_a_second_embed_finds_no_room(self):
         self.assertTrue(embed_vconsole(self.uki, self.vconsole))
         written = self.uki.read_bytes()
@@ -159,7 +173,7 @@ class ImageBuildTest(unittest.TestCase):
 class InstallTest(unittest.TestCase):
     """finalize_limine_boot on a target that picked uk."""
 
-    def install(self, uki: bytes):
+    def install(self, uki: bytes, vconsole: str = UK):
         target = Path(self.enterContext(tempfile.TemporaryDirectory()))
         for path, text in {
             "usr/bin/limine-update": "",
@@ -168,7 +182,7 @@ class InstallTest(unittest.TestCase):
             "boot/limine.conf": "/+Omarchy\n",
             "var/lib/omarchy-iso/prebuilt-uki.kernel": "linux-omarchy\n",
             "var/lib/omarchy-iso/prebuilt-uki.keymap": "\n",
-            "etc/vconsole.conf": UK,
+            "etc/vconsole.conf": vconsole,
         }.items():
             (target / path).parent.mkdir(parents=True, exist_ok=True)
             (target / path).write_text(text)
@@ -201,6 +215,16 @@ class InstallTest(unittest.TestCase):
         ran, hashed = self.install(uki_with_cmdline_room())
         self.assertTrue([cmd for cmd in ran if cmd.endswith("limine-mkinitcpio")], "no UKI was built for the layout")
         self.assertEqual(hashed, [])
+
+    def test_a_nonlatin_layout_keeps_the_prebuilt_uki_on_us(self):
+        ran, hashed = self.install(
+            uki_with_cmdline_room() + placeholder(),
+            vconsole="KEYMAP=ua\nXKBLAYOUT=ua,us\nXKBMODEL=pc105\n",
+        )
+        self.assertFalse([cmd for cmd in ran if "limine-mkinitcpio" in cmd], "a UKI was built for a non-Latin layout")
+        self.assertEqual(len(hashed), 1)
+        self.assertIn(placeholder(), hashed[0], "the placeholder was overwritten with a non-Latin layout")
+        self.assertNotIn(b"XKBLAYOUT=ua", hashed[0])
 
 
 if __name__ == "__main__":

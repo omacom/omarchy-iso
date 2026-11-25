@@ -3151,8 +3151,19 @@ def _prebuilt_uki_keymap_stale(target: Path) -> str:
     """
     recorded = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki.keymap"
     baked = (recorded.read_text().strip() if recorded.is_file() else "") or "us"
-    chosen = _keymap_of(target / "etc" / "vconsole.conf")
-    return chosen if chosen and chosen != baked else ""
+    vconsole = target / "etc" / "vconsole.conf"
+    chosen = _keymap_of(vconsole)
+    if not chosen:
+        return ""
+    # omarchy_hooks.conf and omarchy_vconsole.conf keep vconsole.conf out of the
+    # initramfs when the leading XKB layout is non-Latin, so the LUKS prompt
+    # stays on US. A pre-built UKI baked with us already matches that; embedding
+    # vconsole.conf into it would put Plymouth into Cyrillic/Greek/Hebrew until
+    # the first kernel update strips it.
+    from .uki_vconsole import vconsole_is_nonlatin
+    if vconsole_is_nonlatin(vconsole):
+        return "" if baked == "us" else chosen
+    return chosen if chosen != baked else ""
 
 
 def _is_apple_t2_hardware() -> bool:

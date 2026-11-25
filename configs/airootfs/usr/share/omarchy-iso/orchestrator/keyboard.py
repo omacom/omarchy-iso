@@ -19,10 +19,11 @@ from .command import capture
 
 def setup_form_path() -> Path | None:
     """Find the shared setup form, as the configurator does."""
+    omarchy_path = os.environ.get("OMARCHY_PATH") or "/nonexistent"
     candidates = (
         os.environ.get("SETUP_FORM", ""),
         "/usr/share/omarchy-iso/setup-form.sh",
-        str(Path(os.environ.get("OMARCHY_PATH", "/nonexistent")) / "install/provisioning/setup-form.sh"),
+        str(Path(omarchy_path) / "install/provisioning/setup-form.sh"),
     )
     return next((Path(path) for path in candidates if path and Path(path).is_file()), None)
 
@@ -89,9 +90,11 @@ def configure_keyboard(target: Path, language: str, input_method: str | None = N
         vconsole_path.write_text(vconsole_path.read_text() + font + "\n")
 
     # Hyprland reads XKBLAYOUT from this file. Without it the desktop types US
-    # and the console and the disk password prompt use the chosen layout.
+    # while the console and the disk password prompt use the chosen layout.
     if not any(line.startswith("XKBLAYOUT=") and len(line) > len("XKBLAYOUT=") for line in vconsole_path.read_text().splitlines()):
-        vconsole_path.write_text(vconsole_path.read_text() + fallback_xkb_settings(language))
+        extra = fallback_xkb_settings(language)
+        if extra:
+            vconsole_path.write_text(vconsole_path.read_text() + extra)
 
     preference = target / "etc/omarchy/input-method"
     preference.parent.mkdir(parents=True, exist_ok=True)

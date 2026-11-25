@@ -63,6 +63,45 @@ def localectl_lists_keymaps() -> bool:
 LOCALECTL_AVAILABLE = localectl_lists_keymaps()
 
 
+class FallbackXkbSettingsTest(unittest.TestCase):
+    def test_reads_extra_xkb_lines_from_setup_form(self):
+        with tempfile.TemporaryDirectory() as directory:
+            form = Path(directory) / "setup-form.sh"
+            form.write_text(
+                "omarchy_keymap_xkb_settings() {\n"
+                "  case $1 in\n"
+                "    no-latin1) printf 'XKBLAYOUT=no\\nXKBMODEL=pc105\\n' ;;\n"
+                "    *) return 1 ;;\n"
+                "  esac\n"
+                "}\n"
+            )
+            with mock.patch.dict(os.environ, {"SETUP_FORM": str(form)}):
+                self.assertEqual(KEYBOARD.fallback_xkb_settings("no-latin1"), "XKBLAYOUT=no\nXKBMODEL=pc105\n")
+                self.assertEqual(KEYBOARD.fallback_xkb_settings("us"), "")
+
+    def test_older_setup_form_without_helper_returns_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            form = Path(directory) / "setup-form.sh"
+            form.write_text("OMARCHY_KEYBOARD_LAYOUTS=$'English (US)|us'\n")
+            with mock.patch.dict(os.environ, {"SETUP_FORM": str(form)}):
+                self.assertEqual(KEYBOARD.fallback_xkb_settings("no-latin1"), "")
+
+    def test_empty_omarchy_path_does_not_resolve_relative_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rel = Path(directory) / "install/provisioning/setup-form.sh"
+            rel.parent.mkdir(parents=True)
+            rel.write_text("omarchy_keymap_xkb_settings() { echo XKBLAYOUT=no; }\n")
+            cwd = os.getcwd()
+            try:
+                os.chdir(directory)
+                real_is_file = Path.is_file
+                with mock.patch.dict(os.environ, {"SETUP_FORM": "", "OMARCHY_PATH": ""}), \
+                        mock.patch.object(Path, "is_file", new=lambda p: False if str(p) == "/usr/share/omarchy-iso/setup-form.sh" else real_is_file(p)):
+                    self.assertIsNone(KEYBOARD.setup_form_path())
+            finally:
+                os.chdir(cwd)
+
+
 @unittest.skipUnless(LOCALECTL_AVAILABLE, "localectl cannot list keymaps on this host")
 class KeyboardConfigurationTest(unittest.TestCase):
     def target(self, directory: str) -> Path:

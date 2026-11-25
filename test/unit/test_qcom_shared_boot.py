@@ -256,9 +256,10 @@ else:
 
     def test_staging_preserves_legacy_service_alongside_early_hook(self):
         builder=(ROOT/'builder/build-iso.sh').read_text()
-        start=builder.index('  # Keep the existing late-start path')
+        start=builder.index('    # Keep the existing late-start path')
         end=builder.index('  rm -rf "$build_cache_dir/syslinux"',start)
-        block=builder[start:end].replace('/builder/qualcomm/',str(ROOT/'builder/qualcomm')+'/')
+        # The Snapdragon image's block ends inside this slice; the efivars hook after it is every image's.
+        block=builder[start:end].replace('\n  fi\n','\n',1).replace('/builder/qualcomm/',str(ROOT/'builder/qualcomm')+'/')
         old=('usr/local/bin/omarchy-live-dsp','etc/systemd/system/omarchy-live-dsp.service','etc/systemd/system/multi-user.target.wants/omarchy-live-dsp.service')
         for name in old:
             path=self.root/'airootfs'/name; path.parent.mkdir(parents=True,exist_ok=True); path.write_text('old')

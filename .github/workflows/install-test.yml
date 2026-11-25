@@ -106,7 +106,8 @@ jobs:
       # (test/install-test-arches): a change to the Snapdragon live startup
       # does not need the x86_64 matrix, nor documentation either. A push to
       # quattro, the rehearsal and a manual run test both, as does a pull
-      # request whose files cannot be listed.
+      # request whose files cannot be listed. A renamed file counts by its old
+      # path too: moving the ISO builder into plans/ still changes the ISO.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'pull_request'
         with:
@@ -119,7 +120,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           if [[ $GITHUB_EVENT_NAME == pull_request ]] &&
-            files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files?per_page=100" -q '.[].filename'); then
+            files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files?per_page=100" -q '.[] | .filename, (.previous_filename // empty)'); then
             ./test/install-test-arches <<<"$files" | tee -a "$GITHUB_OUTPUT"
           else
             printf '%s\n' x86_64=true aarch64=true | tee -a "$GITHUB_OUTPUT"

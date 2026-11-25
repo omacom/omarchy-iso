@@ -1510,6 +1510,7 @@ if [[ $install_target == "free_space" ]]; then
     verify_error=$(OMARCHY_VERIFY_PROGRESS=/dev/tty OMARCHY_VERIFY_PROGRESS_INDENT="$PADDING_LEFT" \
       OMARCHY_VERIFY_CONFIRM_QUESTION="$(t failure.confirmReadError)" \
       OMARCHY_VERIFY_CONFIRM_YN="$(t failure.confirmContinue "$(t common.yes)" "$(t common.no)")" \
+      OMARCHY_VERIFY_CONFIRM_YES="$(t common.yes)" \
       omarchy-wait-root-image-verify 2>&1 1>"$verify_stdout_file") || verify_status=$?
     cat "$verify_stdout_file" >>"${OMARCHY_INSTALL_LOG_FILE:-/var/log/omarchy-install.log}"
     rm -f "$verify_stdout_file"

@@ -618,6 +618,17 @@ SUMS_RC1=1 SUMS_OUT2="$IMAGE_HASH  omarchy-root.img.zst" TTY_ANSWER=n \
   run_helper loaded "failed" 0
 check "a tty-declined transient read error stays unstable" 1 "$RC" "install medium reads are unstable" "$OUT"
 
+# The configurator advertises the translated answer, so it must accept it:
+# French shows "Oui", not "y".
+SUMS_EXPECTED=$IMAGE_HASH SUMS_STUB=1 TIMEOUT_STUB=1 DROPCACHES=1 \
+SUMS_RC1=1 SUMS_OUT2="$IMAGE_HASH  omarchy-root.img.zst" TTY_ANSWER=Oui \
+OMARCHY_VERIFY_CONFIRM_YES=Oui OMARCHY_VERIFY_CONFIRM_YN='Continue the installation? [Oui/Non]' \
+  run_helper loaded "failed" 0
+check "a localized tty answer continues the install" 0 "$RC" "" "$OUT"
+[[ $OUT == *"Oui/Non"* && $OUT == *"warning: first cold read had a read error"* ]] &&
+  echo "ok: the localized prompt and its answer are accepted" ||
+  { echo "FAIL: localized tty prompt/answer wrong: $OUT"; fails=1; }
+
 # The report is capped so a broadly damaged mirror cannot print one line per
 # file. Two mismatches with a cap of one shows the first and the count.
 SUMS_EXPECTED=$IMAGE_HASH SUMS_LAYER_EXPECTED=$LAYER_HASH \

@@ -216,6 +216,7 @@ confirm_read_error_continue() {
   local state_dir=${OMARCHY_INSTALL_STATE_DIR:-} request answer waited=0 limit=${OMARCHY_VERIFY_CONFIRM_TIMEOUT:-300}
   local question=${OMARCHY_VERIFY_CONFIRM_QUESTION:-'The first cold read of the install medium had a read error, but the second read matched every checksum. Continuing may write a bad install; a different USB stick or port is safer.'}
   local yn=${OMARCHY_VERIFY_CONFIRM_YN:-'Continue the installation? [y/N]'}
+  local yes=${OMARCHY_VERIFY_CONFIRM_YES:-yes}
   if [[ -n $state_dir && -d $state_dir ]]; then
     local monitor="$state_dir/medium-confirm.dashboard" dashboard_pid
     # Only the running dashboard can answer the request. Without its marker,
@@ -243,7 +244,10 @@ confirm_read_error_continue() {
   [[ -r /dev/tty && -w /dev/tty ]] || return 1
   printf '\n%s\n%s ' "$question" "$yn" >/dev/tty
   IFS= read -r -t "$limit" answer </dev/tty || answer=
-  case $answer in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+  answer=${answer#"${answer%%[![:space:]]*}"}
+  answer=${answer%"${answer##*[![:space:]]}"}
+  answer=${answer,,}
+  [[ $answer == y || $answer == yes || $answer == "${yes,,}" ]]
 }
 
 # One cold pass over every listed file. Prints sha256sum's vector; 124 when

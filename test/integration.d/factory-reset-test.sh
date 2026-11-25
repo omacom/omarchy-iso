@@ -375,7 +375,7 @@ first_boot_phase() {
     check "systemd-boot started the first boot" \
       ssh_sudo "bootctl status 2>/dev/null | grep -q 'Product: systemd-boot'"
     check "the boot store is a fresh one, not the old owner's" \
-      ssh_sudo "grep -qx phase=active /var/lib/omarchy/boot/state && [[ \$(btrfs subvolume show /var/lib/omarchy/boot | awk '/^[[:space:]]*UUID:/ { print \$2; exit }') != '$OLD_STORE_UUID' ]]"
+      ssh_sudo "grep -qx phase=active /var/lib/omarchy/boot/state && uuid=\$(btrfs subvolume show /var/lib/omarchy/boot | awk '/^[[:space:]]*UUID:/ { print \$2; exit }') && [[ -n \$uuid && \$uuid != '$OLD_STORE_UUID' ]]"
   else
   check "windows entry survives the first boot" \
     ssh_sudo "grep -q '^/Windows' /boot/limine.conf"

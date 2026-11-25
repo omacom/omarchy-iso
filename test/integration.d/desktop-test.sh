@@ -389,8 +389,15 @@ reach_desktop() {
   # feeds FAILURES), so a stall here is visible and fails the job instead of
   # being masked by the known-failures filter.
   # An encrypted install stops at the disk passphrase first: wait_for_ssh
-  # types it, as it does for every other scenario's boot.
-  wait_for_guest_state "the installed system boots and answers SSH" "$BOOT_TIMEOUT" wait_for_ssh "$BOOT_TIMEOUT" || return 1
+  # types it, as it does for every other scenario's boot. It waits by itself,
+  # says why it gave up and stops when the VM is gone, so it isn't polled.
+  if wait_for_ssh "$BOOT_TIMEOUT"; then
+    printf 'ok - %s\n' "the installed system boots and answers SSH"
+  else
+    printf 'not ok - %s\n' "the installed system boots and answers SSH"
+    ((FAILURES += 1))
+    return 1
+  fi
   if ! wait_for_guest_state "the graphical login is ready" 300 login_ready; then
     diagnose_login
     return 1

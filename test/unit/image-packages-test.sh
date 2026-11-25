@@ -51,3 +51,15 @@ done
 (( fail == 0 )) || exit 1
 
 echo "ok: the image leaves the audio firmware and Tailscale to the machines that need them"
+
+# A Snapdragon ISO installs Snapdragon laptops only, so its root image bakes in
+# the Qualcomm default set instead of pacstrapping it at install time.
+printf '%s\n' hyprland snapper linux-firmware-qcom qcom-firmware-extract >"$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.aarch64-qualcomm.packages"
+mapfile -t snapdragon_image < <(OMARCHY_SNAPDRAGON=1 image_package_list)
+for pkg in linux-firmware-qcom qcom-firmware-extract; do
+  printf '%s\n' "${snapdragon_image[@]}" | grep -qxF "$pkg" || {
+    echo "the Snapdragon image lacks $pkg from omarchy-base.aarch64-qualcomm.packages"
+    exit 1
+  }
+done
+echo "ok: the Snapdragon image bakes in the Qualcomm default package set"

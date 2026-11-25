@@ -30,11 +30,13 @@ refused() { # description, command...: it has to fail and say why
 planned() { "$plan" "$@" 2>/dev/null; }
 
 first=$(planned 2026.10.09 431 1 schedule v4.0.4 "")
-equal "a first run makes every lane" "$(jq -r 'map(.channel) | join(",")' <<<"$first")" "edge,edge-aarch64,stable"
+equal "a first run makes every lane" "$(jq -r 'map(.channel) | join(",")' <<<"$first")" "edge,edge-aarch64,edge-snapdragon,stable"
 lane() { jq -r --arg c "$1" ".[] | select(.channel == \$c) | $2" <<<"$3"; }
-equal "each lane says its architecture" "$(jq -r 'map(.arch) | join(",")' <<<"$first")" "x86_64,aarch64,x86_64"
+equal "each lane says its architecture" "$(jq -r 'map(.arch) | join(",")' <<<"$first")" "x86_64,aarch64,aarch64,x86_64"
 equal "the aarch64 lane has the edge version" "$(lane edge-aarch64 .version "$first")" "2026.10.09.431"
 equal "the aarch64 path" "$(lane edge-aarch64 .release "$first")" "edge-aarch64/2026.10.09.431"
+equal "the Snapdragon lane has the edge version" "$(lane edge-snapdragon .version "$first")" "2026.10.09.431"
+equal "the Snapdragon path" "$(lane edge-snapdragon .release "$first")" "edge-snapdragon/2026.10.09.431"
 equal "the edge version" "$(jq -r '.[0].version' <<<"$first")" "2026.10.09.431"
 equal "the edge path" "$(jq -r '.[0].release' <<<"$first")" "edge/2026.10.09.431"
 equal "the stable version is the release's" "$(lane stable .version "$first")" "4.0.4"
@@ -47,11 +49,11 @@ equal "a run started again has its own stable path" "$(lane stable .release "$ag
   fail "two attempts of one run share a path"
 
 equal "a published release is left out of a scheduled run" \
-  "$(planned 2026.10.09 432 1 schedule v4.0.4 4.0.4 | jq -r 'map(.channel) | join(",")')" "edge,edge-aarch64"
+  "$(planned 2026.10.09 432 1 schedule v4.0.4 4.0.4 | jq -r 'map(.channel) | join(",")')" "edge,edge-aarch64,edge-snapdragon"
 equal "a new release is made on the next scheduled run" \
   "$(lane stable .version "$(planned 2026.10.09 432 1 schedule v4.0.5 4.0.4)")" "4.0.5"
 equal "a manual run makes a published release again" \
-  "$(planned 2026.10.09 432 1 workflow_dispatch v4.0.4 4.0.4 | jq -r 'map(.channel) | join(",")')" "edge,edge-aarch64,stable"
+  "$(planned 2026.10.09 432 1 workflow_dispatch v4.0.4 4.0.4 | jq -r 'map(.channel) | join(",")')" "edge,edge-aarch64,edge-snapdragon,stable"
 
 refused "a release tag that is not a version" "$plan" 2026.10.09 431 1 schedule nightly ""
 refused "an empty release tag" "$plan" 2026.10.09 431 1 schedule "" ""
@@ -130,6 +132,19 @@ equal "stable: unpacked folder" "$(field .vm.unpacked)" "https://nightly.example
 (cd "$tmp/out/stable/4.0.4/431" && sha256sum -c --quiet omarchy-4.0.4.qcow2.sha256) || fail "stable: the image's checksum file does not match it"
 (cd "$tmp/out/stable/4.0.4/431/unpacked" && sha256sum -c --quiet SHA256SUMS) || fail "stable: SHA256SUMS does not match the unpacked files"
 
+# 4.5.0 is published with its architecture in the ISO's name. latest.json
+# points at that name, and the image keeps the version's.
+rm -rf "$tmp/out"
+echo "a released x86 iso" >"$tmp/release/omarchy-4.5.0-x86.iso"
+sealed "$tmp/sealed-x86"
+"$layout" stable 4.5.0 stable/4.5.0/478 "$tmp/release/omarchy-4.5.0-x86.iso" "$tmp/sealed-x86" "$tmp/stable-packages" "$tmp/out" >/dev/null
+equal "stable: url is the x86 release's" "$(field .url)" "https://iso.example/omarchy-4.5.0-x86.iso"
+equal "stable: the image keeps the version's name" "$(field .vm.url)" "https://nightly.example/stable/4.5.0/478/omarchy-4.5.0.qcow2"
+echo "a released aarch64 iso" >"$tmp/release/omarchy-4.5.0-aarch64.iso"
+sealed "$tmp/sealed-arch"
+refused "a released ISO of another architecture" "$layout" stable 4.5.0 stable/4.5.0/9 "$tmp/release/omarchy-4.5.0-aarch64.iso" "$tmp/sealed-arch" "$tmp/stable-packages" "$tmp/out7"
+grep -q 'omarchy-4.5.0-aarch64.iso' "$tmp/refused.err" || fail "a released ISO of another architecture was refused for another reason"
+
 # edge-aarch64: the ISO and latest.json, no image yet. The ARM install test
 # answers with the Omarchy package (twice, as pacman does) and the kernel.
 rm -rf "$tmp/out"
@@ -152,6 +167,26 @@ equal "edge-aarch64: the version read from the ISO's name" "${BASH_REMATCH[0]}" 
 echo "another aarch64 iso" >"$tmp/release/omarchy-2026.10.09-aarch64-edge.iso"
 refused "an aarch64 lane given a sealed image" "$layout" edge-aarch64 2026.10.09.432 edge-aarch64/2026.10.09.432 \
   "$tmp/release/omarchy-2026.10.09-aarch64-edge.iso" "$tmp/sealed-edge" "$tmp/arm-packages" "$tmp/out6"
+
+# edge-snapdragon: the Snapdragon ISO the same way, under its own name.
+rm -rf "$tmp/out"
+echo "a snapdragon iso" >"$tmp/release/omarchy-2026.10.09-aarch64-snapdragon-edge.iso"
+"$layout" edge-snapdragon 2026.10.09.431 edge-snapdragon/2026.10.09.431 "$tmp/release/omarchy-2026.10.09-aarch64-snapdragon-edge.iso" \
+  - "$tmp/arm-packages" "$tmp/out" >/dev/null
+json=$tmp/out/edge-snapdragon/latest.json
+dir=$tmp/out/edge-snapdragon/2026.10.09.431
+equal "edge-snapdragon: files published" "$(cd "$tmp/out" && find . -type f | sort | paste -sd' ')" \
+  "./edge-snapdragon/2026.10.09.431/omarchy-edge-2026.10.09.431-snapdragon.iso ./edge-snapdragon/2026.10.09.431/omarchy-edge-2026.10.09.431-snapdragon.iso.sha256 ./edge-snapdragon/latest.json"
+(cd "$dir" && sha256sum -c --quiet ./*.sha256) || fail "edge-snapdragon: the checksum file does not match the ISO"
+equal "edge-snapdragon: url" "$(field .url)" "https://nightly.example/edge-snapdragon/2026.10.09.431/omarchy-edge-2026.10.09.431-snapdragon.iso"
+equal "edge-snapdragon: channel" "$(field .channel)" "edge-snapdragon"
+equal "edge-snapdragon: arch" "$(field .arch)" "aarch64"
+equal "edge-snapdragon: no image is described" "$(field 'has("vm")')" "false"
+echo "another snapdragon iso" >"$tmp/release/omarchy-2026.10.09-aarch64-snapdragon-edge.iso"
+refused "a Snapdragon lane given a sealed image" "$layout" edge-snapdragon 2026.10.09.432 edge-snapdragon/2026.10.09.432 \
+  "$tmp/release/omarchy-2026.10.09-aarch64-snapdragon-edge.iso" "$tmp/sealed-edge" "$tmp/arm-packages" "$tmp/out8"
+refused "a channel nobody plans" "$layout" edge-riscv 2026.10.09.432 edge-riscv/2026.10.09.432 \
+  "$tmp/release/omarchy-2026.10.09-aarch64-snapdragon-edge.iso" - "$tmp/arm-packages" "$tmp/out9"
 
 # Nothing half-made is described.
 sealed "$tmp/sealed-short"; rm "$tmp/sealed-short/initrd"
@@ -214,6 +249,30 @@ STUB
 else
   echo "nightly-fetch tests skipped: no zip or unzip here"
 fi
+
+# ------------------------------------------------------------ release-iso-name
+# curl is a stand-in that answers with ISO_STATUS, or fails as a network error
+# does when it is "down".
+named="$ROOT/test/vm-image/release-iso-name"
+bash -n "$named"
+mkdir -p "$tmp/iso-curl"
+cat >"$tmp/iso-curl/curl" <<'STUB'
+#!/bin/bash
+echo "${@: -1}" >>"$ISO_LOG"
+[[ $ISO_STATUS == down ]] && { printf 000; echo "curl: (6) Could not resolve host" >&2; exit 6; }
+printf '%s' "$ISO_STATUS"
+STUB
+chmod +x "$tmp/iso-curl/curl"
+iso_name() { env PATH="$tmp/iso-curl:$PATH" ISO_LOG="$tmp/iso.log" ISO_STATUS="$1" "$named" "$2"; }
+
+: >"$tmp/iso.log"
+equal "iso name: a release published with its architecture" "$(iso_name 200 4.5.0)" "omarchy-4.5.0-x86.iso"
+equal "iso name: the -x86 name is the one asked for" "$(cat "$tmp/iso.log")" "https://iso.example/omarchy-4.5.0-x86.iso"
+equal "iso name: a release from before 4.5.0" "$(iso_name 404 4.0.6)" "omarchy-4.0.6.iso"
+refused "iso name: another answer than 200 or 404" iso_name 503 4.5.0
+grep -q 'answered 503' "$tmp/refused.err" || fail "iso name: the answer was not named"
+refused "iso name: a network error" iso_name down 4.5.0
+grep -q 'could not reach' "$tmp/refused.err" || fail "iso name: a network error was not reported as one"
 
 # -------------------------------------------------------------- nightly-rclone
 wrapped="$ROOT/test/vm-image/nightly-rclone"

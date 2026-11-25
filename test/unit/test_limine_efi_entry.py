@@ -106,13 +106,18 @@ if os.environ.get("FAKE_NON_UTF8"):
 
 FAKE_LSBLK = r'''#!/usr/bin/env python3
 import json, os, sys
+guids = json.loads(os.environ["FAKE_GUIDS"])
 dev = sys.argv[-1]
-for key, guid in json.loads(os.environ["FAKE_GUIDS"]).items():
-    disk, part = key.rsplit(":", 1)
-    if "PARTN,PARTUUID" in sys.argv and disk == dev:
-        print(part, guid)
-    elif "PARTUUID" in sys.argv and dev == f"{disk}p{part}":
+if dev == "PARTUUID":
+    for guid in guids.values():
         print(guid)
+else:
+    for key, guid in guids.items():
+        disk, part = key.rsplit(":", 1)
+        if "PARTN,PARTUUID" in sys.argv and disk == dev:
+            print(part, guid)
+        elif "PARTUUID" in sys.argv and dev == f"{disk}p{part}":
+            print(guid)
 '''
 
 FAKE_FINDMNT = r'''#!/usr/bin/env python3
@@ -151,8 +156,8 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
     def entry(self, label, guid, part=1, loader=LOADER):
         return [label, f"HD({part},GPT,{guid},0x800,0x400000)/{loader}"]
 
-    def register(self):
-        phases_impl._register_limine_efi_entry(Path("/dev/nvme1n1"), 3, LOADER)
+    def register(self, replaced_guids=None):
+        phases_impl._register_limine_efi_entry(Path("/dev/nvme1n1"), 3, LOADER, replaced_guids=replaced_guids)
         return json.loads(self.nvram.read_text())
 
     def calls(self):
@@ -371,7 +376,7 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
                 mock.patch.object(phases_impl, "_warn_boot_entry_refused", warnings.append):
             nvram = self.register()
         self.assertEqual(nvram, {"entries": old, "order": ["0003", "0004"], "next": "0003"})
-        self.assertEqual(self.writes(), ["--bootorder", "--bootnext"])
+        self.assertEqual(self.writes(), ["--bootnext"])
         self.assertEqual(warnings, [])
 
     def test_an_entry_the_firmware_answers_a_create_with_is_ours(self):
@@ -435,6 +440,34 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
         self.assertIn("No space left on device", warnings[0])
 
+    def test_stale_limine_entries_for_replaced_partitions_are_pruned_and_disconnected_disks_survive(self):
+        # A previous install on the disk this install just wiped left a "Limine"
+        # entry whose GUID is in replaced_guids. Pruning it before --create
+        # frees the slot (even when NVRAM was full), while a "Limine" entry for
+        # a disconnected disk (not attached AND not in replaced_guids) survives.
+        replaced = "11111111-2222-3333-4444-555555555555"
+        disconnected = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+        self.nvram_with(
+            {
+                "0000": self.entry("Windows Boot Manager", WINDOWS),
+                "0002": self.entry("Omarchy", replaced, loader="\\EFI\\Linux\\omarchy_linux.efi"),
+                "0003": self.entry("Limine", replaced),
+                "0004": self.entry("Limine", OTHER),
+                "0005": self.entry("Limine", disconnected),
+            },
+            ["0003", "0004", "0005", "0000", "0002"],
+        )
+        with mock.patch.dict(os.environ, {"FAKE_SLOTS": "5"}):
+            nvram = self.register(replaced_guids={replaced})
+        self.assertIn("0000", nvram["entries"])
+        self.assertIn("0002", nvram["entries"])
+        self.assertIn("0004", nvram["entries"])
+        self.assertIn("0005", nvram["entries"], "disconnected disk entry must not be deleted")
+        ours = next(num for num, (label, dp) in nvram["entries"].items() if label == "Limine" and OURS in dp)
+        self.assertNotIn(replaced, str(nvram["entries"][ours]))
+        self.assertEqual(nvram["order"], [ours, "0004", "0005", "0000", "0002"])
+        self.assertEqual(nvram.get("next"), ours)
+
 
     def test_boot_check_does_not_count_another_installs_entry(self):
         # validate_boot: our entry was dropped and no fallback was deployed.
@@ -474,7 +507,7 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"FAKE_NON_UTF8": "1"}), \
                 mock.patch.object(phases_impl, "error", lambda _message: None):
             nvram = self.register()
-        self.assertEqual(self.writes(), ["--create", "--bootorder", "--bootnext"])
+        self.assertEqual(self.writes(), ["--create", "--bootnext"])
         self.assertEqual(nvram.get("next"), nvram["order"][0])
 
     def test_an_unreadable_variable_store_skips_registration(self):

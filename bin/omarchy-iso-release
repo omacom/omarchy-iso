@@ -9,6 +9,7 @@ MAKE_ARGS=()
 ISO_REF=quattro
 RELEASE_SUFFIX=""
 ARCH=x86_64
+SNAPDRAGON=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -33,14 +34,19 @@ while [[ $# -gt 0 ]]; do
     esac
     shift 2
     ;;
+  --snapdragon)
+    ARCH=aarch64
+    SNAPDRAGON=1
+    shift
+    ;;
   -*)
     echo "Unknown option: $1"
-    echo "Usage: omarchy-iso-release [--no-make] [--rc] [--arch x86_64|aarch64] [version]"
+    echo "Usage: omarchy-iso-release [--no-make] [--rc] [--arch x86_64|aarch64 | --snapdragon] [version]"
     exit 1
     ;;
   *)
     if [[ -n "${BUILD_VERSION-}" ]]; then
-      echo "Usage: omarchy-iso-release [--no-make] [--rc] [--arch x86_64|aarch64] [version]"
+      echo "Usage: omarchy-iso-release [--no-make] [--rc] [--arch x86_64|aarch64 | --snapdragon] [version]"
       exit 1
     fi
     BUILD_VERSION="$1"
@@ -50,7 +56,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${BUILD_VERSION-}" ]]; then
-  echo "Usage: omarchy-iso-release [--no-make] [--rc] [--arch x86_64|aarch64] [version]"
+  echo "Usage: omarchy-iso-release [--no-make] [--rc] [--arch x86_64|aarch64 | --snapdragon] [version]"
   exit 1
 fi
 
@@ -62,11 +68,23 @@ if [[ $BUILD_VERSION == *rc* ]]; then
   RELEASE_SUFFIX=""
 fi
 
-# The x86_64 ISO keeps the plain name every download link already uses. Any
-# other architecture says so, as the nightly's do, or it would upload over it.
-ARCH_SUFFIX=""
-if [[ $ARCH != x86_64 ]]; then
-  ARCH_SUFFIX="-$ARCH"
+# From 4.5.0 on, every release ISO names its architecture, so the two never
+# upload over each other: omarchy-X.Y.Z-x86.iso and omarchy-X.Y.Z-aarch64.iso,
+# and the Snapdragon laptops' own aarch64 image omarchy-X.Y.Z-snapdragon.iso.
+if [[ -n $SNAPDRAGON && $ARCH != aarch64 ]]; then
+  echo "Error: --snapdragon builds an aarch64 image" >&2
+  exit 1
+fi
+ARCH_SUFFIX="-$ARCH"
+if [[ $ARCH == x86_64 ]]; then
+  ARCH_SUFFIX="-x86"
+fi
+BUILD_SUFFIX="$ARCH"
+MAKE_PLATFORM=(--arch "$ARCH")
+if [[ -n $SNAPDRAGON ]]; then
+  ARCH_SUFFIX="-snapdragon"
+  BUILD_SUFFIX="$ARCH-snapdragon"
+  MAKE_PLATFORM=(--snapdragon)
 fi
 
 BUILD_ROOT=$(realpath "${BASH_SOURCE[0]%/*}/..")
@@ -75,13 +93,15 @@ BUILD_RELEASE_PATH="$BUILD_ROOT/release"
 # Make ISOs
 if [[ ! " ${MAKE_ARGS[*]} " =~ " --no-make " ]]; then
   echo -e "\e[32mMaking $ISO_REF ISO\e[0m"
-  omarchy-iso-make --arch "$ARCH" --no-cache --no-boot-offer "${MAKE_ARGS[@]}"
+  omarchy-iso-make "${MAKE_PLATFORM[@]}" --no-cache --no-boot-offer "${MAKE_ARGS[@]}"
 else
   echo -e "\e[31mSkipping remaking ISOs\e[0m"
 fi
 
-# Sign and upload ISO
-latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*"$ARCH-$ISO_REF".iso | head -n1)
+# Sign and upload ISO. The build to release is named by its date. An OEM build
+# (omarchy-oem-...) ends in the same architecture and channel and erases the
+# disk of whoever boots it, so it is never the one a release publishes.
+latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/omarchy-[0-9]*"$BUILD_SUFFIX-$ISO_REF".iso | head -n1)
 release_iso="$BUILD_RELEASE_PATH/omarchy-$BUILD_VERSION$RELEASE_SUFFIX$ARCH_SUFFIX.iso"
 cp "$latest_iso" "$release_iso"
 

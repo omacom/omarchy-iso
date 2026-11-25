@@ -93,6 +93,48 @@ class InstallBaseDeltaTest(unittest.TestCase):
         calls = self.run_delta(Installer45(self.target(), []))
         self.assertEqual(calls[-1], "post-install hook")
 
+    def test_prebuilt_locale_skips_set_locale_and_empty_kb_skips_vconsole(self):
+        target = self.target()
+        (target / "etc").mkdir()
+        (target / "etc" / "locale.gen").write_text("#de_DE.UTF-8 UTF-8\nen_US.UTF-8 UTF-8\n")
+        installer = Installer45(target, [])
+        installer.set_vconsole = lambda lc: installer.calls.append(("vconsole", lc.kb_layout))
+        installer.set_locale = lambda lc: installer.calls.append(("locale", lc.sys_lang)) or True
+        installer.set_keyboard_language = lambda kb: installer.calls.append(("kb", kb))
+
+        arch = self.enterContext(adapter({"archinstall.lib.pacman.config": {"PacmanConfig": PacmanConfig}}, version="4.5"))
+        timer = types.SimpleNamespace(_time_step=lambda name: nullcontext())
+        self.enterContext(mock.patch.dict(sys.modules, {"orchestrator.phases_impl": timer}))
+        self.enterContext(mock.patch.object(arch, "info", lambda *_: None))
+        config = types.SimpleNamespace(mirror_config=None, pacman_config=None)
+        locale_cfg = types.SimpleNamespace(sys_lang="en_US.UTF-8", sys_enc="UTF-8", kb_layout="")
+        arch.install_base_delta(installer, config, hostname=None, locale_config=locale_cfg)
+
+        self.assertEqual((target / "etc" / "locale.conf").read_text(), "LANG=en_US.UTF-8\n")
+        self.assertNotIn("locale", [c[0] for c in installer.calls if isinstance(c, tuple)])
+        self.assertNotIn("vconsole", [c[0] for c in installer.calls if isinstance(c, tuple)])
+        self.assertNotIn("kb", [c[0] for c in installer.calls if isinstance(c, tuple)])
+
+    def test_non_prebuilt_locale_falls_through_to_set_locale(self):
+        target = self.target()
+        (target / "etc").mkdir()
+        (target / "etc" / "locale.gen").write_text("#da_DK.UTF-8 UTF-8\nen_US.UTF-8 UTF-8\n")
+        installer = Installer45(target, [])
+        installer.set_vconsole = lambda lc: installer.calls.append(("vconsole", lc.kb_layout))
+        installer.set_locale = lambda lc: installer.calls.append(("locale", lc.sys_lang)) or True
+        installer.set_keyboard_language = lambda kb: installer.calls.append(("kb", kb))
+
+        arch = self.enterContext(adapter({"archinstall.lib.pacman.config": {"PacmanConfig": PacmanConfig}}, version="4.5"))
+        timer = types.SimpleNamespace(_time_step=lambda name: nullcontext())
+        self.enterContext(mock.patch.dict(sys.modules, {"orchestrator.phases_impl": timer}))
+        config = types.SimpleNamespace(mirror_config=None, pacman_config=None)
+        locale_cfg = types.SimpleNamespace(sys_lang="da_DK.UTF-8", sys_enc="UTF-8", kb_layout="dk")
+        arch.install_base_delta(installer, config, hostname=None, locale_config=locale_cfg)
+
+        self.assertIn(("locale", "da_DK.UTF-8"), installer.calls)
+        self.assertIn(("vconsole", "dk"), installer.calls)
+        self.assertIn(("kb", "dk"), installer.calls)
+
 
 class TargetPackagesTest(unittest.TestCase):
     """What the delta counts as already installed: what pacman says satisfies
@@ -133,6 +175,80 @@ class TargetPackagesTest(unittest.TestCase):
             self.assertEqual(self.arch.target_missing_packages(self.target, ["linux"]), ["linux"])
         capture.assert_not_called()
         self.assertFalse((self.target / "var").exists())
+
+
+class InstallApplicationsBeforeStrapTest(unittest.TestCase):
+    """install_applications runs before_strap only when a package is actually missing."""
+
+    def setUp(self):
+        self.arch = self.enterContext(adapter())
+        self.target = Path(self.enterContext(TemporaryDirectory()))
+
+    def test_before_strap_runs_only_before_a_real_pacstrap(self):
+        for missing, expected in (
+            ([], []),
+            (["sof-firmware"], ["before_strap", ("strap", ["sof-firmware"])]),
+        ):
+            with self.subTest(missing=missing):
+                events = []
+                installer = types.SimpleNamespace(
+                    target=self.target,
+                    add_additional_packages=lambda pkgs: events.append(("strap", list(pkgs))),
+                )
+                handler = types.SimpleNamespace(
+                    install_applications=lambda inst, app_cfg, users=None: inst.add_additional_packages(["pipewire", "sof-firmware"]),
+                )
+                arch_config = types.SimpleNamespace(
+                    app_config=object(),
+                    auth_config=types.SimpleNamespace(users=["dhh"]),
+                )
+                with (
+                    mock.patch.object(self.arch, "_application_handler", return_value=handler),
+                    mock.patch.object(self.arch, "target_missing_packages", return_value=missing),
+                ):
+                    self.arch.install_applications(
+                        installer,
+                        arch_config,
+                        before_strap=lambda: events.append("before_strap"),
+                    )
+                self.assertEqual(events, expected)
+
+    def test_skip_packages_omits_deferred_packages_without_strapping(self):
+        for requested, expected_wanted, missing, expected_events in (
+            (["sof-firmware"], [], [], []),
+            (["pipewire", "sof-firmware", "alsa-firmware"], ["pipewire", "alsa-firmware"], ["alsa-firmware"], ["before_strap", ("strap", ["alsa-firmware"])]),
+        ):
+            with self.subTest(requested=requested):
+                events = []
+                checked = []
+                installer = types.SimpleNamespace(
+                    target=self.target,
+                    add_additional_packages=lambda pkgs: events.append(("strap", list(pkgs))),
+                )
+                handler = types.SimpleNamespace(
+                    install_applications=lambda inst, app_cfg, users=None: inst.add_additional_packages(requested),
+                )
+                arch_config = types.SimpleNamespace(
+                    app_config=object(),
+                    auth_config=types.SimpleNamespace(users=["dhh"]),
+                )
+
+                def fake_missing(target, pkgs):
+                    checked.append(list(pkgs))
+                    return missing
+
+                with (
+                    mock.patch.object(self.arch, "_application_handler", return_value=handler),
+                    mock.patch.object(self.arch, "target_missing_packages", side_effect=fake_missing),
+                ):
+                    self.arch.install_applications(
+                        installer,
+                        arch_config,
+                        before_strap=lambda: events.append("before_strap"),
+                        skip_packages=("sof-firmware",),
+                    )
+                self.assertEqual(events, expected_events)
+                self.assertEqual(checked, [expected_wanted] if expected_wanted else [])
 
 
 if __name__ == "__main__":

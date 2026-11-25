@@ -107,14 +107,14 @@ release_and_wipe() {
 # the disk's lock, which udevd honours by leaving the disk alone: nothing can
 # be assembled from a signature between reading the stack and wiping it.
 released=false
-for attempt in 1 2 3 4 5; do
+for attempt in $(seq 1 20); do
   udevadm settle 2>/dev/null || true
   exec {lock}<"$disk"
   flock -x "$lock"
   release_and_wipe && released=true
   exec {lock}<&-
   $released && break
-  sleep 1
+  sleep 0.2
 done
 udevadm settle 2>/dev/null || true
 

@@ -3,12 +3,13 @@
 # The live initramfs's udev hook waits for the boot medium by UUID instead of
 # settling the whole uevent queue. It must wait for what the archiso hook will
 # look the medium up by, blkid, and not for udev's /dev/disk/by-uuid link.
-# Ventoy boots the ISO as a file on its stick and maps it to
-# /dev/mapper/ventoy with dmsetup from a udev rule, once the stick has been
-# scanned; that device never gets the link. Waiting for the link ran out its
-# 30 s on every Ventoy boot of 4.5.0rc2, and without that delay archiso
-# searched before the map existed, mounted the stick's VTOYEFI partition
-# and dropped to a shell behind the Plymouth splash.
+#
+# Booted from a Ventoy stick in normal mode it must not wait at all. Ventoy
+# unpacks this initramfs under its own /ventoy scripts, and those map the ISO
+# to /dev/mapper/ventoy only after every hook, just before archiso mounts it.
+# A wait here can only time out: it held every 4.5.0rc3 normal-mode Ventoy boot
+# for 50 s. GRUB2 mode, which puts rdinit=/vtoy/vtoy on the command line, maps
+# it from the uevents the hook has just triggered, so there it still waits.
 #
 # The hook runs with udevadm, blkid and sleep stubbed: the medium shows up
 # to blkid on its third look, and udev never makes a by-uuid link for it.
@@ -26,15 +27,19 @@ trap 'rm -rf "$work"' EXIT
 
 failures=0
 
-# run_case <name> <expected udevadm calls after trigger> <blkid finds it: yes|no> [var=value ...]
+# run_case <name> <expected udevadm calls after trigger, then blkid looks>
+#          <blkid finds it: yes|no> <Ventoy's /ventoy present: yes|no> [var=value ...]
 run_case() {
-  local name=$1 expected=$2 found=$3 calls
-  shift 3
+  local name=$1 expected=$2 found=$3 ventoy=$4 calls
+  shift 4
+  rm -rf "$work/ventoy"
+  [[ $ventoy == yes ]] && mkdir "$work/ventoy"
   calls=$(
     env -i PATH="$PATH" HOOK="$HOOK" WORK="$work" FOUND="$found" "$@" bash -c '
       : >"$WORK/calls"
       echo 0 >"$WORK/looks"
       msg() { :; }
+      getarg() { [[ $1 == rdinit ]] && echo "${RDINIT:-}"; }
       sleep() { :; }
       udevadm() {
         [[ $1 == trigger ]] && return 0
@@ -50,9 +55,10 @@ run_case() {
       }
       archisosearchuuid=${archisosearchuuid:-}
       archiso_nbd_srv=${archiso_nbd_srv:-} archiso_nfs_srv=${archiso_nfs_srv:-} archiso_http_srv=${archiso_http_srv:-}
-      . "$HOOK"
+      # The hook looks for /ventoy; here it looks in the work directory.
+      . <(sed "s|/ventoy|$WORK/ventoy|g" "$HOOK")
       run_hook
-      paste -sd" " "$WORK/calls"
+      echo "$(paste -sd" " "$WORK/calls")|$(<"$WORK/looks")"
     '
   )
   if [[ $calls == "$expected" ]]; then
@@ -63,13 +69,17 @@ run_case() {
   fi
 }
 
-run_case "a medium blkid finds, with no by-uuid link (Ventoy): no settle" "" yes \
+run_case "a medium blkid finds, with no by-uuid link: no settle" "|3" yes no \
   archisosearchuuid=2026-10-27-12-53-28-00
-run_case "a medium that never shows up: settle" "settle" no \
+run_case "a medium that never shows up: settle" "settle|300" no no \
   archisosearchuuid=2026-10-27-12-53-28-00
-run_case "a PXE medium appears after the hooks: settle" "settle" yes \
+run_case "Ventoy's normal mode maps the medium after the hooks: no wait, no settle" "|0" no yes \
+  archisosearchuuid=2026-10-27-12-53-28-00
+run_case "Ventoy's GRUB2 mode maps it from the uevents: wait as usual" "|3" yes yes \
+  archisosearchuuid=2026-10-27-12-53-28-00 RDINIT=/vtoy/vtoy
+run_case "a PXE medium appears after the hooks: settle" "settle|0" yes no \
   archisosearchuuid=2026-10-27-12-53-28-00 archiso_nbd_srv=10.0.2.2
-run_case "no UUID to wait for: settle" "settle" yes
+run_case "no UUID to wait for: settle" "settle|0" yes no
 
 modules=$(bash -c '. "$1"; echo " ${MODULES[*]} "' _ "$CONF")
 if [[ $modules == *" loop "* ]]; then

@@ -2,6 +2,8 @@
 # shellcheck disable=SC2034
 
 iso_name="omarchy"
+[[ ${OMARCHY_OEM_INSTALL:-} == "1" ]] && iso_name="omarchy-oem"
+[[ -n ${OMARCHY_PRESET:-} ]] && iso_name="$iso_name-$OMARCHY_PRESET"
 iso_label="OMARCHY_$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y%m)"
 iso_publisher="Omarchy <https://omarchy.org>"
 iso_application="Omarchy Installer"
@@ -29,9 +31,11 @@ airootfs_image_type="squashfs"
 # cold on every boot: kernel, plymouth, systemd, python, archinstall, gum. The
 # whole ISO grows well under a percent for it, and with no x86 BCJ filter the
 # same options build the aarch64 image too.
+airootfs_zstd_level=19
+[[ ${OMARCHY_FAST_COMPRESSION:-} == "1" ]] && airootfs_zstd_level=1
 airootfs_image_tool_options=(
   '-comp' 'zstd'
-  '-Xcompression-level' '19'
+  '-Xcompression-level' "$airootfs_zstd_level"
   '-b' '1M'
   '-action' 'uncompressed@subpathname(var/cache/omarchy/mirror/offline)'
 )

@@ -32,6 +32,19 @@ source "$INSTALLER_I18N"
 i18n_load "${OMARCHY_ISO_LANGUAGE:-en}"
 i18n_console_font "$TTY_PATH"
 
+# The traced-icon progress screen is vendored from the runtime package this ISO
+# bundles, as setup-form.sh is, because first-boot setup (omarchy-provision-owner)
+# draws the same screen and the two must never drift apart. On the ISO that
+# vendored copy is what loads; a dry run outside the ISO falls back to the
+# omarchy checkout OMARCHY_PATH points at.
+PROGRESS_ICON="${PROGRESS_ICON:-/usr/share/omarchy-iso/progress-icon.sh}"
+[[ -r $PROGRESS_ICON ]] || PROGRESS_ICON="${OMARCHY_PATH:-/usr/share/omarchy}/install/provisioning/progress-icon.sh"
+if [[ ! -r $PROGRESS_ICON ]]; then
+  echo "ERROR: shared progress screen not found at $PROGRESS_ICON" >&2
+  exit 1
+fi
+source "$PROGRESS_ICON"
+
 # Autoinstall has no one at the keyboard, and every prompt this dashboard owns
 # reads from the TTY, so each would hang forever. Suppress them here rather than
 # in the scripts they live in: this process is the only owner of the visible UI.
@@ -58,6 +71,9 @@ export GUM_CONFIRM_UNSELECTED_BACKGROUND="${GUM_CONFIRM_UNSELECTED_BACKGROUND:-0
 
 child_pid=""
 child_pgid=""
+sanitizer_pid=""
+sanitizer_dir=""
+sanitizer_fifo=""
 
 tips=(
   progress.tip.menu
@@ -81,6 +97,7 @@ tips=(
 )
 
 cleanup() {
+  [[ -n ${sanitizer_dir:-} ]] && rm -rf "$sanitizer_dir" 2>/dev/null || true
   printf '%s%s' "$RESET" "$SHOW_CURSOR" >"$TTY_PATH" 2>/dev/null || true
 }
 
@@ -89,22 +106,30 @@ dashboard_log() {
 }
 
 stop_child() {
-  [[ -n ${child_pid:-} ]] || return 0
-  if kill -0 "$child_pid" 2>/dev/null; then
-    if [[ -n ${child_pgid:-} ]]; then
-      kill -- -"$child_pgid" 2>/dev/null || true
-    fi
-    kill "$child_pid" 2>/dev/null || true
-    for _ in {1..20}; do
-      kill -0 "$child_pid" 2>/dev/null || break
-      sleep 0.05
-    done
+  if [[ -n ${child_pid:-} ]]; then
     if kill -0 "$child_pid" 2>/dev/null; then
-      [[ -n ${child_pgid:-} ]] && kill -9 -- -"$child_pgid" 2>/dev/null || true
-      kill -9 "$child_pid" 2>/dev/null || true
+      if [[ -n ${child_pgid:-} ]]; then
+        kill -- -"$child_pgid" 2>/dev/null || true
+      fi
+      kill "$child_pid" 2>/dev/null || true
+      for _ in {1..20}; do
+        kill -0 "$child_pid" 2>/dev/null || break
+        sleep 0.05
+      done
+      if kill -0 "$child_pid" 2>/dev/null; then
+        [[ -n ${child_pgid:-} ]] && kill -9 -- -"$child_pgid" 2>/dev/null || true
+        kill -9 "$child_pid" 2>/dev/null || true
+      fi
     fi
+    wait "$child_pid" 2>/dev/null || true
+    child_pid=""
+    child_pgid=""
   fi
-  wait "$child_pid" 2>/dev/null || true
+  if [[ -n ${sanitizer_pid:-} ]]; then
+    kill "$sanitizer_pid" 2>/dev/null || true
+    wait "$sanitizer_pid" 2>/dev/null || true
+    sanitizer_pid=""
+  fi
 }
 
 interrupt() {
@@ -120,60 +145,6 @@ trap 'interrupt 143' TERM
 
 term_size() { stty size 2>/dev/null <"$TTY_PATH" || printf '24 80\n'; }
 term_cols() { local size; size="$(term_size)"; printf '%s\n' "${size#* }"; }
-
-# Read the actual character dimensions instead of assuming an 8 x 16 font.
-# Linux VTs expose the font through KDFONTOP; desktop terminals may expose
-# pixels in their window size or answer the standard cell-size query.
-term_cell_size() {
-  python3 - "$TTY_PATH" <<'PY'
-import fcntl
-import os
-import re
-import select
-import struct
-import sys
-import termios
-import time
-import tty
-
-with open(sys.argv[1], "r+b", buffering=0) as terminal:
-    fd = terminal.fileno()
-    rows, cols, width, height = struct.unpack(
-        "HHHH", fcntl.ioctl(fd, termios.TIOCGWINSZ, bytes(8)))
-    if rows and cols and width and height:
-        print(round(width / cols), round(height / rows))
-        sys.exit()
-    try:
-        font = bytearray(struct.pack("@5IP", 1, 0, 0, 0, 0, 0))
-        fcntl.ioctl(fd, 0x4B72, font)  # KDFONTOP / KD_FONT_OP_GET, no glyph data
-        _, _, width, height, _ = struct.unpack_from("@5I", font)
-        if width and height:
-            print(width, height)
-            sys.exit()
-    except OSError:
-        pass
-
-    settings = termios.tcgetattr(fd)
-    try:
-        tty.setcbreak(fd, termios.TCSANOW)
-        os.write(fd, b"\x1b[16t")
-        response = b""
-        deadline = time.monotonic() + 0.15
-        while select.select([fd], [], [], max(0, deadline - time.monotonic()))[0]:
-            response += os.read(fd, 64)
-            match = re.search(rb"\x1b\[6;(\d+);(\d+)t", response)
-            if match:
-                height, width = map(int, match.groups())
-                if width and height:
-                    print(width, height)
-                    sys.exit()
-            if time.monotonic() >= deadline:
-                break
-    finally:
-        termios.tcsetattr(fd, termios.TCSANOW, settings)
-    print(8, 16)  # Conventional console font when dimensions aren't available.
-PY
-}
 
 logo_width() {
   if [[ -f $LOGO_PATH ]]; then
@@ -205,8 +176,6 @@ LOGO_HEIGHT="$(logo_height)"
 (( LOGO_WIDTH > 0 )) || LOGO_WIDTH=81
 (( LOGO_HEIGHT > 0 )) || LOGO_HEIGHT=1
 CONTENT_WIDTH="$LOGO_WIDTH"
-TOP_ROW=1
-LAST_SIZE=""
 LAST_PM=10
 # Wordmark, blank, title, and the three rows gum confirm uses (upstream's +5),
 # plus two rows between title and button: a blank and the medium-removal note
@@ -221,13 +190,14 @@ FINISH_TOP_ROW=2
 #   floor  lo + (span-1) * t / (t+tau), on time since this process saw the
 #          phase. Asymptotic, so it approaches the band end without reaching it.
 #          tau is a shape constant, not a duration prediction.
-#   work   packages installed / PKG_TOTAL, for the package phase only (~85% of
-#          the install). libalpm makes one directory per package under
-#          <target>/var/lib/pacman/local; the denominator comes from
-#          build-iso.sh, so there is no second package list to drift.
-#          The root image unpack that precedes the package delta publishes
-#          phase_progress (stream bytes consumed) in the state file; it drives
-#          the same band until the local db fills in when the unpack lands.
+#   work   phase_progress from the state file where a phase publishes one:
+#          the boot-time hash of the medium in "Preparing install target",
+#          and the root image landing in "Installing Arch + Omarchy". That
+#          phase also counts packages installed / PKG_TOTAL: libalpm makes
+#          one directory per package under <target>/var/lib/pacman/local,
+#          and the denominator comes from build-iso.sh. The image brings
+#          almost all of them at once, so the count marks the image landing
+#          rather than moving package by package.
 #
 # Per-mille because a whole-percent asymptote over a 2-point band has two
 # reachable values and stops moving. No give-up predicate: two discontinuous
@@ -255,12 +225,9 @@ fi
 
 PKG_BONUS_MAX_PM=100   # cap on how far progress may run ahead of the count
 PKG_TAIL_PM=40         # band held back so stalled progress has somewhere to go
-PKG_FLOOR_TAU=900      # with a work signal, time is only a backstop until the
-                       # first package, so slow it until it cannot outrun data
 
 POS=10                 # position, per-mille, monotonic
 PROGRESS_PM=10
-VERIFY_PCT=-1          # honest percent of the pre-flight verify, -1 when idle
 NOW=0                  # monotonic seconds, refreshed once per frame
 DASH_T0=0
 PHASE_NAME=""          # last phase this process observed
@@ -272,6 +239,7 @@ PKG_BASE=-1            # package count when the phase started
 PKG_SEEN=0             # running max of packages since PKG_BASE
 PKG_LAST_CHANGE=0
 PKG_BONUS=0
+SIGNAL_BASE=-1         # POS when this phase's phase_progress first arrived
 
 # Monotonic clock: tzupdate and systemd-timesyncd can step the wall clock
 # mid-install, which would jump every time-driven band to its ceiling.
@@ -296,7 +264,7 @@ left_padding() {
 visible_len() {
   local text="$1"
   text="$(printf '%b' "$text" | sed -E $'s/\x1b\\[[0-9;?]*[A-Za-z]//g')"
-  printf '%s' "${#text}"
+  display_width "$text"
 }
 
 blank_line() { printf '\r%s\n' "$CLEAR_LINE"; }
@@ -328,163 +296,6 @@ render_logo() {
   fi
 }
 
-# The icon uses half-block glyphs, scaled to the terminal's actual cell aspect
-# ratio so its square silhouette stays square. No graphics protocol is needed.
-# Coordinates follow the 15 x 15 grid of Omarchy's icon.svg. Each segment
-# paints the full stroke width, starting at the bottom middle of the outer ring.
-ICON_WIDTH=30
-ICON_HEIGHT=15
-CELL_WIDTH=8
-CELL_HEIGHT=16
-ICON_LEFT=1
-ICON_STEPS=0
-ICON_DRAWN=0
-DISPLAY_PM=0
-ICON_FRAME=""
-declare -a ICON_ORDER=() ICON_TRACE=() ICON_FILL=()
-
-icon_segment() {
-  local scale="$1" x1="$2" y1="$3" x2="$4" y2="$5"
-  local x y from to
-  if (( y1 == y2 )); then
-    from=$(( (x1 * ICON_WIDTH + 14) / 15 ))
-    to=$(( ((x2 + 1) * ICON_WIDTH + 14) / 15 ))
-    if (( x2 < x1 )); then
-      from=$(( ((x1 + 1) * ICON_WIDTH + 14) / 15 - 1 ))
-      to=$(( (x2 * ICON_WIDTH + 14) / 15 - 1 ))
-    fi
-    for ((x=from; x!=to; x+=(x2 >= x1 ? 1 : -1))); do
-      for ((y=y1 * scale; y<(y1 + 1) * scale; y++)); do
-        icon_pixel "$((y * ICON_WIDTH + x))"
-      done
-    done
-  else
-    from=$(( y1 * scale ))
-    to=$(( (y2 + 1) * scale ))
-    if (( y2 < y1 )); then
-      from=$(( (y1 + 1) * scale - 1 ))
-      to=$(( y2 * scale - 1 ))
-    fi
-    for ((y=from; y!=to; y+=(y2 >= y1 ? 1 : -1))); do
-      for ((x=(x1 * ICON_WIDTH + 14) / 15; x<((x1 + 1) * ICON_WIDTH + 14) / 15; x++)); do
-        icon_pixel "$((y * ICON_WIDTH + x))"
-      done
-    done
-  fi
-}
-
-icon_pixel() {
-  local pixel="$1"
-  if [[ ! -v ICON_TRACE[pixel] ]]; then
-    ICON_ORDER+=("$pixel")
-    ICON_TRACE[pixel]=${#ICON_ORDER[@]}
-  fi
-}
-
-build_icon() {
-  local scale="$1" x y row
-  local -a mask=(
-    111111111111111
-    100000010000001
-    101111110001101
-    101000000000101
-    101000000000101
-    101000000000101
-    101000000000101
-    111000000000101
-    101000000000101
-    101000000000101
-    101000000000101
-    101000000000101
-    101111111111101
-    100000010000001
-    111111110111111
-  )
-  ICON_WIDTH=$(( (15 * scale * CELL_HEIGHT + CELL_WIDTH) / (2 * CELL_WIDTH) ))
-  ICON_HEIGHT=$(((15 * scale + 1) / 2))
-  ICON_ORDER=() ICON_TRACE=() ICON_FILL=()
-  ICON_DRAWN=0
-  # Start at the bottom middle, follow the outer left edge to the top cross,
-  # then descend into the inner shape. Fill its two bridges as we reach them.
-  icon_segment "$scale" 7 14 0 14
-  icon_segment "$scale" 0 14 0 0
-  icon_segment "$scale" 0 0 7 0
-  icon_segment "$scale" 7 0 7 2
-  icon_segment "$scale" 7 2 2 2
-  icon_segment "$scale" 2 2 2 7
-  icon_segment "$scale" 2 7 0 7
-  icon_segment "$scale" 2 7 2 12
-  icon_segment "$scale" 2 12 7 12
-  icon_segment "$scale" 7 12 7 14
-  icon_segment "$scale" 7 12 12 12
-  icon_segment "$scale" 12 12 12 2
-  icon_segment "$scale" 12 2 11 2
-  # Finish from the top cross: right along the outside, down, then left.
-  icon_segment "$scale" 7 0 14 0
-  icon_segment "$scale" 14 0 14 14
-  icon_segment "$scale" 14 14 9 14
-  ICON_STEPS=${#ICON_ORDER[@]}
-  for ((y=0; y<15 * scale; y++)); do
-    row=${mask[y / scale]}
-    for ((x=0; x<ICON_WIDTH; x++)); do
-      ICON_FILL[y * ICON_WIDTH + x]=${row:x * 15 / ICON_WIDTH:1}
-    done
-  done
-}
-
-# Append one cell with independently colored upper/lower pixels. This also
-# handles a green tracing tip sharing a cell with the still-dark outline.
-icon_cell() {
-  local pixel="$1" drawn="$2" solid="$3" upper=0 lower=0 step
-  if (( solid )); then
-    (( ICON_FILL[pixel] )) && upper=32
-    (( ${ICON_FILL[pixel + ICON_WIDTH]:-0} )) && lower=32
-  else
-    step=${ICON_TRACE[pixel]:-0}
-    (( step > 0 )) && upper=90
-    (( step > 0 && step <= drawn )) && upper=32
-    step=${ICON_TRACE[pixel + ICON_WIDTH]:-0}
-    (( step > 0 )) && lower=90
-    (( step > 0 && step <= drawn )) && lower=32
-  fi
-  if (( upper == 0 && lower == 0 )); then
-    ICON_FRAME+="${RESET} "
-  elif (( upper == lower )); then
-    ICON_FRAME+="${CSI}${upper};49m█"
-  elif (( lower == 0 )); then
-    ICON_FRAME+="${CSI}${upper};49m▀"
-  elif (( upper == 0 )); then
-    ICON_FRAME+="${CSI}${lower};49m▄"
-  else
-    ICON_FRAME+="${CSI}${upper};$((lower + 10))m▀"
-  fi
-}
-
-render_icon() {
-  local pm="$1" full="${2:-0}" drawn i pixel row col
-  drawn=$((pm * ICON_STEPS / 1000))
-  ICON_FRAME=""
-  if (( full || pm == 1000 )); then
-    for ((row=0; row<ICON_HEIGHT; row++)); do
-      ICON_FRAME+="${CSI}$((TOP_ROW + row));${ICON_LEFT}H"
-      for ((col=0; col<ICON_WIDTH; col++)); do
-        icon_cell "$((row * 2 * ICON_WIDTH + col))" "$drawn" "$((pm == 1000))"
-      done
-    done
-  else
-    # Between layout changes, repaint only newly traced pixels. This keeps the
-    # animation cheap even while pacstrap saturates the disk.
-    for ((i=ICON_DRAWN; i<drawn; i++)); do
-      pixel=${ICON_ORDER[i]}
-      row=$((pixel / ICON_WIDTH / 2)) col=$((pixel % ICON_WIDTH))
-      ICON_FRAME+="${CSI}$((TOP_ROW + row));$((ICON_LEFT + col))H"
-      icon_cell "$((row * 2 * ICON_WIDTH + col))" "$drawn" 0
-    done
-  fi
-  printf '%s%s' "$ICON_FRAME" "$RESET"
-  ICON_DRAWN=$drawn
-}
-
 # Packages libalpm has finished installing. local/ holds one directory per
 # package and nothing else in it is a directory, so */ is exact. One glob, no
 # forks: this runs twice a second while the disk is saturated.
@@ -506,11 +317,10 @@ count_packages() {
 # here would land on the TTY between the cursor escape and the drawing.
 install_progress() {
   local phase finished index total target
-  local lo hi tau span t pos work gap n pkg_signal=0 progress_pm
+  local lo hi tau span t pos work top gap n pkg_signal=0 progress_pm
   local -a state
 
   PROGRESS_PM=$POS
-  VERIFY_PCT=-1
   [[ -f $STATE_FILE ]] || return 0
 
   mapfile -t state < <(jq -r '
@@ -544,25 +354,31 @@ install_progress() {
     PKG_SEEN=0
     PKG_BONUS=0
     PKG_LAST_CHANGE=$NOW
+    SIGNAL_BASE=-1
   fi
 
-  # Bands in per-mille, plus tau. The tail bands are wide relative to what they
-  # cost on NVMe: run_system_finalizer can DKMS-build a driver and
-  # finalize_limine_boot rebuilds every UKI, so they vary most on real hardware.
-  # Over-allotting costs a step at a boundary; under-allotting costs a stall.
+  # Bands in per-mille, plus tau, sized to where an install spends its time.
+  # An encrypted install measured 34 s in the VM test: preparing the target
+  # (waiting out the boot-time hash of the medium) 7.7 s, installing 17.2 s
+  # (LUKS format and open 11.7 s, the image write 3.7 s), finalizing boot and
+  # user 5.7 s. On a USB stick the hash wait and the image write are longer
+  # still. tau is about the time a phase takes, so the floor keeps moving
+  # through steps that publish nothing, like the LUKS format; where a phase
+  # publishes progress, that leads (see below). Over-allotting costs a step at
+  # a boundary; under-allotting costs a stall.
   case "$phase" in
-    "Starting installation")      lo=10  hi=25   tau=5   ;;
-    "Preparing live environment") lo=25  hi=50   tau=25  ;;
-    "Preparing install target")   lo=50  hi=65   tau=20  ;;
-    "Installing Arch + Omarchy")  lo=65  hi=700  tau=150 pkg_signal=1 ;;
-    "Configuring hibernation")    lo=700 hi=720  tau=10  ;;
-    "Configuring system")         lo=720 hi=850  tau=120 ;;
-    "Staging provisioning")          lo=850 hi=855  tau=5   ;;
-    "Finalizing Limine boot")     lo=855 hi=950  tau=90  ;;
-    "Finalizing user")            lo=950 hi=978  tau=30  ;;
-    "Finalizing boot and user")   lo=855 hi=978  tau=90  ;;
+    "Starting installation")      lo=10  hi=20   tau=2   ;;
+    "Preparing live environment") lo=20  hi=40   tau=2   ;;
+    "Preparing install target")   lo=40  hi=260  tau=8   ;;
+    "Installing Arch + Omarchy")  lo=260 hi=760  tau=18  pkg_signal=1 ;;
+    "Configuring system")         lo=760 hi=830  tau=3   ;;
+    "Staging provisioning")       lo=830 hi=835  tau=2   ;;
+    "Finalizing Limine boot")     lo=835 hi=935  tau=3   ;;
+    "Finalizing user")            lo=935 hi=978  tau=2   ;;
+    "Finalizing boot and user")   lo=835 hi=978  tau=3   ;;
     "Configuring login")          lo=978 hi=988  tau=5   ;;
     "Configuring DNS resolver")   lo=988 hi=994  tau=5   ;;
+    "Running OEM setup")          lo=994 hi=997  tau=60  ;;
     "Validating boot setup")      lo=994 hi=998  tau=5   ;;
     "Creating factory snapshot")  lo=998 hi=1000 tau=5   ;;
     *)
@@ -580,8 +396,6 @@ install_progress() {
       ;;
   esac
 
-  (( pkg_signal && PKG_TOTAL > 0 )) || pkg_signal=0
-  (( pkg_signal )) && tau=$PKG_FLOOR_TAU
 
   t=$(( NOW - PHASE_T0 ))
   (( t < 0 )) && t=0
@@ -590,6 +404,28 @@ install_progress() {
   (( tau < 1 )) && tau=1
 
   pos=$(( lo + (span - 1) * t / (t + tau) ))
+
+  # Until the install phase publishes anything (the LUKS format comes before
+  # the image write does), the clock covers at most 40% of its band, so the
+  # write still has most of it to move through, however long it takes.
+  (( pkg_signal && progress_pm < 0 && pos > lo + span * 2 / 5 )) && pos=$(( lo + span * 2 / 5 ))
+
+  (( pkg_signal && PKG_TOTAL > 0 )) || pkg_signal=0
+
+  # A phase's published progress drives the rest of its band from where the
+  # bar stood when it first arrived (the LUKS format before the image write
+  # publishes nothing), and the clock may run at most the tail ahead of it:
+  # from a slow USB stick a hash or a write takes minutes, and the floor's
+  # few-second tau would otherwise reach the band's end and stand there.
+  if (( progress_pm >= 0 )); then
+    (( progress_pm > 1000 )) && progress_pm=1000
+    (( SIGNAL_BASE < 0 )) && SIGNAL_BASE=$POS
+    top=$(( hi - 1 - PKG_TAIL_PM ))
+    (( top < SIGNAL_BASE )) && top=$SIGNAL_BASE
+    work=$(( SIGNAL_BASE + (top - SIGNAL_BASE) * progress_pm / 1000 ))
+    (( pos > work + PKG_TAIL_PM )) && pos=$(( work + PKG_TAIL_PM ))
+    (( work > pos )) && pos=$work
+  fi
 
   if (( pkg_signal )); then
     PKG_DB_DIR="$target/var/lib/pacman/local"
@@ -611,18 +447,6 @@ install_progress() {
     work=$(( lo + (span - 1 - PKG_TAIL_PM) * PKG_SEEN / PKG_TOTAL + PKG_BONUS ))
     (( work > pos )) && pos=$work
   fi
-  if (( progress_pm >= 0 )); then
-    (( progress_pm > 1000 )) && progress_pm=1000
-    # The pre-flight band is 15 per-mille wide (the phase is subsecond once
-    # the boot-time hash has finished), so real progress mapped into it moves
-    # the bar about one cell over minutes and reads as a hang. Surface the
-    # honest percent as a status line instead (render_dynamic); the unpack's
-    # band is wide enough that its progress shows in the bar itself.
-    [[ $phase == "Preparing install target" ]] && VERIFY_PCT=$(( progress_pm / 10 ))
-    work=$(( lo + (span - 1 - PKG_TAIL_PM) * progress_pm / 1000 ))
-    (( work > pos )) && pos=$work
-  fi
-
   (( pos > hi - 1 )) && pos=$(( hi - 1 ))
   (( pos > POS )) && POS=$pos
   (( POS > 1000 )) && POS=1000
@@ -637,7 +461,7 @@ current_tip() {
 }
 
 # Vertically center a block of the given height, echoing the row it starts on.
-# Center both the progress icon and the final wordmark on the console.
+# Center the final wordmark on the console.
 centered_top_row() {
   local height="$1" rows top
   rows="$(term_size)"
@@ -648,29 +472,9 @@ centered_top_row() {
   printf '%d' "$(( top + 1 ))"
 }
 
-measure_progress_layout() {
-  local rows cols scale=1
-  LAST_SIZE="$(term_size)"
-  read -r rows cols <<<"$LAST_SIZE"
-  read -r CELL_WIDTH CELL_HEIGHT < <(term_cell_size 2>/dev/null || printf '8 16\n')
-  (( rows >= 34 && cols >= 49 )) && scale=2
-  (( rows >= 50 && cols >= 64 )) && scale=3
-  while (( scale > 1 && (15 * scale * CELL_HEIGHT + CELL_WIDTH) / (2 * CELL_WIDTH) > cols - 4 )); do
-    scale=$((scale - 1))
-  done
-  build_icon "$scale"
-  TOP_ROW="$(centered_top_row "$((ICON_HEIGHT + 5))")"
-  ICON_LEFT=$(( (cols - ICON_WIDTH) / 2 + 1 ))
-  (( ICON_LEFT < 1 )) && ICON_LEFT=1
-  PROGRESS_TEXT_WIDTH=$((cols - 2))
-  (( PROGRESS_TEXT_WIDTH > CONTENT_WIDTH )) && PROGRESS_TEXT_WIDTH=$CONTENT_WIDTH
-  return 0
-}
-
 render_static() {
-  measure_progress_layout
-  printf '%s' "$CLEAR"
-  render_icon "$DISPLAY_PM" 1
+  progress_icon_layout "$TTY_PATH" "$CONTENT_WIDTH"
+  progress_icon_static
 }
 
 update_progress() {
@@ -686,30 +490,7 @@ update_progress() {
 }
 
 render_dynamic() {
-  local step tip
-  # The framebuffer can settle late in VMs. Rebuild at the new size, preserving
-  # progress, instead of leaving the drawing at the old screen coordinates.
-  [[ "$(term_size)" == "$LAST_SIZE" ]] || render_static
-  # Ease phase jumps over several frames, with the percentage following the
-  # same position as the trace. The measured progress still never goes back.
-  step=$(( (LAST_PM - DISPLAY_PM + 3) / 4 ))
-  DISPLAY_PM=$((DISPLAY_PM + step))
-  render_icon "$DISPLAY_PM"
-
-  tip="$(truncate_for_width "$(t progress.tipLine "$(current_tip)")" "$PROGRESS_TEXT_WIDTH")"
-  printf '%s%d;1H' "$CSI" "$((TOP_ROW + ICON_HEIGHT + 1))"
-  center "${GREEN}$((DISPLAY_PM / 10))%${RESET}" "$PROGRESS_TEXT_WIDTH"
-  blank_line
-  # Same row either way, so the layout (icon + 6 rows) never changes height:
-  # blank normally, the verify's honest percent while the pre-flight gate
-  # waits on the hash.
-  if (( VERIFY_PCT >= 0 )); then
-    center "${DIM}verifying the install medium: ${VERIFY_PCT}%${RESET}" "$PROGRESS_TEXT_WIDTH"
-  else
-    blank_line
-  fi
-  center "${DIM}${tip}${RESET}" "$PROGRESS_TEXT_WIDTH"
-  printf '%s' "$CLEAR_TO_END"
+  progress_icon_frame "$LAST_PM" "" "$(t progress.tipLine "$(current_tip)")"
 }
 
 install_duration() {
@@ -720,8 +501,11 @@ install_duration() {
       ((.started_at // 0) | tonumber? // 0) as $started
       | ((.finished_at // 0) | tonumber? // 0) as $finished
       | if $started <= 0 or $finished <= 0 or $finished < $started then empty
-        else (($finished - $started) | round) as $secs
-          | if $secs >= 3600 then "\($secs / 3600 | floor)h \($secs % 3600 / 60 | floor)m \($secs % 60)s"
+        else (($finished - $started) * 100 | round) as $cs
+          | (($finished - $started) | round) as $secs
+          | if $cs < 3000 then "\($cs / 100 | floor).\($cs % 100 | tostring | if length < 2 then "0" + . else . end)s"
+            elif $secs < 60 then "\($secs)s"
+            elif $secs >= 3600 then "\($secs / 3600 | floor)h \($secs % 3600 / 60 | floor)m \($secs % 60)s"
             else "\($secs / 60 | floor)m \($secs % 60)s"
             end
         end
@@ -771,9 +555,9 @@ render_finish() {
     # actually happened, so a failed one withdraws the offer instead of
     # printing a promise the machine is not keeping.
     if [[ $TARGET_RELEASED == yes ]]; then
-      center "${DIM}You can now remove the install medium${RESET}" "$CONTENT_WIDTH"
+      center "${DIM}$(t finish.removeMedium)${RESET}" "$CONTENT_WIDTH"
     else
-      center "${DIM}Leave the install medium in until the reboot completes${RESET}" "$CONTENT_WIDTH"
+      center "${DIM}$(t finish.keepMedium)${RESET}" "$CONTENT_WIDTH"
     fi
   } >"$TTY_PATH"
 
@@ -786,14 +570,20 @@ render_finish() {
     # the way the greeter does, since the console reduces indexed codes well and
     # truecolor ones badly. It settles on indexed 2, the Tokyo Night green used
     # throughout the installer. The laser and sparks keep their own hot palette.
+    # kmscon draws indexed codes as xterm's own colours and 24-bit ones as
+    # given, so there the effect settles on that green by its value.
+    local colors=(--xterm-colors) green=2
+    if [[ ${OMARCHY_KMSCON:-} == 1 ]]; then
+      colors=() green=9ece6a
+    fi
     timeout 8s ttfx -i "$LOGO_PATH" \
       --canvas-width "$effect_canvas_width" \
       --anchor-text c \
       --frame-rate 260 \
       --reuse-canvas \
-      --xterm-colors \
+      "${colors[@]}" \
       laseretch \
-      --final-gradient-stops 2 \
+      --final-gradient-stops "$green" \
       >"$TTY_PATH" 2>/dev/null || {
         dashboard_log "logo effect skipped (ttfx exited $?)"
         { printf '%s%d;1H' "$CSI" "$FINISH_TOP_ROW"; render_logo; } >"$TTY_PATH"
@@ -847,7 +637,9 @@ warm_reboot_path() {
   # render_finish, so the logo effect (up to 8s of it), the timeout in front
   # of it, the stty that sizes the prompt, and the button gum paints are all
   # still ahead of the moment the user is invited to pull the stick.
-  for binary in systemctl ttfx gum timeout stty; do
+  # kmscon too when it draws this screen: it repaints from the medium-backed
+  # live root on every frame of the effect and the button.
+  for binary in systemctl ttfx gum timeout stty ${OMARCHY_KMSCON:+kmscon}; do
     path=$(command -v "$binary" 2>/dev/null) || continue
     cat "$path" >/dev/null 2>&1 || true
     while IFS= read -r dep; do
@@ -898,7 +690,7 @@ reboot_prompt() {
 
   # The button is the label with two columns of padding either side.
   label="$(t finish.reboot)"
-  prompt_pad=$(( ( $(term_cols) - ${#label} - 8 ) / 2 ))
+  prompt_pad=$(( ( $(term_cols) - $(display_width "$label") - 8 ) / 2 ))
   (( prompt_pad < 0 )) && prompt_pad=0
   gum confirm \
     --padding "0 0 0 $prompt_pad" \
@@ -909,10 +701,20 @@ reboot_prompt() {
     "" <"$TTY_PATH" >"$TTY_PATH" 2>&1
 }
 
+# Cut to width columns, not characters: a CJK character takes two.
 truncate_for_width() {
-  local text="$1" width="$2"
-  if (( ${#text} > width )); then
-    printf '%s…' "${text:0:$((width - 1))}"
+  local text="$1" width="$2" cut columns
+  (( width < 1 )) && width=1
+  if (( $(display_width "$text") > width )); then
+    # A character takes at most two columns, so dropping half the excess never
+    # cuts too much, and a couple of passes reach the width.
+    cut=${text:0:$((width - 1))}
+    columns=$(display_width "$cut")
+    while (( columns > width - 1 )); do
+      cut=${cut:0:$((${#cut} - (columns - width + 2) / 2))}
+      columns=$(display_width "$cut")
+    done
+    printf '%s…' "$cut"
   else
     printf '%s' "$text"
   fi
@@ -1138,8 +940,15 @@ sanitize_child_output() {
 
 launch_child() {
   mkdir -p "$(dirname "$LOG_FILE")"
+  sanitizer_dir=$(mktemp -d)
+  sanitizer_fifo="$sanitizer_dir/child-output.fifo"
+  mkfifo "$sanitizer_fifo"
+  # Start the sanitizer as a direct child of the dashboard so we can wait on
+  # its PID after the installer exits and guarantee $LOG_FILE has drained.
+  sanitize_child_output <"$sanitizer_fifo" >>"$LOG_FILE" &
+  sanitizer_pid=$!
   # Child is non-interactive. All visible UI belongs to this supervisor.
-  PYTHONUNBUFFERED=1 setsid "${INSTALL_CMD[@]}" </dev/null > >(sanitize_child_output >>"$LOG_FILE") 2>&1 &
+  PYTHONUNBUFFERED=1 setsid "${INSTALL_CMD[@]}" </dev/null >"$sanitizer_fifo" 2>&1 &
   child_pid=$!
   child_pgid=$child_pid
 }
@@ -1165,9 +974,26 @@ done
 set +e
 wait "$child_pid"
 status=$?
+# Wait for the sanitizer process to drain EOF into $LOG_FILE before copying.
+if [[ -n ${sanitizer_pid:-} ]]; then
+  wait "$sanitizer_pid" 2>/dev/null
+fi
 set -e
 child_pid=""
 child_pgid=""
+sanitizer_pid=""
+if [[ -n ${sanitizer_dir:-} ]]; then
+  rm -rf "$sanitizer_dir" 2>/dev/null || true
+  sanitizer_dir=""
+  sanitizer_fifo=""
+fi
+
+# Refresh the target's copy of the log once the sanitizer pipe has drained so
+# it never misses trailing boot/user lines or failure output before unmount.
+if [[ -f $LOG_FILE && -d /mnt/var/log ]] && mountpoint -q /mnt 2>/dev/null; then
+  cp -f "$LOG_FILE" /mnt/var/log/omarchy-install.log 2>/dev/null || true
+  chmod 0644 /mnt/var/log/omarchy-install.log 2>/dev/null || true
+fi
 
 dashboard_log "installer child exited with status $status"
 
@@ -1175,12 +1001,7 @@ if (( status == 0 )); then
   # Finish the trace even when a short-lived child exits between state polls.
   LAST_PM=1000
   PHASE_NAME="Installation complete"
-  while (( DISPLAY_PM < 999 )); do
-    render_dynamic >"$TTY_PATH" 2>/dev/null || true
-    sleep 0.05
-  done
-  DISPLAY_PM=1000
-  render_dynamic >"$TTY_PATH" 2>/dev/null || true
+  progress_icon_finish "" "$(t progress.tipLine "$(current_tip)")" >"$TTY_PATH" 2>/dev/null || true
   sleep 0.4
 fi
 

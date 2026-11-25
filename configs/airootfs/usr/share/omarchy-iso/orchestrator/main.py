@@ -33,7 +33,6 @@ def build_phases(ctx: InstallContext):
         prepare_live,
         prepare_install_target,
         arch_install_system,
-        configure_hibernation,
         run_system_finalizer,
         stage_provisioning_state,
         finalize_boot_and_user,
@@ -43,6 +42,8 @@ def build_phases(ctx: InstallContext):
         configure_dev_ssh,
         DEV_SSH_SCRIPT,
         configure_tailscale,
+        oem_scripts,
+        run_oem_setup,
         validate_boot,
         create_factory_snapshot,
     )
@@ -51,7 +52,6 @@ def build_phases(ctx: InstallContext):
         ("Preparing live environment", prepare_live),
         ("Preparing install target",   prepare_install_target),
         ("Installing Arch + Omarchy",  arch_install_system),
-        ("Configuring hibernation",    configure_hibernation),
         ("Configuring system",         run_system_finalizer),
         # Before finalize_limine_boot: the deferred-provisioning cryptkey drop-in and keyfile
         # must be in place for the final UKI build.
@@ -66,6 +66,10 @@ def build_phases(ctx: InstallContext):
         *([("DEV ONLY: N1x debug SSH", configure_dev_ssh)] if DEV_SSH_SCRIPT.exists() else []),
         ("Configuring Tailscale",      configure_tailscale),
         ("Configuring DNS resolver",   configure_dns_resolver),
+        # Listed only where an OEM ISO's build was given scripts. Last before
+        # the checks, so they run in the finished system and it is still
+        # validated, and snapshotted, with what they did to it.
+        *([("Running OEM setup", run_oem_setup)] if oem_scripts(ctx) else []),
         ("Validating boot setup",      validate_boot),
         ("Creating factory snapshot",  create_factory_snapshot),
     ]
@@ -87,6 +91,7 @@ def main() -> int:
         cleanup_protected_state,
         cleanup_target_hook_masks,
         restore_cpu_governors,
+        stop_luks_keyslot_enroll,
         stop_target_keyring_init,
     )
 
@@ -111,6 +116,7 @@ def main() -> int:
         # No-op after a completed install (create_factory_snapshot joined it);
         # on a failure it ends the unit before the target is torn down.
         stop_target_keyring_init(ctx)
+        stop_luks_keyslot_enroll(ctx)
         cleanup_bind_mounts(ctx)
         cleanup_target_hook_masks(ctx)
         if not success:

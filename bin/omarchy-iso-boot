@@ -125,10 +125,17 @@ if [[ $HOST_ARCH == aarch64 ]]; then
   omarchy-pkg-add qemu-desktop
   source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/aarch64-firmware.sh"
   if ! aarch64_uefi_firmware; then
-    echo "Missing aarch64 UEFI firmware." >&2
-    echo "Install Arch's edk2-aarch64 (arch=any) from https://archlinux.org/packages/extra/any/edk2-aarch64/" >&2
-    echo "after checking its signature with pacman-key --verify, then: sudo pacman -U edk2-aarch64-*.pkg.tar.zst" >&2
-    exit 1
+    # Find the current package in Arch's extra database, then let pacman fetch
+    # it with its detached signature and verify that against archlinux-keyring.
+    arch_mirror=https://mirror.omarchy.org/extra/os/x86_64
+    edk2_file=$(curl -fsSL --retry 3 "$arch_mirror/extra.db" | bsdtar -xOf - "edk2-aarch64-*/desc" |
+      awk '/%FILENAME%/{getline; print; exit}')
+    if [[ -z $edk2_file ]] || ! sudo pacman -U --noconfirm "$arch_mirror/$edk2_file" || ! aarch64_uefi_firmware; then
+      echo "Missing aarch64 UEFI firmware." >&2
+      echo "Install Arch's edk2-aarch64 (arch=any) from https://archlinux.org/packages/extra/any/edk2-aarch64/" >&2
+      echo "after checking its signature with pacman-key --verify, then: sudo pacman -U edk2-aarch64-*.pkg.tar.zst" >&2
+      exit 1
+    fi
   fi
   UEFI_CODE=$AARCH64_UEFI_CODE
   UEFI_VARS_TEMPLATE=$AARCH64_UEFI_VARS
@@ -195,32 +202,64 @@ fastest_cores() {
 if [[ $HOST_ARCH == aarch64 ]]; then
   cores=$(fastest_cores)
   core_count=$(tr ',' '\n' <<<"$cores" | wc -l)
-  if [[ ${OMARCHY_VM_GL:-1} == "0" ]]; then
-    DISPLAY_ARGS=(-device virtio-gpu-pci -display gtk)
+
+  # Whether the disk holds anything yet: a fresh qcow2 has no data extents.
+  disk_written() {
+    qemu-img map -U --output=json "$DISK" 2>/dev/null | grep -q '"data": true'
+  }
+
+  # The live ISO draws with virtio-gpu-gl, but an installed system's screen
+  # stays dark on it ("Display output is not active"), while plain virtio-gpu,
+  # as in test/arm64-install, shows it. One QEMU keeps its devices across a
+  # reboot, so the install run exits at the installer's reboot (-no-reboot)
+  # and the installed system starts in a fresh QEMU with the plain device.
+  # QMP events tell that reboot apart from closing the window.
+  # OMARCHY_VM_GL=0 uses the plain device throughout.
+  run_aarch64() { # gl|plain, then extra QEMU arguments
+    local display_args
+    if [[ $1 == gl ]]; then
+      display_args=(-device virtio-gpu-gl-pci -display sdl,gl=on)
+    else
+      display_args=(-device virtio-gpu-pci -display gtk)
+    fi
+    shift
+    # MSIs go through a GICv2m, as in test/arm64-install: nested under Apple's
+    # hypervisor the host GIC has no LPIs, so an emulated ITS's interrupts are
+    # lost, while a GICv2m raises ordinary SPIs that every host delivers.
+    taskset -c "$cores" qemu-system-aarch64 \
+      -machine virt,gic-version=host,msi=gicv2m -accel kvm -cpu host,pmu=off \
+      -smp "$((core_count < 8 ? core_count : 8))" \
+      -m 8192 \
+      -drive if=pflash,format=raw,readonly=on,file="$UEFI_CODE" \
+      -drive if=pflash,format=raw,file="$OVMF_VARS" \
+      -drive file="$DISK",format=qcow2,if=none,id=drive0 \
+      -device virtio-blk-pci,drive=drive0,bootindex=1 \
+      -device virtio-scsi-pci,id=scsi0 \
+      -drive file="$ISO",media=cdrom,if=none,format=raw,readonly=on,id=cdrom0 \
+      -device scsi-cd,bus=scsi0.0,drive=cdrom0,bootindex=2 \
+      "${display_args[@]}" \
+      -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-tablet,bus=xhci.0 \
+      -device virtio-rng-pci \
+      -serial file:/tmp/omarchy-iso-boot-serial.log \
+      "${NET_ARGS[@]}" \
+      -boot menu=on \
+      "$@" \
+      "${EXTRA_QEMU_ARGS[@]}"
+  }
+
+  if [[ ${OMARCHY_VM_GL:-1} == "0" ]] || disk_written; then
+    run_aarch64 plain
   else
-    DISPLAY_ARGS=(-device virtio-gpu-gl-pci -display sdl,gl=on)
+    qmp_dir=$(mktemp -d)
+    trap 'rm -rf "$qmp_dir"' EXIT
+    echo '{"execute":"qmp_capabilities"}' >"$qmp_dir/in"
+    run_aarch64 gl -no-reboot \
+      -chardev file,id=qmp,path="$qmp_dir/out",input-path="$qmp_dir/in" -mon chardev=qmp,mode=control
+    if grep -q '"reason": "guest-reset"' "$qmp_dir/out" && disk_written; then
+      echo "Booting the installed system with the plain virtio-gpu"
+      run_aarch64 plain
+    fi
   fi
-  # MSIs go through a GICv2m, as in test/arm64-install: nested under Apple's
-  # hypervisor the host GIC has no LPIs, so an emulated ITS's interrupts are
-  # lost, while a GICv2m raises ordinary SPIs that every host delivers.
-  taskset -c "$cores" qemu-system-aarch64 \
-    -machine virt,gic-version=host,msi=gicv2m -accel kvm -cpu host,pmu=off \
-    -smp "$((core_count < 8 ? core_count : 8))" \
-    -m 8192 \
-    -drive if=pflash,format=raw,readonly=on,file="$UEFI_CODE" \
-    -drive if=pflash,format=raw,file="$OVMF_VARS" \
-    -drive file="$DISK",format=qcow2,if=none,id=drive0 \
-    -device virtio-blk-pci,drive=drive0,bootindex=1 \
-    -device virtio-scsi-pci,id=scsi0 \
-    -drive file="$ISO",media=cdrom,if=none,format=raw,readonly=on,id=cdrom0 \
-    -device scsi-cd,bus=scsi0.0,drive=cdrom0,bootindex=2 \
-    "${DISPLAY_ARGS[@]}" \
-    -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-tablet,bus=xhci.0 \
-    -device virtio-rng-pci \
-    -serial file:/tmp/omarchy-iso-boot-serial.log \
-    "${NET_ARGS[@]}" \
-    -boot menu=on \
-    "${EXTRA_QEMU_ARGS[@]}"
 else
   qemu-system-x86_64 \
     -cpu host -enable-kvm -machine q35,accel=kvm \

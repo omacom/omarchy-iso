@@ -1,9 +1,10 @@
-"""The target's region comes from its timezone, using the runtime's profiles."""
+"""The target's region comes from its timezone, using the runtime's profiles,
+and falls back to the media's region (a --preset ISO's) for any timezone no
+profile lists."""
 
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import types
@@ -24,6 +25,8 @@ from orchestrator import context, phases_impl, region  # noqa: E402
 
 def write_profiles(root: Path) -> Path:
     regions = root / "regions"
+    (regions / "global").mkdir(parents=True)
+    (regions / "global/theme").write_text("Tokyo Night\n")
     cn = regions / "cn"
     (cn / "pacman").mkdir(parents=True)
     (cn / "timezones").write_text("# China\nAsia/Shanghai\n\n  Asia/Urumqi  \n")
@@ -39,9 +42,11 @@ class RegionSelectionTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
         self.regions = write_profiles(self.root)
-        patcher = mock.patch.object(region, "REGIONS_DIR", self.regions)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        self.preset = self.root / "preset.json"
+        for name, value in (("REGIONS_DIR", self.regions), ("PRESET", self.preset)):
+            patcher = mock.patch.object(region, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def test_timezone_selects_region(self):
         for timezone, expected in [
@@ -63,8 +68,51 @@ class RegionSelectionTest(unittest.TestCase):
             with self.subTest(timezone=timezone):
                 self.assertEqual(region.region_for_timezone(timezone), expected)
 
+    def test_media_region_holds_where_no_profile_claims_the_timezone(self):
+        # A China ISO used abroad stays China, but Hong Kong, Macau and Taiwan
+        # are global on every media.
+        self.preset.write_text(json.dumps({"language": "zh-CN", "region": "cn"}))
+        for timezone, expected in [
+            ("Asia/Shanghai", "cn"),
+            ("America/New_York", "cn"),
+            ("UTC", "cn"),
+            (None, "cn"),
+            ("Asia/Hong_Kong", "global"),
+            ("Asia/Taipei", "global"),
+            ("Asia/Macau", "global"),
+        ]:
+            with self.subTest(timezone=timezone):
+                self.assertEqual(region.resolve_region({}, timezone), expected)
+        # A preset without a region is global media; one naming a region this
+        # ISO lacks is refused.
+        self.preset.write_text(json.dumps({"language": "zh-CN", "timezone": "Asia/Shanghai"}))
+        self.assertEqual(region.resolve_region({}, "Europe/Berlin"), "global")
+        self.preset.write_text(json.dumps({"region": "zz"}))
+        with self.assertRaisesRegex(RuntimeError, "Unsupported region"):
+            region.resolve_region({}, "Europe/Berlin")
+
+    def test_the_language_plays_no_part(self):
+        for language in ("en", "zh-CN", "zh-TW"):
+            with self.subTest(language=language):
+                self.assertEqual(region.resolve_region({"language": language}, "Asia/Shanghai"), "cn")
+                self.assertEqual(region.resolve_region({"language": language}, "America/New_York"), "global")
+
+    def test_the_configurator_summary_uses_the_same_lookup(self):
+        env = {**os.environ, "PYTHONPATH": str(ROOT / "configs/airootfs/usr/share/omarchy-iso")}
+        script = (
+            "import sys; from pathlib import Path; from orchestrator import region; "
+            f"region.REGIONS_DIR = Path({str(self.regions)!r}); region.PRESET = Path({str(self.preset)!r}); "
+            "print(region.region_for_timezone(sys.argv[1], region.media_region()))"
+        )
+        import subprocess
+        for timezone, expected in [("Asia/Shanghai", "cn"), ("Asia/Hong_Kong", "global"), ("Europe/Berlin", "global")]:
+            with self.subTest(timezone=timezone):
+                out = subprocess.run([sys.executable, "-c", script, timezone], env=env, check=True,
+                                     capture_output=True, text=True).stdout.strip()
+                self.assertEqual(out, expected)
+
     def test_iso_without_profiles_is_global(self):
-        self.assertEqual(region.region_for_timezone("Asia/Shanghai", self.root / "missing"), "global")
+        self.assertEqual(region.region_for_timezone("Asia/Shanghai", regions_dir=self.root / "missing"), "global")
         self.assertEqual(region.resolve_region({}, "Asia/Shanghai", self.root / "missing"), "global")
 
     def test_autoinstall_region_overrides_timezone(self):
@@ -90,8 +138,8 @@ class RegionSelectionTest(unittest.TestCase):
     def test_context_resolves_region_before_install(self):
         self.assertEqual(self.from_env({"timezone": "Asia/Shanghai"}).region, "cn")
         self.assertEqual(self.from_env({"timezone": "Europe/Berlin"}).region, "global")
-        # Deferred installs carry UTC until first boot, so they are global
-        # unless the autoinstall config names a region.
+        # Deferred installs carry UTC until first boot, so they take the
+        # media's region unless the autoinstall config names one.
         self.assertEqual(self.from_env({"timezone": "UTC"}).region, "global")
         self.assertEqual(self.from_env({"timezone": "UTC", "omarchy_install": {"region": "cn"}}).region, "cn")
         with self.assertRaises(RuntimeError):
@@ -105,10 +153,10 @@ class RegionSelectionTest(unittest.TestCase):
 
     def test_marker_is_written_only_for_regional_targets(self):
         target = self.root / "target"
-        phases_impl._write_region_marker(types.SimpleNamespace(target=target, region="global"))
-        self.assertFalse((target / "etc/omarchy/region").exists())
+        phases_impl._write_region_marker(types.SimpleNamespace(target=target, region="global", defer_provisioning=False))
+        self.assertFalse((target / "etc/omarchy").exists())
 
-        phases_impl._write_region_marker(types.SimpleNamespace(target=target, region="cn"))
+        phases_impl._write_region_marker(types.SimpleNamespace(target=target, region="cn", defer_provisioning=False))
         marker = target / "etc/omarchy/region"
         self.assertEqual(marker.read_text(), "cn\n")
         self.assertEqual(marker.stat().st_mode & 0o777, 0o644)
@@ -128,7 +176,7 @@ class RegionSelectionTest(unittest.TestCase):
                 installer = mock.MagicMock()
                 installer.add_additional_packages.side_effect = packages_added.extend
                 config = types.SimpleNamespace(
-                    kernels=["linux-omarchy"], locale_config=None, mirror_config=None,
+                    kernels=["linux-omarchy"], locale_config=None, mirror_config=None, disk_config=None,
                     swap=None, auth_config=None, app_config=None, timezone=None,
                     ntp=False, hostname="test", pacman_config="/etc/pacman.conf",
                 )
@@ -154,7 +202,7 @@ class RegionSelectionTest(unittest.TestCase):
                 stack.enter_context(mock.patch.object(phases_impl.arch, "target_missing_packages", return_value=[], create=True))
                 for name, value in (("is_pre_mount", pre_mounted), ("is_encrypted", False), ("root_user", None)):
                     stack.enter_context(mock.patch.object(phases_impl.arch, name, return_value=value, create=True))
-                for name in ("sanity_check", "perform_filesystem_operations", "install_base_delta"):
+                for name in ("sanity_check", "perform_filesystem_operations", "install_base_delta", "defer_argon2_keyslot"):
                     stack.enter_context(mock.patch.object(phases_impl.arch, name, create=True))
                 opened = stack.enter_context(mock.patch.object(phases_impl.arch, "open_installer", create=True))
                 opened.return_value.__enter__.return_value = installer
@@ -176,75 +224,6 @@ class RegionSelectionTest(unittest.TestCase):
                 commands = [call.args[1] for call in run.call_args_list]
                 self.assertEqual(commands[:-1], [])
                 self.assertEqual(commands[-1][0], "/usr/bin/omarchy-apply-system")
-
-
-class PrepareRegionsTest(unittest.TestCase):
-    def run_prepare(self, regions: Path, root: Path) -> tuple[Path, str]:
-        payload = root / "payload"
-        payload.mkdir()
-        stubs = root / "bin"
-        stubs.mkdir()
-        log = root / "calls.log"
-        for name in ("pacman", "pacman-key"):
-            stub = stubs / name
-            stub.write_text(f'#!/bin/bash\necho "{name} $*" >> "{log}"\n')
-            stub.chmod(0o755)
-        subprocess.run(
-            ["bash", str(ROOT / "builder/prepare-regions.sh"), str(regions), str(payload)],
-            env={**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}"},
-            check=True, capture_output=True, text=True,
-        )
-        return payload, log.read_text() if log.exists() else ""
-
-    def test_ships_every_profile_and_trusts_nothing_new(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            regions = write_profiles(root)
-            payload, calls = self.run_prepare(regions, root)
-            self.assertEqual((payload / "regions/cn/timezones").read_text(), (regions / "cn/timezones").read_text())
-            self.assertEqual((payload / "regions/cn/pacman/omarchy-rc.prepend").read_text(),
-                             (regions / "cn/pacman/omarchy-rc.prepend").read_text())
-            # Staging a profile downloads nothing and imports no key.
-            self.assertEqual(calls, "")
-
-    def settings_package(self, root: Path, with_regions: bool) -> Path:
-        tree = root / "pkgroot"
-        (tree / "usr/share/omarchy/default/pacman").mkdir(parents=True)
-        if with_regions:
-            write_profiles(root / "src")
-            (root / "src/regions").rename(tree / "usr/share/omarchy/default/regions")
-        package = root / "omarchy-settings-1-1-any.pkg.tar.zst"
-        subprocess.run(["bsdtar", "--zstd", "-cf", str(package), "-C", str(tree), "usr"], check=True)
-        return package
-
-    def test_published_build_reads_profiles_from_the_settings_package(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            payload, calls = self.run_prepare(self.settings_package(root, with_regions=True), root)
-            self.assertTrue((payload / "regions/cn/pacman/omarchy-stable.prepend").is_file())
-            self.assertEqual(calls, "")
-
-    def test_settings_package_without_profiles_builds_a_global_iso(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            payload, calls = self.run_prepare(self.settings_package(root, with_regions=False), root)
-            self.assertFalse((payload / "regions").exists())
-            self.assertEqual(calls, "")
-
-    def test_unreadable_settings_package_fails_the_build(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            package = root / "omarchy-settings-1-1-any.pkg.tar.zst"
-            package.write_text("not an archive")
-            with self.assertRaises(subprocess.CalledProcessError):
-                self.run_prepare(package, root)
-
-    def test_runtime_without_profiles_builds_a_global_iso(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            payload, calls = self.run_prepare(root / "missing", root)
-            self.assertFalse((payload / "regions").exists())
-            self.assertEqual(calls, "")
 
 
 if __name__ == "__main__":

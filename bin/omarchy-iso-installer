@@ -58,7 +58,6 @@ simulate_install() {
     "Preparing live environment" 0.8
     "Preparing install target" 0.3
     "Installing Arch + Omarchy" 5.0
-    "Configuring hibernation" 0.4
     "Configuring system" 1.2
     "Finalizing Limine boot" 1.0
     "Finalizing user" 1.0

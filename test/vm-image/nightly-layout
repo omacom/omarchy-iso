@@ -6,8 +6,8 @@
 #
 #   release      the path under the site, from nightly-plan
 #   iso          the ISO that was installed
-#   sealed_dir   what vm-seal made, or - for edge-aarch64, which publishes no
-#                VM image yet
+#   sealed_dir   what vm-seal made, or - for edge-aarch64 and edge-snapdragon,
+#                which publish no VM image yet
 #   vm_packages  what the installed system answered to: pacman -Q of its
 #                Omarchy package (and, from a sealed image, pacman -Qo of its
 #                kernel's pkgbase), then uname -r last
@@ -25,7 +25,8 @@
 #   omarchy-edge-<version>.iso and .sha256  edge only
 #
 # edge-aarch64 gets omarchy-edge-<version>-aarch64.iso and its .sha256 only,
-# and a latest.json without the vm part.
+# and a latest.json without the vm part; edge-snapdragon the same with
+# omarchy-edge-<version>-snapdragon.iso.
 #
 # and <channel>/latest.json. The released ISO already has its place:
 # latest.json points there and the ISO stays where it is.
@@ -40,11 +41,15 @@ iso_site=${ISO_SITE:-https://iso.omarchy.org}
 iso_commit=${ISO_COMMIT:-$(git -C "$here" rev-parse HEAD)}
 fail() { echo "nightly-layout: $*" >&2; exit 1; }
 
-[[ $channel == edge || $channel == stable || $channel == edge-aarch64 ]] || fail "'$channel' is not a channel"
+case $channel in
+  edge | stable) iso_only= ;;
+  edge-aarch64 | edge-snapdragon) iso_only=${channel#edge-} ;;
+  *) fail "'$channel' is not a channel" ;;
+esac
 [[ -f $iso_file ]] || fail "no ISO at $iso_file"
 unpacked=(vmlinuz initrd cmdline)
-if [[ $channel == edge-aarch64 ]]; then
-  [[ $sealed == - ]] || fail "edge-aarch64 publishes no image; its sealed_dir is -"
+if [[ -n $iso_only ]]; then
+  [[ $sealed == - ]] || fail "$channel publishes no image; its sealed_dir is -"
 else
   for file in base.qcow2 "${unpacked[@]}"; do
     [[ -s $sealed/$file ]] || fail "the sealed image has no $file"
@@ -61,8 +66,8 @@ omarchy_commit=$(sed -nE 's/.*\.g([0-9a-f]+)-.*/\1/p' <<<"$omarchy")
 dir=$out/$release
 mkdir -p "$dir" "$out/$channel"
 latest=$out/$channel/latest.json
-if [[ $channel == edge-aarch64 ]]; then
-  iso=omarchy-edge-$version-aarch64.iso
+if [[ -n $iso_only ]]; then
+  iso=omarchy-edge-$version-$iso_only.iso
   mv "$iso_file" "$dir/$iso"
   (cd "$dir" && sha256sum "$iso" >"$iso.sha256")
   jq -n \
@@ -76,10 +81,10 @@ if [[ $channel == edge-aarch64 ]]; then
       iso_commit: $iso_commit, omarchy_version: $omarchy_version, omarchy_commit: $omarchy_commit,
       kernel: $kernel
     }' >"$latest"
-  jq -e '
+  jq -e --arg channel "$channel" --arg ending "-$iso_only.iso" '
     def one_line: type == "string" and test("^[^\n]+$");
-    (.version | one_line) and .channel == "edge-aarch64" and .arch == "aarch64"
-    and (.url | test("^https://[^\n ]+-aarch64\\.iso$")) and (.sha256 | test("^[0-9a-f]{64}$")) and .size > 0
+    (.version | one_line) and .channel == $channel and .arch == "aarch64"
+    and (.url | test("^https://[^\n ]+$")) and (.url | endswith($ending)) and (.sha256 | test("^[0-9a-f]{64}$")) and .size > 0
     and (.iso_commit | test("^[0-9a-f]{40}$"))
     and (.omarchy_version | one_line) and (.omarchy_commit | test("^[0-9a-f]*$")) and (.kernel | one_line)
     and (has("vm") | not)
@@ -97,8 +102,8 @@ if [[ $channel == edge ]]; then
   iso_sha256=$(cut -d' ' -f1 "$dir/$iso.sha256") iso_size=$(stat -c %s "$dir/$iso")
 else
   name=omarchy-$version
-  iso=$name.iso
-  [[ ${iso_file##*/} == "$iso" ]] || fail "the released ISO is $iso, not ${iso_file##*/}"
+  iso=${iso_file##*/}
+  [[ $iso == "$name.iso" || $iso == "$name-x86.iso" ]] || fail "the released ISO is $name.iso or $name-x86.iso, not $iso"
   iso_url=$iso_site/$iso
   iso_sha256=$(sha256sum "$iso_file" | cut -d' ' -f1) iso_size=$(stat -c %s "$iso_file")
 fi

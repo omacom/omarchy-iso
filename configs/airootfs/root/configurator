@@ -9,9 +9,10 @@ OMARCHY_SETTINGS_PACKAGE="${OMARCHY_SETTINGS_PACKAGE:-omarchy-settings}"
 
 LOGO_PATH="$OMARCHY_PATH/logo.txt"
 
-# The setup form — keyboard, timezone, account, and hostname questions, plus the
-# rules their answers are checked against — shared verbatim with the first-boot
-# owner setup that finishes a deferred install. build-iso.sh vendors it out of
+# The setup form — keyboard, timezone, and account questions, the hostname made
+# from the account and the machine, and the rules the answers are checked
+# against — shared verbatim with the first-boot owner setup that finishes a
+# deferred install. build-iso.sh vendors it out of
 # the runtime package this ISO bundles, so the two can never offer different
 # layouts or accept different usernames. On the ISO that vendored copy is what
 # loads; a dry run outside the ISO falls back to the omarchy checkout
@@ -102,8 +103,21 @@ wait_for_stable_terminal() {
 
 clear_logo() {
   measure_terminal
-  printf "\033[H\033[2J"
-  gum style --foreground 2 --padding "1 0 0 $PADDING_LEFT" "$(<"$LOGO_PATH")"
+  draw_screen
+}
+
+# The logo, and the line a step puts under it, in one write over the screen
+# before. Clearing first and then starting gum to draw showed a blank screen
+# between questions, so everything is rendered before the screen is touched:
+# then the cursor goes home, each line overwrites the old one and erases what
+# is left of it, and only what lies below the new lines is cleared.
+draw_screen() {
+  local screen
+  screen=$(gum style --foreground 2 --padding "1 0 0 $PADDING_LEFT" "$(<"$LOGO_PATH")")
+  [[ -z ${1:-} ]] || screen+=$'\n\n'$(gum style --padding "0 0 0 $PADDING_LEFT" "$1")
+  # Purely visual screen redraws go straight to /dev/tty so the install log
+  # (which stdout is teed into) does not collect repeated ASCII banners.
+  printf '\033[H%s\033[K\n\033[J' "${screen//$'\n'/$'\033[K\n'}" >/dev/tty
 }
 
 # Vertically-centered welcome shown once before the keyboard step — the same
@@ -111,12 +125,19 @@ clear_logo() {
 # bookend the setup identically. Logo, the Omarchy tagline, and a single button,
 # centered like the boot logo. No animation.
 greeter() {
-  measure_terminal
-
   local rows logo_h content_h top cols logo_row tagline_row hint_row
-  local tagline hint tpad hpad anim
+  local tagline hint tpad hpad anim size status resized
+
+  # Drawn again whenever the console changes size while it waits: the screen
+  # is laid out for the size it had, and a console that grows afterwards (KMS
+  # taking over later than wait_for_stable_terminal allows for, a VM window
+  # resized) would leave the logo clipped at the left edge with its animation
+  # beside it. Every later screen measures as it draws.
+  while true; do
+  size=$(stty size 2>/dev/null </dev/tty)
+  measure_terminal
   cols=$TERM_WIDTH
-  rows=$(stty size 2>/dev/null </dev/tty | awk '{print $1}')
+  rows=${size% *}
   [[ $rows =~ ^[0-9]+$ ]] || rows=${LINES:-24}
   logo_h=$(wc -l <"$LOGO_PATH")
 
@@ -128,18 +149,24 @@ greeter() {
   tagline_row=$((top + logo_h + 2))
   hint_row=$((top + logo_h + 4))
 
-  printf '\033[?25l\033[H\033[2J'
+  # Purely visual welcome screen: draw straight to /dev/tty so the install log
+  # (which stdout is teed into) does not collect repeated ASCII banners.
+  {
+    printf '\033[?25l\033[H\033[2J'
 
-  printf '\033[%d;1H' "$logo_row"
-  gum style --foreground 2 --padding "0 0 0 $PADDING_LEFT" "$(<"$LOGO_PATH")"
+    printf '\033[%d;1H' "$logo_row"
+    gum style --foreground 2 --padding "0 0 0 $PADDING_LEFT" "$(<"$LOGO_PATH")"
 
-  tagline="Beautiful, Fun & Agentic Linux by DHH"
-  tpad=$(((cols - ${#tagline}) / 2)); (( tpad < 0 )) && tpad=0
-  printf '\033[%d;%dH%s' "$tagline_row" "$((tpad + 1))" "$tagline"
+    tagline=$(t greeter.tagline)
+    tpad=$(((cols - $(display_width "$tagline")) / 2)); (( tpad < 0 )) && tpad=0
+    printf '\033[%d;%dH%s' "$tagline_row" "$((tpad + 1))" "$tagline"
+    (( tagline_row < rows )) && printf '\n'
 
-  hint="Press Return to Start Install"
-  hpad=$(((cols - ${#hint}) / 2)); (( hpad < 0 )) && hpad=0
-  printf '\033[%d;%dH\033[2m%s\033[0m' "$hint_row" "$((hpad + 1))" "$hint"
+    hint=$(t greeter.hint)
+    hpad=$(((cols - $(display_width "$hint")) / 2)); (( hpad < 0 )) && hpad=0
+    printf '\033[%d;%dH\033[2m%s\033[0m' "$hint_row" "$((hpad + 1))" "$hint"
+    (( hint_row < rows )) && printf '\n'
+  } >/dev/tty
 
   # ColorShift the logo: a green base (indexed color 2) with a cyan accent (6)
   # drifting through, settling on green. Indexed ANSI colors, not hex — the
@@ -152,7 +179,14 @@ greeter() {
   # what flashed. The effect reads from /dev/null so it never swallows the
   # Return; --reuse-canvas paints upward from the saved cursor, anchored one row
   # below the logo.
-  printf '\033[%d;1H\0337' "$((logo_row + logo_h))"
+  #
+  # kmscon draws 256-colour codes as xterm's own colours, not the palette's,
+  # and 24-bit ones as given: there the stops are the palette's green and cyan.
+  local colors=(--xterm-colors) green=2 bright_green=10 cyan=6
+  if [[ ${OMARCHY_KMSCON:-} == 1 ]]; then
+    colors=() green=9ece6a bright_green=9ece6a cyan=7dcfff
+  fi
+  printf '\033[%d;1H\0337' "$((logo_row + logo_h))" >/dev/tty
   # Run ttfx directly (not inside a `while` subshell) so $anim is ttfx's own
   # PID: killing a wrapping subshell would orphan ttfx, which then keeps
   # painting the logo over the keyboard step. --cycles is high enough that it
@@ -165,25 +199,35 @@ greeter() {
     --anchor-text c \
     --frame-rate 60 \
     --reuse-canvas \
-    --xterm-colors \
+    "${colors[@]}" \
     colorshift \
-    --gradient-stops 2 10 6 10 \
+    --gradient-stops "$green" "$bright_green" "$cyan" "$bright_green" \
     --gradient-frames 3 \
     --cycles 1000 \
-    --final-gradient-stops 2 \
+    --final-gradient-stops "$green" \
     </dev/null >/dev/tty 2>/dev/null &
   anim=$!
 
-  IFS= read -r _ </dev/tty || true
+  # Return ends the wait, as does a tty that cannot be read; twice a second
+  # the size is looked at again.
+  resized=false
+  while true; do
+    status=0
+    IFS= read -r -t 0.5 _ </dev/tty || status=$?
+    (( status > 128 )) || break
+    [[ $(stty size 2>/dev/null </dev/tty) == "$size" ]] || { resized=true; break; }
+  done
   # Tolerate ttfx's kill signal in `wait` so a future `set -e` here can't abort.
   kill "$anim" 2>/dev/null
   wait "$anim" 2>/dev/null || true
   # ttfx leaves the tty in raw/no-echo mode when killed; restore it or the gum
   # prompts in the keyboard step that follows silently die.
   stty sane </dev/tty 2>/dev/null || true
+  $resized || break
+  done
   # Reset the screen so the leftover animation frame doesn't linger under the
   # keyboard step that follows.
-  printf '\033[0m\033[H\033[2J\033[?25h'
+  printf '\033[0m\033[H\033[2J\033[?25h' >/dev/tty
 }
 
 abort() {
@@ -194,9 +238,8 @@ abort() {
 }
 
 step() {
-  clear_logo
-  echo
-  gum style --padding "0 0 0 $PADDING_LEFT" "$1"
+  measure_terminal
+  draw_screen "$1"
   echo
 }
 
@@ -219,7 +262,17 @@ notice() {
 # their English name and only set the installed system's language.
 
 LANGUAGES_JSON="${LANGUAGES_JSON:-$OMARCHY_PATH/default/i18n/locales.json}"
-language="en"
+
+# A preset ISO (--preset) answers any of the language, the keyboard (a label
+# of the setup form's list) and the timezone, and does not ask for those.
+PRESET_FILE="${PRESET_FILE:-$OMARCHY_ISO_SHARE/preset.json}"
+preset() {
+  jq -r --arg field "$1" '.[$field] // empty' "$PRESET_FILE" 2>/dev/null || true
+}
+preset_language=$(preset language)
+preset_keyboard=$(preset keyboard)
+preset_timezone=$(preset timezone)
+language=${preset_language:-en}
 
 # The setup form takes its language and defaults from the language picked here:
 # the layout that goes with it, and its country's capital for when the network
@@ -233,7 +286,10 @@ language_default() {
 }
 
 set_form_language() {
+  # The form's text comes from Omarchy's catalogs, which have every language;
+  # on a console that cannot draw this one it stays English like the rest.
   OMARCHY_FORM_LANGUAGE=$language
+  i18n_translated "$language" || OMARCHY_FORM_LANGUAGE=en
   OMARCHY_FORM_KEYBOARD_DEFAULT=$(language_default keyboard)
   OMARCHY_FORM_KEYBOARD_DEFAULT=${OMARCHY_FORM_KEYBOARD_DEFAULT:-English (US)}
   OMARCHY_FORM_TIMEZONE_FALLBACK=$(language_default timezone)
@@ -249,8 +305,12 @@ language_label() {
 
 # "label<TAB>code" rows, English first and the rest alphabetical by what is shown.
 language_rows() {
-  local translated
-  translated=$(cd "$OMARCHY_ISO_I18N_DIR" && printf '%s\n' *.json | sed 's/\.json$//' | jq -R . | jq -sc .)
+  local translated code
+  # Native names only for catalogs this console can draw: a CJK name would be
+  # boxes on the plain console, so there Chinese is listed by its English name.
+  translated=$(for code in $(cd "$OMARCHY_ISO_I18N_DIR" && printf '%s\n' *.json | sed 's/\.json$//'); do
+    i18n_translated "$code" && printf '%s\n' "$code"
+  done | jq -R . | jq -sc .)
   jq -r --argjson translated "$translated" '
     to_entries
     | map({code: .key, label: (if (.key | IN($translated[])) then .value.name else .value.englishName end)})
@@ -265,7 +325,7 @@ language_rows() {
 language_form() {
   local choice status
 
-  if [[ -r $LANGUAGES_JSON ]]; then
+  if [[ -z $preset_language && -r $LANGUAGES_JSON ]]; then
     while true; do
       clear_logo
       echo
@@ -295,13 +355,23 @@ keyboard_form() {
   local status
 
   while true; do
-    clear_logo
-    echo
+    # A preset keyboard is the setup form's row of that label, loaded below
+    # like a picked one, so the disk password is typed under it.
+    if [[ -n $preset_keyboard ]]; then
+      IFS='|' read -r keyboard_label keyboard keyboard_input_method keyboard_xkb_layout < <(
+        printf '%s\n' "$OMARCHY_KEYBOARD_LAYOUTS" | awk -F'|' -v c="$preset_keyboard" '$1==c{print; exit}')
+      keyboard_input_method=${keyboard_input_method:-none}
+      break
+    fi
+
+    # Under the heading of the language before it and the account steps
+    # after it, so the screen does not shift from one to the next.
+    step "$(t keyboard.intro)"
     if ! i18n_translated "$language"; then
       # English on purpose: there is no catalog for this language to say it in.
       say --foreground 8 "The installer stays in English. Omarchy will be in $(language_label "$language") once installed."
+      echo
     fi
-    echo
 
     omarchy_prompt_keyboard && status=0 || status=$?
     ((status == 0)) && break
@@ -322,6 +392,41 @@ keyboard_form() {
   if [[ $(tty 2>/dev/null) == "/dev/tty"* ]]; then
     loadkeys "$keyboard" 2>/dev/null
   fi
+
+  # kmscon reads keys through XKB and picks its font once, at its start:
+  # relaunch it with the layout just picked so the password is typed under the
+  # layout it will be entered with at boot, and with the Han forms of a
+  # language picked again on the way back (Chinese, then Japanese).
+  if [[ ${OMARCHY_KMSCON:-} == 1 ]] &&
+    [[ $(omarchy_keymap_xkb "$keyboard") != "${OMARCHY_KMSCON_XKB:-}" ||
+      $(omarchy_kmscon_face "$language") != "${OMARCHY_KMSCON_FACE:-}" ]]; then
+    switch_to_kmscon user
+  fi
+}
+
+# ── kmscon handoff ──────────────────────────────────────────────────────────
+#
+# .automated_script.sh runs the configurator inside kmscon, which takes its
+# keyboard layout and font once, at its start. To change either, the
+# configurator saves the answers so far and exits 75; .automated_script.sh
+# starts kmscon again, which runs the installer from the saved stage.
+
+KMSCON_SWITCH=75
+# The runtime's launcher, for the layout and font kmscon would start with.
+KMSCON_LIB="${KMSCON_LIB:-/usr/share/omarchy-iso/kmscon.sh}"
+[[ -r $KMSCON_LIB ]] || KMSCON_LIB="$OMARCHY_PATH/install/provisioning/kmscon.sh"
+# shellcheck disable=SC1090
+source "$KMSCON_LIB"
+# shellcheck disable=SC1091
+source "$OMARCHY_ISO_SHARE/kmscon-session.sh"
+
+switch_to_kmscon() {
+  local resume_stage=$1
+  # Outside the kmscon tty1 started, by hand on another VT, nothing would
+  # start it again: carry on in this one.
+  kmscon_save_answers resume_stage language keyboard keyboard_label keyboard_input_method \
+    keyboard_xkb_layout defer_provisioning timezone username password password_hash hostname || return 0
+  exit $KMSCON_SWITCH
 }
 
 # Ctrl+C on the first screen offers to prepare the machine for another owner.
@@ -341,19 +446,23 @@ confirm_prepare_for_another_owner() {
 # operator sets nothing user-specific.
 
 user_form() {
-  step "$(t user.intro)"
+  step "$(t keyboard.intro)"
 
   # Each prompt reports 0 (set), OMARCHY_FORM_BACK (Esc), or OMARCHY_FORM_SIGNAL
   # (Ctrl+C). Both non-zero cases unwind to user_step, which decides what they
   # mean here; the form itself never aborts.
-  omarchy_prompt_timezone || return $?
+  if [[ -n $preset_timezone ]]; then
+    timezone=$preset_timezone
+  else
+    omarchy_prompt_timezone || return $?
+  fi
   omarchy_prompt_username || return $?
   omarchy_prompt_password || return $?
 
   # Hash the password with SHA-512 crypt ($6$), which is what openssl passwd offers
   password_hash=$(printf '%s' "$password" | openssl passwd -6 -stdin)
 
-  omarchy_prompt_hostname || return $?
+  omarchy_generate_hostname
 }
 
 # Returns 0 on confirmed account details, or as soon as the keyboard screen
@@ -373,28 +482,33 @@ user_step() {
       continue
     fi
 
-    # Use the orchestrator's timezone lookup without adding another prompt.
-    # World installs keep the summary exactly as it was.
-    region=$(cd "$OMARCHY_ISO_SHARE" && python -m orchestrator.region "$timezone") || region="global"
-    region_row=""
-    if [[ $region != "global" ]]; then
-      region_row="\n$(t summary.region),$region"
-    fi
+    # The answers the user gave; what the ISO presets is not theirs to check,
+    # and a username and password alone need no second look.
+    [[ -n $preset_language && -n $preset_keyboard && -n $preset_timezone ]] && break
 
+    # The region the timezone settles, from the orchestrator's own lookup.
+    # Global installs keep the summary exactly as it was.
+    region=$(cd "$OMARCHY_ISO_SHARE" && python -m orchestrator.region "$timezone") || region="global"
+
+    # Tab-separated, as layouts have commas ("Chinese (Simplified, Pinyin)").
     # Add manual padding since gum table -p doesn't respect padding
-    echo -e "$(t summary.field),$(t summary.value)
-$(t summary.language),$(language_label "$language")
-$(t summary.keyboard),$keyboard
-$(t summary.timezone),$timezone$region_row
-$(t summary.username),$username
-$(t summary.password),$(printf "%${#password}s" | tr ' ' '*')
-$(t summary.hostname),$hostname" |
-      gum table -s "," -p | sed "s/^/${PADDING_LEFT_SPACES}/"
+    {
+      printf '%s\t%s\n' "$(t summary.field)" "$(t summary.value)"
+      [[ -n $preset_language ]] || printf '%s\t%s\n' "$(t summary.language)" "$(language_label "$language")"
+      [[ -n $preset_keyboard ]] || printf '%s\t%s\n' "$(t summary.keyboard)" "${keyboard_label:-$keyboard}"
+      [[ -n $preset_timezone ]] || printf '%s\t%s\n' "$(t summary.timezone)" "$timezone"
+      [[ $region == "global" ]] || printf '%s\t%s\n' "$(t summary.region)" "$region"
+      printf '%s\t%s\n' "$(t summary.username)" "$username"
+      printf '%s\t%s\n' "$(t summary.password)" "$(printf "%${#password}s" | tr ' ' '*')"
+    } | gum table -s $'\t' -p | sed "s/^/${PADDING_LEFT_SPACES}/"
 
     echo
     if gum confirm --affirmative "$(t common.yes)" --negative "$(t common.change)" "$(t summary.prompt)"; then
       break
     else
+      # Every answer on the summary can be changed, the language first.
+      language_form
+      $defer_provisioning && return 0
       keyboard_form
       $defer_provisioning && return 0
     fi
@@ -408,7 +522,7 @@ get_disk_info() {
   local size vendor model label
 
   # Get basic disk information
-  size=$(lsblk -dno SIZE "$device" 2>/dev/null)
+  size=$(lsblk -dno SIZE "$device" 2>/dev/null | tr -d ' ')
   vendor=$(lsblk -dno VENDOR "$device" 2>/dev/null | sed 's/ *$//')
   model=$(lsblk -dno MODEL "$device" 2>/dev/null | sed 's/ *$//')
 
@@ -477,27 +591,72 @@ detect_bitlocker() {
   return 1
 }
 
+# The firmware files the device tree names that the live system lacks, less
+# those a maker's package in the offline mirror installs: a package providing
+# qcom-firmware-<folder>, by the folder-to-name mapping Omarchy's
+# install/hardware/qualcomm/oem-firmware.sh uses to install it.
+qualcomm_firmware_uncovered() {
+  local db=/var/cache/omarchy/mirror/offline/offline.db.tar.gz file folder name
+  local -A provided=()
+  if [[ -r $db ]]; then
+    while IFS= read -r name; do
+      provided[$name]=1
+    done < <(bsdtar -xOf "$db" '*/desc' 2>/dev/null | awk '
+      /^%PROVIDES%$/ { p = 1; next }
+      /^$/ { p = 0 }
+      p && /^qcom-firmware-/ { sub(/[<>=].*/, ""); print }')
+  fi
+  while IFS= read -r file; do
+    [[ -n $file ]] || continue
+    folder=${file%/*}
+    name=qcom-firmware-${folder#qcom/}
+    name=${name//\//-}
+    name=${name,,}
+    [[ -n ${provided[$name]:-} ]] || printf '%s\n' "$file"
+  done < <(qcom-firmware-extract --list-missing 2>/dev/null)
+}
+
 # Save vendor-signed Qualcomm firmware before a full-disk install removes Windows.
-# Missing firmware does not abort installation.
+# Missing firmware does not abort installation. Firmware a maker's package
+# covers is not missing: the install brings that package.
 stage_qualcomm_firmware() {
   command -v qcom-firmware-extract >/dev/null 2>&1 || return 0
   [[ -d /sys/firmware/devicetree/base ]] || return 0
 
-  local stage=/run/omarchy/firmware
-  local missing saved
-  missing=$(qcom-firmware-extract --list-missing 2>/dev/null | grep -c . || true)
+  local stage=/run/omarchy/firmware log=/run/omarchy/firmware-stage.log
+  local missing saved=0 name
+  local -a uncovered=()
+  local -A staged=()
+  mapfile -t uncovered < <(qualcomm_firmware_uncovered)
+  missing=${#uncovered[@]}
   ((missing > 0)) || return 0
 
   step "$(t firmware.title)"
-  qcom-firmware-extract --stage "$stage" >/run/omarchy/firmware-stage.log 2>&1 || true
-  saved=$(grep -c . "$stage/manifest" 2>/dev/null || true)
+  # The redirection needs /run/omarchy; without it the shell never ran the
+  # staging and every machine read "No Windows firmware found".
+  mkdir -p "${log%/*}"
+  qcom-firmware-extract --stage "$stage" >"$log" 2>&1 || true
+  # Count only the uncovered files Windows supplied. The manifest also lists
+  # files a package covers, and those would make missing firmware look saved.
+  if [[ -r $stage/manifest ]]; then
+    while read -r name _; do
+      if [[ -n $name ]]; then
+        staged[$name]=1
+      fi
+    done <"$stage/manifest"
+  fi
+  for name in "${uncovered[@]}"; do
+    if [[ -n ${staged[$name]:-} ]]; then
+      saved=$((saved + 1))
+    fi
+  done
   if ((saved >= missing)); then
     say "$(t firmware.saved "$saved")"
   elif ((saved > 0)); then
     say "$(t firmware.partial "$saved" "$missing")"
   else
     say --foreground 1 "$(t firmware.none)"
-    if grep -q BitLocker /run/omarchy/firmware-stage.log 2>/dev/null; then
+    if grep -q BitLocker "$log" 2>/dev/null; then
       say "$(t firmware.bitlocker)"
       say "$(t firmware.bitlockerHint)"
     fi
@@ -572,6 +731,8 @@ fi
 # disk_step and create_partition fail through this rather than abort() so a
 # half-built layout is undone before the user is handed back their disk.
 disk_abort_hook() {
+  # A format or an open that failed leaves the volume key it was given.
+  [[ -z ${luks_volume_key:-} ]] || rm -f "$luks_volume_key"
   # Release the target before reclaiming its partitions: a mounted filesystem
   # or an open LUKS mapping would keep parted from removing them.
   umount -R /mnt 2>/dev/null || true
@@ -691,7 +852,7 @@ run_partition_decide() {
 
   step "$(t space.analyzing "$disk")"
   partprobe "$disk" 2>/dev/null || true
-  sleep 1
+  settle_devices
 
   # An unlabeled disk has no partition table for parted to scan, so we
   # synthesize a whole-disk free region and mklabel gpt before mkpart.
@@ -839,18 +1000,18 @@ run_partition_execute() {
     if $needs_mklabel; then
       disk_step "initializing GPT on $disk" parted --script "$disk" mklabel gpt
       partprobe "$disk" 2>/dev/null || true
-      sleep 1
+      settle_devices
     fi
 
     # create_partition reports the number parted actually used; nothing here
     # may assume it. It sets created_partition_number rather than printing so
     # the rollback bookkeeping survives (a $(...) would subshell it away).
     create_partition "$disk" "$EFI_START_B" "$EFI_END_B" fat32 OMARCHY_EFI ||
-      disk_abort_hook "Could not create the EFI partition on $disk"
+      disk_abort_hook "$(t partitions.efiFailed "$disk")"
     efi_part_num="$created_partition_number"
 
     create_partition "$disk" "$ROOT_START_B" "$ROOT_END_B" btrfs OMARCHY_ROOT ||
-      disk_abort_hook "Could not create the root partition on $disk"
+      disk_abort_hook "$(t partitions.rootFailed "$disk")"
     root_part_num="$created_partition_number"
 
     disk_step "flagging partition $efi_part_num as ESP" \
@@ -863,11 +1024,11 @@ run_partition_execute() {
     # the log.
     partprobe "$disk" 2>>"${OMARCHY_INSTALL_LOG_FILE:-/dev/null}"
     sync
-    sleep 2
+    settle_devices
 
-    wait_for_device "$efi_dev" || disk_abort_hook "EFI partition $efi_dev never appeared"
+    wait_for_device "$efi_dev" || disk_abort_hook "$(t partitions.efiMissing "$efi_dev")"
     wait_for_device "$root_partition_device" ||
-      disk_abort_hook "Root partition $root_partition_device never appeared"
+      disk_abort_hook "$(t partitions.rootMissing "$root_partition_device")"
 
     # Both partitions are ours and brand new, but the space they occupy may
     # carry signatures from whatever was deleted to free it.
@@ -884,11 +1045,18 @@ run_partition_execute() {
       # The same persistent open flags as orchestrator/luks_tuning.py: the
       # free-space path formats and opens here, before the orchestrator runs,
       # so that tuning does not reach it.
+      # The open uses the volume key the format was given, in a root-only
+      # file on tmpfs, so it does not derive the passphrase's key a second
+      # time (2 s). The file goes once the volume is open, or when either
+      # step fails (disk_abort_hook).
+      luks_volume_key=$(omarchy-luks-calibrate volume-key)
       disk_step "Formatting LUKS2 on $root_partition_device" \
-        omarchy-luks-calibrate format "$root_partition_device" < <(printf "%s" "$password")
+        omarchy-luks-calibrate format "$root_partition_device" "$luks_volume_key" < <(printf "%s" "$password")
       disk_step "Opening the encrypted root on $root_partition_device" \
         cryptsetup open --persistent --allow-discards --perf-no_read_workqueue \
-          "$root_partition_device" omarchy_root - < <(printf "%s" "$password")
+          --volume-key-file "$luks_volume_key" "$root_partition_device" omarchy_root
+      rm -f "$luks_volume_key"
+      luks_volume_key=""
       root_mapper="/dev/mapper/omarchy_root"
     else
       root_mapper="$root_partition_device"
@@ -903,7 +1071,7 @@ run_partition_execute() {
     # full-disk path does the same through archinstall (archinstall_adapter).
     disk_step "creating the Btrfs filesystem on $root_mapper" \
       mkfs.btrfs -K -f -L OMARCHY "$root_mapper"
-    wait_for_device "$root_mapper" || disk_abort_hook "Root device $root_mapper never appeared"
+    wait_for_device "$root_mapper" || disk_abort_hook "$(t partitions.deviceMissing "$root_mapper")"
 
     mkdir -p /mnt/btrfs-root
     disk_step "mounting $root_mapper" mount "$root_mapper" /mnt/btrfs-root
@@ -932,9 +1100,9 @@ run_partition_execute() {
     # a failure names the step that broke rather than surfacing later as
     # "protected mode: /mnt is not a mountpoint".
     mountpoint -q /mnt ||
-      disk_abort_hook "Target /mnt is not mounted; not starting the installer"
+      disk_abort_hook "$(t partitions.targetUnmounted)"
     mountpoint -q "/mnt$esp_mount_in_target" ||
-      disk_abort_hook "ESP is not mounted at /mnt$esp_mount_in_target"
+      disk_abort_hook "$(t partitions.espUnmounted "/mnt$esp_mount_in_target")"
   fi
 
   local luks_uuid_json="null" luks_uuid
@@ -1026,8 +1194,6 @@ _EOF_
 }
 
 disk_form() {
-  step "$(t disk.intro)"
-
   # Don't offer the install media as an option (Arch ISO mounts it here)
   local boot_source
   local exclude_disk
@@ -1037,6 +1203,18 @@ disk_form() {
   # Installable disks, internal ones first, without the boot device
   local available_disks
   available_disks=$(install_disk_candidates "$exclude_disk")
+  [[ -n $available_disks ]] || abort "$(t disk.none)"
+
+  # One disk is no choice: go on to what to do with it, which names the disk.
+  # Counted on every call, as a disk plugged in since changes it.
+  only_disk=false
+  if [[ -n $available_disks && $available_disks != *$'\n'* ]]; then
+    disk=$available_disks
+    only_disk=true
+    return 0
+  fi
+
+  step "$(t disk.intro)"
 
   # Get available disks and format them with info
   local disk_options=""
@@ -1057,6 +1235,14 @@ disk_form() {
   disk=$(echo "$selected_display" | awk '{print $1}')
 }
 
+# After a partition table changed: wait until udev has handled what the kernel
+# reported, which is when the device nodes and their properties are current.
+# The fixed sleeps that stood here (1-2 s each) waited longer than that on
+# every machine and not long enough on a slow one.
+settle_devices() {
+  udevadm settle --timeout=10 2>/dev/null || true
+}
+
 # STEP 4: INSTALL MODE
 
 open_partition_tool() {
@@ -1071,7 +1257,7 @@ open_partition_tool() {
   cfdisk "$disk" || true
   partprobe "$disk" 2>/dev/null || true
   sync
-  sleep 1
+  settle_devices
 }
 
 # If the disk has no partition table or no unallocated free space, the only
@@ -1100,17 +1286,26 @@ requires_full_disk_install() {
 # Returns gum's status: OMARCHY_FORM_BACK for Esc, OMARCHY_FORM_SIGNAL for
 # Ctrl+C.
 install_mode_form() {
-  local free_space_offered=false choice choices=()
+  local free_space_offered=false other_disk_offered=true choice choices=()
 
   # The free-space/protected path registers an EFI boot entry and is UEFI-only.
   # Full-disk installs still support BIOS through the orchestrator's BIOS branch.
   if [[ -d /sys/firmware/efi ]] && ! $full_disk_only; then
     free_space_offered=true
   fi
+  $only_disk && other_disk_offered=false
   local -A labels=([full_disk]="$(t mode.fullDisk)" [free_space]="$(t mode.freeSpace)" [other_disk]="$(t mode.otherDisk)")
   while read -r choice; do
     choices+=("${labels[$choice]}"$'\t'"$choice")
-  done < <(install_mode_choices "$free_space_offered")
+  done < <(install_mode_choices "$free_space_offered" "$other_disk_offered")
+
+  # A single choice is no choice: the overwrite confirmation names the disk.
+  install_mode_asked=false
+  if (( ${#choices[@]} == 1 )); then
+    install_mode=${choices[0]#*$'\t'}
+    return 0
+  fi
+  install_mode_asked=true
 
   step "$(t mode.intro)"
   install_mode=$(gum choose --label-delimiter $'\t' --header "$(t mode.header "$disk")" "${choices[@]}")
@@ -1118,7 +1313,12 @@ install_mode_form() {
 
 confirm_disk_overwrite() {
   local mode="encrypted"
-  local affirmative confirm_status
+  local affirmative confirm_status disk_details
+
+  # The disk as the disk list describes it (size, model, partitions), which a
+  # machine with one disk now reaches without seeing that list. It is what the
+  # confirmation names.
+  disk_details=$(get_disk_info "$disk")
 
   while true; do
     clear_logo
@@ -1133,7 +1333,7 @@ confirm_disk_overwrite() {
     fi
 
     echo
-    gum confirm --affirmative "$affirmative" --negative "$(t common.change)" "$(t overwrite.prompt "$disk")"
+    gum confirm --affirmative "$affirmative" --negative "$(t common.change)" "$(t overwrite.prompt "$disk_details")"
     confirm_status=$?
 
     case $confirm_status in
@@ -1173,6 +1373,7 @@ select_installation() {
     # mode, so skip the picker and go straight to the overwrite confirm.
     if $full_disk_only; then
       install_mode="full_disk"
+      install_mode_asked=false
     else
       # Esc goes back to the disk list, as "Choose a different disk" does. Ctrl+C
       # still ends the install.
@@ -1190,8 +1391,12 @@ select_installation() {
           return 0
         fi
         # When the picker was skipped, declining the overwrite means the user
-        # wants a different disk.
-        $full_disk_only && disk_form
+        # wants a different disk; with only the one disk, there is nothing
+        # left to choose, and the installer ends.
+        if ! $install_mode_asked; then
+          $only_disk && abort
+          disk_form
+        fi
         ;;
       free_space)
         if run_partition_decide; then
@@ -1210,17 +1415,41 @@ select_installation() {
 
 defer_provisioning=false
 install_target="full_disk"
+only_disk=false
+oem_install=false
+if [[ ${1:-} == "--oem" ]]; then
+  [[ -f /usr/share/omarchy-iso/oem-install ]] || { echo "OEM install requires an OEM ISO" >&2; exit 1; }
+  oem_install=true
+  defer_provisioning=true
+fi
 
-# Let the live VT reach its settled width before the first screen so the logo
-# isn't measured against the transient 80-column boot console.
-wait_for_stable_terminal
-i18n_console_font "$(tty 2>/dev/null)"
+# Carry on from where the run before a kmscon relaunch left off.
+resume_stage=""
+if answers=$(kmscon_take_answers); then
+  eval "$answers"
+  unset answers
+  i18n_load "$language"
+  set_form_language
+fi
 
-greeter
+if [[ -z $resume_stage ]]; then
+  # Let the live VT reach its settled width before the first screen so the logo
+  # isn't measured against the transient 80-column boot console. kmscon's
+  # grid is settled from its first frame, and waiting would only hold an empty
+  # screen up before the welcome.
+  [[ ${OMARCHY_KMSCON:-} == 1 ]] || wait_for_stable_terminal
+  i18n_console_font "$(tty 2>/dev/null)"
 
-language_form
+  # A preset language greets in that language.
+  i18n_load "$language"
 
-$defer_provisioning || keyboard_form
+  if ! $oem_install; then
+    greeter
+    language_form
+  fi
+
+  $defer_provisioning || keyboard_form
+fi
 
 # Normal install: keyboard (loaded above, so the LUKS passphrase is typed under
 # the right layout) → user → disk → install mode. The user step can unwind to
@@ -1240,18 +1469,28 @@ if $defer_provisioning; then
   username=""
   password=""
   password_hash=""
-  # Neutral defaults for the install; the owner overwrites both in the
-  # first-boot OOBE (omarchy-provision-owner).
+  # Neutral defaults for the install, or the preset's timezone; the owner
+  # overwrites both in the first-boot OOBE (omarchy-provision-owner), which
+  # opens in the preset language.
   hostname="omarchy"
-  timezone="UTC"
+  timezone=${preset_timezone:-UTC}
 
   # Jump straight to disk selection + overwrite confirmation (encrypted by
   # default, Ctrl+C toggles unencrypted). deferred provisioning is always a full-disk install.
-  disk_form
-  stage_qualcomm_firmware
-  until confirm_disk_overwrite; do
+  if $oem_install; then
+    disk=$(python3 /usr/share/omarchy-iso/oem-disk.py) || exit 1
+    encrypt_installation=true
+    clear_logo
+    say "OEM install: preparing $disk for another owner"
+    stage_qualcomm_firmware
+  else
     disk_form
-  done
+    stage_qualcomm_firmware
+    until confirm_disk_overwrite; do
+      $only_disk && abort
+      disk_form
+    done
+  fi
   install_target="full_disk"
 else
   disk_form
@@ -1275,7 +1514,7 @@ if [[ $install_target == "free_space" ]]; then
   # terminal while the hash is still running, so a wait on a slow medium
   # shows movement instead of a frozen step header.)
   if [[ ${1:-} != "dry" ]]; then
-    step "Verifying the install medium"
+    step "$(t verify.title)"
     if ! verify_error=$(OMARCHY_VERIFY_PROGRESS=/dev/tty OMARCHY_VERIFY_PROGRESS_INDENT="$PADDING_LEFT" \
       omarchy-wait-root-image-verify 2>&1 1>/dev/null); then
       abort "$(head -1 <<<"$verify_error")"

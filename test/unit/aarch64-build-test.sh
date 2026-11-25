@@ -25,7 +25,7 @@ have_archiso() {
 
 # --- entrypoint argument contract -------------------------------------------
 bash -n "$ROOT/bin/omarchy-iso-make" "$ROOT/builder/build-iso.sh" \
-  "$ROOT/builder/aarch64-package-filter.sh" "$ROOT/builder/grub-platform.sh" \
+  "$ROOT/builder/aarch64-package-filter.sh" "$ROOT/builder/qcom-oem-firmware.sh" "$ROOT/builder/grub-platform.sh" \
   "$ROOT/builder/archiso-aarch64-mkinitcpio.sh" "$ROOT/builder/archiso-aarch64-grub-modules.sh" \
   "$ROOT/builder/node-release.sh" "$ROOT/builder/arm64-kernel-image.sh" \
   "$ROOT/builder/n1x-dev-ssh/omarchy-n1x-dev-ssh" "$ROOT/configs/airootfs/root/.automated_script.sh"
@@ -34,14 +34,19 @@ grep -Eq '^ *CONTAINER_IMAGE=ghcr\.io/menci/archlinuxarm@sha256:[0-9a-f]{64}$' "
 grep -Eq 'requires? (--package-dir DIR|the package bundle)' "$ROOT/bin/omarchy-iso-make" "$ROOT/builder/build-iso.sh" \
   && fail "an aarch64 build still requires a package bundle, though edge publishes linux-omarchy"
 grep -Fq 'ships no $required' "$ROOT/builder/build-iso.sh" || fail "a runtime without the platform support is not refused"
-for required in bin/omarchy-hw-platform install/hardware/qualcomm/dtb-uki.sh install/omarchy-aarch64-qualcomm.packages \
-  install/omarchy-aarch64-n1x.packages install/omarchy-aarch64-gb10.packages; do
-  sed -n '/^  for required in /,/; do$/p' "$ROOT/builder/build-iso.sh" | grep -Fq -- "$required" \
-    || fail "a runtime without $required is not refused"
+required_lines=$(sed -n '/^  required_platform_files=(/,/^  for required in /p' "$ROOT/builder/build-iso.sh")
+for required in bin/omarchy-hw-platform install/omarchy-aarch64-n1x.packages install/omarchy-aarch64-gb10.packages; do
+  grep -Fq -- "$required" <<<"${required_lines%%if *}" || fail "a runtime without $required is not refused"
+done
+# The Snapdragon setup is required only of the runtime a Snapdragon image installs.
+for required in install/hardware/qualcomm/dtb-uki.sh install/omarchy-aarch64-qualcomm.packages; do
+  grep -Fq -- "$required" <<<"${required_lines%%if *}" && fail "the plain aarch64 image requires the Snapdragon setup $required"
+  grep -Fq -- "$required" <<<"$required_lines" || fail "a Snapdragon image takes a runtime without $required"
 done
 grep -Fq 'sha256sum --check --strict --quiet SHA256SUMS' "$ROOT/bin/omarchy-iso-make" || fail "bundle checksums are not verified on the host"
 grep -Fq -- '-v "$PACKAGE_DIR:/packages:ro"' "$ROOT/bin/omarchy-iso-make" || fail "bundle is not mounted read-only at /packages"
-grep -Fq 'OMARCHY_ARCH == x86_64 && -d /var/cache/pacman/pkg' "$ROOT/bin/omarchy-iso-make" || fail "host pacman cache would leak into aarch64 builds"
+grep -Fq '/var/cache/pacman/pkg:/var/cache/pacman/pkg' "$ROOT/bin/omarchy-iso-make" && fail "host pacman cache would leak into builds"
+grep -Fq 'builder_pkg_${OMARCHY_MIRROR}_${OMARCHY_ARCH}' "$ROOT/bin/omarchy-iso-make" || fail "builder package cache is not isolated by channel and arch"
 grep -Fq 'aarch64 builds use the stable, rc or edge channel' "$ROOT/builder/build-iso.sh" || fail "an aarch64 build accepts a channel it has no config for"
 grep -Fq 'OMARCHY_KERNEL=linux-omarchy' "$ROOT/bin/omarchy-iso-make" || fail "an aarch64 image does not boot linux-omarchy"
 grep -Fq -- '--kernel' "$ROOT/bin/omarchy-iso-make" && fail "an aarch64 build still offers a choice of kernel"
@@ -56,7 +61,7 @@ if grep -Fq -- '--config "/configs/pacman-online-' "$ROOT/builder/build-iso.sh";
 fi
 grep -Fq 'configure_archiso_aarch64_mkinitcpio' "$ROOT/builder/build-iso.sh" || fail "live initramfs is not adapted for aarch64"
 grep -Fq 'kernel_options="console=tty0 acpi=nospcr initramfs_async=0"' "$ROOT/builder/build-iso.sh" || fail "aarch64 live boot does not pin the panel console"
-grep -Fq 'boot_splash_kernel_options="quiet splash "' "$ROOT/builder/build-iso.sh" || fail "aarch64 live boot does not show the splash"
+grep -Fq 'boot_splash_kernel_options="quiet loglevel=3 ' "$ROOT/builder/build-iso.sh" || fail "aarch64 live boot is not quiet"
 grep -Fq 'plymouth.enable=0 console=tty0' "$ROOT/builder/build-iso.sh" && fail "aarch64 live boot still turns Plymouth off"
 grep -Fq '"$mkarchiso_command" -v -w' "$ROOT/builder/build-iso.sh" || fail "builder does not use the patched mkarchiso on aarch64"
 # pacman takes the first repository carrying a name: the platform bundle, then
@@ -97,7 +102,7 @@ done
 for cfg in grub.cfg loopback.cfg; do
   src="$ROOT/configs/grub/$cfg"
   grep -Fqx 'set live_kernel=%KERNEL%' "$src" || fail "$cfg does not template the kernel"
-  grep -Fq 'vmlinuz-${live_kernel}' "$src" || fail "$cfg entries do not boot the selected kernel"
+  grep -Fq 'vmlinuz-%LIVE_KERNEL%' "$src" || fail "$cfg entries do not boot the selected kernel"
   grep -Fq "if [ \"\${sys_vendor}\" == 'Apple Inc.' ]; then" "$src" || fail "$cfg boots linux-t2 on a machine Apple did not make"
   grep -Fq '%BOOT_SPLASH_KERNEL_OPTIONS%%KERNEL_OPTIONS%' "$src" || fail "$cfg does not template boot options"
   grep -Fq -- "--id 'n1x-recovery'" "$src" || fail "$cfg lacks the N1x recovery entry"
@@ -113,10 +118,32 @@ for cfg in grub.cfg loopback.cfg; do
     fi
     if [[ $platform == aarch64 ]]; then
       grep -Fq 'n1x-recovery' "$fixture/$platform-$cfg" || fail "the aarch64 menu lost the N1x recovery entry in $cfg"
+      # No T2 Mac is arm64. Ventoy hooks the initramfs it finds by literal
+      # path here; without the hook an arm64 boot from its stick can't find
+      # the ISO and drops to a shell.
+      grep -Eq 'live_kernel|linux-t2|sys_vendor' "$fixture/$platform-$cfg" && fail "the aarch64 $cfg still chooses a Mac kernel"
+      grep -Eq '^\s*initrd\s' "$fixture/$platform-$cfg" || fail "the aarch64 $cfg loads no initramfs"
+      grep -E '^\s*initrd\s' "$fixture/$platform-$cfg" | grep -Fv 'initrd /arch/boot/aarch64/initramfs-linux-omarchy.img' \
+        && fail "an aarch64 $cfg entry loads an initramfs Ventoy can't find by name"
     else
       grep -Fq 'n1x-recovery' "$fixture/$platform-$cfg" && fail "recovery entry leaked into the $platform $cfg"
+      grep -Fq "if [ \"\${sys_vendor}\" == 'Apple Inc.' ]; then" "$fixture/$platform-$cfg" || fail "the x86_64 $cfg no longer boots linux-t2 on a Mac"
+      # Ventoy skips an initrd path with a variable in it, as on aarch64.
+      grep -E '^\s*initrd\s' "$fixture/$platform-$cfg" | grep -F '$' && fail "an x86_64 $cfg entry loads an initramfs Ventoy can't find by name"
+      # Every entry that boots the live kernel loads its initramfs through
+      # live_initrd.
+      entries=$(grep -c 'vmlinuz-${live_kernel} ' "$fixture/$platform-$cfg")
+      ((entries > 0)) && [[ $(grep -cx '\s*live_initrd' "$fixture/$platform-$cfg") == "$entries" ]] \
+        || fail "an x86_64 $cfg entry boots the live kernel without live_initrd"
+      # Each kernel loads its own initramfs. live_initrd is plain enough for
+      # bash to run, with initrd printing the path GRUB would load.
+      for kernel in linux-omarchy linux-t2; do
+        # shellcheck disable=SC2034,SC2329 # used by the live_initrd under test
+        chosen=$(initrd() { echo "$1"; }; eval "$(sed -n '/^function live_initrd {$/,/^}$/p' "$fixture/$platform-$cfg")"; live_kernel=$kernel; live_initrd)
+        [[ $chosen == "/arch/boot/x86_64/initramfs-$kernel.img" ]] || fail "the x86_64 $cfg loads '$chosen' for $kernel"
+      done
     fi
-    grep -Eq '^%N1X_ONLY' "$fixture/$platform-$cfg" && fail "template markers remain in $cfg"
+    grep -Eq '^%(N1X|X86)_ONLY|%LIVE_(KERNEL|INITRD)%' "$fixture/$platform-$cfg" && fail "template markers remain in $cfg"
     grep -Fqx 'timeout_style=hidden' "$fixture/$platform-$cfg" || fail "$cfg ($platform) shows the boot menu"
     grep -Fqx 'timeout=0' "$fixture/$platform-$cfg" || fail "$cfg ($platform) waits at the boot menu"
   done
@@ -138,11 +165,15 @@ grep -Fq 'smbios --type 4 --get-string 7 --set cpu_maker' "$grub" || fail "GRUB 
 
 # --- manifest filter -----------------------------------------------------------
 source "$ROOT/builder/aarch64-package-filter.sh"
-result=$(filter_aarch64_packages linux-omarchy linux linux-headers linux-omarchy linux-omarchy-headers amd-ucode broadcom-wl-dkms tzupdate lib32-nvidia-utils dell-xps13-sidecar-amps linux-firmware-cirrus-dx13260 apple-bcm-firmware-fetcher superwhisper-bin mise-bin nvim vi obs-studio yay-debug hyprland omarchy-dev 2>/dev/null | tr '\n' ' ')
-[[ $result == "linux-omarchy linux-omarchy-headers linux-omarchy linux-omarchy-headers tzupdate mise-bin neovim ex-vi-compat hyprland omarchy-dev " ]] || fail "manifest filter produced: $result"
+result=$(filter_aarch64_packages linux-omarchy linux linux-headers linux-omarchy linux-omarchy-headers amd-ucode broadcom-wl-dkms tzupdate lib32-nvidia-utils dell-xps13-sidecar-amps linux-firmware-cirrus-dx13260 apple-bcm-firmware-fetcher facetimehd-dkms facetimehd-firmware-fetcher superwhisper-bin mise-bin nvim vi obs-studio yay-debug hyprland omarchy-dev 2>/dev/null | tr '\n' ' ')
+[[ $result == "linux-omarchy linux-omarchy-headers linux-omarchy linux-omarchy-headers tzupdate superwhisper-bin mise-bin neovim ex-vi-compat hyprland omarchy-dev " ]] || fail "manifest filter produced: $result"
 # The N1x list names linux-omarchy, and keeps the name.
 result=$(filter_aarch64_packages linux-omarchy linux-omarchy linux-omarchy-headers 2>/dev/null | paste -sd' ')
 [[ $result == "linux-omarchy linux-omarchy-headers" ]] || fail "linux-omarchy lost its name on its own image: $result"
+# The Dell XPS 16's N1x haptic touchpad installs it (omacom/omarchy#20108);
+# it is an any-architecture package, so the mirror must carry it.
+result=$(filter_aarch64_packages linux-omarchy dell-xps-touchpad-haptics 2>/dev/null)
+[[ $result == dell-xps-touchpad-haptics ]] || fail "the N1x haptic touchpad package is dropped from aarch64: '$result'"
 
 grep -Fq -- '-e "OMARCHY_RUNTIME_PACKAGE=${OMARCHY_RUNTIME_PACKAGE:-}"' "$ROOT/bin/omarchy-iso-make" \
   || fail "the Omarchy package pair cannot be overridden for a --local-source build"
@@ -247,15 +278,29 @@ make_refuses 'only valid with --arch aarch64' --package-dir /tmp
 make_refuses 'Unknown option: --platform' --arch aarch64 --platform n1x --edge
 
 # The live UKI that carries the Snapdragon laptops' device trees, since their
-# firmware provides none. Every image tries to build one from its own kernel.
+# firmware provides none. Only the Snapdragon image builds one, and only it
+# carries their firmware and its tools.
 uki="$ROOT/builder/qualcomm/live-uki.sh"
 bash -n "$uki"
-grep -Fq 'parted systemd-ukify linux-firmware-qcom qcom-firmware-extract python)' "$ROOT/builder/build-iso.sh" \
-  || fail "the live image lacks ukify or the Snapdragon firmware tools"
+grep -Fq '    arch_packages+=(systemd-ukify systemd-stub-omarchy linux-firmware-qcom qcom-firmware-extract)' "$ROOT/builder/build-iso.sh" \
+  || fail "the Snapdragon live image lacks ukify or the Snapdragon firmware tools"
+grep -E '^  arch_packages=\("\$OMARCHY_KERNEL" archlinuxarm-keyring ' "$ROOT/builder/build-iso.sh" | grep -Eq 'qcom|ukify|systemd-stub' \
+  && fail "the plain aarch64 live image carries the Snapdragon firmware or tools"
+# Each Snapdragon block, from its if to the fi at the same indentation.
+snapdragon_blocks=$(awk '
+  !indent && /^ *if \[\[ -n \$OMARCHY_SNAPDRAGON \]\]; then$/ { match($0, /^ */); indent = RLENGTH + 1 }
+  indent { print; if ($0 ~ "^ {" indent - 1 "}fi$") indent = 0 }
+' "$ROOT/builder/build-iso.sh")
+for gated in 'live-uki.sh "$build_cache_dir' 'early-startup "$build_cache_dir' 'omarchy-live-dsp "$build_cache_dir' \
+  'source /builder/qcom-oem-firmware.sh' 'bash /builder/qualcomm/stage-medium-firmware.sh'; do
+  (( $(grep -Fc -- "$gated" <<<"$snapdragon_blocks") > 0 )) || fail "$gated is not limited to the Snapdragon image"
+  (( $(grep -Fc -- "$gated" "$ROOT/builder/build-iso.sh") == $(grep -Fc -- "$gated" <<<"$snapdragon_blocks") )) \
+    || fail "$gated also runs outside the Snapdragon image"
+done
 # The UKI is built in the image's customize step, once pacstrap has made the
 # kernel and initramfs it wraps: the builder's own lines, run against the live
 # root's customize_airootfs.sh.
-insert_uki=$(sed -n '/^  customize="\$build_cache_dir\/airootfs\/root\/customize_airootfs.sh"$/,/ "\$customize"$/p' "$ROOT/builder/build-iso.sh")
+insert_uki=$(sed -n '/^    customize="\$build_cache_dir\/airootfs\/root\/customize_airootfs.sh"$/,/ "\$customize"$/p' "$ROOT/builder/build-iso.sh")
 [[ $(wc -l <<<"$insert_uki") == 3 ]] || fail "the builder no longer adds the live UKI step to customize_airootfs.sh: $insert_uki"
 mkdir -p "$fixture/cache/airootfs/root"
 live_customize="$fixture/cache/airootfs/root/customize_airootfs.sh"
@@ -370,7 +415,7 @@ printf '%s\n' '# qualcomm' vulkan-freedreno >"$fixture/lists/omarchy-aarch64-qua
 printf '%s\n' '# apple' asahi-audio >"$fixture/lists/omarchy-aarch64-apple.packages"
 composed=$(
   base_pkg_lists=("$fixture/lists/omarchy-base.packages")
-  OMARCHY_ARCH=aarch64
+  OMARCHY_ARCH=aarch64 OMARCHY_SNAPDRAGON=1
   eval "$(sed -n '/^# aarch64 takes the runtime/,/^fi$/p' "$ROOT/builder/build-iso.sh")" 2>/dev/null
   cat "${base_pkg_lists[0]}"
   echo "--"
@@ -384,6 +429,18 @@ composed=$(
 )
 [[ $composed == $'base-one\nbase-two\nzram-generator\nrtkit\n--\nbase-one\nbase-two\nzram-generator\nrtkit\nlinux-omarchy\n--\nbase-one\nbase-two\nzram-generator\nrtkit\nvulkan-freedreno\n--\nomarchy-base.aarch64-n1x.packages\nomarchy-base.aarch64-qualcomm.packages\n--\nomarchy-aarch64-n1x.packages\nomarchy-aarch64-qualcomm.packages' ]] \
   || fail "aarch64 does not get the base list plus its architecture's additions, and one set per platform apart from Apple Silicon: $composed"
+# The plain aarch64 image installs no Snapdragon laptop, so it carries no
+# Qualcomm set and none of the firmware that set pulls into the mirror.
+composed=$(
+  base_pkg_lists=("$fixture/lists/omarchy-base.packages")
+  OMARCHY_ARCH=aarch64
+  eval "$(sed -n '/^# aarch64 takes the runtime/,/^fi$/p' "$ROOT/builder/build-iso.sh")" 2>/dev/null
+  ls "$platform_base_dir"
+  echo "--"
+  printf '%s\n' "${platform_lists[@]##*/}"
+)
+[[ $composed == $'omarchy-base.aarch64-n1x.packages\n--\nomarchy-aarch64-n1x.packages' ]] \
+  || fail "the plain aarch64 image carries the Snapdragon set: $composed"
 composed=$(
   rm "$fixture/lists"/omarchy-aarch64*.packages "$fixture/lists/omarchy-x86_64-only.packages"
   base_pkg_lists=("$fixture/lists/omarchy-base.packages")
@@ -406,9 +463,24 @@ grep -q '^MODULES=(loop i2c_mt65xx i2c_tegra i2c_hid i2c_hid_acpi hid_generic hi
 # A Snapdragon laptop's platform drivers, for a kernel that builds them as
 # modules. Each is optional, so a kernel without one still gets its image.
 live_modules=$(sed -n 's/^MODULES=(\(.*\))$/\1/p' "$fixture/archiso.conf")
-for module in gcc-x1e80100 pinctrl-x1e80100 qnoc-x1e80100 gcc-glymur tcsrcc-glymur dispcc-glymur gpucc-glymur pinctrl-glymur qnoc-glymur thunderbolt phy-qcom-qmp-usb phy-qcom-m31-eusb2 spmi-pmic-arb i2c-qcom-geni i2c-hid-of dwc3-qcom phy-qcom-qmp-combo; do
+for module in gcc-x1e80100 pinctrl-x1e80100 qnoc-x1e80100 gcc-glymur tcsrcc-glymur dispcc-glymur gpucc-glymur pinctrl-glymur qnoc-glymur thunderbolt phy-qcom-qmp-usb phy-qcom-m31-eusb2 spmi-pmic-arb i2c-qcom-geni i2c-hid-of dwc3-qcom dwc3-qcom-legacy phy-qcom-qmp-combo phy-nxp-ptn3222 gpio-sbu-mux; do
   [[ " $live_modules " == *" $module? "* ]] || fail "the live initramfs lacks the Snapdragon platform driver $module"
 done
 [[ " $live_modules " != *" qcom_q6v5_pas"* ]] || fail "the live initramfs loads the DSP driver"
+# The efivarfs mount fails on Snapdragon until the live root loads the EFI
+# variable driver; the hook that quiets it must run after base adds
+# init_functions, and must match the line mkinitcpio actually writes.
+live_hooks=$(sed -n 's/^HOOKS=(\(.*\))$/\1/p' "$fixture/archiso.conf")
+[[ " $live_hooks " == *" base "*" omarchy_quiet_efivars "* ]] || fail "the efivarfs mount is not quieted after base: $live_hooks"
+mkdir -p "$fixture/buildroot"
+if [[ -f /usr/lib/initcpio/init_functions ]]; then
+  cp /usr/lib/initcpio/init_functions "$fixture/buildroot/init_functions"
+else
+  printf '%s\n' '    if [ -e /sys/firmware/efi ]; then' \
+    '        mount -t efivarfs efivarfs /sys/firmware/efi/efivars -o nosuid,nodev,noexec' '    fi' >"$fixture/buildroot/init_functions"
+fi
+(BUILDROOT="$fixture/buildroot" && source "$ROOT/builder/qualcomm/quiet-efivars-install" && build)
+grep -Eq '^[[:space:]]*mount -t efivarfs .* 2>/dev/null$' "$fixture/buildroot/init_functions" || fail "the initramfs efivarfs mount still prints its error"
+grep -Eq '^[[:space:]]*mount -t efivarfs .*noexec$' "$fixture/buildroot/init_functions" && fail "an efivarfs mount was left unquieted"
 
 echo "aarch64 build overlay tests passed"

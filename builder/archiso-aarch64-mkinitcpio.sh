@@ -27,10 +27,20 @@ configure_archiso_aarch64_mkinitcpio() {
     qcom_hwspinlock? smem? smp2p? socinfo? llcc-qcom? qcom_aoss? icc-bwmon?
     qcom-cpucp-mbox? nvmem_qfprom? nvmem_qcom-spmi-sdam? qcom-pon? rtc-pm8xxx?
     qcom_tsens? qcom-spmi-temp-alarm? i2c-qcom-geni? i2c-hid-of?
-    phy-qcom-qmp-pcie? phy-qcom-qmp-combo? phy-qcom-eusb2-repeater?
+    phy-qcom-qmp-pcie? phy-qcom-qmp-combo? phy-qcom-eusb2-repeater? phy-nxp-ptn3222?
     phy-qcom-qmp-usb? phy-qcom-m31-eusb2?
     phy-snps-eusb2? phy-qcom-edp? dwc3-qcom? xhci-plat-hcd? ps883x? pmic_glink?
+    # The chips before the X1 (sc7180, sc8180x, sc8280xp, sdm845, msm8998)
+    # still describe USB the old way, with the controller as a child node,
+    # and only this driver binds that. Without it the image never finds the
+    # stick it started from.
+    dwc3-qcom-legacy?
     pmic_glink_altmode? pci-pwrctrl-pwrseq? pwrseq-qcom-wcn?
+    # Boards without retimers (the X13s, the Zenbook 14 UX3480QA) switch their
+    # USB-C SBU lines with GPIO muxes. When the early start brings up UCSI,
+    # the Type-C ports and pmic_glink_altmode wait for them; without the
+    # driver, UCSI retries for 10 s, resetting the port controller each time.
+    gpio-sbu-mux?
   )
   local -i memdisk_count=0 microcode_count=0 plymouth_count=0
 
@@ -74,6 +84,9 @@ configure_archiso_aarch64_mkinitcpio() {
   # excluding memtest86+ makes mkinitcpio report an incomplete ARM64 image.
   # Plymouth stays: 26.134.222-2 aborted in the GB10 initramfs, but -3 runs
   # there.
+  # Last, so it runs after base, which adds the init_functions it quiets
+  # (builder/qualcomm/quiet-efivars-install).
+  filtered_hooks+=(omarchy_quiet_efivars)
   printf -v replacement 'HOOKS=(%s)' "${filtered_hooks[*]}"
   sed -i "s|^HOOKS=.*$|$replacement|" "$config"
 

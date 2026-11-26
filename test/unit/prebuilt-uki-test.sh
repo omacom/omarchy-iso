@@ -75,7 +75,9 @@ uki_branch=$(awk '
 [[ -n $uki_branch ]] || fail "could not extract the OMARCHY_SNAPDRAGON pre-built UKI branch"
 
 run_uki_branch() {
-  local snapdragon=$1 root="$work/root-${snapdragon:-ordinary}" log="$work/chroot-${snapdragon:-ordinary}.log"
+  # Two locals: within one, $snapdragon still expands to the caller's value.
+  local snapdragon=$1
+  local root="$work/root-${snapdragon:-ordinary}" log="$work/chroot-${snapdragon:-ordinary}.log"
   mkdir -p "$root/var/lib/omarchy-iso"
   printf 'stale' >"$root/var/lib/omarchy-iso/prebuilt-uki.efi"
   rm -f "$log"

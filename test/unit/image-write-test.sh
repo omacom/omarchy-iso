@@ -125,6 +125,24 @@ OMARCHY_IMAGE_WRITE_PROGRESS="$work/progress" run write "$image" "$work/target" 
   fail "write reports its progress to OMARCHY_IMAGE_WRITE_PROGRESS" "status $status, progress '$(cat "$work/progress" 2>/dev/null)'"
 pass "write reports its progress to OMARCHY_IMAGE_WRITE_PROGRESS"
 
+# The progress reporter must not keep the tool alive once the frames are
+# written: it used to sleep out its quarter second first, every time. Five
+# tries, so that a stalled test machine does not fail this.
+prompt=no
+for _ in 1 2 3 4 5; do
+  target "$work/target" 0
+  OMARCHY_IMAGE_WRITE_PROGRESS="$work/progress" run write "$image" "$work/target" 2
+  [[ $status == 0 ]] || fail "write with progress succeeds" "$(cat "$work/stderr")"
+  frames=$(sed -n 's/.* frames \([0-9.]*\) s .*/\1/p' "$work/stderr")
+  if awk -v t="$frames" 'BEGIN { exit !(t != "" && t < 0.2) }'; then
+    prompt=yes
+    break
+  fi
+done
+[[ $prompt == yes ]] ||
+  fail "write ends when its frames are written, not at the reporter's next sample" "frames took ${frames}s"
+pass "write ends when its frames are written, not at the reporter's next sample"
+
 # The split the installer log keeps: wall time by stage, and the workers'
 # thread-seconds by activity, which cannot add up to more than the threads had.
 python3 - "$work/stderr" <<'PY' || fail "write reports where its time went" "$(cat "$work/stderr")"

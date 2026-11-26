@@ -266,6 +266,12 @@ await_verdict() {
 # The mirror is hashed first (its unit is ordered Before= the image's, so the
 # image is the last thing read before the install writes it); its verdict comes
 # first too. Without the mirror's sums file there is nothing to verify.
+greeter_marker=${OMARCHY_GREETER_READY_FILE:-/run/omarchy-iso/greeter-ready}
+if [[ ! -e $greeter_marker ]]; then
+  mkdir -p "${greeter_marker%/*}" 2>/dev/null || true
+  cut -d' ' -f1 /proc/uptime >"$greeter_marker" 2>/dev/null || : >"$greeter_marker" 2>/dev/null || true
+fi
+
 IMAGE_UNIT=$UNIT
 if [[ -f $MIRROR_SUMS ]]; then
   await_verdict "$MIRROR_UNIT" "the package mirror"

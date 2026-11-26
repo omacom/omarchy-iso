@@ -49,6 +49,7 @@ file_permissions=(
   ["/root/customize_airootfs.sh"]="0:0:755"
   ["/usr/local/bin/choose-mirror"]="0:0:755"
   ["/usr/local/bin/omarchy-cidata-load"]="0:0:755"
+  ["/usr/local/bin/omarchy-wait-greeter-ready"]="0:0:755"
   ["/usr/local/bin/omarchy-wait-root-image-verify"]="0:0:755"
   ["/usr/local/bin/omarchy-image-write"]="0:0:755"
   ["/usr/local/bin/omarchy-iso-cleanup-disk"]="0:0:755"

@@ -1,0 +1,21 @@
+#!/bin/bash
+# Hold the medium-hashing chain (omarchy-mirror-verify -> omarchy-root-image-verify
+# -> omarchy-luks-calibrate -> omarchy-target-keyring-early / omarchy-cache-warm)
+# until the live greeter has drawn its logo (or a non-interactive boot starts).
+# Hashing the offline mirror from multi-user.target at ~2.7 s saturates the USB
+# stick through loop0 (where BFQ loses the idle I/O class) while udev, GPU
+# firmware, and kmscon are still reading off the same medium.
+#
+# Falls through after a bounded cap so a headless or broken-VT boot still
+# verifies the medium without hanging.
+set -euo pipefail
+
+marker=${OMARCHY_GREETER_READY_FILE:-/run/omarchy-iso/greeter-ready}
+timeout=${OMARCHY_GREETER_READY_TIMEOUT:-30}
+poll=${OMARCHY_GREETER_READY_POLL:-0.05}
+deadline=$((SECONDS + timeout))
+
+while [[ ! -e $marker ]]; do
+  ((SECONDS >= deadline)) && exit 0
+  sleep "$poll"
+done

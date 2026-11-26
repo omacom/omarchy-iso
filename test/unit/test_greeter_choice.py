@@ -52,7 +52,7 @@ class GreeterChoiceTest(unittest.TestCase):
         (self.dir / "logo.txt").write_text("LOGO-LOGO-\n")
         self.layer = self.dir / "omarchy-try.sfs"
 
-    def run_greeter(self, keys, layer=True):
+    def run_greeter(self, keys, layer=True, extra_env=None):
         if layer:
             self.layer.touch()
         pid, fd = pty.fork()
@@ -60,6 +60,8 @@ class GreeterChoiceTest(unittest.TestCase):
             fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
             os.environ["LOGO_PATH"] = str(self.dir / "logo.txt")
             os.environ["TRY_LAYER"] = str(self.layer)
+            if extra_env:
+                os.environ.update(extra_env)
             os.execvp("bash", ["bash", "-c", SCRIPT])
         seen = b""
         try:
@@ -129,6 +131,13 @@ class GreeterChoiceTest(unittest.TestCase):
         choice, seen = self.run_greeter([b" ", DOWN, b"\n"], layer=False)
         self.assertEqual(choice, "install")
         self.assertNotIn(b"Space", seen)
+
+
+    def test_greeter_signals_ready_marker_after_drawing_logo(self):
+        marker = self.dir / "run" / "greeter-ready"
+        choice, _ = self.run_greeter([b"\r"], extra_env={"OMARCHY_GREETER_READY_FILE": str(marker)})
+        self.assertEqual(choice, "install")
+        self.assertTrue(marker.is_file())
 
 
 if __name__ == "__main__":

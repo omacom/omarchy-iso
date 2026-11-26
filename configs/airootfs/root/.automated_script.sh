@@ -21,7 +21,15 @@ set -euo pipefail
 
 # The N1x recovery boot entry is a diagnostic shell, never the installer: record
 # the hardware probe, show how to reach the machine, and leave tty1 at a prompt.
+signal_greeter_ready() {
+  local marker=${OMARCHY_GREETER_READY_FILE:-/run/omarchy-iso/greeter-ready}
+  [[ -e $marker ]] && return 0
+  mkdir -p "${marker%/*}" 2>/dev/null || true
+  cut -d' ' -f1 /proc/uptime >"$marker" 2>/dev/null || : >"$marker" 2>/dev/null || true
+}
+
 if grep -qw 'omarchy.n1x_recovery=1' /proc/cmdline; then
+  signal_greeter_ready
   /usr/local/sbin/omarchy-n1x-live-probe || true
   exit 0
 fi
@@ -100,10 +108,12 @@ if [[ -n ${OMARCHY_KMSCON_SHELL:-} && -n ${OMARCHY_KMSCON_ENDED:-} ]]; then
   trap 'trap - EXIT HUP TERM; kill -HUP $$' HUP TERM
 fi
 if [[ -f /usr/share/omarchy-iso/oem-install ]]; then
+  signal_greeter_ready
   export OMARCHY_UI_INTERACTIVE=no
   set_tokyo_night_colors
   ./configurator --oem
 elif [[ ${OMARCHY_KMSCON:-} != 1 || -n ${OMARCHY_KMSCON_SHELL:-} ]] && /usr/local/bin/omarchy-cidata-load; then
+  signal_greeter_ready
   # Looked for by the tty1 run and by a rerun from the shell an abort left,
   # where a cidata drive may have been plugged in since. Not by the run kmscon
   # starts: the tty1 run that started it has just looked. The palette is the

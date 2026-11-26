@@ -29,6 +29,20 @@ else
   echo "WARNING: /usr/lib/systemd/systemd-update-done missing; every live boot will redo the update units" >&2
 fi
 
+# Every boot of the stick runs this system first, whether the person goes on
+# to install or to Just try, and Just try promises to leave the machine as it
+# found it. Two things here would not:
+#   - The clock. timesyncd keeps the kernel from writing the system time to
+#     the RTC every 11 minutes only when the RTC is declared local time
+#     (systemd's timesyncd-manager.c), and Windows keeps its RTC in local
+#     time. The live system never sets a timezone, so local time is UTC and
+#     the clock reads the same.
+#   - systemd-hibernate-clear.service deletes the HibernateLocation EFI
+#     variable an installed system hibernated with, since this boot did not
+#     resume from it.
+printf '0.0 0 0\n0\nLOCAL\n' >/etc/adjtime
+systemctl mask systemd-hibernate-clear.service
+
 # The live system installs from the stick and never joins a network on its
 # own: the configurator has no Wi-Fi step, and the one network call it makes
 # (tzupdate, for a timezone guess) only works over a cable that is already

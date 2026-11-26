@@ -1,0 +1,21 @@
+#!/bin/bash
+#
+# Try Omarchy: probe again every PCI and USB device that has no driver.
+# omarchy-try-reprobe.service runs it once, early in a Try session.
+#
+# Try starts from the live installer by a soft reboot, which keeps the
+# kernel's drivers. The live system runs some devices without what they need
+# (no radio firmware, no SOF audio), and omarchy-try lets those go before the
+# soft reboot; a Wi-Fi driver may have released its card already. udev's
+# coldplug in the session replays uevents without probing a driver that is
+# already loaded, so without this those devices stay without one: no Wi-Fi,
+# no sound. Written to drivers_probe, a device is matched again against every
+# driver loaded now, with the session's firmware and modprobe settings.
+
+sysfs=${OMARCHY_SYSFS:-/sys}
+
+for device in "$sysfs"/bus/pci/devices/* "$sysfs"/bus/usb/devices/*; do
+  [[ -e $device && ! -e $device/driver ]] || continue
+  printf '%s' "${device##*/}" >"${device%/devices/*}/drivers_probe" 2>/dev/null || true
+done
+exit 0

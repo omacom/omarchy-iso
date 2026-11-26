@@ -1,0 +1,174 @@
+#!/bin/bash
+#
+# Try Omarchy, started from the installer's first question: the root image the
+# install writes, with the Try layer and a tmpfs over it, becomes the root of a
+# soft reboot.
+#
+#   omarchy-root.sfs   the root image; the live system already runs over it,
+#                      mounted read-only at /run/omarchy-root/image
+#                      (hooks/omarchy_try)
+#   omarchy-try.sfs    the Try layer (builder/build-try-layer.sh): the user,
+#                      the session, nothing that touches a disk
+#   omarchy-try-*.sfs  a driver layer on top, for the machine's NVIDIA card or
+#                      T2 chip
+#   tmpfs              where everything the session writes goes
+#
+# A soft reboot (systemd-soft-reboot.service) stops the live system and starts
+# systemd again in /run/nextroot. The kernel keeps running, so the firmware and
+# the boot loader are not involved and no key has to reach them: the boot menu
+# only reads keyboards the firmware drives. kexec would do the same, but the
+# Secure Boot signed kernel does not have it.
+#
+# systemd leaves every mount under /run/nextroot in place, and overlayfs holds
+# its own references to the layers under it, so nothing of the session goes
+# away with the live system.
+#
+# Exits non-zero, with the reason on stderr and nothing left mounted, when Try
+# cannot start. Nothing on the machine's disks is touched either way.
+
+set -euo pipefail
+
+medium=${OMARCHY_TRY_MEDIUM:-/run/archiso/bootmnt/arch/$(uname -m)}
+image=${OMARCHY_TRY_IMAGE:-/run/omarchy-root/image}
+run=${OMARCHY_TRY_RUN:-/run/omarchy-try}
+nextroot=${OMARCHY_TRY_NEXTROOT:-/run/nextroot}
+pci_devices=${OMARCHY_PCI_DEVICES_PATH:-/sys/bus/pci/devices}
+sysfs=${OMARCHY_SYSFS:-/sys}
+live_modules=${OMARCHY_TRY_LIVE_MODULES:-/usr/lib/modules}
+omarchy_path=${OMARCHY_PATH:-/usr/share/omarchy}
+
+mounted=()
+started=false
+
+# Anything but a soft reboot under way takes the session down again: a
+# populated /run/nextroot turns the next `systemctl reboot`, the installer's
+# own at the end of an install, into a soft reboot into Try.
+cleanup() {
+  local i
+  $started && return 0
+  # The session root first, whether or not it was recorded: a signal can land
+  # between its mount and the record.
+  if mountpoint -q "$nextroot"; then
+    umount -R "$nextroot" 2>/dev/null || umount -R -l "$nextroot" 2>/dev/null || true
+  fi
+  for ((i = ${#mounted[@]} - 1; i >= 0; i--)); do
+    umount "${mounted[i]}" 2>/dev/null || umount -l "${mounted[i]}" 2>/dev/null || true
+  done
+}
+trap cleanup EXIT
+trap 'exit 1' INT TERM HUP
+
+fail() {
+  echo "$1" >&2
+  exit 1
+}
+
+# Recorded before it is made: a signal between the two must not leave a
+# mount cleanup does not know of. Unmounting one that never came is harmless.
+mount_at() {
+  local target=${*: -1}
+  mkdir -p "$target"
+  mounted+=("$target")
+  mount "$@"
+}
+
+# Which driver layer this machine takes: Omarchy's own NVIDIA detector, which
+# the live system has from the image, or the T2 bridge by the IDs
+# install/hardware/apple/fix-t2.sh checks. The NVIDIA layers hold modules for
+# the image's kernel only; a Mac boots linux-t2.
+machine_driver() {
+  local device
+  if [[ -d $image/usr/lib/modules/$(uname -r) ]]; then
+    if OMARCHY_PCI_DEVICES_PATH=$pci_devices "$omarchy_path/bin/omarchy-hw-nvidia-gsp"; then
+      echo nvidia-open
+    fi
+    return 0
+  fi
+  for device in "$pci_devices"/*; do
+    [[ -r $device/vendor && -r $device/device ]] || continue
+    [[ $(<"$device/vendor") == "0x106b" ]] || continue
+    case $(<"$device/device") in
+      0x1801 | 0x1802) echo t2; return 0 ;;
+    esac
+  done
+}
+
+[[ -f $medium/omarchy-try.sfs ]] || fail "this medium has no Try layer ($medium/omarchy-try.sfs)"
+mountpoint -q "$image" || fail "the root image is not mounted at $image"
+# Left by an attempt that could not finish; nothing else mounts it here.
+if mountpoint -q "$nextroot"; then
+  umount -R "$nextroot" || umount -R -l "$nextroot" || fail "$nextroot is mounted and could not be unmounted"
+fi
+
+mount_at -t squashfs -o ro,loop "$medium/omarchy-try.sfs" "$run/layer" ||
+  fail "could not mount $medium/omarchy-try.sfs"
+lower=$run/layer:$image
+
+driver=$(machine_driver)
+if [[ -n $driver && -f $medium/omarchy-try-$driver.sfs ]]; then
+  if mount_at -t squashfs -o ro,loop "$medium/omarchy-try-$driver.sfs" "$run/driver"; then
+    lower=$run/driver:$lower
+    echo "Try Omarchy: with the $driver layer"
+  fi
+fi
+
+# Half of RAM for what the session writes; tmpfs takes pages only as they are
+# used.
+mount_at -t tmpfs -o size=50%,mode=0755 omarchy-try "$run/rw" || fail "could not mount the session's tmpfs"
+mkdir -p "$run/rw/upper" "$run/rw/work"
+
+mount_at -t overlay omarchy-try \
+  -o "lowerdir=$lower,upperdir=$run/rw/upper,workdir=$run/rw/work,index=off,metacopy=off,redirect_dir=off" \
+  "$nextroot" || fail "could not mount the session root"
+
+# A kernel the image has no modules for (linux-t2, which a Mac boots) keeps the
+# live system's own.
+kver=$(uname -r)
+if [[ ! -d $nextroot/usr/lib/modules/$kver && -d $live_modules/$kver ]]; then
+  mount_at --bind "$live_modules/$kver" "$nextroot/usr/lib/modules/$kver" ||
+    fail "could not give the session the live kernel's modules"
+fi
+
+# From here to the request, no signal: each step below is undone only on the
+# way that knows it happened, and a request systemd took needs the session
+# root it was given.
+trap '' INT TERM HUP
+
+# The live system's checks of the medium serve an install only. A soft reboot
+# would kill a hash still running, and systemd would carry its failed state
+# into the session; it would also keep reading the stick while Try starts
+# from it. Stopped first, and started again if the soft reboot is refused, so
+# an install still gets their verdict.
+checks=(omarchy-mirror-verify.service omarchy-root-image-verify.service)
+systemctl stop "${checks[@]}" 2>/dev/null || true
+systemctl reset-failed "${checks[@]}" 2>/dev/null || true
+
+# The kernel keeps its drivers and what they bound across a soft reboot, and
+# the live system runs some devices without what they need: no radio firmware
+# (a Wi-Fi driver either releases the card or keeps it broken), and Panther
+# Lake's SOF audio blacklisted, so snd_hda_intel holds the card SOF should
+# take. Wireless network (0x0280) and audio (0x0401, 0x0403) controllers are
+# let go here, and the session probes them again with its own firmware and
+# modprobe settings (builder/try-layer/omarchy-try-reprobe), as a fresh boot
+# would.
+released=()
+for device in "$sysfs"/bus/pci/devices/*; do
+  [[ -e $device/driver && -r $device/class ]] || continue
+  case $(<"$device/class") in
+    0x0280* | 0x0401* | 0x0403*)
+      if printf '%s' "${device##*/}" >"$device/driver/unbind" 2>/dev/null; then
+        released+=("${device##*/}")
+      fi
+      ;;
+  esac
+done
+
+if ! systemctl soft-reboot; then
+  for device in "${released[@]}"; do
+    printf '%s' "$device" >"$sysfs/bus/pci/drivers_probe" 2>/dev/null || true
+  done
+  systemctl start --no-block "${checks[@]}" 2>/dev/null || true
+  trap 'exit 1' INT TERM HUP
+  fail "systemctl soft-reboot failed"
+fi
+started=true

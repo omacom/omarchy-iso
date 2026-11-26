@@ -255,6 +255,41 @@ notice() {
   echo
 }
 
+# THE FIRST QUESTION: INSTALL OR TRY
+#
+# Asked here and not in the boot menu: GRUB and syslinux read keys through the
+# firmware, which drives only keyboards that speak the USB boot protocol. A
+# wired Apple Magic Keyboard does not, and reaches nothing before Linux runs.
+# Only media that carry the Try layer ask. Install is the first entry, so
+# Return installs as before.
+TRY_LAYER="${TRY_LAYER:-/run/archiso/bootmnt/arch/$(uname -m)/omarchy-try.sfs}"
+
+start_form() {
+  local choice status error
+
+  [[ -f $TRY_LAYER ]] || return 0
+  while true; do
+    clear_logo
+    echo
+    choice=$(printf '%s\t%s\n' "$(t start.install)" install "$(t start.try)" try |
+      gum choose --label-delimiter $'\t' --header "$(t start.header)") && status=0 || status=$?
+    # Esc, or Ctrl+C: nothing precedes this screen, so ask again.
+    ((status == 0)) && [[ -n $choice ]] || continue
+    [[ $choice == "try" ]] || return 0
+
+    step "$(t start.starting)"
+    if error=$(omarchy-try 2>&1 >/dev/null); then
+      # The soft reboot is under way, and it ends this installer with the
+      # rest of the live system. Returning would start an install.
+      while true; do sleep 60; done
+    fi
+    step "$(t start.failed)"
+    say "$error"
+    echo
+    gum choose "$(t common.back)" >/dev/null || true
+  done
+}
+
 # STEP 0: LANGUAGE
 #
 # Every Omarchy language is offered. One with a catalog here also switches the
@@ -319,8 +354,9 @@ language_rows() {
   ' "$LANGUAGES_JSON"
 }
 
-# The first screen, so it carries the intro and the hidden Ctrl+C entry into
-# deferred provisioning; before a language is picked they read in English.
+# The first screen of the install, so it carries the intro and the hidden
+# Ctrl+C entry into deferred provisioning; before a language is picked they
+# read in English.
 # Callers re-check defer_provisioning after this returns.
 language_form() {
   local choice status
@@ -1440,6 +1476,7 @@ if [[ -z $resume_stage ]]; then
 
   if ! $oem_install; then
     greeter
+    start_form
     language_form
   fi
 

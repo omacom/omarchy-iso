@@ -1,4 +1,4 @@
-"""Unit tests for Try Omarchy initramfs hook, Try layer build, dedup, and ISO gates."""
+"""Unit tests for the live system's initramfs hook, Try layer build, dedup, and ISO gates."""
 
 import os
 import re
@@ -119,21 +119,6 @@ class OmarchyTryHookTest(unittest.TestCase):
         self.assertIn("losetup -d /dev/loop9", calls)
         self.assertIn("umount /run/omarchy-root/sfs", calls)
 
-    def test_try_t2_handles_empty_pci_glob_without_stderr(self):
-        empty_pci = self.dir / "pci"
-        empty_pci.mkdir()
-        hook_text = HOOK.read_text().replace("/sys/bus/pci/devices", str(empty_pci))
-        patched = self.dir / "omarchy_try"
-        patched.write_text(hook_text)
-        res = subprocess.run(
-            ["sh", "-c", f'. "{patched}"\ntry_t2'],
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(res.returncode, 0)
-        self.assertEqual(res.stdout, "")
-        self.assertEqual(res.stderr, "")
-
     def test_live_overlay_sets_index_off(self):
         self.assertIn("workdir=/run/archiso/cowspace/${cow_directory}/workdir,index=off", HOOK.read_text())
 
@@ -179,7 +164,9 @@ class BuildTryLayerTest(unittest.TestCase):
         self.assertIn("OMARCHY_NOUVEAU_DRIVER_PATH=/dev/null", self.text)
 
     def test_guards_nvidia_lua_when_proprietary_driver_absent(self):
-        self.assertIn('io.open("/etc/modprobe.d/nvidia.conf", "r")', self.text)
+        # The running driver, not a layer's config: a card nouveau kept after a
+        # failed handover from the installer must not get NVIDIA's variables.
+        self.assertIn('io.open("/sys/module/nvidia_drm/initstate", "r")', self.text)
         self.assertIn("no_hardware_cursors = true", self.text)
 
     def test_driver_layer_stubs_systemctl_on_pass_one_only(self):
@@ -200,6 +187,16 @@ class BuildTryLayerTest(unittest.TestCase):
         self.assertIn("chown sddm:sddm /var/lib/sddm /var/lib/sddm/state.conf", self.text)
         self.assertIn("omarchy-try-session", self.text)
         self.assertIn('sddm.login("$TRY_USER", "", root.sessionIndex)', self.text)
+
+
+class LiveSystemLeavesTheMachineTest(unittest.TestCase):
+    # Every boot runs the live installer first, Just try included.
+    def test_the_live_rtc_is_local_and_hibernate_state_is_kept(self):
+        text = (ROOT / "configs/airootfs/root/customize_airootfs.sh").read_text()
+        self.assertIn("printf '0.0 0 0\\n0\\nLOCAL\\n' >/etc/adjtime", text)
+        self.assertIn("systemctl mask systemd-hibernate-clear.service", text)
+        # Before anything that can end the script early.
+        self.assertLess(text.index("LOCAL"), text.index("fw=/usr/lib/firmware"))
 
 
 class DedupAndBuildIsoTest(unittest.TestCase):
@@ -245,12 +242,10 @@ class DedupAndBuildIsoTest(unittest.TestCase):
         self.assertIn('trap \'rm -f "$pseudo"\' EXIT', shim_text)
         self.assertNotIn('exec /usr/bin/mksquashfs "$@" -pf "$pseudo"', shim_text)
 
-    def test_oem_iso_skips_try_layer_and_hides_grub_menu(self):
+    def test_oem_iso_skips_try_layer(self):
+        # Without the layer the installer never asks Install or Try.
         text = BUILD_ISO.read_text()
         self.assertIn('[[ $OMARCHY_ARCH == x86_64 && ${OMARCHY_OEM_INSTALL:-} != "1" ]]', text)
-        self.assertIn("s/^timeout=.*/timeout=0/", text)
-        self.assertIn("s/^timeout_style=.*/timeout_style=hidden/", text)
-        self.assertIn("/^# Just try:/,$d", text)
 
     def test_iso_size_gate_checks_only_newly_built_isos_after_chown(self):
         text = BUILD_ISO.read_text()

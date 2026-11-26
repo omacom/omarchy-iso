@@ -1,9 +1,10 @@
 #!/bin/bash
 #
 # Build the Try layer: what turns the root image into a live Omarchy session
-# when the ISO's "Just try" entry boots it (configs/airootfs/etc/initcpio/
-# hooks/omarchy_try). The image itself stays exactly the bytes an install
-# writes; this layer goes on top of it, read-only, under a tmpfs.
+# when the installer soft-reboots into it for Try Omarchy
+# (configs/airootfs/usr/local/bin/omarchy-try). The image itself stays
+# exactly the bytes an install writes; this layer goes on top of it,
+# read-only, under a tmpfs.
 #
 # Usage: build-try-layer.sh <image root> <output.sfs> [channel] [pacman.conf]
 #
@@ -45,6 +46,8 @@ stable | rc | edge) ;;
 esac
 
 TRY_USER=omarchy
+# The scripts the layer's own units run (builder/try-layer/).
+scripts=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/try-layer
 
 work=$(mktemp -d /tmp/omarchy-try-layer.XXXXXX)
 upper="$work/upper"
@@ -220,22 +223,70 @@ exit 0
 EOF
 ln -s no-wait.d/50-omarchy-try-timezone "$merged/etc/NetworkManager/dispatcher.d/50-omarchy-try-timezone"
 
+# Devices the live installer ran without what they need: no radio firmware,
+# no SOF audio. omarchy-try lets them go before its soft reboot, which keeps
+# the kernel's drivers, and udev's coldplug replays uevents without probing a
+# loaded driver again. Once udev has loaded what it loads, probe every PCI and
+# USB device that still has no driver, with the session's firmware and
+# modprobe settings in place (builder/try-layer/).
+install -Dm755 "$scripts/omarchy-try-reprobe" "$merged/usr/local/lib/omarchy-try/omarchy-try-reprobe"
+install -Dm644 /dev/stdin "$merged/etc/systemd/system/omarchy-try-reprobe.service" <<'EOF'
+[Unit]
+Description=Try Omarchy: probe the devices the installer's drivers left
+DefaultDependencies=no
+After=systemd-udev-trigger.service systemd-modules-load.service omarchy-try-nvidia-handover.service
+Before=sysinit.target network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/omarchy-try/omarchy-try-reprobe
+
+[Install]
+WantedBy=sysinit.target
+EOF
+in_try systemctl enable omarchy-try-reprobe.service >/dev/null
+
+# The NVIDIA layer's driver can only take a card no driver holds. Try starts
+# from the live installer by a soft reboot, and the kernel keeps what the
+# installer loaded: nouveau, bound to the card and to the console. Before udev
+# loads the NVIDIA driver, give the card up: the console first, then nouveau.
+# Only with the NVIDIA layer, the one place /etc/modprobe.d/nvidia.conf comes
+# from (builder/try-layer/).
+install -Dm755 "$scripts/omarchy-try-nvidia-handover" "$merged/usr/local/lib/omarchy-try/omarchy-try-nvidia-handover"
+install -Dm644 /dev/stdin "$merged/etc/systemd/system/omarchy-try-nvidia-handover.service" <<'EOF'
+[Unit]
+Description=Try Omarchy: hand the NVIDIA card from nouveau to the NVIDIA driver
+DefaultDependencies=no
+ConditionPathExists=/etc/modprobe.d/nvidia.conf
+ConditionPathExists=/sys/module/nouveau
+Before=systemd-udev-trigger.service sysinit.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/omarchy-try/omarchy-try-nvidia-handover
+
+[Install]
+WantedBy=sysinit.target
+EOF
+in_try systemctl enable omarchy-try-nvidia-handover.service >/dev/null
+
 # Guard Hyprland's NVIDIA env script for cards that run Try on nouveau
 # (Maxwell-Volta GPUs, which have no 580xx layer, and non-T2 Macs booting
 # linux-t2). default/hypr/nvidia.lua checks sysfs PCI IDs rather than the
 # loaded driver, so without a guard it exports __GLX_VENDOR_LIBRARY_NAME=nvidia
-# and NVD_BACKEND=egl when nvidia-utils is absent. /etc/modprobe.d/nvidia.conf
-# exists in Try if and only if omarchy-try-nvidia-open.sfs is stacked on top.
+# and NVD_BACKEND=egl when nvidia-utils is absent. The guard asks the kernel
+# whether nvidia_drm is loaded: a layer on the disk is no driver on the card.
 nvidia_lua="$merged/usr/share/omarchy/default/hypr/nvidia.lua"
 if [[ -f $nvidia_lua ]]; then
   mv "$nvidia_lua" "$merged/usr/share/omarchy/default/hypr/nvidia_upstream.lua"
   cat >"$nvidia_lua" <<'EOF'
 -- Try Omarchy guard: only apply proprietary NVIDIA environment variables when
--- the NVIDIA driver layer is active (/etc/modprobe.d/nvidia.conf is present).
--- Otherwise NVIDIA GPUs run Try on nouveau (e.g. Maxwell-Volta without 580xx,
--- or Macs booting linux-t2), where exporting __GLX_VENDOR_LIBRARY_NAME=nvidia
--- breaks GLX and hardware cursors can be invisible.
-local f = io.open("/etc/modprobe.d/nvidia.conf", "r")
+-- the NVIDIA driver runs. Otherwise NVIDIA GPUs run Try on nouveau (e.g.
+-- Maxwell-Volta without 580xx, Macs booting linux-t2, or a card nouveau kept
+-- when the handover from the installer failed), where exporting
+-- __GLX_VENDOR_LIBRARY_NAME=nvidia breaks GLX and hardware cursors can be
+-- invisible.
+local f = io.open("/sys/module/nvidia_drm/initstate", "r")
 if f then
   f:close()
   require("default.hypr.nvidia_upstream")
@@ -462,6 +513,12 @@ for unit in snapper-timeline.timer snapper-cleanup.timer snapper-boot.timer \
   lvm2-monitor.service lvm2-lvmpolld.socket systemd-boot-random-seed.service; do
   in_try systemctl mask "$unit" >/dev/null 2>&1 || true
 done
+#   systemd-gpt-auto-generator mounts the ESP the boot loader names, and swap
+#   on the disk / is on. Try starts by a soft reboot, which keeps the
+#   installer's kernel command line, so systemd.gpt_auto=0 cannot be passed
+#   there: the generator is turned off here instead.
+install -d "$merged/etc/systemd/system-generators"
+ln -sf /dev/null "$merged/etc/systemd/system-generators/systemd-gpt-auto-generator"
 #   mdadm's udev rule assembles RAID members it finds, and assembly can write
 #   to them (a resync); LVM activates volume groups on its own.
 install -d "$merged/etc/udev/rules.d"
@@ -483,12 +540,13 @@ done
 exec /usr/bin/udiskie "${args[@]}"
 EOF
 
-# The way to the installer: reboot and pick Install in the boot menu.
+# The way to the installer: restart from the stick, whose installer asks first
+# whether to install or try.
 install -Dm755 /dev/stdin "$merged/usr/local/bin/omarchy-try-install" <<'EOF'
 #!/bin/bash
-# Try Omarchy runs from the stick. Installing is the other entry of its boot
-# menu; offer the reboot that gets there.
-if gum confirm "Omarchy installs from the boot menu: restart now and pick \"Install\"?"; then
+# Try Omarchy runs from the stick, and so does the installer: offer the
+# restart that gets there.
+if gum confirm "Restart into the Omarchy installer?"; then
   systemctl reboot
 fi
 EOF
@@ -528,7 +586,7 @@ echo "Try layer: $(du -h "$output" | cut -f1) at $output"
 [[ -n $pacman_conf ]] || exit 0
 
 # Driver layers: what Omarchy's installer adds to a machine with an NVIDIA
-# card or a T2 chip, one layer each, which the Try hook stacks over this one
+# card or a T2 chip, one layer each, which omarchy-try stacks over this one
 # on such a machine. Each is made the way an install makes it: Omarchy's own
 # install/hardware script runs in a chroot over the image and this layer,
 # against a pretend PCI bus, and the packages it asks for are installed from
@@ -537,7 +595,7 @@ echo "Try layer: $(du -h "$output" | cut -f1) at $output"
 #
 # The 32-bit libraries stay out (omarchy-hw-x86 answers no): a session that
 # forgets everything has no Steam to run. So do kernels and headers: on a Mac
-# the hook uses the live system's own linux-t2 modules.
+# omarchy-try gives the session the live system's own linux-t2 modules.
 driver_layer() { # name, script, lspci line, PCI vendor, device, class
   local name=$1 script=$2 line=$3 dir="$work/$1"
   local root="$dir/merged" stubs="$dir/merged/omarchy-try-stubs" packages=()

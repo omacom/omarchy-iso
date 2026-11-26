@@ -25,8 +25,14 @@ match=$(fc-match "JetBrainsMono Nerd Font")
 grep -q "JetBrainsMono" <<<"$match" || { echo "unexpected match: $match" >&2; exit 1; }
 upper=$(findmnt -no OPTIONS / | tr ',' '\n' | sed -n 's/^upperdir=//p')
 test -n "$upper"
-! compgen -G "$upper/var/cache/fontconfig/*.cache-*" >/dev/null
-! compgen -G "/root/.cache/fontconfig/*.cache-*" >/dev/null
+if compgen -G "$upper/var/cache/fontconfig/*.cache-*" >/dev/null; then
+  echo "system-wide font caches were rebuilt" >&2
+  exit 1
+fi
+if compgen -G "/root/.cache/fontconfig/*.cache-*" >/dev/null; then
+  echo "root font caches were rebuilt" >&2
+  exit 1
+fi
 GUEST
 
 stop_vm

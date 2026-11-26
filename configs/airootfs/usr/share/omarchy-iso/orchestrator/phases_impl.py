@@ -3989,7 +3989,12 @@ def run_chroot_finalizer(ctx: InstallContext, *, private_mounts: bool = False) -
     # omit it and retain the ordinary first-login invitation.
     choice = ctx.omarchy_install.get("fingerprint_setup")
     if choice in ("requested", "skipped"):
-        marker = "fingerprint-setup-requested" if choice == "requested" else "fingerprint-setup-invitation"
+        marker, opposite = "fingerprint-setup-requested", "fingerprint-setup-invitation"
+        if choice == "skipped":
+            marker, opposite = opposite, marker
+        _run_target_setup_command(
+            ctx, ["/usr/bin/omarchy-done", "clear", opposite], user=ctx.username, private_mounts=private_mounts,
+        )
         _run_target_setup_command(
             ctx, ["/usr/bin/omarchy-done", "mark", marker], user=ctx.username, private_mounts=private_mounts,
         )

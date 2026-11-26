@@ -31,12 +31,24 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
   || fail "omarchy-greeter-ready.service not enabled in multi-user.target.wants"
 grep -q '"/usr/local/bin/omarchy-wait-greeter-ready"\]="0:0:755"' "$ROOT/configs/profiledef.sh" \
   || fail "omarchy-wait-greeter-ready not registered in profiledef.sh"
-grep -q '^Before=omarchy-mirror-verify\.service omarchy-root-image-verify\.service$' "$GATE_UNIT" \
-  || fail "omarchy-greeter-ready.service does not order before verify units"
-grep -q '^After=omarchy-greeter-ready\.service$' "$MIRROR_UNIT" \
-  || fail "omarchy-mirror-verify.service missing After=omarchy-greeter-ready.service"
-grep -q '^After=omarchy-greeter-ready\.service$' "$IMAGE_UNIT" \
-  || fail "omarchy-root-image-verify.service missing After=omarchy-greeter-ready.service"
+LUKS_UNIT="$ROOT/configs/airootfs/etc/systemd/system/omarchy-luks-calibrate.service"
+KEYRING_UNIT="$ROOT/configs/airootfs/etc/systemd/system/omarchy-target-keyring-early.service"
+grep -q '^Before=omarchy-luks-calibrate\.service omarchy-mirror-verify\.service omarchy-root-image-verify\.service$' "$GATE_UNIT" \
+  || fail "omarchy-greeter-ready.service must order before calibration and verify units"
+grep -q '^Type=oneshot$' "$LUKS_UNIT" \
+  || fail "omarchy-luks-calibrate.service must be Type=oneshot so downstream units wait for calibration to exit"
+grep -q '^RemainAfterExit=' "$LUKS_UNIT" \
+  && fail "omarchy-luks-calibrate.service must not set RemainAfterExit (wait helpers check inactive state)"
+grep -q '^After=omarchy-greeter-ready\.service$' "$LUKS_UNIT" \
+  || fail "omarchy-luks-calibrate.service must run immediately after omarchy-greeter-ready.service"
+grep -q '^Before=omarchy-mirror-verify\.service omarchy-root-image-verify\.service$' "$LUKS_UNIT" \
+  || fail "omarchy-luks-calibrate.service must finish before verify units start"
+grep -q '^After=omarchy-greeter-ready\.service omarchy-luks-calibrate\.service$' "$MIRROR_UNIT" \
+  || fail "omarchy-mirror-verify.service must order after greeter-ready and luks-calibrate"
+grep -q '^After=omarchy-greeter-ready\.service omarchy-luks-calibrate\.service$' "$IMAGE_UNIT" \
+  || fail "omarchy-root-image-verify.service must order after greeter-ready and luks-calibrate"
+grep -q '^After=omarchy-luks-calibrate\.service$' "$KEYRING_UNIT" \
+  || fail "omarchy-target-keyring-early.service should overlap USB verification once luks-calibrate finishes"
 
 # 2. Immediate exit when marker already exists
 marker="$fixture/already-ready"

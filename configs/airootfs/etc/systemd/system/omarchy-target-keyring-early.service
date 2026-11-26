@@ -7,11 +7,11 @@ Description=Make the installed system's pacman keyring while the installer wizar
 # it is ready before the first question is answered. The installer takes it
 # (orchestrator _early_target_keyring) and makes its own when there is none.
 #
-# After the hashing units, like the LUKS calibration, and only once that
-# calibration has finished with a result (the script waits and checks): a
-# benchmark that shares the CPUs measures low, and its result sets the cost of
-# the disk password.
-After=omarchy-mirror-verify.service omarchy-root-image-verify.service omarchy-luks-calibrate.service
+# Start right after the LUKS calibration finishes (never beside it: a benchmark
+# that shares the CPUs measures low and under-costs the disk password). Once
+# calibration exits, this CPU-bound gpg work overlaps the USB-bound medium
+# verification so the keyring is ready while the wizard is still open.
+After=omarchy-luks-calibrate.service
 ConditionPathExists=/run/archiso/bootmnt
 
 [Service]

@@ -134,12 +134,14 @@ fi
 # root it was given.
 trap '' INT TERM HUP
 
-# The live system's checks of the medium serve an install only. A soft reboot
-# would kill a hash still running, and systemd would carry its failed state
-# into the session; it would also keep reading the stick while Try starts
-# from it. Stopped first, and started again if the soft reboot is refused, so
-# an install still gets their verdict.
-checks=(omarchy-mirror-verify.service omarchy-root-image-verify.service)
+# The live system's background work serves an install only: the hashes of the
+# medium, the LUKS calibration and the installed system's keyring. A soft
+# reboot would kill any of them still running, and systemd would carry the
+# failed unit into the session; the hashes would also keep reading the stick
+# while Try starts from it. Stopped first, and started again if the soft
+# reboot is refused, so an install still gets their results.
+checks=(omarchy-mirror-verify.service omarchy-root-image-verify.service
+  omarchy-luks-calibrate.service omarchy-target-keyring-early.service)
 systemctl stop "${checks[@]}" 2>/dev/null || true
 systemctl reset-failed "${checks[@]}" 2>/dev/null || true
 

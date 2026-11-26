@@ -2,7 +2,7 @@
 
 [![Nightly ISO Build](https://github.com/omacom/omarchy-iso/actions/workflows/nightly-build.yml/badge.svg?branch=quattro&event=schedule)](https://github.com/omacom/omarchy-iso/actions/workflows/nightly-build.yml?query=branch%3Aquattro+event%3Aschedule)
 
-The Omarchy ISO is the supported way to install Omarchy on x86_64 and non-Apple aarch64 machines (Apple Silicon Macs install from macOS instead). It boots into the Omarchy Configurator, where x86_64 consumer media also offer a live **Just try** session that soft-reboots into a temporary desktop without touching any disk. While the wizard is open, background units verify the install medium's checksums, calibrate LUKS encryption, pre-build a per-machine pacman keyring, and warm the page cache. To install, the orchestrator verifies the medium before touching the disk, writes a pre-built Arch Linux + Omarchy btrfs root image (`omarchy-root.sfs`) in parallel with `omarchy-image-write`, gives it a fresh filesystem ID, grows it and reshapes its subvolumes, extracts any matching pre-packed hardware/platform layer and installs remaining per-machine packages (such as extra kernels, audio firmware, or platform packages) from the bundled offline mirror, creates the user, runs target system setup (`omarchy-apply-system`) in the chroot, finalizes boot (`systemd-boot` on UEFI, Limine on BIOS and Intel T2 Macs) in parallel with `omarchy-provision-user` (or defers user setup to first boot), validates the install, takes a read-only `@factory` snapshot, and releases the target so the stick can be removed before rebooting.
+The Omarchy ISO is the supported way to install Omarchy on x86_64 and non-Apple aarch64 machines (Apple Silicon Macs install from macOS instead). It boots into the Omarchy Configurator to install a pre-built Arch Linux + Omarchy system, or — on x86_64 — lets you **Just try** Omarchy live without touching any drive.
 
 ## Get Omarchy
 
@@ -47,7 +47,13 @@ The output must say `Good signature from "Omarchy <pkgs@omarchy.org>"` and show 
 
 # For maintainers
 
-The rest of this file covers building, testing and publishing the ISO.
+The rest of this file covers how the installer works and how to build, test and publish the ISO.
+
+## How the install works
+
+Interactive media boot into the Omarchy Configurator inside `kmscon`. On x86_64 consumer ISOs, the welcome screen also offers **Just try**, which soft-reboots (`systemctl soft-reboot`) into a live Omarchy desktop over a tmpfs + `omarchy-root.sfs` + `omarchy-try.sfs` overlay without touching any disk. While the wizard is open, background units verify the medium's SHA-256 checksums, calibrate LUKS Argon2id, pre-build a per-machine pacman keyring, and warm the page cache.
+
+When an install starts, the orchestrator checks the verification verdicts before touching any disk, partitions and optionally encrypts the target, and writes the pre-built Arch Linux + Omarchy btrfs root image (`omarchy-root.sfs`) in parallel with `omarchy-image-write`. It then assigns a fresh filesystem ID, grows the filesystem and reshapes its subvolumes, extracts any matching pre-packed hardware/platform layer and installs remaining per-machine packages (such as extra kernels, audio firmware, or platform packages) from the bundled offline mirror, creates the user, and runs target system setup (`omarchy-apply-system`) in the chroot. Boot setup (`systemd-boot` on UEFI, Limine on BIOS and Intel T2 Macs) then runs in parallel with `omarchy-provision-user` (or defers user setup to first boot), followed by boot validation, a read-only `@factory` btrfs snapshot, and target unmount/close so the stick can be removed before rebooting.
 
 ## What is published, and where
 
@@ -539,7 +545,7 @@ To build the same ISO yourself:
 
 ## Upgrade testing
 
-`test/upgrade-test` checks what an existing user gets. It takes an installed system, moves it to another channel with `omarchy-channel-set`, reboots it, and checks what came back: the update's exit status, skipped migrations, that the reboot comes back by itself into an installed kernel on the new channel and version, failed units, the desktop and shell theme, the user's wallpaper, and the boot configuration (`systemd-boot`'s default boot image or Limine's boot menu).
+`test/upgrade-test` checks what an existing user gets. It takes an installed system, moves it to another channel with `omarchy-channel-set`, reboots it, and checks what came back: the update's exit status, skipped migrations, that the machine switches to the target channel and updates the Omarchy package, that the reboot comes back by itself into an installed kernel, failed units, the desktop and shell theme, the user's wallpaper, and the boot configuration (`systemd-boot`'s default boot image or Limine's boot menu).
 
 ```bash
 ./test/integration release/omarchy.iso boot                                # installs once, leaves the installed disk
@@ -608,7 +614,7 @@ Run `./bin/omarchy-iso-release VERSION` to build, sign, checksum, and upload an 
 
 ## LUKS calibration during live boot
 
-`omarchy-luks-calibrate.service` runs cryptsetup's 2000 ms Argon2id benchmark after the medium verifiers, while the wizard is open, reclaiming clean page cache (~1.1 GiB when `MemFree` is low) outside the benchmark timer. It publishes only the iteration, memory and parallel costs in a root-only file under `/run/omarchy-luks-calibration/`; no password, volume key or header is cached. Both the free-space wizard and archinstall's full-disk format consume it. Each format still creates a fresh header, salt and 4096-byte-sector volume key (passed via a temporary tmpfs key file so the immediate open skips a second Argon2id derivation and persists `--allow-discards` and `--perf-no_read_workqueue`). On full-disk installs with at least 4 CPUs, 4 GiB usable RAM, and 2.5 GiB available RAM, Argon2id slot-0 enrollment is deferred to a background thread (using efficiency cores on hybrid CPUs when available) after a fast temporary slot-1 format, then slot 1 is removed before the factory snapshot.
+`omarchy-luks-calibrate.service` runs cryptsetup's 2000 ms Argon2id benchmark after the medium verifiers, while the wizard is open, reclaiming clean page cache (~1.1 GiB when `MemFree` is low) outside the benchmark timer. It publishes only the iteration, memory and parallel costs in a root-only file under `/run/omarchy-luks-calibration/`; no password, volume key or header is cached. Both the free-space wizard and archinstall's full-disk format consume it. Each format still creates a fresh header, salt and volume key, requesting 4096-byte sectors when the device size is a multiple of 4096 (and passing the volume key via a temporary tmpfs key file so the immediate open skips a second Argon2id derivation and persists `--allow-discards` and `--perf-no_read_workqueue`). On full-disk installs with at least 4 CPUs, 4 GiB usable RAM, and 2.5 GiB available RAM, Argon2id slot-0 enrollment is deferred to a background thread (using efficiency cores on hybrid CPUs when available) after a fast temporary slot-1 format, then slot 1 is removed before the factory snapshot.
 
 Before a synchronous format, an in-flight benchmark is waited on for up to 20 s before being stopped (deferred full-disk formats stop it immediately); `omarchy-cache-warm.service` is stopped too, and `omarchy-target-keyring-early.service` is stopped whenever an uncached live benchmark will run. Missing, malformed or incompatible results leave cryptsetup's normal calibration in place; custom iteration times and key sizes are preserved. Background work is skipped below 4 GiB usable RAM or 1.5 GiB available RAM. Only a benchmark that retains the full default 1 GiB memory cost is reusable, and it is rejected if memory has since become tight. Below 4 GiB without swap, cryptsetup caps Argon2 at half of free RAM; the medium's page cache makes that cap change between boot and format, so those machines keep normal calibration. The benchmark runs at normal priority after the hash jobs, without changing CPU governors. Timing depends on machine load and power policy; moving calibration does not guarantee identical unlock times.
 

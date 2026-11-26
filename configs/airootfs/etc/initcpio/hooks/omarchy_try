@@ -1,0 +1,65 @@
+#!/usr/bin/ash
+# The root image under the new root, after archiso has found the medium and
+# mounted its live environment there:
+#
+#   omarchy-root.sfs  the squashfs on the medium holding the root image
+#   omarchy-root.img  the image, attached read-only to a loop device
+#   its btrfs         mounted read-only, subvolume omarchy-root
+#
+# The live system is built as a layer over that image
+# (builder/dedup-airootfs.sh), so a live boot stacks it on the image, over
+# archiso's own writable space.
+#
+# Try Omarchy uses the same image mount: the installer's first question
+# stacks the Try layer over it and soft-reboots into that
+# (/usr/local/bin/omarchy-try).
+#
+# The backing mounts stay under /run, which switch_root carries into the new
+# root, so the loop device keeps its file for as long as the system runs.
+
+# The live system cannot start without the image under it. Tear down
+# Plymouth first so the message and rescue shell are visible instead of hidden
+# behind the boot logo, then reboot on exit.
+boot_failed() {
+    if command -v plymouth >/dev/null 2>&1 && plymouth --ping 2>/dev/null; then
+        plymouth --wait quit 2>/dev/null || true
+    fi
+    err "Omarchy: $1. Nothing has been installed; the machine restarts when you leave this shell."
+    launch_interactive_shell
+    reboot -f
+}
+
+mount_image() {
+    local loop=""
+    mkdir -p /run/omarchy-root/sfs /run/omarchy-root/image
+    # threads=multi: squashfs decompresses on every core instead of one.
+    # A kernel without CONFIG_SQUASHFS_CHOICE_DECOMP_BY_MOUNT refuses the
+    # option with EINVAL, so fall back to a plain read-only loop mount.
+    if ! mount -t squashfs -o ro,loop,threads=multi "$1" /run/omarchy-root/sfs 2>/dev/null; then
+        mount -t squashfs -o ro,loop "$1" /run/omarchy-root/sfs || return 1
+    fi
+    if ! loop="$(losetup --find --show --read-only -- /run/omarchy-root/sfs/omarchy-root.img)"; then
+        umount /run/omarchy-root/sfs 2>/dev/null || true
+        return 1
+    fi
+    if ! mount -t btrfs -o ro,subvol=omarchy-root "$loop" /run/omarchy-root/image; then
+        losetup -d "$loop" 2>/dev/null || true
+        umount /run/omarchy-root/sfs 2>/dev/null || true
+        return 1
+    fi
+}
+
+run_latehook() {
+    local sfs
+    [ -e /run/archiso/airootfs/etc/omarchy-iso-live-over-image ] || return 0
+    # shellcheck disable=SC2154
+    # archisobasedir comes from the command line (parse_cmdline in init).
+    sfs="/run/archiso/bootmnt/${archisobasedir:-arch}/$(uname -m)/omarchy-root.sfs"
+    mount_image "$sfs" || boot_failed "the live system needs $sfs, which could not be mounted"
+    # shellcheck disable=SC2154
+    # cow_directory is archiso's (its run_hook), as are the directories.
+    umount /new_root &&
+        mount -t overlay airootfs \
+            -o "lowerdir=/run/archiso/airootfs:/run/omarchy-root/image,upperdir=/run/archiso/cowspace/${cow_directory}/upperdir,workdir=/run/archiso/cowspace/${cow_directory}/workdir,index=off" \
+            /new_root || boot_failed "could not mount the live system over the root image"
+}

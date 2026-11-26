@@ -1,9 +1,12 @@
 {
   "greeter.tagline": "Beautiful, Fun & Agentic Linux by DHH",
   "greeter.hint": "Press Return to Start Install",
+  "greeter.try": "...or press Space just to try",
   "common.yes": "Yes",
   "common.back": "Back",
   "common.change": "No, change it",
+  "start.starting": "Starting Omarchy from this drive...",
+  "start.failed": "Try Omarchy could not start. Nothing has been installed.",
   "language.header": "Language",
   "keyboard.intro": "Let's setup your machine...",
   "keyboard.anotherOwner": "Press Ctrl+C to prepare this machine for another owner.",

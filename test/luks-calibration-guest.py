@@ -110,11 +110,12 @@ def exercise_formats(calibration, Luks2, report, expect_no_cache=False):
                 # The cost of a guess is the KDF's: memory and parallelism are
                 # the cache's in every mode (above), so compare iterations, not
                 # unlock seconds, which move with the CI host's speed between
-                # two unlocks. Against both ordinary calibrations, because one
-                # benchmark alone varies too: absent 13 and malformed 10 within
-                # a minute on one runner, where unlock seconds put the cache at
-                # 0.59 of ordinary. Keep raw timings; fail a material weakening.
-                ordinary = statistics.median([runs['absent']['kdf']['time'], runs['malformed']['kdf']['time']])
+                # two unlocks. Host CPU steal can only push an Argon2id count
+                # down, never up, so compare against the quieter of the two
+                # ordinary benchmarks (max): stricter against a weakened cache,
+                # and immune to a single noisy-neighbor steal burst dragging a
+                # two-sample mean below a quiet cache.
+                ordinary = max(runs['absent']['kdf']['time'], runs['malformed']['kdf']['time'])
                 report['cached_to_ordinary_iterations_ratio'] = runs['cached']['kdf']['time'] / ordinary
                 assert 0.70 <= report['cached_to_ordinary_iterations_ratio'] <= 1.40, report
                 assert report['format_saved_seconds'] > 1, report

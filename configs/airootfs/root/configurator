@@ -574,10 +574,13 @@ get_root_disk() {
 # partition_path lives in disk-partitioning.sh alongside the creation helpers.
 
 # BitLocker writes the "-FVE-FS-" signature at offset 3 of the partition.
+# tr drops the NUL bytes other partitions have there (LUKS, ext4, btrfs)
+# before bash reads them: bash drops them too, but warns on the installer's
+# screen for each partition. The signature has none, so it compares the same.
 detect_bitlocker() {
   local p sig
   for p in $(lsblk -lnpo NAME,TYPE "$disk" | awk '$2=="part"{print $1}'); do
-    sig=$(dd if="$p" bs=1 skip=3 count=8 status=none 2>/dev/null)
+    sig=$(dd if="$p" bs=1 skip=3 count=8 status=none 2>/dev/null | tr -d '\0')
     if [[ "$sig" == "-FVE-FS-" ]]; then
       echo "$p"
       return 0

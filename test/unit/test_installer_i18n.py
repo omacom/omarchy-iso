@@ -60,6 +60,13 @@ def omarchy_file(relative):
     return None
 
 
+def form_language_functions():
+    # Sourcing the whole configurator would start the installer.
+    configurator = SOURCES[0].read_text()
+    return "\n".join(re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", configurator, re.MULTILINE | re.DOTALL).group(0)
+                     for name in ("language_default", "set_form_language"))
+
+
 def console_font():
     spec = importlib.util.spec_from_file_location("console_font", SHARE / "console-font.py")
     module = importlib.util.module_from_spec(spec)
@@ -120,13 +127,9 @@ class LanguageDefaultsTest(unittest.TestCase):
         self.defaults = json.loads((SHARE / "language-defaults.json").read_text())
 
     def form_environment(self, *languages):
-        # The configurator runs its screens when sourced, so take the two functions out of it.
-        configurator = SOURCES[0].read_text()
-        functions = "\n".join(re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", configurator, re.MULTILINE | re.DOTALL).group(0)
-                              for name in ("language_default", "set_form_language"))
         steps = "".join(f'language={code}; set_form_language; env | grep "^OMARCHY_FORM_" | sort; echo --;' for code in languages)
         output = subprocess.run(
-            ["bash", "-c", f"source {SHARE / 'i18n.sh'}\n{functions}\n{steps}"],
+            ["bash", "-c", f'source "{SHARE}/i18n.sh"\n{form_language_functions()}\n{steps}'],
             env={"PATH": os.environ["PATH"], "LANGUAGE_DEFAULTS": str(SHARE / "language-defaults.json")},
             capture_output=True, text=True, check=True,
         ).stdout
@@ -180,6 +183,66 @@ class LanguageDefaultsTest(unittest.TestCase):
             if "timezone" in defaults:
                 with self.subTest(code=code):
                     self.assertIn(defaults["timezone"], zones)
+
+
+class SharedFormTranslationTest(unittest.TestCase):
+    def test_real_shared_form_follows_the_active_console(self):
+        form = omarchy_file("install/provisioning/setup-form.sh")
+        if form is None:
+            if os.environ.get("CI"):
+                self.fail("CI must provide the real shared form through OMARCHY_PATH")
+            self.skipTest("set OMARCHY_PATH to an Omarchy checkout to test the shared form")
+        runtime = form.parents[2]
+        registry = json.loads((runtime / "default/i18n/locales.json").read_text())
+        defaults = json.loads((SHARE / "language-defaults.json").read_text())
+        supported = set(catalogs())
+        translations = {code: json.loads((runtime / f"default/i18n/{code}/cli.json").read_text())
+                        for code in supported}
+        english = translations["en"]
+        keys = sorted(key for key in english if key.startswith("setupForm."))
+        self.assertTrue(keys, "the runtime must contain the shared form's English catalog")
+        for code in ("pl", "ja", "ko", "zh-CN", "zh-TW"):
+            self.assertNotEqual(translations[code]["setupForm.usernamePrompt"], english["setupForm.usernamePrompt"])
+
+        # Switch back to a translated language after each selection to catch
+        # stale text or defaults when going back through the language picker.
+        languages = [code for choice in sorted(registry) for code in (choice, "pl")]
+        script = f'''
+set -e
+source "{SHARE}/i18n.sh"
+{form_language_functions()}
+source "$OMARCHY_PATH/install/provisioning/setup-form.sh"
+for language in "$@"; do
+  set_form_language
+  printf '%s\\0' "$language" "$OMARCHY_FORM_LANGUAGE" "$OMARCHY_FORM_KEYBOARD_DEFAULT" "$OMARCHY_FORM_TIMEZONE_FALLBACK"
+  for key in {" ".join(keys)}; do
+    printf '%s\\0' "$(omarchy_form_text "$key")"
+  done
+done
+'''
+        for kmscon in (False, True):
+            with self.subTest(kmscon=kmscon):
+                result = subprocess.run(
+                    ["bash", "-c", script, "shared-form", *languages],
+                    env={"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "OMARCHY_PATH": str(runtime),
+                         "OMARCHY_FORM_DEFAULTS": "/nonexistent/form-defaults",
+                         "LANGUAGE_DEFAULTS": str(SHARE / "language-defaults.json"),
+                         **({"OMARCHY_KMSCON": "1"} if kmscon else {})},
+                    capture_output=True, text=True, check=True,
+                )
+                values = result.stdout.split("\0")
+                self.assertEqual(values.pop(), "")
+                width = 4 + len(keys)
+                self.assertEqual(len(values), len(languages) * width)
+                for index, code in enumerate(languages):
+                    with self.subTest(kmscon=kmscon, code=code, selection=index):
+                        chosen, effective, keyboard, timezone, *texts = values[index * width:(index + 1) * width]
+                        expected = code if code in supported and (kmscon or not KMSCON_ONLY.match(code)) else "en"
+                        self.assertEqual(chosen, code, "fallback must not overwrite the installed-system language")
+                        self.assertEqual(effective, expected)
+                        self.assertEqual(keyboard, defaults[code]["keyboard"])
+                        self.assertEqual(timezone, defaults[code].get("timezone", "UTC"))
+                        self.assertEqual(texts, [translations[expected].get(key, english[key]) for key in keys])
 
 
 class ConsoleFontTest(unittest.TestCase):

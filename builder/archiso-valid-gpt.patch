@@ -1,0 +1,26 @@
+--- mkarchiso
++++ mkarchiso
+@@ -1498,17 +1498,12 @@
+     # Attach efiboot.img as a second partition and set its partition type to "EFI system partition"
+     xorrisofs_options+=('-append_partition' '2' 'C12A7328-F81F-11D2-BA4B-00A0C93EC93B' "${efibootimg}")
+     # Ensure GPT is used as some systems do not support UEFI booting without it
+-    # shellcheck disable=SC2076
+-    if [[ ! " ${bootmodes[*]} " =~ ' bios.syslinux ' ]]; then
+-        # Use valid GPT if BIOS booting support will not be required
+-        xorrisofs_options+=('-appended_part_as_gpt')
+-    else
+-        # A valid GPT prevents BIOS booting on some systems, use an invalid GPT instead.
+-        # If '-isohybrid-gpt-basdat' is specified before '-e', then the appended EFI system partition will have the
+-        # EFI system partition type ID/GUID in both MBR and GPT. If '-isohybrid-gpt-basdat' is specified after '-e',
+-        # the appended EFI system partition will have the Microsoft basic data type GUID in GPT.
+-        xorrisofs_options+=('-isohybrid-gpt-basdat')
+-    fi
++    # Omarchy: a valid GPT, also on an ISO that boots through BIOS. With the invalid one, UEFI firmware reaches the
++    # boot files only through the El Torito catalog, as a CD image, and firmware that will not offer a CD image on a
++    # USB disk that reports itself as fixed leaves the stick out of its boot menu (an MSI Z690 with a SanDisk
++    # Extreme Pro). archiso went back to the invalid GPT because a ThinkPad T420 of 2011 does not BIOS boot a disk
++    # with a valid one; --mbr-force-bootable still marks a partition active for a BIOS that wants that.
++    xorrisofs_options+=('-appended_part_as_gpt')
+     # systemd-boot in an attached EFI system partition via El Torito
+     xorrisofs_options+=(
+         # Start a new El Torito boot entry for UEFI

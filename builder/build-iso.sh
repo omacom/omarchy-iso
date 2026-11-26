@@ -17,6 +17,7 @@ export OMARCHY_ARCH OMARCHY_KERNEL OMARCHY_OEM_INSTALL OMARCHY_PRESET OMARCHY_FA
 source /builder/node-release.sh
 source /builder/arm64-kernel-image.sh
 source /builder/archiso-aarch64-mkinitcpio.sh
+source /builder/iso-partition-table.sh
 source /builder/grub-platform.sh
 source /builder/required-packages.sh
 
@@ -196,8 +197,13 @@ else
   # Full upgrade, not just -Sy: the pinned container can fall behind the mirror
   # it installs from. A plain -Sy install is then a partial upgrade — new packages
   # can link against a glibc the container doesn't have yet.
-  pacman --noconfirm -Syu archiso gcc jq grub btrfs-progs python "${local_build_packages[@]}"
-  mkarchiso_command=mkarchiso
+  pacman --noconfirm -Syu archiso gcc jq grub btrfs-progs python patch "${local_build_packages[@]}"
+  # The x86_64 ISO gets a valid GPT, as the aarch64 one has
+  # (builder/archiso-valid-gpt.patch says why).
+  mkarchiso_command=/tmp/mkarchiso-x86_64
+  cp "$(command -v mkarchiso)" "$mkarchiso_command"
+  patch --batch --forward --fuzz=0 "$mkarchiso_command" </builder/archiso-valid-gpt.patch
+  chmod 0755 "$mkarchiso_command"
 fi
 
 # The root image writer (builder/omarchy-image-write.c): build-root-image.sh
@@ -1459,6 +1465,17 @@ else
   "$mkarchiso_command" -v -w "$build_cache_dir/work/" -o /out/ "$build_cache_dir/"
   echo "[timing] mkarchiso end $(date +%s)"
 fi
+
+# Firmware has to find the ISO's partitions in a GPT it accepts, or a USB disk
+# that reports itself as fixed may never appear in the boot menu
+# (builder/iso-partition-table.sh).
+for built_iso in /out/*.iso; do
+  [[ -f $built_iso ]] || { echo "ERROR: the build left no ISO in /out" >&2; exit 1; }
+  if ! iso_has_valid_gpt "$built_iso"; then
+    echo "ERROR: $built_iso has no valid GPT: no protective MBR entry in front of a GPT header" >&2
+    exit 1
+  fi
+done
 
 # The live initramfs must stay small enough for GRUB and the kernel to place
 # it. omarchy-iso#128: at 241 MiB (every DRM driver's firmware, via the kms

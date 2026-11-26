@@ -114,7 +114,7 @@ warm_offline_mirror() {
   # (Before=) and that unit still reads inactive. The image's pass is the
   # warm-up for the image too; the read below then keeps it cached.
   while [[ -n $(systemctl list-jobs --no-legend omarchy-mirror-verify.service \
-    omarchy-root-image-verify.service 2>/dev/null) ]]; do
+    omarchy-root-image-verify.service omarchy-luks-calibrate.service 2>/dev/null) ]]; do
     sleep 1
   done
 

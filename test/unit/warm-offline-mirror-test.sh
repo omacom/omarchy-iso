@@ -47,6 +47,7 @@ case "\$1 \$phase" in
     echo "1 omarchy-mirror-verify.service     start running"
     echo "2 omarchy-root-image-verify.service start waiting" ;;
   "list-jobs image")  echo "2 omarchy-root-image-verify.service start running" ;;
+  "list-jobs luks")   echo "3 omarchy-luks-calibrate.service start running" ;;
 esac
 exit 0
 EOF
@@ -67,7 +68,7 @@ warm_reads() { # the boot's phases, one per systemctl call -> the reads, one per
   command cat "$fixture/reads" 2>/dev/null || true
 }
 
-reads=$(warm_reads mirror mirror image image finished)
+reads=$(warm_reads mirror mirror image image luks finished)
 [[ $reads == $'finished omarchy-root.sfs\nfinished linux-firmware-1-1-any.pkg.tar.zst' ]] \
   || fail "the warm-up read the medium before both checks had finished: $(paste -sd, <<<"$reads")"
 

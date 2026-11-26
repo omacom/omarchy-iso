@@ -123,17 +123,19 @@ draw_screen() {
 # Where Just try starts from: media that carry the Try layer offer it.
 TRY_LAYER="${TRY_LAYER:-/run/archiso/bootmnt/arch/$(uname -m)/omarchy-try.sfs}"
 
-# The welcome's keys, centered from row $1 of a $2-column screen: Start
-# Install as it always was, dim, and under it, fainter, Space for Just try,
-# on media that carry the Try layer.
+# The welcome's choices, centered from row $1 of a $2-column screen, with
+# choice $3 (0 Start Install, 1 Just try) highlighted: Start Install, and
+# under it, on media that carry the Try layer, Space for Just try. The
+# highlighted line is dim, as Start Install always was, and the other fainter
+# still, so the welcome opens looking as it did.
 greeter_choices() {
-  local row=$1 cols=$2 text pad i
+  local row=$1 cols=$2 selected=${3:-0} text pad i
   local -a texts=("$(t greeter.hint)") styles=('\033[2m' '\033[90m')
   [[ -f $TRY_LAYER ]] && texts+=("$(t greeter.try)")
   for i in "${!texts[@]}"; do
     text=${texts[i]}
     pad=$(((cols - $(display_width "$text")) / 2)); (( pad < 0 )) && pad=0
-    printf "\033[%d;%dH\033[2K%b%s\033[0m" "$((row + i))" "$((pad + 1))" "${styles[i]}" "$text"
+    printf "\033[%d;%dH\033[2K%b%s\033[0m" "$((row + i))" "$((pad + 1))" "${styles[$((i == selected ? 0 : 1))]}" "$text"
   done
 }
 
@@ -141,8 +143,9 @@ greeter_choices() {
 # frame the deferred-provisioning first boot opens on, so install and first boot
 # bookend the setup identically. Logo, the Omarchy tagline, and Start Install,
 # centered like the boot logo, with Just try under it where the medium carries
-# Try Omarchy: Return installs and Space tries, into greeter_choice (install or
-# try).
+# Try Omarchy: Space tries, Down and Up move the highlight between the two,
+# and Return starts the highlighted one, into greeter_choice (install or
+# try). Return alone installs.
 #
 # The choice is made here, once Linux drives the keyboard, and not in the boot
 # menu: GRUB and syslinux read keys through the firmware, which drives only
@@ -150,7 +153,7 @@ greeter_choices() {
 # not, and reaches nothing before Linux runs.
 greeter() {
   local rows logo_h content_h top cols logo_row tagline_row hint_row
-  local tagline anim size status resized key last=0
+  local tagline anim size status resized key rest selected=0 last=0
 
   [[ -f $TRY_LAYER ]] && last=1
 
@@ -188,7 +191,7 @@ greeter() {
     printf '\033[%d;%dH%s' "$tagline_row" "$((tpad + 1))" "$tagline"
     (( tagline_row < rows )) && printf '\n'
 
-    greeter_choices "$hint_row" "$cols"
+    greeter_choices "$hint_row" "$cols" "$selected"
     (( hint_row + last < rows )) && printf '\n'
   } >/dev/tty
 
@@ -232,9 +235,11 @@ greeter() {
     </dev/null >/dev/tty 2>/dev/null &
   anim=$!
 
-  # One key at a time, with no echo, since Space is a key of its own here:
-  # Return ends the wait (a newline, or a carriage return on a raw terminal),
-  # as does a tty that cannot be read; Space does where Just try is offered.
+  # One key at a time, with no echo, since Space is a key of its own here.
+  # Return (a newline, or a carriage return on a raw terminal) starts the
+  # highlighted choice, as does a tty that cannot be read; Space tries where
+  # Just try is offered. An arrow comes as an escape sequence, ESC [ B, or
+  # ESC O B in application cursor mode, on the console and in kmscon alike.
   # Twice a second the size is looked at again.
   stty -icanon -echo </dev/tty 2>/dev/null || true
   resized=false
@@ -248,8 +253,21 @@ greeter() {
     fi
     (( status == 0 )) || break
     case $key in
-      $'\n' | $'\r') break ;;
+      $'\n' | $'\r')
+        (( selected == 1 )) && greeter_choice=try
+        break
+        ;;
       ' ') (( last )) && { greeter_choice=try; break; } ;;
+      $'\e')
+        rest=""
+        IFS= read -rsN2 -t 0.1 rest </dev/tty || true
+        case $rest in
+          '[B' | 'OB') selected=$last ;;
+          '[A' | 'OA') selected=0 ;;
+          *) continue ;;
+        esac
+        greeter_choices "$hint_row" "$cols" "$selected" >/dev/tty
+        ;;
     esac
   done
   # Tolerate ttfx's kill signal in `wait` so a future `set -e` here can't abort.

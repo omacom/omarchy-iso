@@ -668,6 +668,7 @@ def arch_install_system(ctx: InstallContext) -> None:
         # CPU or memory bandwidth with omarchy-image-write.
         _start_luks_keyslot_enroll(ctx)
         _apply_platform_layer(ctx)
+        _start_library_warmup(ctx)
         # Fallback if prepare_live did not already start the staged keyring
         # unit (e.g., when live /usr/share/pacman/keyrings was incomplete or
         # arch_install_system was invoked directly). No-op if already running.
@@ -1495,6 +1496,52 @@ def stop_target_keyring_init(ctx: InstallContext) -> None:
         return
     subprocess.run(["systemctl", "stop", TARGET_KEYRING_UNIT], check=False, capture_output=True)
     _join_target_keyring_init(ctx, raise_on_error=False)
+
+
+def _start_library_warmup(ctx: InstallContext) -> None:
+    """Read the written image's shared libraries in the background, so they
+    are in the page cache when the first pacman transaction runs ldconfig.
+
+    The image write uses O_DIRECT and leaves nothing cached, so that
+    ldconfig read every library cold: 530 ms of a 731 ms pacman run on a
+    Samsung 990 PRO, against 51 ms after this scan. -N and -X keep ldconfig
+    from writing the cache or any link, and -i from reading the auxiliary
+    cache, so it only reads: it can't race a later ldconfig over a file. It
+    runs from after the image and any layer are in place to the factory
+    snapshot, and nothing waits for it before then."""
+    state = getattr(ctx, "state", None)
+    if state is None:
+        return
+    state["library_warmup_proc"] = subprocess.Popen(
+        ["ldconfig", "-r", str(ctx.target), "-N", "-X", "-i"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def _join_library_warmup(ctx: InstallContext) -> None:
+    """Wait for the scan before the target is snapshotted or unmounted. It
+    only warms the page cache, so a failed scan is noted and the install goes
+    on."""
+    state = getattr(ctx, "state", None)
+    proc = state.pop("library_warmup_proc", None) if state else None
+    if proc is None:
+        return
+    with _time_step("STEP.join_library_warmup"):
+        status = proc.wait()
+    if status != 0:
+        info(f"› library warm-up exited {status}; nothing depends on it")
+
+
+def stop_library_warmup(ctx: InstallContext) -> None:
+    """Exit path: end the scan if it still runs, so it holds no file on the
+    target when the install stops early and the target is torn down."""
+    state = getattr(ctx, "state", None)
+    proc = state.pop("library_warmup_proc", None) if state else None
+    if proc is None:
+        return
+    if proc.poll() is None:
+        proc.kill()
+    proc.wait()
 
 
 def _start_luks_keyslot_enroll(ctx: InstallContext) -> None:
@@ -4839,6 +4886,7 @@ def create_factory_snapshot(ctx: InstallContext) -> None:
     # The keyring unit writes into @; the snapshot must not catch it midway.
     _join_target_keyring_init(ctx)
     _join_luks_keyslot_enroll(ctx)
+    _join_library_warmup(ctx)
     _mark_updates_applied(ctx)
 
     fstype = _findmnt_value(ctx.target, "FSTYPE")

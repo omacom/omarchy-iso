@@ -1361,6 +1361,10 @@ def _finish_root_image(ctx: InstallContext) -> None:
 
 # Transient systemd unit that initialises the target's pacman keyring.
 TARGET_KEYRING_UNIT = "omarchy-target-keyring"
+# The live system's own copy of that work, made while the wizard is open
+# (omarchy-target-keyring-early.service), and where it leaves the keyring.
+EARLY_KEYRING_UNIT = "omarchy-target-keyring-early.service"
+EARLY_KEYRING_DIR = Path("/run/omarchy-target-keyring")
 LIVE_KEYRINGS_DIR = Path("/usr/share/pacman/keyrings")
 
 
@@ -1462,6 +1466,8 @@ def _start_target_keyring_init(ctx: InstallContext, *, keyrings_dir: Path | None
     if ctx.state.get("target_keyring_proc") is not None or ctx.state.get("target_keyring_installed"):
         return
     staged = _target_keyring_stage_dir(ctx)
+    if keyrings_dir is not None and _early_target_keyring(ctx, staged):
+        return
     keyrings = keyrings_dir or (ctx.target / "usr" / "share" / "pacman" / "keyrings")
     staged_q = shlex.quote(str(staged))
     keyrings_q = shlex.quote(str(keyrings))
@@ -1482,6 +1488,71 @@ def _start_target_keyring_init(ctx: InstallContext, *, keyrings_dir: Path | None
         stderr=subprocess.STDOUT,
         text=True,
     )
+
+
+def _early_target_keyring_ready() -> bool:
+    """Whether the live system's keyring is finished and usable now. Its
+    marker holds the time it was finished. A clock set back since (a first
+    answer from a time server, on a machine whose hardware clock runs ahead)
+    would leave the new master key dated in the future, which gpg refuses to
+    sign with until the clock catches up. Such a keyring is removed, and the
+    install makes its own, as it always has at this point."""
+    marker = EARLY_KEYRING_DIR / "complete"
+    if not marker.is_file():
+        return False
+    try:
+        finished = int(marker.read_text().strip())
+    except (OSError, ValueError):
+        finished = None
+    if finished is None or finished > time.time():
+        info("› the pacman keyring the live system made is dated after the clock; not using it")
+        shutil.rmtree(EARLY_KEYRING_DIR / "gnupg", ignore_errors=True)
+        marker.unlink(missing_ok=True)
+        return False
+    return (EARLY_KEYRING_DIR / "gnupg").is_dir()
+
+
+def _early_target_keyring(ctx: InstallContext, staged: Path) -> bool:
+    """Use the keyring the live system made while the wizard was open, or
+    wait for it if that unit is still at it. False when there is none to use
+    and the install makes its own: the unit is not on this ISO, it made none,
+    or an earlier install in this live session took its keyring.
+
+    Made in the install, the keyring is 3 to 4.4 s of gpg on one core of a
+    Dell XPS 16, which an install of about that length waits for at its end.
+    The unit runs the same two pacman-key commands from the same keyring
+    packages, so the keyring differs only in when it was made."""
+    if _early_target_keyring_ready():
+        waiter = ["true"]
+    else:
+        active = subprocess.run(["systemctl", "is-active", EARLY_KEYRING_UNIT],
+                                capture_output=True, text=True, check=False)
+        if active.stdout.strip() != "activating":
+            # The install makes its own. A unit still queued behind the
+            # hashes must not make a second one beside it.
+            subprocess.run(["systemctl", "stop", EARLY_KEYRING_UNIT], check=False, capture_output=True)
+            return False
+        # The unit is still running: starting it again joins that run. If it
+        # finished since the check above, there is nothing to wait for.
+        waiter = ["true"] if _early_target_keyring_ready() else ["systemctl", "start", EARLY_KEYRING_UNIT]
+    info("› using the pacman keyring the live system made before the install")
+    ctx.state["target_keyring_stage"] = staged
+    ctx.state["target_keyring_early"] = True
+    ctx.state["target_keyring_proc"] = subprocess.Popen(
+        waiter, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    return True
+
+
+def _take_early_target_keyring(staged: Path) -> bool:
+    """Move the live system's finished keyring to the staging directory the
+    rest of the install reads. False if it is not there to take."""
+    if not _early_target_keyring_ready():
+        return False
+    shutil.rmtree(staged, ignore_errors=True)
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(EARLY_KEYRING_DIR / "gnupg"), str(staged))
+    (EARLY_KEYRING_DIR / "complete").unlink(missing_ok=True)
+    return True
 
 
 def _target_supports_iso_managed_keyring(target: Path) -> bool:
@@ -1527,6 +1598,14 @@ def _join_target_keyring_init(ctx: InstallContext, *, raise_on_error: bool = Tru
         return
     with _time_step("STEP.join_target_keyring"):
         out, _ = proc.communicate()
+    if ctx.state.pop("target_keyring_early", False) and raise_on_error:
+        if proc.returncode != 0 or staged is None or not _take_early_target_keyring(staged):
+            # The live system's keyring did not arrive: make one now, the way
+            # an install without that unit does, and wait for it.
+            info("› the live system's pacman keyring is not there; making one now")
+            _start_target_keyring_init(ctx)
+            _join_target_keyring_init(ctx, raise_on_error=raise_on_error)
+            return
     if proc.returncode != 0:
         if staged is not None:
             shutil.rmtree(staged, ignore_errors=True)
@@ -1551,6 +1630,12 @@ def stop_target_keyring_init(ctx: InstallContext) -> None:
     install's own error must win, so a keyring failure is not raised here."""
     if ctx.state.get("target_keyring_proc") is None:
         return
+    if ctx.state.get("target_keyring_early"):
+        # End the wait, and the unit if it is still at work, so that no gpg
+        # runs on beside whatever comes next. A keyring it had finished stays
+        # for the next attempt in this live session.
+        ctx.state["target_keyring_proc"].kill()
+        subprocess.run(["systemctl", "stop", EARLY_KEYRING_UNIT], check=False, capture_output=True)
     subprocess.run(["systemctl", "stop", TARGET_KEYRING_UNIT], check=False, capture_output=True)
     _join_target_keyring_init(ctx, raise_on_error=False)
 

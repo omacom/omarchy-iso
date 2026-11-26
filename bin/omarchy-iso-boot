@@ -169,11 +169,11 @@ fi
 NET_ARGS=()
 if [[ $NETWORK != "0" && $NETWORK != "false" && $NETWORK != "no" ]]; then
   if [[ -n $SSH_PORT && $SSH_PORT != "0" ]]; then
-    NET_ARGS=(-netdev "user,id=net0,hostfwd=tcp:${SSH_HOST}:${SSH_PORT}-:22" -device virtio-net-pci,netdev=net0)
+    NET_ARGS=(-netdev "user,id=net0,hostfwd=tcp:${SSH_HOST}:${SSH_PORT}-:22" -device "virtio-net-pci,netdev=net0")
     echo "SSH forwarding enabled: ssh -p $SSH_PORT root@localhost"
     echo "SCP example: scp -P $SSH_PORT /path/to/system-manifest root@localhost:/tmp/"
   else
-    NET_ARGS=(-netdev user,id=net0 -device virtio-net-pci,netdev=net0)
+    NET_ARGS=(-netdev "user,id=net0" -device "virtio-net-pci,netdev=net0")
     echo "Networking enabled without SSH port forwarding."
   fi
 else
@@ -218,7 +218,7 @@ if [[ $HOST_ARCH == aarch64 ]]; then
   run_aarch64() { # gl|plain, then extra QEMU arguments
     local display_args
     if [[ $1 == gl ]]; then
-      display_args=(-device virtio-gpu-gl-pci -display sdl,gl=on)
+      display_args=(-device virtio-gpu-gl-pci -display "sdl,gl=on")
     else
       display_args=(-device virtio-gpu-pci -display gtk)
     fi
@@ -254,7 +254,7 @@ if [[ $HOST_ARCH == aarch64 ]]; then
     trap 'rm -rf "$qmp_dir"' EXIT
     echo '{"execute":"qmp_capabilities"}' >"$qmp_dir/in"
     run_aarch64 gl -no-reboot \
-      -chardev file,id=qmp,path="$qmp_dir/out",input-path="$qmp_dir/in" -mon chardev=qmp,mode=control
+      -chardev "file,id=qmp,path=$qmp_dir/out,input-path=$qmp_dir/in" -mon chardev=qmp,mode=control
     if grep -q '"reason": "guest-reset"' "$qmp_dir/out" && disk_written; then
       echo "Booting the installed system with the plain virtio-gpu"
       run_aarch64 plain

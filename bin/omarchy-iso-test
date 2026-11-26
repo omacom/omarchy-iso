@@ -371,11 +371,11 @@ DSL
   [[ -n $CPU_ID ]] && log "Fake CPU identity: $CPU_ID"
   ((${#SMBIOS[@]})) && log "Fake DMI identity: ${SMBIOS[*]}"
   if ((${#FAKE_PCI[@]})); then
-    fake_args+=(-object "memory-backend-memfd,id=fakepcimem,size=${MEMORY}M,share=on" -numa node,memdev=fakepcimem)
+    fake_args+=(-object "memory-backend-memfd,id=fakepcimem,size=${MEMORY}M,share=on" -numa "node,memdev=fakepcimem")
     log "Fake PCI hardware: ${FAKE_PCI[*]}"
   fi
 
-  local net_args=(-netdev "user,id=net0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22" -device virtio-net-pci,netdev=net0)
+  local net_args=(-netdev "user,id=net0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22" -device "virtio-net-pci,netdev=net0")
   $NO_NETWORK && net_args=(-nic none)
 
   qemu-system-x86_64 \

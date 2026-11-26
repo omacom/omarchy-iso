@@ -289,8 +289,8 @@ start_vm() {
   local firmware_args=()
   if [[ $FIRMWARE == uefi ]]; then
     firmware_args=(
-      -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE"
-      -drive if=pflash,format=raw,file="$ACTIVE_OVMF"
+      -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE"
+      -drive "if=pflash,format=raw,file=$ACTIVE_OVMF"
     )
   fi
 

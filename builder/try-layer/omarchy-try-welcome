@@ -4,13 +4,27 @@
 # The user unit omarchy-try-welcome.service runs it at every login; the mark it
 # leaves keeps a login after a logout from saying it again. The session's home
 # lives in RAM, so each Try boot says it once.
+#
+# It goes on top of the stack, so after Omarchy's first-run notifications: the
+# first-run's own mark, then its prompts that wait for the network
+# (install/user/first-run/wifi.sh). Never longer than the wait, as a machine
+# with no network holds those back for good.
 
-export PATH="/usr/share/omarchy/bin:/usr/local/bin:/usr/bin:$PATH"
+# After the PATH it got, so a caller's own helpers come first (the unit test).
+export PATH="$PATH:/usr/share/omarchy/bin:/usr/local/bin:/usr/bin"
 mark=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/try-welcomed
 
 [[ -e $mark ]] && exit 0
 # The shell comes up well after the session starts on a slow machine.
 omarchy-notification-wait 120 || exit 0
+wait_for=${OMARCHY_TRY_WELCOME_WAIT:-180}
+waited=0
+until [[ -e $HOME/.local/state/omarchy/done/first-run-user ]] &&
+  ! pgrep -u "$(id -u)" -f '/install/user/first-run/' >/dev/null; do
+  ((waited >= wait_for)) && break
+  sleep 1
+  ((waited += 1))
+done
 omarchy-notification-send -u critical -g $'\uf04b' "Try Omarchy!" \
   "Install apps, change themes, anything. When you're sold, reboot and pick install instead." || exit 0
 mkdir -p "${mark%/*}" && : >"$mark"

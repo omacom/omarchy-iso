@@ -175,8 +175,10 @@ check "Try ran this machine's hardware setup" try_ssh \
 check "the bar shows no passwordless sudo warning" try_ssh 'omarchy-sudo-passwordless --active; [ $? = 1 ]'
 check "Try idles as an install does" try_ssh '[ "$(omarchy-toggle-idle status | jq -r .enabled)" = false ]'
 check "a reboot from Try arms no watchdog" try_ssh '[ "$(systemctl show -p RebootWatchdogUSec --value)" = 0 ]'
+# The welcome waits up to 120 s for the shell, then up to 180 s for
+# first-run's notifications (omarchy-try-welcome).
 check "Try says once what the session is" try_ssh \
-  'timeout 120 bash -c "until [ -e ~/.local/state/omarchy/try-welcomed ]; do sleep 2; done"'
+  'timeout 330 bash -c "until [ -e ~/.local/state/omarchy/try-welcomed ]; do sleep 2; done"'
 # The layers are stamped as updated (build-try-layer.sh), so the boot redid
 # none of pacman's work: ldconfig alone is seconds from a USB stick.
 check "the boot skipped the ConditionNeedsUpdate= units" try_ssh \

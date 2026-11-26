@@ -344,6 +344,35 @@ grep -qx 'ExecStart=/usr/local/lib/omarchy-try/omarchy-try-welcome' "$layer" || 
 grep -E '^ExecStart=.*\$' "$layer" | grep -v '\$\$' && fail "a unit in the Try layer has a \$ systemd would expand"
 pass "the layer's units run their scripts, with nothing for systemd to expand"
 
+# The welcome goes on top: after Omarchy's first-run has marked itself done
+# and its prompts that wait for the network have gone, and never later than
+# its wait.
+wl="$work/welcome"
+mkdir -p "$wl/bin" "$wl/home/.local/state/omarchy/done" "$wl/install/user/first-run"
+printf '#!/bin/bash\nexit 0\n' >"$wl/bin/omarchy-notification-wait"
+printf '#!/bin/bash\necho "send $*" >>"$WL/calls"\n' >"$wl/bin/omarchy-notification-send"
+chmod +x "$wl/bin/"*
+printf 'sleep 3\n' >"$wl/install/user/first-run/wifi.sh"
+run_welcome() {
+  rm -f "$wl/home/.local/state/omarchy/try-welcomed"
+  : >"$wl/calls"
+  env WL="$wl" HOME="$wl/home" XDG_STATE_HOME= PATH="$wl/bin:$PATH" OMARCHY_TRY_WELCOME_WAIT="${1:-10}" \
+    bash "$LAYER_SCRIPTS/omarchy-try-welcome"
+}
+: >"$wl/home/.local/state/omarchy/done/first-run-user"
+bash "$wl/install/user/first-run/wifi.sh" &
+first_run=$!
+started=$SECONDS
+run_welcome || fail "the welcome failed"
+((SECONDS - started >= 2)) || fail "the welcome came before first-run's network prompts were done"
+wait "$first_run"
+grep -q 'send .* Try Omarchy!' "$wl/calls" || fail "the welcome was not sent: $(cat "$wl/calls")"
+rm "$wl/home/.local/state/omarchy/done/first-run-user"
+started=$SECONDS
+run_welcome 2 || fail "the welcome failed with no first-run"
+{ ((SECONDS - started <= 5)) && grep -q 'Try Omarchy!' "$wl/calls"; } || fail "the welcome waited past its wait for a first-run that never ends"
+pass "the welcome comes after Omarchy's first-run notifications, and never later than its wait"
+
 # pacman for the session's hardware setup: a kernel, its headers and a DKMS
 # module, told by their files, are recorded without them; the rest installs.
 pw="$work/pw"

@@ -27,6 +27,48 @@ SECTOR_SIZE = 4096
 VOLUME_KEY_DIR = Path("/run")
 ASYNC_MIN_CPUS = 4
 ASYNC_MIN_MEMORY = 2560 * 1024  # 2.5 GiB available so 1 GiB Argon2id never pressures install
+ATOM_CPUS_PATH = Path("/sys/devices/cpu_atom/cpus")
+ONLINE_CPUS_PATH = Path("/sys/devices/system/cpu/online")
+
+
+def _parse_cpu_set(spec: str) -> set[int]:
+    cpus: set[int] = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            cpus.update(range(int(lo), int(hi) + 1))
+        else:
+            cpus.add(int(part))
+    return cpus
+
+
+def _format_cpu_set(cpus: set[int]) -> str:
+    if not cpus:
+        return ""
+    ordered = sorted(cpus)
+    ranges: list[str] = []
+    start = prev = ordered[0]
+    for cpu in ordered[1:]:
+        if cpu == prev + 1:
+            prev = cpu
+        else:
+            ranges.append(f"{start}-{prev}" if start != prev else str(start))
+            start = prev = cpu
+    ranges.append(f"{start}-{prev}" if start != prev else str(start))
+    return ",".join(ranges)
+
+
+def _enroll_parallel(cmd: list[str]) -> int:
+    for idx, arg in enumerate(cmd):
+        if arg == "--pbkdf-parallel" and idx + 1 < len(cmd):
+            try:
+                return max(1, int(cmd[idx + 1]))
+            except ValueError:
+                return 4
+    return 4
 
 
 def memory_total() -> int:
@@ -415,22 +457,48 @@ class DeferredKeyslot:
                     self._proc = None
 
     @staticmethod
-    def _on_all_cpus(cmd: list[str]) -> list[str]:
-        """The command, on every CPU the installer started with.
+    def _online_atom_cpus(cmd: list[str], all_cpus: str) -> str:
+        try:
+            if not ATOM_CPUS_PATH.is_file():
+                return ""
+            atom = _parse_cpu_set(ATOM_CPUS_PATH.read_text().strip())
+            atom &= _parse_cpu_set(all_cpus)
+            if ONLINE_CPUS_PATH.is_file():
+                atom &= _parse_cpu_set(ONLINE_CPUS_PATH.read_text().strip())
+            if len(atom) >= _enroll_parallel(cmd):
+                return _format_cpu_set(atom)
+        except (OSError, ValueError):
+            pass
+        return ""
 
-        On a hybrid CPU omarchy-iso-install keeps the installer on the
-        performance cores and names the CPUs it had before in
-        OMARCHY_INSTALLER_ALL_CPUS. The enrollment is four Argon2 threads for
-        about two seconds. Kept on those cores too, it shares them with the
-        install: 3.65 s against 3.52 s with nothing pinned, on a Dell XPS 16
-        with an Argon2 load of this size. Given every CPU back, it takes the
-        cores the install leaves, and the install takes 3.27 s."""
+    @classmethod
+    def _on_all_cpus(cls, cmd: list[str]) -> list[str]:
+        """The command, on efficiency cores where a hybrid CPU has enough of
+        them online, or else on every CPU the installer started with.
+
+        On a hybrid CPU omarchy-iso-install pins the installer to performance
+        cores and records the original mask in OMARCHY_INSTALLER_ALL_CPUS.
+        Running the four Argon2id threads on cpu_atom keeps the P-cores free
+        for omarchy-image-write and setup with 0 ms penalty on F1.image_write."""
         cpus = os.environ.get("OMARCHY_INSTALLER_ALL_CPUS")
-        return ["taskset", "-c", cpus, *cmd] if cpus else cmd
+        if not cpus:
+            return cmd
+        atom = cls._online_atom_cpus(cmd, cpus)
+        return ["taskset", "-c", atom or cpus, *cmd]
 
     def _worker(self) -> None:
         try:
-            rc, out = self._run_step(self._on_all_cpus(self.enroll_cmd), input_data=self._passphrase)
+            all_cpus = os.environ.get("OMARCHY_INSTALLER_ALL_CPUS")
+            atom = self._online_atom_cpus(self.enroll_cmd, all_cpus) if all_cpus else ""
+            if atom:
+                rc, out = self._run_step(["taskset", "-c", atom, *self.enroll_cmd], input_data=self._passphrase)
+                if rc != 0 and "affinity" in out.lower():
+                    rc, out = self._run_step(["taskset", "-c", all_cpus, *self.enroll_cmd], input_data=self._passphrase)
+            else:
+                rc, out = self._run_step(
+                    ["taskset", "-c", all_cpus, *self.enroll_cmd] if all_cpus else self.enroll_cmd,
+                    input_data=self._passphrase,
+                )
             if rc != 0:
                 self.error = f"cryptsetup luksAddKey failed (exit {rc}): {out}"
                 return

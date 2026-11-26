@@ -54,4 +54,9 @@ done
 [[ ${internal_rule##*/} > 71-omarchy-iso-boot-medium-bfq.rules ]] ||
   { echo "$internal_rule must sort after the 71- rule"; exit 1; }
 
+# The live root must also drop omarchy-settings' 60- kyber rule so internal
+# disks do not switch schedulers twice on every udev change event.
+grep -qE '^rm -f /etc/udev/rules\.d/60-omarchy-io-scheduler\.rules$' "$ROOT/configs/airootfs/root/customize_airootfs.sh" ||
+  { echo "customize_airootfs.sh no longer removes 60-omarchy-io-scheduler.rules"; exit 1; }
+
 echo "ok: udev rules parse; boot media go on bfq; internal disks leave kyber"

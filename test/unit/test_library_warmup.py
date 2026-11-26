@@ -83,11 +83,13 @@ class LibraryWarmupTest(unittest.TestCase):
         source = Path(phases_impl.__file__).read_text()
         body = source[source.index("def arch_install_system("):]
         image = body.index("_install_root_image(ctx)")
-        layer = body.index("_apply_platform_layer(ctx)")
+        layer = body.index("_apply_platform_layer(ctx, layer=layer_path, proc_box=layer_proc_box)")
+        layer_join = body.index("layer_thread.join()")
         warmup = body.index("_start_library_warmup(ctx)")
         delta = body.index("arch.install_base_delta(")
         self.assertLess(image, layer)
-        self.assertLess(layer, warmup)
+        self.assertLess(layer, layer_join)
+        self.assertLess(layer_join, warmup)
         self.assertLess(warmup, delta)
 
     def test_it_ends_before_the_snapshot_and_on_the_exit_path(self):

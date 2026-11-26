@@ -201,6 +201,19 @@ class EarlyTargetKeyringTest(unittest.TestCase):
         self.assertEqual(self.popens[1][0], "systemd-run")
         install.assert_called_once()
 
+
+    def test_a_subsecond_float_marker_is_accepted_when_not_in_the_future(self):
+        self.finished_keyring()
+        (self.early / "complete").write_text(f"{time.time() - 0.005:.3f}\n")
+        self.start()
+        self.assertEqual(self.popens, [["true"]])
+
+    def test_a_non_finite_marker_is_rejected(self):
+        self.finished_keyring()
+        (self.early / "complete").write_text("nan\n")
+        self.start()
+        self.assertEqual(self.popens[0][0], "systemd-run")
+
     def test_a_marker_that_holds_no_time_is_not_trusted(self):
         self.finished_keyring()
         (self.early / "complete").write_text("")

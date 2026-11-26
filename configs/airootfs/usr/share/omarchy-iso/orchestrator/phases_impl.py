@@ -36,6 +36,7 @@ import platform
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -670,32 +671,115 @@ def arch_install_system(ctx: InstallContext) -> None:
         with _time_step("STEP.sanity_check"):
             arch.sanity_check(installer)
 
+        # Start Argon2id slot-0 enrollment now, right after LUKS opens and on
+        # E-cores where available, so the 2 s KDF overlaps the O_DIRECT image
+        # write without slowing F1.image_write and finishes before the snapshot.
+        _start_luks_keyslot_enroll(ctx)
         with _time_step("STEP.install_root_image"):
             _install_root_image(ctx)
         if config.auth_config and config.auth_config.users:
             _start_skel_warmup(ctx)
-        # Start Argon2id slot-0 enrollment now, after the 8-thread image write
-        # finishes, so it overlaps single-threaded setup without contending for
-        # CPU or memory bandwidth with omarchy-image-write.
-        _start_luks_keyslot_enroll(ctx)
-        _apply_platform_layer(ctx)
+        # Overlap platform/hardware layer extraction with setup steps that never
+        # touch /etc/passwd, /var/lib/pacman, or any file in the layer. Join the
+        # extraction before _start_library_warmup, pacman transactions, user
+        # creation, and root password changes so layers that add system users
+        # (such as aarch64-n1x) never race or overwrite /etc/passwd.
+        layer_path = _platform_layer() or _hardware_layer(ctx)
+        layer_err: list[BaseException] = []
+        layer_proc_box: list[subprocess.Popen] = []
+        layer_thread: threading.Thread | None = None
+        if layer_path is not None:
+            def _extract_layer_bg() -> None:
+                try:
+                    _apply_platform_layer(ctx, layer=layer_path, proc_box=layer_proc_box)
+                except BaseException as exc:  # noqa: BLE001 - re-raised after join
+                    layer_err.append(exc)
+            layer_thread = threading.Thread(
+                target=_extract_layer_bg,
+                name="omarchy-platform-layer",
+                daemon=True,
+            )
+            layer_thread.start()
+
+        # Everything after layer_thread.start() runs inside try/finally so any
+        # exception (including SIGINT) terminates/joins tar before cleanup
+        # unmounts /mnt. Bootloader setup stays after package installation so
+        # UEFI BootOrder is never modified before package deltas succeed.
+        kb_layout = config.locale_config.kb_layout if config.locale_config else ""
+        try:
+            # Fallback if prepare_live did not already start the staged keyring
+            # unit (e.g., when live /usr/share/pacman/keyrings was incomplete or
+            # arch_install_system was invoked directly). No-op if already running.
+            _start_target_keyring_init(ctx)
+
+            if not pre_mounted and arch.is_encrypted(config):
+                installer.generate_key_files()
+
+            if config.mirror_config:
+                installer.set_mirrors(mirror_handler, config.mirror_config, on_target=False)
+
+            with _time_step("STEP.configure_keyboard"):
+                if not configure_keyboard(
+                    installer.target, kb_layout,
+                    ctx.omarchy_install.get("input_method"),
+                    ctx.omarchy_install.get("input_xkb_layout", ""),
+                ):
+                    error(f"Invalid keyboard language specified: {kb_layout}")
+
+            if config.mirror_config:
+                with _time_step("STEP.set_mirrors on-target"):
+                    installer.set_mirrors(mirror_handler, config.mirror_config, on_target=True)
+
+            if config.swap and config.swap.enabled:
+                with _time_step("STEP.setup_zram_swap"):
+                    arch.setup_zram_swap(installer)
+                    _drop_archinstall_zram_conf(ctx)
+
+            _write_language_marker(ctx)
+            # The root image is shared by every region. Write the machine's
+            # selection only after it has been unpacked, before the runtime's
+            # system finalizer restores the online pacman configuration.
+            _write_region_marker(ctx)
+
+            if config.timezone:
+                with _time_step("STEP.set_timezone"):
+                    if not _set_timezone_direct(ctx.target, config.timezone):
+                        installer.set_timezone(config.timezone)
+            if config.ntp:
+                with _time_step("STEP.activate_time_sync"):
+                    installer.activate_time_synchronization()
+
+            with _time_step("STEP.genfstab"):
+                if pre_mounted:
+                    _write_pre_mounted_fstab(ctx)
+                else:
+                    installer.genfstab()
+        finally:
+            if layer_thread is not None:
+                with _time_step("STEP.join_platform_layer"):
+                    try:
+                        layer_thread.join()
+                    except BaseException:
+                        for proc in list(layer_proc_box):
+                            try:
+                                proc.terminate()
+                                proc.wait(timeout=5)
+                            except Exception:
+                                try:
+                                    proc.kill()
+                                    proc.wait(timeout=5)
+                                except Exception:
+                                    pass
+                        layer_thread.join(timeout=5)
+                        raise
+        if layer_err:
+            raise layer_err[0]
+
         _start_library_warmup(ctx)
-        # Fallback if prepare_live did not already start the staged keyring
-        # unit (e.g., when live /usr/share/pacman/keyrings was incomplete or
-        # arch_install_system was invoked directly). No-op if already running.
-        _start_target_keyring_init(ctx)
-
-        if not pre_mounted and arch.is_encrypted(config):
-            installer.generate_key_files()
-
-        if config.mirror_config:
-            installer.set_mirrors(mirror_handler, config.mirror_config, on_target=False)
-
         _mount_offline_package_cache(ctx)
         _mask_mkinitcpio_pacman_hooks(ctx)
         try:
             info("› installing per-machine packages (mkinitcpio deferred to final Limine UKI build)")
-            kb_layout = config.locale_config.kb_layout if config.locale_config else ""
             with _time_step("STEP.install_base_delta"):
                 arch.install_base_delta(
                     installer,
@@ -729,23 +813,6 @@ def arch_install_system(ctx: InstallContext) -> None:
                 # The platform layer installed the set; still name it in the log.
                 info(f"› {_base_package_file().name}: all installed")
 
-            with _time_step("STEP.configure_keyboard"):
-                if not configure_keyboard(
-                    installer.target, kb_layout,
-                    ctx.omarchy_install.get("input_method"),
-                    ctx.omarchy_install.get("input_xkb_layout", ""),
-                ):
-                    error(f"Invalid keyboard language specified: {kb_layout}")
-
-            if config.mirror_config:
-                with _time_step("STEP.set_mirrors on-target"):
-                    installer.set_mirrors(mirror_handler, config.mirror_config, on_target=True)
-
-            if config.swap and config.swap.enabled:
-                with _time_step("STEP.setup_zram_swap"):
-                    arch.setup_zram_swap(installer)
-                    _drop_archinstall_zram_conf(ctx)
-
             with _time_step("STEP.configure_limine_boot (Limine EFI + config)"):
                 _configure_limine_boot(ctx, installer, config)
 
@@ -768,12 +835,6 @@ def arch_install_system(ctx: InstallContext) -> None:
                         skip_packages=_app_packages_deferred_to_hardware(ctx),
                     )
 
-            _write_language_marker(ctx)
-            # The root image is shared by every region. Write the machine's
-            # selection only after it has been unpacked, before the runtime's
-            # system finalizer restores the online pacman configuration.
-            _write_region_marker(ctx)
-
             # Tailscale is bundled in the offline mirror but only installed
             # when an autoinstall drive staged an auth key; must happen here,
             # while the mirror is still bind-mounted, not in the phase that
@@ -785,22 +846,9 @@ def arch_install_system(ctx: InstallContext) -> None:
             _unmask_mkinitcpio_pacman_hooks(ctx)
             _unmount_offline_package_cache(ctx)
 
-        # Standard arch finishers.
-        if config.timezone:
-            with _time_step("STEP.set_timezone"):
-                installer.set_timezone(config.timezone)
-        if config.ntp:
-            with _time_step("STEP.activate_time_sync"):
-                installer.activate_time_synchronization()
         if root := arch.root_user(config):
             with _time_step("STEP.set_root_password"):
                 installer.set_user_password(root)
-
-        with _time_step("STEP.genfstab"):
-            if pre_mounted:
-                _write_pre_mounted_fstab(ctx)
-            else:
-                installer.genfstab()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1357,7 +1405,11 @@ def _run_layer_scriptlets(ctx: InstallContext) -> None:
     listing.unlink()
 
 
-def _apply_platform_layer(ctx: InstallContext, layer: Path | None = None) -> None:
+def _apply_platform_layer(
+    ctx: InstallContext,
+    layer: Path | None = None,
+    proc_box: list[subprocess.Popen] | None = None,
+) -> None:
     """Extract this machine's layer over the freshly written image: the
     packages its platform's list or its hardware layer adds, their pacman
     database entries, and the module index, linker cache and system users their
@@ -1378,13 +1430,20 @@ def _apply_platform_layer(ctx: InstallContext, layer: Path | None = None) -> Non
     if layer is None:
         return
     info(f"› extracting layer ({layer.stat().st_size >> 20} MiB from {layer.name})")
+    cmd = [
+        "tar", "--zstd", "-xpf", str(layer), "-C", str(ctx.target),
+        "--numeric-owner", "--acls", "--xattrs", "--xattrs-include=*",
+        "--keep-directory-symlink",
+    ]
     with _time_step(f"STEP.platform_layer ({layer.name})"):
-        subprocess.run(
-            ["tar", "--zstd", "-xpf", str(layer), "-C", str(ctx.target),
-             "--numeric-owner", "--acls", "--xattrs", "--xattrs-include=*",
-             "--keep-directory-symlink"],
-            check=True,
-        )
+        if proc_box is None:
+            subprocess.run(cmd, check=True)
+        else:
+            proc = subprocess.Popen(cmd)
+            proc_box.append(proc)
+            rc = proc.wait()
+            if rc != 0:
+                raise subprocess.CalledProcessError(rc, cmd)
 
 
 def _finish_root_image(ctx: InstallContext) -> None:
@@ -1554,7 +1613,9 @@ def _early_target_keyring_ready() -> bool:
     if not marker.is_file():
         return False
     try:
-        finished = int(marker.read_text().strip())
+        finished = float(marker.read_text().strip())
+        if not math.isfinite(finished):
+            finished = None
     except (OSError, ValueError):
         finished = None
     if finished is None or finished > time.time():
@@ -1943,6 +2004,17 @@ def _pipewire_units_without_chroot():
         yield
     finally:
         audio_app._enable_pipewire = original
+
+
+def _set_timezone_direct(target: Path, tz: str) -> bool:
+    zone = target / "usr" / "share" / "zoneinfo" / tz
+    if not zone.is_file():
+        return False
+    localtime = target / "etc" / "localtime"
+    if localtime.is_symlink() or localtime.exists():
+        localtime.unlink()
+    localtime.symlink_to(f"/usr/share/zoneinfo/{tz}")
+    return True
 
 
 def _create_users_with_reflink_skel(ctx: InstallContext, installer, users) -> None:
@@ -4078,12 +4150,7 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
 
     _drop_initramfs_modules_the_kernel_lacks(ctx)
 
-    # limine-update, run as its two steps so that each is timed.
-    with _time_step("LIMINE.limine-install --no-efi-register"):
-        subprocess.run(
-            ["arch-chroot", str(ctx.target), "limine-install", "--no-efi-register"],
-            check=True,
-        )
+
 
     # With a pre-built UKI in the image, copy it to the ESP and skip the ~4 s
     # of limine-mkinitcpio. Without one, build it here as before.
@@ -4172,27 +4239,53 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     # validate_boot checks), and the N1x UKI carries the one while Limine's
     # entry and the embedded cmdline carry the other. Every other machine, a
     # generic aarch64 one included, takes the image's UKI.
+    def _run_limine_install() -> None:
+        with _time_step("LIMINE.limine-install --no-efi-register"):
+            subprocess.run(
+                ["arch-chroot", str(ctx.target), "limine-install", "--no-efi-register"],
+                check=True,
+            )
+
     if prebuilt_uki.is_file() and not skip_prebuilt and arch.has_uefi() and (n1x_uki or not _arm_platform_boot()):
         used_prebuilt_uki = True
-        with _time_step("LIMINE.deploy_prebuilt_uki (copy from image)"):
-            esp_uki.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(prebuilt_uki, esp_uki)
-            info(f"› deployed pre-built UKI ({prebuilt_uki.stat().st_size >> 20} MiB)")
-        # Before --add-uki: the Limine entry pins the UKI's BLAKE2B hash.
-        if stale_keymap:
-            with _time_step("LIMINE.embed_vconsole (keyboard layout into the pre-built UKI)"):
-                from .uki_vconsole import embed_vconsole
-                # It fit a moment ago, in the copy's source. A prompt in the
-                # wrong layout locks the owner out, so nothing boots without it.
-                if not embed_vconsole(esp_uki, vconsole):
-                    raise RuntimeError(f"could not write keyboard layout {stale_keymap} into {esp_uki}")
-                info(f"› UKI carries keyboard layout {stale_keymap} for the console and the LUKS prompt")
-        with _time_step("LIMINE.embed_cmdline (pre-built UKI boots without a loader)"):
-            from .uki_cmdline import embed_cmdline
-            if embed_cmdline(esp_uki, cmdline):
-                info("› UKI carries this install's cmdline; bootable from any loader")
-            else:
-                info("› WARNING: UKI cmdline not embedded; only the Limine entry can boot it")
+        limine_err: list[BaseException] = []
+
+        def _limine_install_bg() -> None:
+            try:
+                _run_limine_install()
+            except BaseException as exc:  # noqa: BLE001 - re-raised after join
+                limine_err.append(exc)
+
+        limine_thread = threading.Thread(
+            target=_limine_install_bg,
+            name="omarchy-limine-install",
+            daemon=True,
+        )
+        limine_thread.start()
+        try:
+            with _time_step("LIMINE.deploy_prebuilt_uki (copy from image)"):
+                esp_uki.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(prebuilt_uki, esp_uki)
+                info(f"› deployed pre-built UKI ({prebuilt_uki.stat().st_size >> 20} MiB)")
+            # Before --add-uki: the Limine entry pins the UKI's BLAKE2B hash.
+            if stale_keymap:
+                with _time_step("LIMINE.embed_vconsole (keyboard layout into the pre-built UKI)"):
+                    from .uki_vconsole import embed_vconsole
+                    # It fit a moment ago, in the copy's source. A prompt in the
+                    # wrong layout locks the owner out, so nothing boots without it.
+                    if not embed_vconsole(esp_uki, vconsole):
+                        raise RuntimeError(f"could not write keyboard layout {stale_keymap} into {esp_uki}")
+                    info(f"› UKI carries keyboard layout {stale_keymap} for the console and the LUKS prompt")
+            with _time_step("LIMINE.embed_cmdline (pre-built UKI boots without a loader)"):
+                from .uki_cmdline import embed_cmdline
+                if embed_cmdline(esp_uki, cmdline):
+                    info("› UKI carries this install's cmdline; bootable from any loader")
+                else:
+                    info("› WARNING: UKI cmdline not embedded; only the Limine entry can boot it")
+        finally:
+            limine_thread.join()
+        if limine_err:
+            raise limine_err[0]
         # Register the boot entry in limine.conf, which limine-mkinitcpio
         # would have done after building the UKI. Without it limine.conf has
         # no Omarchy entry and the firmware menu comes up instead. Mirrors
@@ -4217,6 +4310,7 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
             with _time_step(f"LIMINE.limine-mkinitcpio {kernel} (not covered by the pre-built UKI)"):
                 subprocess.run(["arch-chroot", str(ctx.target), "limine-mkinitcpio", kernel], check=True)
     else:
+        _run_limine_install()
         with _time_step("LIMINE.limine-mkinitcpio (built on this machine)"):
             subprocess.run(
                 ["arch-chroot", str(ctx.target), "limine-mkinitcpio"],

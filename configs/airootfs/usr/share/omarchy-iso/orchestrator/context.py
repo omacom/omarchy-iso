@@ -81,11 +81,6 @@ class InstallContext:
         validate_input_selection(omarchy_install.get("input_method"), omarchy_install.get("input_xkb_layout", ""))
         validate_language(omarchy_install.get("language"))
 
-        # Resolved before any disk is touched, so an autoinstall naming a
-        # region this ISO lacks fails without wiping anything.
-        region = resolve_region(omarchy_install, user_configuration.get("timezone"))
-        omarchy_install["region"] = region
-
         # Deferred provisioning: the whole system installs but user creation is deferred to
         # first boot. Selected by the configurator (omarchy_install.defer_provisioning) or by
         # an `defer-provisioning` marker file on an autoinstall drive, which also replaces the
@@ -93,6 +88,12 @@ class InstallContext:
         defer_provisioning_marker = _optional_path(os.environ.get("OMARCHY_INSTALL_DEFER_PROVISIONING_FILE"))
         defer_provisioning = bool(omarchy_install.get("defer_provisioning")) or defer_provisioning_marker is not None
         omarchy_install["defer_provisioning"] = defer_provisioning
+
+        # Resolved before any disk is touched, so an autoinstall naming a
+        # region this ISO lacks fails without wiping anything. A deferred
+        # install's timezone is a placeholder, so it takes the media's region
+        # and its owner's timezone settles it at first boot.
+        region = resolve_region(omarchy_install, None if defer_provisioning else user_configuration.get("timezone"))
 
         if creds_path.exists():
             user_credentials = json.loads(creds_path.read_text())

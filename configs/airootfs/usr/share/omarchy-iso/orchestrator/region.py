@@ -69,4 +69,4 @@ def resolve_region(
 
 
 if __name__ == "__main__":
-    print(region_for_timezone(sys.argv[1] if len(sys.argv) > 1 else None, media_region()))
+    print(resolve_region({}, sys.argv[1] if len(sys.argv) > 1 else None))

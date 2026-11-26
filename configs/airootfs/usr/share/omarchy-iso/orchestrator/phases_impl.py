@@ -2236,11 +2236,12 @@ def _unmask_mkinitcpio_pacman_hooks(
 def _write_region_marker(ctx: InstallContext) -> None:
     """Tell the runtime's pacman finalizer (omarchy-apply-pacman) which
     profile to apply. Global installs write no marker, so the shared root
-    image stays unchanged. A deferred install has no owner timezone yet, so it
-    also leaves its region as REGION in the form defaults, where first-boot
-    setup (configure_region) settles it against the owner's timezone."""
+    image stays unchanged. A deferred install has no owner timezone yet, so
+    unless the config named a region it also leaves the media's as REGION in
+    the form defaults, where first-boot setup (configure_region) settles it
+    against the owner's timezone."""
     etc = ctx.target / "etc/omarchy"
-    if ctx.defer_provisioning:
+    if ctx.defer_provisioning and not ctx.omarchy_install.get("region"):
         etc.mkdir(parents=True, exist_ok=True)
         (etc / "form-defaults").write_text(f"REGION={ctx.region}\n")
         (etc / "form-defaults").chmod(0o644)

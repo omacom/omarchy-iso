@@ -139,9 +139,11 @@ class RegionSelectionTest(unittest.TestCase):
     def test_context_resolves_region_before_install(self):
         self.assertEqual(self.from_env({"timezone": "Asia/Shanghai"}).region, "cn")
         self.assertEqual(self.from_env({"timezone": "Europe/Berlin"}).region, "global")
-        # Deferred installs carry UTC until first boot, so they take the
+        # A deferred install's timezone is a placeholder, so it takes the
         # media's region unless the autoinstall config names one.
         self.assertEqual(self.from_env({"timezone": "UTC"}).region, "global")
+        deferred = {"timezone": "Asia/Shanghai", "omarchy_install": {"defer_provisioning": True}}
+        self.assertEqual(self.from_env(deferred).region, "global")
         self.assertEqual(self.from_env({"timezone": "UTC", "omarchy_install": {"region": "cn"}}).region, "cn")
         with self.assertRaises(RuntimeError):
             self.from_env({"omarchy_install": {"region": "zz"}})
@@ -170,12 +172,18 @@ class RegionSelectionTest(unittest.TestCase):
         for selected, marker in (("global", None), ("cn", "cn\n")):
             with self.subTest(region=selected):
                 target = self.root / selected
-                phases_impl._write_region_marker(types.SimpleNamespace(target=target, region=selected, defer_provisioning=True))
+                phases_impl._write_region_marker(
+                    types.SimpleNamespace(target=target, region=selected, defer_provisioning=True, omarchy_install={}))
                 defaults = target / "etc/omarchy/form-defaults"
                 self.assertEqual(defaults.read_text(), f"REGION={selected}\n")
                 self.assertEqual(defaults.stat().st_mode & 0o777, 0o644)
                 path = target / "etc/omarchy/region"
                 self.assertEqual(path.read_text() if path.exists() else None, marker)
+        # A region the config named stands: first boot leaves it alone.
+        target = self.root / "named"
+        phases_impl._write_region_marker(
+            types.SimpleNamespace(target=target, region="global", defer_provisioning=True, omarchy_install={"region": "global"}))
+        self.assertFalse((target / "etc/omarchy/form-defaults").exists())
 
     def test_region_survives_root_image_install_without_changing_package_delta(self):
         cases = (

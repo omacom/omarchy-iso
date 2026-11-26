@@ -285,6 +285,25 @@ WantedBy=sysinit.target
 EOF
 in_try systemctl enable omarchy-try-console.service >/dev/null
 
+# The soft reboot carries the installer's units over, and one it stopped
+# mid-run (a keyring, a hash) comes over failed. Those units do not exist in
+# this system, so their state is the installer's, not Try's: cleared at boot.
+install -Dm755 "$scripts/omarchy-try-forget-installer" "$merged/usr/local/lib/omarchy-try/omarchy-try-forget-installer"
+install -Dm644 /dev/stdin "$merged/etc/systemd/system/omarchy-try-forget-installer.service" <<'EOF'
+[Unit]
+Description=Try Omarchy: forget the installer's failed units
+DefaultDependencies=no
+Before=sysinit.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/omarchy-try/omarchy-try-forget-installer
+
+[Install]
+WantedBy=sysinit.target
+EOF
+in_try systemctl enable omarchy-try-forget-installer.service >/dev/null
+
 # The NVIDIA layer's driver can only take a card no driver holds. Try starts
 # from the live installer by a soft reboot, and the kernel keeps what the
 # installer loaded: nouveau, bound to the card and to the console. Before udev

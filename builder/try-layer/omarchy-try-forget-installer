@@ -1,0 +1,17 @@
+#!/bin/bash
+#
+# Try Omarchy: forget the failed units the installer left behind.
+# omarchy-try-forget-installer.service runs it first thing in a Try session.
+#
+# The soft reboot from the installer carries its units' state over, and a unit
+# the installer still ran (a hash of the medium, a keyring) is stopped on the
+# way and comes over failed. Those units do not exist in this system: their
+# state is the installer's, so it is cleared. A unit of this system that fails
+# stays failed.
+
+systemctl list-units --all --failed --plain --no-legend --no-pager |
+  while read -r unit load _; do
+    [[ $load == "not-found" ]] && printf '%s\n' "$unit"
+  done |
+  xargs -r -d '\n' systemctl reset-failed --
+exit 0

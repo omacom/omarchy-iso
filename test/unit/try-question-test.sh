@@ -399,11 +399,32 @@ said=$(OMARCHY_SYSFS=$sys OMARCHY_TRY_SCREENS="$work/run3" OMARCHY_DEV="$work/de
 [[ ! -s $work/dev3/tty1 && -z $said ]] || fail "omarchy-try-console drew with no screen kept"
 pass "the Try system draws the starting screen again on the console shown, and only one the installer kept"
 
+# Only the installer's units, which this system does not have, are forgotten.
+mkdir -p "$work/forget-bin"
+cat >"$work/forget-bin/systemctl" <<'EOF'
+#!/bin/bash
+if [[ $1 == "list-units" ]]; then
+  printf '%s\n' "pacman-init.service not-found failed failed pacman-init.service" \
+    "omarchy-root-image-verify.service not-found failed failed omarchy-root-image-verify.service" \
+    'systemd-fsck@dev-disk-by\x2dlabel-ARCH.service not-found failed failed systemd-fsck@dev-disk-by\x2dlabel-ARCH.service' \
+    "sddm.service loaded failed failed Simple Desktop Display Manager"
+else
+  echo "systemctl $*" >>"$WORK/forget-calls"
+fi
+EOF
+chmod +x "$work/forget-bin/systemctl"
+: >"$work/forget-calls"
+WORK=$work PATH="$work/forget-bin:$PATH" bash "$LAYER_SCRIPTS/omarchy-try-forget-installer" || fail "omarchy-try-forget-installer failed"
+[[ $(<"$work/forget-calls") == 'systemctl reset-failed -- pacman-init.service omarchy-root-image-verify.service systemd-fsck@dev-disk-by\x2dlabel-ARCH.service' ]] ||
+  fail "the wrong units were forgotten: $(<"$work/forget-calls")"
+pass "the installer's failed units are forgotten, and this system's are kept"
+
 # systemd expands $ in ExecStart= itself: the units run these scripts, with no
 # shell code of their own.
 layer="$ROOT/builder/build-try-layer.sh"
 grep -qx 'ExecStart=/usr/local/lib/omarchy-try/omarchy-try-reprobe' "$layer" || fail "the reprobe unit does not run its script"
 grep -qx 'ExecStart=/usr/local/lib/omarchy-try/omarchy-try-nvidia-handover' "$layer" || fail "the handover unit does not run its script"
 grep -qx 'ExecStart=/usr/local/lib/omarchy-try/omarchy-try-console' "$layer" || fail "the console unit does not run its script"
+grep -qx 'ExecStart=/usr/local/lib/omarchy-try/omarchy-try-forget-installer' "$layer" || fail "the forget unit does not run its script"
 grep -E '^ExecStart=.*\$' "$layer" | grep -v '\$\$' && fail "a unit in the Try layer has a \$ systemd would expand"
 pass "the layer's units run their scripts, with nothing for systemd to expand"

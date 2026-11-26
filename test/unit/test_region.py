@@ -27,6 +27,7 @@ def write_profiles(root: Path) -> Path:
     regions = root / "regions"
     (regions / "global").mkdir(parents=True)
     (regions / "global/theme").write_text("Tokyo Night\n")
+    (regions / "global/timezones").write_text("Asia/Hong_Kong\nHongkong\nAsia/Macau\nAsia/Macao\nAsia/Taipei\nROC\n")
     cn = regions / "cn"
     (cn / "pacman").mkdir(parents=True)
     (cn / "timezones").write_text("# China\nAsia/Shanghai\n\n  Asia/Urumqi  \n")
@@ -52,7 +53,7 @@ class RegionSelectionTest(unittest.TestCase):
         for timezone, expected in [
             ("Asia/Shanghai", "cn"),
             ("Asia/Urumqi", "cn"),
-            # Hong Kong, Macau and Taiwan are never part of any region.
+            # The global profile lists Hong Kong, Macau and Taiwan.
             ("Asia/Hong_Kong", "global"),
             ("Hongkong", "global"),
             ("Asia/Macau", "global"),

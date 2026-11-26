@@ -4,8 +4,8 @@ The live ISO carries the runtime's profiles (default/regions/ of the bundled
 settings package); a profile only reorders mirrors. Nobody picks a region by
 hand. The media's region is the preset's (--preset), or global. The timezone
 the user already chose settles it, as docs/regions.md in the runtime defines:
-a timezone a profile lists picks that profile, Hong Kong, Macau and Taiwan are
-always global, and any other timezone keeps the media's region. An autoinstall
+a timezone a profile lists picks that profile (global lists Hong Kong, Macau
+and Taiwan), and any other timezone keeps the media's region. An autoinstall
 config may name one explicitly in omarchy_install.region. Run as
 `python -m orchestrator.region <timezone>` to print the region the installer
 would use, which is how the configurator fills its summary.
@@ -21,10 +21,6 @@ from pathlib import Path
 REGIONS_DIR = Path("/usr/share/omarchy/default/regions")
 PRESET = Path("/usr/share/omarchy-iso/preset.json")
 GLOBAL = "global"
-
-# Every tzdata name for Hong Kong, Macau and Taiwan, the same list as the
-# runtime's first-boot configure_region (omarchy-provision-owner).
-ALWAYS_GLOBAL = frozenset({"Asia/Hong_Kong", "Hongkong", "Asia/Macau", "Asia/Macao", "Asia/Taipei", "ROC"})
 
 
 def _entries(path: Path) -> list[str]:
@@ -52,8 +48,6 @@ def media_region(preset: Path | None = None, regions_dir: Path | None = None) ->
 
 def region_for_timezone(timezone: str | None, fallback: str = GLOBAL, regions_dir: Path | None = None) -> str:
     regions_dir = regions_dir or REGIONS_DIR
-    if timezone in ALWAYS_GLOBAL:
-        return GLOBAL
     if timezone and regions_dir.is_dir():
         for profile in sorted(regions_dir.iterdir()):
             if timezone in _entries(profile / "timezones"):

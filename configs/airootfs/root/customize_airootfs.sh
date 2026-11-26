@@ -40,8 +40,13 @@ fi
 #   - systemd-hibernate-clear.service deletes the HibernateLocation EFI
 #     variable an installed system hibernated with, since this boot did not
 #     resume from it.
+#   - mdadm's udev rule starts any RAID array whose members it finds, and a
+#     started array can write its metadata or begin a resync. The installer
+#     needs no array running: it wipes the disk it installs on, member
+#     signatures included (omarchy-iso-cleanup-disk).
 printf '0.0 0 0\n0\nLOCAL\n' >/etc/adjtime
 systemctl mask systemd-hibernate-clear.service
+ln -sf /dev/null /etc/udev/rules.d/64-md-raid-assembly.rules
 
 # The live system installs from the stick and never joins a network on its
 # own: the configurator has no Wi-Fi step, and the one network call it makes

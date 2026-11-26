@@ -195,6 +195,7 @@ class LiveSystemLeavesTheMachineTest(unittest.TestCase):
         text = (ROOT / "configs/airootfs/root/customize_airootfs.sh").read_text()
         self.assertIn("printf '0.0 0 0\\n0\\nLOCAL\\n' >/etc/adjtime", text)
         self.assertIn("systemctl mask systemd-hibernate-clear.service", text)
+        self.assertIn("ln -sf /dev/null /etc/udev/rules.d/64-md-raid-assembly.rules", text)
         # Before anything that can end the script early.
         self.assertLess(text.index("LOCAL"), text.index("fw=/usr/lib/firmware"))
 

@@ -644,18 +644,35 @@ echo "Try layer: $(du -h "$output" | cut -f1) at $output"
 [[ -n $pacman_conf ]] || exit 0
 
 # Driver layers: what Omarchy's installer adds to a machine with an NVIDIA
-# card or a T2 chip, one layer each, which omarchy-try stacks over this one
-# on such a machine. Each is made the way an install makes it: Omarchy's own
-# install/hardware script runs in a chroot over the image and this layer,
-# against a pretend PCI bus, and the packages it asks for are installed from
-# the image's offline repository (DKMS builds against the image's kernel and
-# headers). What it adds is the layer.
+# card, a T2 chip or a Dell XPS haptic touchpad, one layer each, which
+# omarchy-try stacks over this one on such a machine. Each is made the way an
+# install makes it: Omarchy's own install/hardware script runs in a chroot over
+# the image and this layer, against a pretend machine (a PCI device, or an
+# Omarchy detector that says yes), and the packages it asks for are installed
+# from the image's offline repository (DKMS builds against the image's kernel
+# and headers, and package scripts set up the session's user). What it adds is
+# the layer.
 #
 # The 32-bit libraries stay out (omarchy-hw-x86 answers no): a session that
 # forgets everything has no Steam to run. So do kernels and headers: on a Mac
 # omarchy-try gives the session the live system's own linux-t2 modules.
-driver_layer() { # name, script, lspci line, PCI vendor, device, class
-  local name=$1 script=$2 line=$3 dir="$work/$1"
+pretend_pci() { # stubs, lspci line, PCI vendor, device, class
+  mkdir -p "$1/pci/0000:01:00.0"
+  printf '%s\n' "$3" >"$1/pci/0000:01:00.0/vendor"
+  printf '%s\n' "$4" >"$1/pci/0000:01:00.0/device"
+  printf '%s\n' "$5" >"$1/pci/0000:01:00.0/class"
+  printf '#!/bin/sh\necho "%s"\n' "$2" >"$1/lspci"
+  chmod 0755 "$1/lspci"
+}
+# A detector that reads DMI or I2C sysfs, which a chroot cannot fake (Omarchy
+# 4.5.0's reads a fixed path, with no override), says yes here. On the
+# machine, omarchy-try asks the real one.
+pretend_detector() { # stubs, detector
+  printf '#!/bin/sh\nexit 0\n' >"$1/$2"
+  chmod 0755 "$1/$2"
+}
+driver_layer() { # name, script, pretend function, its arguments
+  local name=$1 script=$2 pretend=$3 dir="$work/$1"
   local root="$dir/merged" stubs="$dir/merged/omarchy-try-stubs" packages=()
 
   mkdir -p "$dir/upper" "$dir/work" "$root"
@@ -663,14 +680,11 @@ driver_layer() { # name, script, lspci line, PCI vendor, device, class
     -o "lowerdir=$upper:$image_root,upperdir=$dir/upper,workdir=$dir/work,index=off,metacopy=off,redirect_dir=off" \
     "$root"
 
-  mkdir -p "$stubs/pci/0000:01:00.0"
-  printf '%s\n' "$4" >"$stubs/pci/0000:01:00.0/vendor"
-  printf '%s\n' "$5" >"$stubs/pci/0000:01:00.0/device"
-  printf '%s\n' "$6" >"$stubs/pci/0000:01:00.0/class"
-  printf '#!/bin/sh\necho "%s"\n' "$line" >"$stubs/lspci"
+  mkdir -p "$stubs"
+  "$pretend" "$stubs" "${@:4}"
   printf '#!/bin/sh\nprintf "%%s\\n" "$@" >>/omarchy-try-stubs/packages\n' >"$stubs/omarchy-pkg-add"
   printf '#!/bin/sh\nexit 1\n' >"$stubs/omarchy-hw-x86"
-  chmod 0755 "$stubs/lspci" "$stubs/omarchy-pkg-add" "$stubs/omarchy-hw-x86"
+  chmod 0755 "$stubs/omarchy-pkg-add" "$stubs/omarchy-hw-x86"
 
   # Twice: first to collect the packages it asks for (with systemctl stubbed
   # because the packages' units are not installed yet), then, with the packages
@@ -687,7 +701,11 @@ driver_layer() { # name, script, lspci line, PCI vendor, device, class
       rm -f "$stubs/systemctl"
       mapfile -t packages < <(grep -Ev '^(linux-t2|lib32-.*|.*-headers)$' "$stubs/packages")
       ((${#packages[@]})) || { echo "build-try-layer.sh: $script asked for nothing" >&2; exit 1; }
-      pacstrap -C "$pacman_conf" -c -G -M "$root" "${packages[@]}" >/dev/null
+      # Package scripts that set up the desktop user take the session's, not
+      # the build's sudo user, who is not in the image (dell-xps-touchpad-
+      # haptics.install tries SUDO_USER before anyone else).
+      env -u SUDO_USER OMARCHY_HAPTIC_USER="$TRY_USER" \
+        pacstrap -C "$pacman_conf" -c -G -M "$root" "${packages[@]}" >/dev/null
     fi
   done
 
@@ -704,5 +722,8 @@ driver_layer() { # name, script, lspci line, PCI vendor, device, class
 # apple/fix-t2.sh and nvidia.sh look for. Not the 580xx driver for Maxwell to
 # Volta (its layer is about 0.55 GB, which the ISO's size limit has no room
 # for): those cards run Try on nouveau, and an install still gets 580xx.
-driver_layer t2 apple/fix-t2.sh "00:00.0 Non-VGA unclassified device [0000]: Apple Inc. T2 Bridge Controller [106b:1801]" 0x106b 0x1801 0x088000
-driver_layer nvidia-open nvidia.sh "01:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD102 [10de:2684]" 0x10de 0x2684 0x030000
+driver_layer t2 apple/fix-t2.sh pretend_pci "00:00.0 Non-VGA unclassified device [0000]: Apple Inc. T2 Bridge Controller [106b:1801]" 0x106b 0x1801 0x088000
+driver_layer nvidia-open nvidia.sh pretend_pci "01:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD102 [10de:2684]" 0x10de 0x2684 0x030000
+# The Synaptics haptic touchpad of a Dell XPS 16 (DA16260): its daemon sets the
+# click strength, which the touchpad otherwise keeps at its own default.
+driver_layer dell-xps-touchpad-haptics dell-xps-touchpad-haptics.sh pretend_detector omarchy-hw-dell-xps-haptic-touchpad

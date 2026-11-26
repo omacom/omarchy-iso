@@ -182,7 +182,7 @@ setup_try() {
   mkdir -p "$work/t/medium" "$work/t/image/usr/lib/modules/7.2.15" "$work/t/pci" \
     "$work/t/live-modules/7.2.15-t2" "$work/t/omarchy/bin" "$work/t/bin"
   touch "$work/t/medium/omarchy-try.sfs" "$work/t/medium/omarchy-try-nvidia-open.sfs" \
-    "$work/t/medium/omarchy-try-t2.sfs"
+    "$work/t/medium/omarchy-try-t2.sfs" "$work/t/medium/omarchy-try-dell-xps-touchpad-haptics.sfs"
   : >"$work/t/calls"
   for command in mount umount systemctl; do
     printf '#!/bin/bash\necho "%s $*" >>"$WORK/t/calls"\n[[ " $* " == *" ${FAIL_ON:-none} "* ]] && exit 1\nexit 0\n' "$command" >"$work/t/bin/$command"
@@ -191,6 +191,9 @@ setup_try() {
   printf '#!/bin/bash\n[[ ${@: -1} == "$WORK/t/image" ]]\n' >"$work/t/bin/mountpoint"
   printf '#!/bin/bash\ncase $1 in -r) echo "${KVER:-7.2.15}" ;; -m) echo x86_64 ;; esac\n' >"$work/t/bin/uname"
   printf '#!/bin/bash\nexit "${GSP:-1}"\n' >"$work/t/omarchy/bin/omarchy-hw-nvidia-gsp"
+  # Omarchy's haptic touchpad detector calls omarchy-hw-match by name.
+  printf '#!/bin/bash\nomarchy-hw-match XPS && exit "${HAPTIC:-1}"\n' >"$work/t/omarchy/bin/omarchy-hw-dell-xps-haptic-touchpad"
+  printf '#!/bin/bash\nexit 0\n' >"$work/t/omarchy/bin/omarchy-hw-match"
   chmod +x "$work/t/bin/"* "$work/t/omarchy/bin/"*
 }
 
@@ -226,11 +229,24 @@ mkdir -p "$work/t/pci/0000:01:00.0"
 run_try GSP=0
 status=$?
 ((status == 0)) || fail "omarchy-try failed with an NVIDIA card: $(cat "$work/t/err")"
-grep -Fq "mount -t squashfs -o ro,loop $work/t/medium/omarchy-try-nvidia-open.sfs $work/t/run/driver" "$work/t/calls" ||
+grep -Fq "mount -t squashfs -o ro,loop $work/t/medium/omarchy-try-nvidia-open.sfs $work/t/run/nvidia-open" "$work/t/calls" ||
   fail "the NVIDIA layer was not mounted: $(cat "$work/t/calls")"
-grep -Fq "lowerdir=$work/t/run/driver:$work/t/run/layer:$work/t/image," "$work/t/calls" ||
+grep -Fq "lowerdir=$work/t/run/nvidia-open:$work/t/run/layer:$work/t/image," "$work/t/calls" ||
   fail "the NVIDIA layer is not on top: $(cat "$work/t/calls")"
 pass "a card Omarchy's detector gives nvidia-open gets that layer on top"
+
+# A Dell XPS with the haptic touchpad, and with an NVIDIA card too: both
+# layers, the driver's on top.
+setup_try
+mkdir -p "$work/t/pci/0000:01:00.0"
+run_try GSP=0 HAPTIC=0
+status=$?
+((status == 0)) || fail "omarchy-try failed on an XPS with the haptic touchpad: $(cat "$work/t/err")"
+grep -Fq "mount -t squashfs -o ro,loop $work/t/medium/omarchy-try-dell-xps-touchpad-haptics.sfs $work/t/run/dell-xps-touchpad-haptics" "$work/t/calls" ||
+  fail "the haptic touchpad layer was not mounted: $(cat "$work/t/calls")"
+grep -Fq "lowerdir=$work/t/run/nvidia-open:$work/t/run/dell-xps-touchpad-haptics:$work/t/run/layer:$work/t/image," "$work/t/calls" ||
+  fail "the haptic touchpad and NVIDIA layers are not both stacked: $(cat "$work/t/calls")"
+pass "a Dell XPS haptic touchpad gets its layer, under a driver layer it also takes"
 
 setup_try
 mkdir -p "$work/t/pci/0000:00:00.0"
@@ -239,7 +255,7 @@ echo 0x1801 >"$work/t/pci/0000:00:00.0/device"
 run_try KVER=7.2.15-t2
 status=$?
 ((status == 0)) || fail "omarchy-try failed on a T2 Mac: $(cat "$work/t/err")"
-grep -Fq "$work/t/medium/omarchy-try-t2.sfs $work/t/run/driver" "$work/t/calls" || fail "the T2 layer was not mounted: $(cat "$work/t/calls")"
+grep -Fq "$work/t/medium/omarchy-try-t2.sfs $work/t/run/t2" "$work/t/calls" || fail "the T2 layer was not mounted: $(cat "$work/t/calls")"
 grep -Fq "mount --bind $work/t/live-modules/7.2.15-t2 $work/t/nextroot/usr/lib/modules/7.2.15-t2" "$work/t/calls" ||
   fail "linux-t2's modules were not given to the session: $(cat "$work/t/calls")"
 [[ $(tail -1 "$work/t/calls") == "systemctl soft-reboot" ]] || fail "the soft reboot is not the last step"

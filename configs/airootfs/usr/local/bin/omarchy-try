@@ -9,8 +9,8 @@
 #                      (hooks/omarchy_try)
 #   omarchy-try.sfs    the Try layer (builder/build-try-layer.sh): the user,
 #                      the session, nothing that touches a disk
-#   omarchy-try-*.sfs  a driver layer on top, for the machine's NVIDIA card or
-#                      T2 chip
+#   omarchy-try-*.sfs  driver layers on top, for the machine's NVIDIA card or
+#                      T2 chip and a Dell XPS haptic touchpad
 #   tmpfs              where everything the session writes goes
 #
 # A soft reboot (systemd-soft-reboot.service) stops the live system and starts
@@ -72,12 +72,16 @@ mount_at() {
   mount "$@"
 }
 
-# Which driver layer this machine takes: Omarchy's own NVIDIA detector, which
-# the live system has from the image, or the T2 bridge by the IDs
-# install/hardware/apple/fix-t2.sh checks. The NVIDIA layers hold modules for
-# the image's kernel only; a Mac boots linux-t2.
-machine_driver() {
+# Which driver layers this machine takes, bottom first: Omarchy's own
+# detectors, which the live system has from the image, as its install/hardware
+# scripts ask them, and the T2 bridge by the IDs install/hardware/apple/
+# fix-t2.sh checks. The NVIDIA layers hold modules for the image's kernel only;
+# a Mac boots linux-t2.
+machine_layers() {
   local device
+  if PATH="$omarchy_path/bin:$PATH" "$omarchy_path/bin/omarchy-hw-dell-xps-haptic-touchpad" 2>/dev/null; then
+    echo dell-xps-touchpad-haptics
+  fi
   if [[ -d $image/usr/lib/modules/$(uname -r) ]]; then
     if OMARCHY_PCI_DEVICES_PATH=$pci_devices "$omarchy_path/bin/omarchy-hw-nvidia-gsp"; then
       echo nvidia-open
@@ -104,13 +108,13 @@ mount_at -t squashfs -o ro,loop "$medium/omarchy-try.sfs" "$run/layer" ||
   fail "could not mount $medium/omarchy-try.sfs"
 lower=$run/layer:$image
 
-driver=$(machine_driver)
-if [[ -n $driver && -f $medium/omarchy-try-$driver.sfs ]]; then
-  if mount_at -t squashfs -o ro,loop "$medium/omarchy-try-$driver.sfs" "$run/driver"; then
-    lower=$run/driver:$lower
+for driver in $(machine_layers); do
+  [[ -f $medium/omarchy-try-$driver.sfs ]] || continue
+  if mount_at -t squashfs -o ro,loop "$medium/omarchy-try-$driver.sfs" "$run/$driver"; then
+    lower=$run/$driver:$lower
     echo "Try Omarchy: with the $driver layer"
   fi
-fi
+done
 
 # Half of RAM for what the session writes; tmpfs takes pages only as they are
 # used.

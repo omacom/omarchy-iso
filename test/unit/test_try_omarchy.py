@@ -184,6 +184,16 @@ class BuildTryLayerTest(unittest.TestCase):
         self.assertIn('printf \'#!/bin/sh\\nexit 0\\n\' >"$stubs/systemctl"', self.text)
         self.assertIn('rm -f "$stubs/systemctl"', self.text)
 
+    def test_dell_xps_haptic_touchpad_layer_runs_omarchys_script_on_a_pretend_xps(self):
+        # Try sets up the haptic touchpad as an install does: Omarchy's own
+        # hardware script says what it adds, with its detector saying yes.
+        self.assertIn(
+            "driver_layer dell-xps-touchpad-haptics dell-xps-touchpad-haptics.sh pretend_detector omarchy-hw-dell-xps-haptic-touchpad",
+            self.text,
+        )
+        # Its package script sets up the session's user, never the builder's.
+        self.assertIn('env -u SUDO_USER OMARCHY_HAPTIC_USER="$TRY_USER"', self.text)
+
     def test_sets_utf8_locale_and_browser_policies(self):
         self.assertIn("LANG=en_US.UTF-8", self.text)
         self.assertIn("browser-policy.sh", self.text)

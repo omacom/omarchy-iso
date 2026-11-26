@@ -475,6 +475,7 @@ composed=$(
 grep -Fq 'omarchy-other-aarch64.packages' "$ROOT/builder/build-iso.sh" \
   || fail "build-iso.sh does not extract omarchy-other-aarch64.packages"
 printf '%s\n' '# aarch64 optional' anduril-bluechip-support >"$fixture/lists/omarchy-other-aarch64.packages"
+# shellcheck disable=SC2034 # read by the builder lines run through eval
 other_aarch64=$(
   base_pkg_lists=("$fixture/lists/omarchy-base.packages" "$fixture/lists/omarchy-other.packages")
   OMARCHY_ARCH=aarch64
@@ -483,6 +484,7 @@ other_aarch64=$(
 )
 [[ $other_aarch64 == $'omarchy-aarch64-base.packages\nomarchy-other.packages\nomarchy-other-aarch64.packages' ]] \
   || fail "aarch64 does not include omarchy-other-aarch64.packages: $other_aarch64"
+# shellcheck disable=SC2034 # read by the builder lines run through eval
 other_x86=$(
   base_pkg_lists=("$fixture/lists/omarchy-base.packages" "$fixture/lists/omarchy-other.packages")
   OMARCHY_ARCH=x86_64

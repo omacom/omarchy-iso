@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # The aarch64 UEFI firmware pair QEMU boots from: read-only code and the
 # template of the writable vars. Sourced by bin/omarchy-iso-boot and by
 # test/arm64-live-boot and test/arm64-install, so the launcher boots with the

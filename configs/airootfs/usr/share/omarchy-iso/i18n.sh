@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Installer strings, shared by the configurator and the install dashboard.
 #
 # Catalogs are i18n/<code>.json beside this file, one per language the console

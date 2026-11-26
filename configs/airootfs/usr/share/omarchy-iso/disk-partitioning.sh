@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Disk partitioning helpers, shared by the ISO configurator and its tests.
 #
 # The rule here is: never predict a partition number. parted fills the lowest

@@ -1,4 +1,5 @@
 #!/usr/bin/ash
+# shellcheck shell=dash # busybox ash, which shellcheck checks as dash
 # mkinitcpio's udev hook, waiting for the live medium instead of settling.
 
 run_earlyhook() {

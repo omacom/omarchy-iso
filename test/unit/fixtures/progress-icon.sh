@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Stands in for Omarchy's install/provisioning/progress-icon.sh, which
 # build-iso.sh vendors into the ISO from the runtime package, so dashboard tests
 # run without an Omarchy runtime. They cover the dashboard around the progress

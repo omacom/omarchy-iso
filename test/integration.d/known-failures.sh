@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Sourced by base-test.sh: which failing assertions test/known-failures.txt
 # allows, and until when.
 

@@ -25,20 +25,23 @@ from orchestrator import phases_impl  # noqa: E402
 
 class MiseOfflineTest(unittest.TestCase):
     def test_installer_records_fingerprint_preference_for_the_owner(self):
-        requested, skipped = "fingerprint-setup-requested", "fingerprint-setup-invitation"
-        for choice, marker, opposite in (("requested", requested, skipped), ("skipped", skipped, requested),
-                                         ("", None, None)):
-            with self.subTest(choice=choice):
-                ctx = types.SimpleNamespace(username="owner", defer_provisioning=False,
-                                            omarchy_install={"fingerprint_setup": choice})
-                with mock.patch.object(phases_impl, "_run_target_setup_command") as run:
-                    phases_impl.run_chroot_finalizer(ctx, private_mounts=True)
-                commands = [call.args[1] for call in run.call_args_list]
-                expected = [["/usr/bin/omarchy-done", "clear", opposite],
-                            ["/usr/bin/omarchy-done", "mark", marker]] if marker else []
-                self.assertEqual(commands[1:], expected)
-                self.assertTrue(all(call.kwargs == {"user": "owner", "private_mounts": True}
-                                    for call in run.call_args_list))
+        helper = "usr/share/omarchy/bin/omarchy-provision-fingerprint-choice"
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            for supported in (False, True):
+                if supported:
+                    (target / helper).parent.mkdir(parents=True)
+                    (target / helper).touch()
+                for choice in ("requested", "skipped", ""):
+                    with self.subTest(choice=choice, supported=supported):
+                        ctx = types.SimpleNamespace(username="owner", defer_provisioning=False, target=target,
+                                                    omarchy_install={"fingerprint_setup": choice})
+                        with mock.patch.object(phases_impl, "_run_target_setup_command") as run:
+                            phases_impl.run_chroot_finalizer(ctx, private_mounts=True)
+                        commands = [call.args[1] for call in run.call_args_list]
+                        self.assertEqual(commands[1:], [[f"/{helper}", choice]] if choice and supported else [])
+                        self.assertTrue(all(call.kwargs == {"user": "owner", "private_mounts": True}
+                                            for call in run.call_args_list))
 
     def test_user_finalizer_runs_mise_offline(self):
         ctx = mock.Mock(username="user", full_name="User", email="user@example.com",

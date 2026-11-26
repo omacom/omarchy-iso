@@ -3985,18 +3985,12 @@ def run_chroot_finalizer(ctx: InstallContext, *, private_mounts: bool = False) -
         private_mounts=private_mounts,
     )
 
-    # Store the choice as the installed user. Older and unattended answers
-    # omit it and retain the ordinary first-login invitation.
+    # Reused unattended answers can request this even on an older target.
     choice = ctx.omarchy_install.get("fingerprint_setup")
-    if choice in ("requested", "skipped"):
-        marker, opposite = "fingerprint-setup-requested", "fingerprint-setup-invitation"
-        if choice == "skipped":
-            marker, opposite = opposite, marker
+    helper = Path("usr/share/omarchy/bin/omarchy-provision-fingerprint-choice")
+    if choice in ("requested", "skipped") and (ctx.target / helper).is_file():
         _run_target_setup_command(
-            ctx, ["/usr/bin/omarchy-done", "clear", opposite], user=ctx.username, private_mounts=private_mounts,
-        )
-        _run_target_setup_command(
-            ctx, ["/usr/bin/omarchy-done", "mark", marker], user=ctx.username, private_mounts=private_mounts,
+            ctx, [f"/{helper}", choice], user=ctx.username, private_mounts=private_mounts,
         )
 
 

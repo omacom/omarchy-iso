@@ -64,3 +64,10 @@ truncate -s 257M "$work/n1x-big.efi"
 n1x_prebuilt_uki_size_ok "$work/n1x.efi" >/dev/null 2>&1 || fail "a 190 MiB N1x UKI is refused"
 if n1x_prebuilt_uki_size_ok "$work/n1x-big.efi" >/dev/null 2>&1; then fail "a 257 MiB N1x UKI is accepted"; fi
 echo "ok - the N1x UKI has a ceiling of its own"
+
+# Snapdragon ISOs install only Snapdragon laptops, which always build their own
+# UKI with board firmware and device trees; skip the unused generic UKI so it
+# does not bloat the root image.
+grep -Fq 'Skipping generic pre-built UKI on Snapdragon image' "$builder" ||
+  fail "Snapdragon builds still pre-build the unused generic UKI"
+echo "ok - Snapdragon builds skip the unused generic pre-built UKI"

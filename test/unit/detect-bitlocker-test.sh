@@ -13,7 +13,8 @@ set -uo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 configurator="$ROOT/configs/airootfs/root/configurator"
 
-WORK=$(mktemp -d)
+# Without a work directory the fixtures below would land in /.
+WORK=$(mktemp -d) || { echo "mktemp gave no work directory" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT
 failures=0
 
@@ -54,6 +55,9 @@ probe() {
   found=$(disk=/dev/test detect_bitlocker 2>"$WORK/stderr")
   status=$?
   noise=$(<"$WORK/stderr")
+  # A blank line is noise too, and the substitution above drops it.
+  [[ -z $noise && -s $WORK/stderr ]] && noise="blank lines"
+  return 0
 }
 
 probe luks zeros

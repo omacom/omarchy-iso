@@ -10,6 +10,7 @@ set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 
+# shellcheck disable=SC2154 # set by test/integration or the install-test workflow, which run the scenarios
 ISO="$OMARCHY_INTEGRATION_ISO"
 SSH_PORT="${OMARCHY_INTEGRATION_SSH_PORT:-2322}"
 MEMORY="${OMARCHY_INTEGRATION_MEMORY:-8192}"
@@ -21,6 +22,7 @@ NO_PREVIEW="${OMARCHY_INTEGRATION_NO_PREVIEW:-false}"
 # true when the ISO is a shipped release rather than a build of this tree:
 # what only this tree's installer does is then noted instead of checked.
 RELEASE_ISO="${OMARCHY_INTEGRATION_RELEASE_ISO:-false}"
+# shellcheck disable=SC2034 # read by the scenarios that source this file
 BOOT_TIMEOUT=600
 
 GUEST_USER="omarchy"
@@ -289,8 +291,8 @@ start_vm() {
   local firmware_args=()
   if [[ $FIRMWARE == uefi ]]; then
     firmware_args=(
-      -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE"
-      -drive if=pflash,format=raw,file="$ACTIVE_OVMF"
+      -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE"
+      -drive "if=pflash,format=raw,file=$ACTIVE_OVMF"
     )
   fi
 
@@ -606,6 +608,7 @@ ssh_live_root() {
 # finds no datasource and leaves cloud-init off for the boot; the DMI serial
 # ds=nocloud tells it NoCloud is there, and NoCloud then finds the drive.
 # Nothing in the ISO or the install reads the serial.
+# shellcheck disable=SC2034 # read by the scenarios that source this file
 LIVE_CIDATA_SMBIOS=(-smbios "type=1,serial=ds=nocloud")
 wait_for_live_root_ssh() {
   local timeout="$1" started=$SECONDS

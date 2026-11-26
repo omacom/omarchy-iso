@@ -14,13 +14,21 @@ OMARCHY_SNAPDRAGON="${OMARCHY_SNAPDRAGON:-}"
 # profiledef.sh reads these in the mkarchiso environment.
 export OMARCHY_ARCH OMARCHY_KERNEL OMARCHY_OEM_INSTALL OMARCHY_PRESET OMARCHY_FAST_COMPRESSION
 
+# shellcheck source=SCRIPTDIR/node-release.sh
 source /builder/node-release.sh
+# shellcheck source=SCRIPTDIR/arm64-kernel-image.sh
 source /builder/arm64-kernel-image.sh
+# shellcheck source=SCRIPTDIR/archiso-aarch64-mkinitcpio.sh
 source /builder/archiso-aarch64-mkinitcpio.sh
+# shellcheck source=SCRIPTDIR/iso-partition-table.sh
 source /builder/iso-partition-table.sh
+# shellcheck source=SCRIPTDIR/grub-platform.sh
 source /builder/grub-platform.sh
+# shellcheck source=SCRIPTDIR/try-kernel.sh
 source /builder/try-kernel.sh
+# shellcheck source=SCRIPTDIR/boot-menu-theme.sh
 source /builder/boot-menu-theme.sh
+# shellcheck source=SCRIPTDIR/required-packages.sh
 source /builder/required-packages.sh
 
 # The online pacman configuration drives every package download below: one per
@@ -217,8 +225,9 @@ fi
 # their code for the CPU at run time (-O2, Arch's flags and -O3 -march=native
 # -flto all measure 0.78 s on the root image).
 (
+  # shellcheck source=/dev/null # Arch's, in the builder container
   source /etc/makepkg.conf
-  # shellcheck disable=SC2086 # the flag lists are meant to split
+  # shellcheck disable=SC2086,SC2154 # makepkg.conf sets the flag lists, which are meant to split
   gcc -std=gnu11 $CFLAGS -Wall -Wextra -pthread $LDFLAGS \
     -o /usr/local/bin/omarchy-image-write /builder/omarchy-image-write.c -lzstd
 )

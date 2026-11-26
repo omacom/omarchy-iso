@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Disk partitioning helpers, shared by the ISO configurator and its tests.
 #
 # The rule here is: never predict a partition number. parted fills the lowest
@@ -63,8 +64,7 @@ partition_table_type() {
 # Fail loudly. The former version looped over sleep and returned its status,
 # so a device that never appeared was indistinguishable from one that did.
 wait_for_device() {
-  local i
-  for i in $(seq 1 10); do
+  for _ in $(seq 1 10); do
     [[ -b "$1" ]] && return 0
     udevadm settle 2>/dev/null || true
     sleep 1
@@ -158,6 +158,7 @@ create_partition() {
   parted --script "$disk" name "$num" "$name" >>"${OMARCHY_INSTALL_LOG_FILE:-/dev/null}" 2>&1 || true
 
   created_parts+=("$num")
+  # shellcheck disable=SC2034 # the caller reads it once this returns
   created_partition_number="$num"
 }
 

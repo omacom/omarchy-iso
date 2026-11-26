@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # The installer's kmscon session on tty1, and the answers the configurator
 # carries across a kmscon relaunch. Sourced by .automated_script.sh and the
 # configurator.

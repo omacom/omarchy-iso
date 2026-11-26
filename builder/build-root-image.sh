@@ -138,6 +138,7 @@ build_prebuilt_initramfs() {
   printf '%s\n' "$image_kver" >"$root$dir/prebuilt-initramfs.kver"
   # The console keymap the keymap hook compiled in, which the hashed inputs
   # below don't cover (vconsole.conf).
+  # shellcheck source=/dev/null # the image's own vconsole.conf
   ( [ -f "$root/etc/vconsole.conf" ] && . "$root/etc/vconsole.conf"; printf '%s\n' "${KEYMAP:-}" ) \
     >"$root$dir/prebuilt-initramfs.keymap"
   initramfs_inputs "$root" >"$root$dir/prebuilt-initramfs.inputs"
@@ -613,6 +614,7 @@ CMDLINE
 # The preset names the kernel version explicitly: mkinitcpio treats a glob in
 # ALL_kver as a literal path. It sets no ALL_microcode, which is deprecated;
 # the microcode hook in mkinitcpio.conf adds the microcode.
+# shellcheck disable=SC2010 # kernel version directories, named by pacman
 image_kver=$(ls -1 "$root/usr/lib/modules/" | grep -E '^[0-9]+\.' | head -1)
 # The output directory persists between builds: no layer from an older one.
 rm -f "${output%/*}"/omarchy-layer.*.tar.zst
@@ -642,6 +644,7 @@ else
   # The LUKS passphrase prompt runs from this initramfs, so a stale `us` makes
   # a passphrase enrolled under another layout untypeable and locks the owner
   # out of a fresh install (upstream omarchy#8196).
+  # shellcheck source=/dev/null # the image's own vconsole.conf
   ( [ -f "$root/etc/vconsole.conf" ] && . "$root/etc/vconsole.conf"; printf '%s\n' "${KEYMAP:-}" ) \
     >"$root/var/lib/omarchy-iso/prebuilt-uki.keymap"
   cat >"$root/etc/mkinitcpio.d/${image_kernel}.preset" <<PRESET

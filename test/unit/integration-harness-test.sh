@@ -136,7 +136,7 @@ done
   fail "two boots left authorized_keys as: $(cat "$guest/home/.ssh/authorized_keys")"
 [[ $(stat -c %a "$guest/home/.ssh") == 700 && $(stat -c %a "$guest/home/.ssh/authorized_keys") == 600 ]] ||
   fail "the key is not private to the owner"
-grep -qx "install -d -m 700 -o $GUEST_USER -g staff $guest/home/.ssh" "$guest/calls" || fail "~/.ssh is not the owner's: $(cat "$guest/calls")"
+grep -qx "install -d -m 700 -o $GUEST_USER -g staff $guest/home/.ssh" "$guest/calls" || fail "the .ssh directory is not the owner's: $(cat "$guest/calls")"
 grep -qx "chown $GUEST_USER: $guest/home/.ssh/authorized_keys" "$guest/calls" || fail "the key file is not the owner's"
 grep -qx "ufw allow from 10.0.2.2 to any port 22 proto tcp" "$guest/calls" || fail "the firewall is not opened to the host"
 grep -qx "systemctl enable --now sshd.service" "$guest/calls" || fail "sshd is not started"

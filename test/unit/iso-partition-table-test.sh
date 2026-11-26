@@ -10,7 +10,7 @@
 set -uo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-# shellcheck source=../../builder/iso-partition-table.sh
+# shellcheck source=SCRIPTDIR/../../builder/iso-partition-table.sh
 source "$ROOT/builder/iso-partition-table.sh"
 
 # Without a work directory the images below would land in /.

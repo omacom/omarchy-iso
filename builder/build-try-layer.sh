@@ -95,7 +95,13 @@ mark_updated() {
 in_try useradd -m -G wheel -s /bin/bash "$TRY_USER"
 in_try passwd -d "$TRY_USER" >/dev/null
 install -d -m 0750 "$merged/etc/sudoers.d"
-printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "$TRY_USER" >"$merged/etc/sudoers.d/10-omarchy-try"
+# Omarchy's bar shows passwordless sudo as a warning (omarchy-sudo-passwordless
+# --active asks sudo whether its own __status runs without authentication),
+# and it is no warning here: the user has no password. sudo takes the last
+# rule that matches, so that one command needs a password; every other runs
+# without one.
+printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\n%s ALL=(ALL:ALL) PASSWD: /usr/bin/omarchy-sudo-passwordless\n' \
+  "$TRY_USER" "$TRY_USER" >"$merged/etc/sudoers.d/10-omarchy-try"
 chmod 0440 "$merged/etc/sudoers.d/10-omarchy-try"
 
 # The user's desktop, as the installer's run_chroot_finalizer makes it

@@ -173,6 +173,14 @@ class BuildTryLayerTest(unittest.TestCase):
         self.assertIn('printf \'#!/bin/sh\\nexit 0\\n\' >"$stubs/systemctl"', self.text)
         self.assertIn('rm -f "$stubs/systemctl"', self.text)
 
+    def test_the_bar_does_not_read_trys_sudo_as_a_warning(self):
+        # omarchy-sudo-passwordless --active asks sudo for its own __status;
+        # the last matching rule needs a password, every other command none.
+        self.assertIn(
+            "printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\\n%s ALL=(ALL:ALL) PASSWD: /usr/bin/omarchy-sudo-passwordless\\n'",
+            self.text,
+        )
+
     def test_idles_as_an_install_does(self):
         # Stay awake was on in every Try session; Omarchy's idle lock turns
         # itself down without the lock screen's PAM file, which Try lacks.

@@ -171,6 +171,8 @@ check "Try ran this machine's hardware setup" try_ssh \
      timeout 600 bash -c "until [ \"\$(systemctl show -p ExecMainExitTimestampMonotonic --value $u)\" != 0 ]; do sleep 2; done" &&
        [ "$(systemctl show -p Result --value "$u")" = success ] || exit 1
    done'
+# --active exits 1 for no grant; a missing or broken helper exits otherwise.
+check "the bar shows no passwordless sudo warning" try_ssh 'omarchy-sudo-passwordless --active; [ $? = 1 ]'
 check "Try idles as an install does" try_ssh '[ "$(omarchy-toggle-idle status | jq -r .enabled)" = false ]'
 check "a reboot from Try arms no watchdog" try_ssh '[ "$(systemctl show -p RebootWatchdogUSec --value)" = 0 ]'
 check "Try says once what the session is" try_ssh \

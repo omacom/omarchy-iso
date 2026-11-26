@@ -19,6 +19,12 @@ bash -n "$layout"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# bash -n accepts a script whose quotes end in the wrong place if the result
+# still parses. An apostrophe in a comment once ended vm-seal's guest script,
+# and the runner ran the rest itself. shellcheck reports where that happens.
+command -v shellcheck >/dev/null || fail "shellcheck is not installed"
+shellcheck -S warning "$ROOT"/test/vm-image/* || fail "shellcheck found problems in test/vm-image"
 equal() { [[ $2 == "$3" ]] || fail "$1: got '$2', expected '$3'"; }
 refused() { # description, command...: it has to fail and say why
   local what=$1; shift

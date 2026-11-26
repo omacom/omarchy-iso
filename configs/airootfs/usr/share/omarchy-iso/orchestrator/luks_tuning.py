@@ -164,6 +164,7 @@ def _with_calibration(original_encrypt):
             deferred_format_command,
             format_command,
             new_volume_key,
+            pretouch_for_format,
             stop_calibration,
         )
         # When deferring Argon2id enrollment, stop any in-flight calibration
@@ -204,7 +205,9 @@ def _with_calibration(original_encrypt):
                     )
                     return result
                 candidate_temp.unlink(missing_ok=True)
-            return original_run(format_command(command, volume_key), *run_args, **run_kwargs)
+            argv = format_command(command, volume_key)
+            pretouch_for_format(argv)
+            return original_run(argv, *run_args, **run_kwargs)
 
         luks.run = calibrated_run
         try:

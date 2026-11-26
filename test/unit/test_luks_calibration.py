@@ -175,7 +175,7 @@ class Calibration(unittest.TestCase):
         for failure in (OSError(), subprocess.TimeoutExpired('systemctl', 5)):
             calls = []
             def run(command, **_kwargs):
-                if command[-1] == luks.EARLY_KEYRING_UNIT:
+                if command[-1] in (luks.EARLY_KEYRING_UNIT, luks.CACHE_WARM_UNIT):
                     return types.SimpleNamespace(stdout='')
                 calls.append(command[1])
                 if command[1] == 'show':
@@ -190,7 +190,7 @@ class Calibration(unittest.TestCase):
         turn (the last one from then on), on a clock that only sleep moves."""
         calls, clock = [], [0.0]
         def run(command, **_kwargs):
-            if command[-1] == luks.EARLY_KEYRING_UNIT:
+            if command[-1] in (luks.EARLY_KEYRING_UNIT, luks.CACHE_WARM_UNIT):
                 return types.SimpleNamespace(stdout='')
             calls.append(command[1])
             state = states[min(calls.count('show') - 1, len(states) - 1)] if command[1] == 'show' else ''
@@ -220,6 +220,38 @@ class Calibration(unittest.TestCase):
         calls, waited = self.stop(['ActiveState=active\nJob=\n'], wait=2)
         self.assertEqual(calls[-1], 'stop')
         self.assertTrue(2.0 <= waited < 2.5, waited)
+
+    def test_stop_calibration_stops_keyring_and_cache_warm_units(self):
+        stopped = []
+        def run(command, **_kwargs):
+            if command[1] == 'stop':
+                stopped.append(command[-1])
+                return types.SimpleNamespace(stdout='')
+            return types.SimpleNamespace(stdout='ActiveState=inactive\nJob=\n')
+        with mock.patch.object(luks.subprocess, 'run', side_effect=run):
+            luks.stop_calibration()
+        self.assertEqual(stopped, [luks.UNIT, luks.EARLY_KEYRING_UNIT, luks.CACHE_WARM_UNIT])
+
+    def test_pretouch_for_format_runs_only_for_uncached_benchmark_with_headroom(self):
+        uncached = list(COMMAND)
+        default_time = [arg for arg in COMMAND if arg not in ('--iter-time', '2000')]
+        cached_separate = list(COMMAND) + ['--pbkdf-force-iterations', '13']
+        cached_eq = list(COMMAND) + ['--pbkdf-force-iterations=13']
+        with mock.patch.object(luks, '_pretouch_benchmark_memory') as pretouch, \
+                mock.patch.object(luks, 'memory_total', return_value=8*1024*1024), \
+                mock.patch.object(luks, 'memory_available', return_value=4*1024*1024):
+            luks.pretouch_for_format(cached_separate)
+            luks.pretouch_for_format(cached_eq)
+            luks.pretouch_for_format(['cryptsetup', 'open', '/dev/vda2', 'root'])
+            pretouch.assert_not_called()
+            luks.pretouch_for_format(uncached)
+            luks.pretouch_for_format(default_time)
+            self.assertEqual(pretouch.call_count, 2)
+        with mock.patch.object(luks, '_pretouch_benchmark_memory') as pretouch, \
+                mock.patch.object(luks, 'memory_total', return_value=3*1024*1024), \
+                mock.patch.object(luks, 'memory_available', return_value=2*1024*1024):
+            luks.pretouch_for_format(uncached)
+            pretouch.assert_not_called()
 
 
 class ArchinstallBoundary(unittest.TestCase):

@@ -141,7 +141,8 @@ trap '' INT TERM HUP
 # while Try starts from it. Stopped first, and started again if the soft
 # reboot is refused, so an install still gets their results.
 checks=(omarchy-mirror-verify.service omarchy-root-image-verify.service
-  omarchy-luks-calibrate.service omarchy-target-keyring-early.service)
+  omarchy-luks-calibrate.service omarchy-target-keyring-early.service
+  omarchy-cache-warm.service)
 systemctl stop "${checks[@]}" 2>/dev/null || true
 systemctl reset-failed "${checks[@]}" 2>/dev/null || true
 

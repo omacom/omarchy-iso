@@ -14,8 +14,10 @@ import threading
 import time
 
 STATE = Path("/run/omarchy-luks-calibration/result.json")
-# The live system's other boot-time job (phases_impl EARLY_KEYRING_UNIT).
+# The live system's other boot-time install jobs, stopped before luksFormat
+# so neither gpg nor multi-GB cache warm-up competes with Argon2id.
 EARLY_KEYRING_UNIT = "omarchy-target-keyring-early.service"
+CACHE_WARM_UNIT = "omarchy-cache-warm.service"
 UNIT = "omarchy-luks-calibrate.service"
 ITER_TIME = 2000
 KEY_SIZE = 512
@@ -111,6 +113,19 @@ def _pretouch_benchmark_memory(target_kib: int = PRETOUCH_MEMORY) -> None:
         pass
 
 
+def pretouch_for_format(command: list[str]) -> None:
+    """Clear clean page cache before an uncached Argon2id luksFormat
+    benchmark, matching calibrate() so fallback formats do not pay
+    kswapd reclaim inside cryptsetup's wall-clock timer."""
+    if "luksFormat" not in command:
+        return
+    if any(arg == "--pbkdf-force-iterations" or arg.startswith("--pbkdf-force-iterations=") for arg in command):
+        return
+    if memory_total() < 4 * 1024 * 1024 or memory_available() < 1536 * 1024:
+        return
+    _pretouch_benchmark_memory()
+
+
 def parse_benchmark(output: str) -> dict:
     lines = [line for line in output.splitlines() if line.startswith("argon2id")]
     if len(lines) != 1:
@@ -195,20 +210,16 @@ def stop_calibration(wait: float = 20) -> None:
             time.sleep(0.2)
     except (OSError, subprocess.TimeoutExpired):
         pass  # a poll that fails ends the wait, not the stop
-    try:
-        subprocess.run(["systemctl", "stop", UNIT], check=False,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    # The keyring the live system makes for the target is gpg on one core, and
-    # must not run beside the format's PBKDF either. One that is finished
-    # stays. One still at work is given up, and the install makes the keyring
-    # itself, as it did before that unit existed.
-    try:
-        subprocess.run(["systemctl", "stop", EARLY_KEYRING_UNIT], check=False,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+    # Stop calibration, early keyring generation, and page-cache warm-up before
+    # luksFormat runs so neither gpg nor multi-GB reads compete with Argon2id.
+    # Completed calibration, a finished keyring, and pages already cached all
+    # stay in place when their units stop.
+    for unit in (UNIT, EARLY_KEYRING_UNIT, CACHE_WARM_UNIT):
+        try:
+            subprocess.run(["systemctl", "stop", unit], check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
 
 def cached_options(iter_time: int, key_size: int) -> list[str]:
@@ -555,7 +566,9 @@ def main() -> None:
         # Same free-space format, with the existing defaults made explicit.
         command = ["cryptsetup", "luksFormat", sys.argv[2], "--type", "luks2", "--batch-mode",
                    "--pbkdf", "argon2id", "--key-size", "512", "--iter-time", "2000", "-"]
-        os.execvp("cryptsetup", format_command(command, Path(sys.argv[3]) if len(sys.argv) == 4 else None))
+        argv = format_command(command, Path(sys.argv[3]) if len(sys.argv) == 4 else None)
+        pretouch_for_format(argv)
+        os.execvp("cryptsetup", argv)
     else:
         raise SystemExit("usage: omarchy-luks-calibrate calibrate | volume-key | format DEVICE [VOLUME-KEY]")
 

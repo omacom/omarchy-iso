@@ -117,7 +117,8 @@ class EarlyTargetKeyringTest(unittest.TestCase):
                 mock.patch.object(luks.subprocess, "run", side_effect=lambda cmd, **kw: stops.append(list(cmd))):
             luks.stop_calibration(wait=0)
         self.assertEqual(stops, [["systemctl", "stop", luks.UNIT],
-                                 ["systemctl", "stop", "omarchy-target-keyring-early.service"]])
+                                 ["systemctl", "stop", "omarchy-target-keyring-early.service"],
+                                 ["systemctl", "stop", "omarchy-cache-warm.service"]])
 
     def test_the_start_from_the_targets_own_keyrings_never_takes_it(self):
         self.finished_keyring()

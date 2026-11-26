@@ -144,8 +144,8 @@ status=$?
 expected="mount -t squashfs -o ro,loop $work/t/medium/omarchy-try.sfs $work/t/run/layer
 mount -t tmpfs -o size=50%,mode=0755 omarchy-try $work/t/run/rw
 mount -t overlay omarchy-try -o lowerdir=$work/t/run/layer:$work/t/image,upperdir=$work/t/run/rw/upper,workdir=$work/t/run/rw/work,index=off,metacopy=off,redirect_dir=off $work/t/nextroot
-systemctl stop omarchy-mirror-verify.service omarchy-root-image-verify.service omarchy-luks-calibrate.service omarchy-target-keyring-early.service
-systemctl reset-failed omarchy-mirror-verify.service omarchy-root-image-verify.service omarchy-luks-calibrate.service omarchy-target-keyring-early.service
+systemctl stop omarchy-mirror-verify.service omarchy-root-image-verify.service omarchy-luks-calibrate.service omarchy-target-keyring-early.service omarchy-cache-warm.service
+systemctl reset-failed omarchy-mirror-verify.service omarchy-root-image-verify.service omarchy-luks-calibrate.service omarchy-target-keyring-early.service omarchy-cache-warm.service
 systemctl soft-reboot"
 [[ $(<"$work/t/calls") == "$expected" ]] || fail "omarchy-try ran:
 $(cat "$work/t/calls")"
@@ -197,7 +197,7 @@ grep -q "^mount .* $work/t/nextroot$" "$work/t/calls" || fail "the session root 
 
 ((status == 1)) || fail "a failed soft reboot returned $status"
 [[ $(grep -c '^umount' "$work/t/calls") == 3 ]] || fail "a failed soft reboot left mounts behind: $(cat "$work/t/calls")"
-grep -qx "systemctl start --no-block omarchy-mirror-verify.service omarchy-root-image-verify.service omarchy-luks-calibrate.service omarchy-target-keyring-early.service" "$work/t/calls" ||
+grep -qx "systemctl start --no-block omarchy-mirror-verify.service omarchy-root-image-verify.service omarchy-luks-calibrate.service omarchy-target-keyring-early.service omarchy-cache-warm.service" "$work/t/calls" ||
   fail "a refused soft reboot left the medium checks stopped, so the install would have no verdict"
 pass "a soft reboot systemd refuses unmounts the session and starts the installer's background work again"
 

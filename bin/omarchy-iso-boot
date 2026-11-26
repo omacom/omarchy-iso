@@ -184,18 +184,18 @@ fi
 # different CPU IDs and counters. Use the fastest cores the host has.
 fastest_cores() {
   local cpu fastest=0 freq
-  local -a cores=()
+  local -a ids=()
   for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
     freq=$(<"$cpu/cpufreq/cpuinfo_max_freq")
     if (( freq > fastest )); then
       fastest=$freq
-      cores=("${cpu##*cpu}")
+      ids=("${cpu##*cpu}")
     elif (( freq == fastest )); then
-      cores+=("${cpu##*cpu}")
+      ids+=("${cpu##*cpu}")
     fi
   done
   local IFS=,
-  echo "${cores[*]}"
+  echo "${ids[*]}"
 }
 
 # Boot from ISO before we've installed, then boot from drive after

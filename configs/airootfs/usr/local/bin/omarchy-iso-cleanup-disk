@@ -103,7 +103,7 @@ disk_has_state() {
     [[ -e $holder ]] && return 0
   done
   findmnt -rn -S "$disk" >/dev/null 2>&1 && return 0
-  grep -qs "^$disk[[:space:]]" /proc/swaps && return 0
+  grep -qs "^${disk}[[:space:]]" /proc/swaps && return 0
   has_signatures --types nogpt,PMBR,dos "$disk" && return 0
   return 1
 }

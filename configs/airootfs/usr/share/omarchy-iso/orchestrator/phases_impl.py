@@ -3985,6 +3985,15 @@ def run_chroot_finalizer(ctx: InstallContext, *, private_mounts: bool = False) -
         private_mounts=private_mounts,
     )
 
+    # Store the choice as the installed user. Older and unattended answers
+    # omit it and retain the ordinary first-login invitation.
+    choice = ctx.omarchy_install.get("fingerprint_setup")
+    if choice in ("requested", "skipped"):
+        marker = "fingerprint-setup-requested" if choice == "requested" else "fingerprint-setup-invitation"
+        _run_target_setup_command(
+            ctx, ["/usr/bin/omarchy-done", "mark", marker], user=ctx.username, private_mounts=private_mounts,
+        )
+
 
 def finalize_boot_and_user(ctx: InstallContext) -> None:
     """finalize_limine_boot and run_chroot_finalizer at the same time. The

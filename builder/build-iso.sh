@@ -476,6 +476,7 @@ pacman --config "$online_pacman_conf" --noconfirm -Sy --dbpath /tmp/offlinedb >/
 # pulls the published omarchy* from the network mirror like any other package.
 if [[ -d /omarchy-source ]]; then
   base_pkg_lists=(/omarchy-source/install/omarchy-base.packages /omarchy-source/install/omarchy-other.packages)
+  fingerprint_detector=/omarchy-source/bin/omarchy-hw-fingerprint
   setup_form=/omarchy-source/install/provisioning/setup-form.sh
   progress_icon=/omarchy-source/install/provisioning/progress-icon.sh
   kmscon_lib=/omarchy-source/install/provisioning/kmscon.sh
@@ -509,6 +510,8 @@ else
   # build here (set -e) with a bare "Not found in archive" instead of the
   # actionable error below.
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/setup-form.sh 2>/dev/null || true
+  bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/bin/omarchy-hw-fingerprint 2>/dev/null || true
+  fingerprint_detector=/tmp/omarchy-pkglists/usr/bin/omarchy-hw-fingerprint
   setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/progress-icon.sh 2>/dev/null || true
   progress_icon=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/progress-icon.sh
@@ -643,6 +646,9 @@ if [[ ! -f $setup_form ]]; then
   echo "       would boot into an installer with no questions to ask." >&2
   echo "       $remedy" >&2
   exit 1
+fi
+if [[ -f $fingerprint_detector ]]; then
+  install -Dm0755 "$fingerprint_detector" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-hw-fingerprint"
 fi
 cp "$setup_form" "$build_cache_dir/airootfs/usr/share/omarchy-iso/setup-form.sh"
 

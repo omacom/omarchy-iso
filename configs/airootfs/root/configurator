@@ -1126,6 +1126,7 @@ run_partition_execute() {
     "bootloader_config": { "bootloader": "Limine", "uki": false, "removable": false },
     "custom_commands": [],
     "omarchy_install": {
+        "fingerprint_setup": "${fingerprint_setup:-}",
         "input_method": "${keyboard_input_method:-none}",
         "input_xkb_layout": "${keyboard_xkb_layout:-}",
         "language": "$language",
@@ -1449,8 +1450,15 @@ fi
 # Normal install: keyboard (loaded above, so the LUKS passphrase is typed under
 # the right layout) → user → disk → install mode. The user step can unwind to
 # the language screen and arm deferral there, hence the second check.
+fingerprint_setup=""
 if ! $defer_provisioning; then
   user_step
+  # Older runtime packages do not ship the desktop fingerprint manager.
+  if ! $defer_provisioning && declare -F omarchy_prompt_fingerprint >/dev/null; then
+    detector=/usr/share/omarchy-iso/omarchy-hw-fingerprint
+    [[ -x $detector ]] || detector="$OMARCHY_PATH/bin/omarchy-hw-fingerprint"
+    omarchy_prompt_fingerprint "$detector"
+  fi
 fi
 
 if $defer_provisioning; then
@@ -1571,6 +1579,7 @@ cat <<-_EOF_ >user_configuration.json
     "bootloader_config": { "bootloader": "Limine", "uki": false, "removable": false },
     "custom_commands": [],
     "omarchy_install": {
+        "fingerprint_setup": "${fingerprint_setup:-}",
         "input_method": "${keyboard_input_method:-none}",
         "input_xkb_layout": "${keyboard_xkb_layout:-}",
         "language": "$language",

@@ -166,10 +166,10 @@ for cfg_script in browser-policy.sh theme-system.sh; do
   fi
 done
 
-# Stay awake: no screensaver and no idle lock in a session someone is trying
-# out (the state omarchy-toggle-idle stay-awake writes).
-in_try runuser -u "$TRY_USER" -- install -D -m 0644 /dev/null \
-  "/home/$TRY_USER/.local/state/omarchy/indicators/stay-awake"
+# Idle as an install idles: Omarchy's screensaver, then its idle lock, which
+# turns itself down here because Try ships no lock screen PAM file
+# (omarchy-lock-password), so nobody is locked out of a session with no
+# password.
 
 # No lock before a suspend (a closed lid). Try ships no lock screen PAM file,
 # so omarchy-system-sleep-lock could only send a critical notification at

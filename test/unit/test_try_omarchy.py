@@ -173,6 +173,12 @@ class BuildTryLayerTest(unittest.TestCase):
         self.assertIn('printf \'#!/bin/sh\\nexit 0\\n\' >"$stubs/systemctl"', self.text)
         self.assertIn('rm -f "$stubs/systemctl"', self.text)
 
+    def test_idles_as_an_install_does(self):
+        # Stay awake was on in every Try session; Omarchy's idle lock turns
+        # itself down without the lock screen's PAM file, which Try lacks.
+        self.assertNotIn("indicators/stay-awake", self.text)
+        self.assertNotRegex(self.text, r"pam\.d/omarchy-lock-password[^\n]*<<")
+
     def test_sets_utf8_locale_and_browser_policies(self):
         self.assertIn("LANG=en_US.UTF-8", self.text)
         self.assertIn("browser-policy.sh", self.text)

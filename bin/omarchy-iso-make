@@ -137,7 +137,7 @@ while [[ $# -gt 0 ]]; do
     shift
     ;;
   --quattro)
-    OMARCHY_INSTALLER_REF=quattro
+    OMARCHY_ISO_REF=quattro
     OMARCHY_MIRROR=edge
     shift
     ;;

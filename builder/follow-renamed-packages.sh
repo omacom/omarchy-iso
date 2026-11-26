@@ -47,6 +47,6 @@ if [[ -s $unresolved ]]; then
   done <"$unresolved"
 fi
 if ((failed)); then
-  echo "Add the replacement to renamed_packages in builder/build-iso.sh." >&2
+  echo "Add the replacement to renamed_packages in builder/build-iso.sh (or move an aarch64-only package to install/omarchy-other-aarch64.packages in omarchy)." >&2
   exit 1
 fi

@@ -49,8 +49,8 @@ printf '#!/bin/bash\necho "gum $1" >>"$WORK/screens"\n' >"$work/bin/gum"
 chmod +x "$work/bin/gum"
 
 # start_try as the configurator defines it, with the screens it draws
-# stubbed. A soft reboot that is under way leaves start_try sleeping until
-# systemd stops it: the sleep stands in for that and ends the run with 42.
+# stubbed. A soft reboot that is under way leaves start_try waiting until
+# systemd stops it: timeout stands in for that and ends the run with 124.
 run_start_try() {
   : >"$work/try-calls"
   : >"$work/screens"
@@ -59,18 +59,35 @@ run_start_try() {
     t() { printf '%s' "$1"; }
     say() { echo "say $*" >>"$WORK/screens"; }
     step() { echo "step $1" >>"$WORK/screens"; }
-    sleep() { exit 42; }
     eval "$start_try_source"
     start_try
-  ) </dev/null >/dev/null 2>&1
+  ) </dev/null >/dev/null 2>&1 &
+  local pid=$! waited=0
+  while kill -0 "$pid" 2>/dev/null && ((waited < 30)); do
+    command sleep 0.1
+    ((++waited))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    pkill -P "$pid" 2>/dev/null
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    return 124
+  fi
+  wait "$pid"
 }
 
 echo 0 >"$work/try-status"
 run_start_try
 status=$?
-((status == 42)) || fail "start_try returned $status after Try started, so the install would run"
+((status == 124)) || fail "start_try returned $status after Try started, so the install would run"
 [[ $(wc -l <"$work/try-calls") == 1 ]] || fail "omarchy-try ran $(wc -l <"$work/try-calls") times"
 pass "Just try starts Try and never returns to the install"
+
+# Nothing it waits with is a program: one loading from the stick when the soft
+# reboot's SIGTERM comes held the installer's session up 5 s and failed it.
+waiting=$(sed -n '/omarchy-try 2>&1/,/^  fi$/p' <<<"$start_try_source")
+grep -Eq "(^|[^a-z_])(sleep|tail|cat)( |$)" <<<"$waiting" && fail "start_try waits for the soft reboot with a program: $waiting"
+pass "start_try waits for the soft reboot in bash alone"
 
 echo 1 >"$work/try-status"
 run_start_try

@@ -302,8 +302,13 @@ start_try() {
   step "$(t start.starting)"
   if error=$(omarchy-try 2>&1 >/dev/null); then
     # The soft reboot is under way, and it ends this installer with the
-    # rest of the live system. Returning would start an install.
-    while true; do sleep 60; done
+    # rest of the live system. Returning would start an install. Wait in
+    # bash alone: a program started now loads from the stick while the live
+    # system shuts down and reads it, and one still loading when its SIGTERM
+    # comes holds the session up 5 s and fails it, which carries into Try.
+    # The coprocess is bash forked, and waits on a pipe nobody writes.
+    coproc { read -r _; }
+    while true; do wait; done
   fi
   step "$(t start.failed)"
   say "$error"

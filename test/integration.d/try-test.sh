@@ -102,6 +102,8 @@ no_unit_failed() {
   try_ssh 'systemctl is-system-running --wait >/dev/null; ! systemctl --failed --no-legend | grep -q .' && return 0
   try_ssh 'systemctl --failed; for u in $(systemctl --failed --no-legend --plain | cut -d" " -f1); do journalctl -b -u "$u" -o short-monotonic --no-pager | tail -30; done' \
     >"$RUN_DIR/failure-try-units.txt" 2>&1 || true
+  # The whole boot, the installer's part and the soft reboot included.
+  try_ssh 'sudo journalctl -b -o short-monotonic --no-pager' >"$RUN_DIR/failure-try-journal.txt" 2>&1 || true
   return 1
 }
 

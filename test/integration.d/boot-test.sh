@@ -45,6 +45,24 @@ if [[ $ENCRYPT == true ]]; then
     >"$RUN_DIR/luks-dump.txt" 2>/dev/null || true
   sector=$(awk '$1 == "sector:" { print $2; exit }' "$RUN_DIR/luks-dump.txt")
   check "the root's LUKS sectors are 4096 bytes (got: ${sector:-nothing})" test "$sector" = 4096
+
+  # TRIM has to reach the drive through dm-crypt, which drops every discard
+  # unless the mapping allows them (omacom/omarchy#5332). The installer stores
+  # allow-discards in the LUKS2 header, so every activation applies it; the
+  # live table shows it took effect, the root then advertises a discard
+  # granularity, and btrfs turns on discard=async by itself only for a device
+  # that does. The VM's virtio disk accepts discards, so each of these fails
+  # only when the encryption layer blocks them.
+  ssh_sudo 'root=$(findmnt -no SOURCE / | sed "s/\[.*//"); echo "source $root"
+    echo "table $(dmsetup table "${root#/dev/mapper/}")"
+    echo "granularity $(lsblk -dno DISC-GRAN "$root" | tr -d " ")"
+    echo "options $(findmnt -no OPTIONS /)"' >"$RUN_DIR/trim.txt" 2>/dev/null || true
+  flags=$(awk '$1 == "Flags:" { $1 = ""; print; exit }' "$RUN_DIR/luks-dump.txt" | xargs)
+  granularity=$(awk '$1 == "granularity" { print $2 }' "$RUN_DIR/trim.txt")
+  check "the root's LUKS2 header allows discards (flags: ${flags:-none})" grep -qw allow-discards <<<"$flags"
+  check "the open root mapping passes discards (dm-crypt allow_discards)" grep -q '^table .* allow_discards' "$RUN_DIR/trim.txt"
+  check "the root advertises a discard granularity (got: ${granularity:-nothing})" test -n "$granularity" -a "$granularity" != 0B
+  check "btrfs discards freed space on the root (discard=async)" grep -q '^options .*discard=async' "$RUN_DIR/trim.txt"
 fi
 capture_console "success-boot"
 

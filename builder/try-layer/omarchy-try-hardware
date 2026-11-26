@@ -23,8 +23,11 @@
 # boot image or a kernel module, or installs a kernel, could take effect only
 # after a reboot, which leaves Try. Those tools do nothing here, and those
 # packages are recorded without their files (live-bin/). What can take effect
-# now is applied as a boot would apply it: udev rules, modules and sysctl
-# settings again if the setup changed them, the units it enabled for the
+# now is applied as a boot would apply it: udev rules the setup brought, by
+# an add event for the devices each of their lines names (a boot's coldplug,
+# narrowed to those, as an add event runs every rule's RUN+= again), modules
+# and sysctl settings again if the setup changed them, the units it enabled
+# for the
 # boot's targets started (not those it enabled for sleep or shutdown), and
 # devices still without a driver probed again, for firmware or board data the
 # setup brought (omarchy-try-reprobe). A Wi-Fi or audio controller whose
@@ -51,6 +54,38 @@ boot_units() {
   done | sort -u
 }
 
+# Each rules file, with its checksum, to tell which ones the setup brought.
+rules_files() {
+  local file
+  for file in "$root"/etc/udev/rules.d/*.rules "$root"/usr/lib/udev/rules.d/*.rules; do
+    [[ -f $file ]] && printf '%s %s\n' "$(cksum <"$file" | cut -d' ' -f1)" "$file"
+  done | sort
+}
+
+# An add event for the devices a rules file's lines name, by SUBSYSTEM== and
+# KERNEL==, one trigger per line, as udevadm's matches for one call combine
+# across lines. A line that names neither could match anything: the whole
+# coldplug then, once.
+replay_add() {
+  local line subsystem kernel name
+  local -a args
+  while IFS= read -r line; do
+    [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+    subsystem="" kernel=""
+    [[ $line =~ (^|[[:space:],])SUBSYSTEM==\"([^\"]+)\" ]] && subsystem=${BASH_REMATCH[2]}
+    [[ $line =~ (^|[[:space:],])KERNEL==\"([^\"]+)\" ]] && kernel=${BASH_REMATCH[2]}
+    if [[ -z $subsystem && -z $kernel ]]; then
+      echo "Try Omarchy: a rule in ${1##*/} names no device; replaying add for all of them" >&2
+      udevadm trigger --action=add
+      return
+    fi
+    args=()
+    for name in ${subsystem//|/ }; do args+=("--subsystem-match=$name"); done
+    for name in ${kernel//|/ }; do args+=("--sysname-match=$name"); done
+    udevadm trigger --action=add "${args[@]}" || return
+  done <"$1"
+}
+
 digest() {
   local dir
   for dir in "$@"; do
@@ -59,11 +94,12 @@ digest() {
 }
 
 system_setup() {
-  local status=0 units_before rules_before modules_before sysctl_before started device driver stamp
+  local status=0 units_before rules_before modules_before sysctl_before started device driver stamp file
+  local -a rules_added=()
 
   stamp=$(mktemp)
   units_before=$(boot_units)
-  rules_before=$(digest /etc/udev/rules.d /usr/lib/udev/rules.d)
+  rules_before=$(rules_files)
   modules_before=$(digest /etc/modules-load.d /usr/lib/modules-load.d)
   sysctl_before=$(digest /etc/sysctl.d /usr/lib/sysctl.d)
 
@@ -72,8 +108,12 @@ system_setup() {
   omarchy-apply-hardware --install-user "$user" || status=1
 
   systemctl daemon-reload || status=1
-  if [[ $(digest /etc/udev/rules.d /usr/lib/udev/rules.d) != "$rules_before" ]]; then
-    udevadm control --reload && udevadm trigger --action=add || status=1
+  mapfile -t rules_added < <(comm -13 <(printf '%s\n' "$rules_before") <(rules_files) | cut -d' ' -f2-)
+  if ((${#rules_added[@]})); then
+    udevadm control --reload || status=1
+    for file in "${rules_added[@]}"; do
+      replay_add "$file" || status=1
+    done
   fi
   if [[ $(digest /etc/modules-load.d /usr/lib/modules-load.d) != "$modules_before" ]]; then
     systemctl restart systemd-modules-load.service || status=1

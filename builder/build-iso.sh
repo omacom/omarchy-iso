@@ -14,13 +14,21 @@ OMARCHY_SNAPDRAGON="${OMARCHY_SNAPDRAGON:-}"
 # profiledef.sh reads these in the mkarchiso environment.
 export OMARCHY_ARCH OMARCHY_KERNEL OMARCHY_OEM_INSTALL OMARCHY_PRESET OMARCHY_FAST_COMPRESSION
 
+# shellcheck source=SCRIPTDIR/node-release.sh
 source /builder/node-release.sh
+# shellcheck source=SCRIPTDIR/arm64-kernel-image.sh
 source /builder/arm64-kernel-image.sh
+# shellcheck source=SCRIPTDIR/archiso-aarch64-mkinitcpio.sh
 source /builder/archiso-aarch64-mkinitcpio.sh
+# shellcheck source=SCRIPTDIR/iso-partition-table.sh
 source /builder/iso-partition-table.sh
+# shellcheck source=SCRIPTDIR/grub-platform.sh
 source /builder/grub-platform.sh
+# shellcheck source=SCRIPTDIR/try-kernel.sh
 source /builder/try-kernel.sh
+# shellcheck source=SCRIPTDIR/boot-menu-theme.sh
 source /builder/boot-menu-theme.sh
+# shellcheck source=SCRIPTDIR/required-packages.sh
 source /builder/required-packages.sh
 
 # The online pacman configuration drives every package download below: one per
@@ -217,8 +225,9 @@ fi
 # their code for the CPU at run time (-O2, Arch's flags and -O3 -march=native
 # -flto all measure 0.78 s on the root image).
 (
+  # shellcheck source=/dev/null # Arch's, in the builder container
   source /etc/makepkg.conf
-  # shellcheck disable=SC2086 # the flag lists are meant to split
+  # shellcheck disable=SC2086,SC2154 # makepkg.conf sets the flag lists, which are meant to split
   gcc -std=gnu11 $CFLAGS -Wall -Wextra -pthread $LDFLAGS \
     -o /usr/local/bin/omarchy-image-write /builder/omarchy-image-write.c -lzstd
 )
@@ -532,9 +541,10 @@ else
   console_font=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/console-font
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/user/mise-work.sh 2>/dev/null || true
   mise_work=/tmp/omarchy-pkglists/usr/share/omarchy/install/user/mise-work.sh
-  # The aarch64 list, each platform's own and the x86_64-only one. Runtimes
-  # from before the platform lists ship none, so each is optional.
-  for platform_list in 'omarchy-aarch64*.packages' omarchy-x86_64-only.packages; do
+  # The aarch64 list, each platform's own, the aarch64-only optional list, and
+  # the x86_64-only one. Runtimes from before the platform lists ship none, so
+  # each is optional.
+  for platform_list in 'omarchy-aarch64*.packages' omarchy-other-aarch64.packages omarchy-x86_64-only.packages; do
     bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists "usr/share/omarchy/install/$platform_list" 2>/dev/null || true
   done
   # The package installs its commands to /usr/bin and links them from
@@ -606,6 +616,9 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   aarch64_base_list=/tmp/omarchy-aarch64-base.packages
   aarch64_default_set "${aarch64_lists[@]}" >"$aarch64_base_list"
   base_pkg_lists[0]=$aarch64_base_list
+  if [[ -f $pkglist_dir/omarchy-other-aarch64.packages ]]; then
+    base_pkg_lists+=("$pkglist_dir/omarchy-other-aarch64.packages")
+  fi
 fi
 
 mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
@@ -616,6 +629,10 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # The runtime's own detector, which stands alone wherever a copy of it is
   # shipped, and the default set of each platform it can name.
   install -Dm0644 "$hw_platform" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-hw-platform"
+  if [[ -f $pkglist_dir/omarchy-other-aarch64.packages ]]; then
+    cp "$pkglist_dir/omarchy-other-aarch64.packages" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-other-aarch64.packages"
+    shipped_lists+=(omarchy-other-aarch64.packages)
+  fi
   for platform_base in "$platform_base_dir"/omarchy-base.*.packages; do
     [[ -f $platform_base ]] || continue
     cp "$platform_base" "$build_cache_dir/airootfs/usr/share/omarchy-iso/"

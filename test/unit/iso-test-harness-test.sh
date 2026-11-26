@@ -139,6 +139,7 @@ base_name() { # [VAR=value | VAR+=(value)]...
   local setting
   for setting; do eval "$setting"; done
   eval "$naming"
+  # shellcheck disable=SC2154 # set by the naming lines run through eval
   echo "$BASE_NAME"
 }
 
@@ -243,7 +244,8 @@ echo "ok - an OEM install is sent no keys, and is not asked for a free-space ins
   # As offline_install above: an `||` around the driver would switch set -e
   # off inside it and hide a step that failed.
   drive() {
-    : >"$work/actions" >"$work/captured-progress"
+    : >"$work/actions"
+    : >"$work/captured-progress"
     screens "$@"
     set +e
     (set -e; drive_provision_owner) 2>"$work/err"

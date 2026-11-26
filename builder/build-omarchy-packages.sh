@@ -99,4 +99,5 @@ done
 
 echo
 echo "Built Omarchy packages, placed in $offline_mirror_dir:"
+# shellcheck disable=SC2010 # package file names, which makepkg makes
 ls "$offline_mirror_dir"/omarchy*.pkg.tar.* | grep -v '\.sig$' | sed 's|^|  |'

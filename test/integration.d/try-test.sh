@@ -189,6 +189,18 @@ check "no unit failed" no_unit_failed
 # is drawn there until SDDM takes the screen.
 check "Try drew the starting screen again on tty1" try_ssh \
   'sudo journalctl -b -u omarchy-try-console -o cat | grep -qx "Drew the starting screen on tty1"'
+# The hardware setup an install runs for this machine ran in the session
+# (omarchy-try-hardware), from the stick's offline repository.
+# The system part runs beside the desktop's start, so it may still run here.
+check "Try ran this machine's hardware setup" try_ssh \
+  'for u in omarchy-try-hardware.service omarchy-try-hardware-user.service; do
+     timeout 600 bash -c "until [ \"\$(systemctl show -p ExecMainExitTimestampMonotonic --value $u)\" != 0 ]; do sleep 2; done" &&
+       [ "$(systemctl show -p Result --value "$u")" = success ] || exit 1
+   done'
+check "Try idles as an install does" try_ssh '[ "$(omarchy-toggle-idle status | jq -r .enabled)" = false ]'
+check "a reboot from Try arms no watchdog" try_ssh '[ "$(systemctl show -p RebootWatchdogUSec --value)" = 0 ]'
+check "Try says once what the session is" try_ssh \
+  'timeout 120 bash -c "until [ -e ~/.local/state/omarchy/try-welcomed ]; do sleep 2; done"'
 # The layers are stamped as updated (build-try-layer.sh), so the boot redid
 # none of pacman's work: ldconfig alone is seconds from a USB stick.
 check "the boot skipped the ConditionNeedsUpdate= units" try_ssh \

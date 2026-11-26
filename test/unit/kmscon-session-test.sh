@@ -8,7 +8,7 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 export KMSCON_RETRY_PAUSE=0 KMSCON_RUN_DIR="$work/run" WORK="$work" SESSION="$ROOT/configs/airootfs/usr/share/omarchy-iso/kmscon-session.sh"
-# shellcheck disable=SC1090
+# shellcheck source=SCRIPTDIR/../../configs/airootfs/usr/share/omarchy-iso/kmscon-session.sh
 source "$SESSION"
 
 fail() { echo "not ok - $*" >&2; exit 1; }
@@ -128,6 +128,7 @@ echo "ok - answers left from before the session are dropped"
 # A session that is gone counts as none.
 (
   export OMARCHY_KMSCON_SUPERVISOR=999999
+  # shellcheck disable=SC2034 # the answer a live session would save, which a dead one must not
   password=x
   kmscon_save_answers password && fail "saved answers for a session that is gone"
   true

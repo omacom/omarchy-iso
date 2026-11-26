@@ -16,6 +16,7 @@ trap 'rm -rf "$work" /tmp/omarchy-expected-packages' EXIT
 # The function alone, not the rest of the build.
 awk '/^resolve_expected_packages\(\) \{$/,/^\}$/' "$ROOT/builder/build-iso.sh" >"$work/fn.sh"
 [[ -s $work/fn.sh ]] || { echo "resolve_expected_packages not found in builder/build-iso.sh"; exit 1; }
+# shellcheck source=/dev/null # the function this test just took out of the builder
 source "$work/fn.sh"
 
 # pacman resolves nothing new beyond what it is asked for, and records the ask.
@@ -30,10 +31,10 @@ pacman() {
 build_cache_dir=$work/cache
 image_localdb=$work/localdb
 mkdir -p "$build_cache_dir" "$image_localdb/local/base-3-3" "$image_localdb/local/mkinitcpio-40-1"
-image_packages=(base mkinitcpio)
 
 fail=0
 for arch in x86_64 aarch64; do
+  # shellcheck disable=SC2034 # the resolver reads the kernel, and must not pick one by architecture
   OMARCHY_ARCH=$arch OMARCHY_KERNEL=linux-omarchy
   count=$(resolve_expected_packages)
   asked=$(<"$work/targets")

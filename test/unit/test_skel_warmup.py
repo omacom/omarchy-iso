@@ -84,11 +84,12 @@ class SkelWarmupTest(unittest.TestCase):
         walk = body.index("_start_skel_warmup(ctx)")
         # Only an install that creates a user has a home to copy skel into.
         self.assertIn("if config.auth_config and config.auth_config.users:\n            _start_skel_warmup(ctx)", body)
-        layer = body.index("_apply_platform_layer(ctx)")
+        layer = body.index("_apply_platform_layer(ctx, layer=layer_path, proc_box=layer_proc_box)")
+        layer_join = body.index("layer_thread.join()")
         users = body.index("_create_users_with_reflink_skel(ctx,")
         self.assertLess(image, walk)
         self.assertLess(walk, layer)
-        self.assertLess(walk, users)
+        self.assertLess(layer_join, users)
 
 
 if __name__ == "__main__":

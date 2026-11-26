@@ -23,6 +23,7 @@ if [[ ! -r $SETUP_FORM ]]; then
   echo "ERROR: shared setup form not found at $SETUP_FORM" >&2
   exit 1
 fi
+# shellcheck disable=SC1090 # vendored from the Omarchy runtime package
 source "$SETUP_FORM"
 
 # Partition creation helpers, shared with test/partition-numbering-test.sh so
@@ -34,6 +35,7 @@ if [[ ! -r $DISK_PARTITIONING ]]; then
   echo "ERROR: disk partitioning helpers not found at $DISK_PARTITIONING" >&2
   exit 1
 fi
+# shellcheck source=SCRIPTDIR/../usr/share/omarchy-iso/disk-partitioning.sh
 source "$DISK_PARTITIONING"
 
 # Installer strings in the language picked on the first screen; t <key> [args].
@@ -44,6 +46,7 @@ if [[ ! -r $INSTALLER_I18N ]]; then
   echo "ERROR: installer strings not found at $INSTALLER_I18N" >&2
   exit 1
 fi
+# shellcheck source=SCRIPTDIR/../usr/share/omarchy-iso/i18n.sh
 source "$INSTALLER_I18N"
 i18n_load en
 
@@ -485,6 +488,7 @@ language_form() {
         --selected "$(language_label "$language")" --header "$(t language.header)") && status=0 || status=$?
       ((status == 0)) && [[ -n $choice ]] && break
 
+      # shellcheck disable=SC2154 # set by setup-form.sh, which comes from Omarchy
       if ((status == OMARCHY_FORM_SIGNAL)) && confirm_prepare_for_another_owner; then
         defer_provisioning=true
         return 0
@@ -507,6 +511,7 @@ keyboard_form() {
     # A preset keyboard is the setup form's row of that label, loaded below
     # like a picked one, so the disk password is typed under it.
     if [[ -n $preset_keyboard ]]; then
+      # shellcheck disable=SC2154 # set by setup-form.sh, which comes from Omarchy
       IFS='|' read -r keyboard_label keyboard keyboard_input_method keyboard_xkb_layout < <(
         printf '%s\n' "$OMARCHY_KEYBOARD_LAYOUTS" | awk -F'|' -v c="$preset_keyboard" '$1==c{print; exit}')
       keyboard_input_method=${keyboard_input_method:-none}
@@ -526,6 +531,7 @@ keyboard_form() {
     ((status == 0)) && break
 
     # Esc means "back", to the language picker, which can arm deferred provisioning.
+    # shellcheck disable=SC2154 # set by setup-form.sh, which comes from Omarchy
     if ((status == OMARCHY_FORM_BACK)); then
       language_form
       $defer_provisioning && return 0
@@ -566,7 +572,7 @@ KMSCON_LIB="${KMSCON_LIB:-/usr/share/omarchy-iso/kmscon.sh}"
 [[ -r $KMSCON_LIB ]] || KMSCON_LIB="$OMARCHY_PATH/install/provisioning/kmscon.sh"
 # shellcheck disable=SC1090
 source "$KMSCON_LIB"
-# shellcheck disable=SC1091
+# shellcheck source=SCRIPTDIR/../usr/share/omarchy-iso/kmscon-session.sh
 source "$OMARCHY_ISO_SHARE/kmscon-session.sh"
 
 switch_to_kmscon() {

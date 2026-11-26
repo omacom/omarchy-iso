@@ -48,6 +48,14 @@ printf '0.0 0 0\n0\nLOCAL\n' >/etc/adjtime
 systemctl mask systemd-hibernate-clear.service
 ln -sf /dev/null /etc/udev/rules.d/64-md-raid-assembly.rules
 
+# omarchy-settings installs a 60- rule that puts every disk on kyber, and the
+# ISO's 72- rule immediately puts internal disks back on none or mq-deadline.
+# Each whole-disk udev change event then switches the NVMe scheduler twice
+# (57-75 ms per event on a Dell XPS 16, adding 0.22 s across cleanup and
+# partitioning). Drop the 60- rule from the live root; the installed system
+# keeps its own copy from the root image.
+rm -f /etc/udev/rules.d/60-omarchy-io-scheduler.rules
+
 # The live system installs from the stick and never joins a network on its
 # own: the configurator has no Wi-Fi step, and the one network call it makes
 # (tzupdate, for a timezone guess) only works over a cable that is already

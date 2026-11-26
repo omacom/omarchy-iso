@@ -26,12 +26,14 @@ if grep -qw 'omarchy.n1x_recovery=1' /proc/cmdline; then
   exit 0
 fi
 
+# shellcheck disable=SC2155 # kept: under set -e, a split would end the install on a failed read
 export OMARCHY_MIRROR="$(cat /root/omarchy_mirror)"
 if [[ -f /root/omarchy_iso_ref ]]; then
+  # shellcheck disable=SC2155 # as above
   export OMARCHY_ISO_REF="$(cat /root/omarchy_iso_ref)"
 fi
 if [[ -f /usr/share/omarchy-iso/package-targets ]]; then
-  # shellcheck disable=SC1091
+  # shellcheck source=/dev/null # build-iso.sh writes it into the ISO
   source /usr/share/omarchy-iso/package-targets
   export OMARCHY_RUNTIME_PACKAGE OMARCHY_SETTINGS_PACKAGE OMARCHY_NVIM_PACKAGE
 fi
@@ -63,7 +65,9 @@ set_tokyo_night_colors() {
 mkdir -p /var/log
 touch "$OMARCHY_INSTALL_LOG_FILE"
 
+# shellcheck disable=SC2155 # kept: under set -e, a split would end the install where tput fails
 export COLUMNS=$(tput cols)
+# shellcheck disable=SC2155 # as above
 export LINES=$(tput lines)
 exec > >(tee >(sed -u -E 's/\x1b(\[[0-9;?]*[A-Za-z]|[78])//g' >>"$OMARCHY_INSTALL_LOG_FILE") 2>/dev/null) 2>/dev/tty
 export CLICOLOR_FORCE=1
@@ -76,75 +80,9 @@ if [[ ${OMARCHY_INSTALL_DEBUG:-} == "1" ]]; then
   echo "================================"
 fi
 
-# Warm the page cache for the root image and bundled packages while the user
-# works through the wizard. The install writes a multi-GB root image to the
-# target and then pacstraps a few packages out of the offline mirror; on media
-# slower than the target the install is read-bound and every byte cached here
-# is a byte it never waits for. On faster media this costs nothing but
-# otherwise-idle bandwidth: the medium is untouched while the user types, and
-# the target disk it writes to later is a different device.
-#
-# Clean page cache only, so the kernel reclaims it under pressure instead of
-# OOMing, and a budget so small machines never evict what was just warmed.
-# Set OMARCHY_NO_PREFETCH=1 to A/B the same ISO with this disabled.
-warm_offline_mirror() {
-  local mirror=/var/cache/omarchy/mirror/offline
-  local mem_avail_kb half_kb headroom_kb budget_kb spent_kb=0 size_kb path
-  # The orchestrator's ROOT_IMAGE.
-  local image=/run/archiso/bootmnt/arch/$(uname -m)/omarchy-root.sfs
-
-  [[ ${OMARCHY_NO_PREFETCH:-} == 1 ]] && return 0
-
-  # Keep at least 2 GiB free (or half of MemAvailable when MemAvailable <= 4 GiB)
-  # so an 8 GiB machine can hold the full ~4 GiB root image warm in clean page
-  # cache while small machines still avoid evicting what verify just cached.
-  mem_avail_kb=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
-  half_kb=$((mem_avail_kb / 2))
-  headroom_kb=$((mem_avail_kb - 2097152))
-  budget_kb=$((headroom_kb > half_kb ? headroom_kb : half_kb))
-  ((budget_kb > 262144)) || return 0
-
-  # omarchy-mirror-verify.service and then omarchy-root-image-verify.service
-  # (started at boot) read the shipped mirror and the whole image as they hash
-  # them, and two readers on one USB stick seek against each other: let both
-  # finish first, whatever their verdict. Wait on their start jobs, not on
-  # is-active: while the mirror is hashed the image's job is queued behind it
-  # (Before=) and that unit still reads inactive. The image's pass is the
-  # warm-up for the image too; the read below then keeps it cached.
-  while [[ -n $(systemctl list-jobs --no-legend omarchy-mirror-verify.service \
-    omarchy-root-image-verify.service 2>/dev/null) ]]; do
-    sleep 1
-  done
-
-  # The image first, and only when all of it fits: a second read of pages
-  # the verify just cached keeps them cached through the install. When it does
-  # not fit, leave the cache alone. omarchy-image-write writes whatever part
-  # of the image is still cached first and reads the rest once; re-reading
-  # the head here, or the mirror after it, would only evict the part the
-  # verify left behind (on a 4 GB machine, most of what was cached).
-  if [[ -f $image ]]; then
-    size_kb=$(du -k -- "$image" | cut -f1)
-    ((size_kb > budget_kb)) && return 0
-    cat -- "$image" >/dev/null 2>&1 || true
-    spent_kb=$size_kb
-  fi
-
-  [[ -d $mirror ]] || return 0
-
-  # Then the mirror, largest first: when the budget cannot cover all of it
-  # this still front-loads the bytes that dominate.
-  while read -r size_kb path; do
-    ((spent_kb + size_kb > budget_kb)) && continue
-    cat -- "$path" >/dev/null 2>&1 || true
-    spent_kb=$((spent_kb + size_kb))
-  done < <(du -k "$mirror"/*.pkg.tar.zst 2>/dev/null | sort -rn)
-}
-
-# Inside kmscon the tty1 run is still warming the cache.
+# Restore the cursor on exit if the wizard or installer left it hidden.
 if [[ ${OMARCHY_KMSCON:-} != 1 ]]; then
-  warm_offline_mirror &
-  warm_pid=$!
-  trap 'kill "$warm_pid" 2>/dev/null; printf "\e[?25h" >/dev/tty1 2>/dev/null' EXIT
+  trap 'printf "\e[?25h" >/dev/tty1 2>/dev/null' EXIT
 fi
 
 cd /root
@@ -182,16 +120,16 @@ else
   # machine, where the console has one bitmap font and cannot draw Chinese,
   # Japanese or Korean at all. The launcher is the runtime's own, the one
   # first-boot owner setup is drawn with.
-  # shellcheck disable=SC1091
+  # shellcheck source=/dev/null # vendored from Omarchy at build time
   source /usr/share/omarchy-iso/setup-form.sh
-  # shellcheck disable=SC1091
+  # shellcheck source=/dev/null # as above
   source /usr/share/omarchy-iso/kmscon.sh
-  # shellcheck disable=SC1091
+  # shellcheck source=SCRIPTDIR/../usr/share/omarchy-iso/kmscon-session.sh
   source /usr/share/omarchy-iso/kmscon-session.sh
 
   # The answers a relaunch carries hold the password: however this run ends,
   # none outlive it.
-  trap 'kill "$warm_pid" 2>/dev/null || true; rm -f "$KMSCON_RESUME"*; printf "\e[?25h" >/dev/tty1 2>/dev/null' EXIT
+  trap 'rm -f "$KMSCON_RESUME"*; printf "\e[?25h" >/dev/tty1 2>/dev/null' EXIT
 
   # Before any language is picked, the one an ISO presets (presets/<code>.json).
   language=$(jq -r '.language // empty' /usr/share/omarchy-iso/preset.json 2>/dev/null || true)
@@ -218,6 +156,7 @@ export OMARCHY_ISO_LANGUAGE
 # The foreground dashboard is now the sole visible install UI owner. It starts
 # the actual installer as a non-interactive child, logs child output, waits for
 # completion, then renders the final installed-time/reboot prompt itself.
+# shellcheck disable=SC2155 # kept: under set -e, a split would end the install where tty fails
 export OMARCHY_DASHBOARD_TTY="$(tty)"
 rm -f /run/omarchy-install/state.json
 /usr/local/bin/omarchy-install-dashboard \

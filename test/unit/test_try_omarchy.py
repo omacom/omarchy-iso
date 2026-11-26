@@ -184,6 +184,46 @@ class BuildTryLayerTest(unittest.TestCase):
         self.assertIn('printf \'#!/bin/sh\\nexit 0\\n\' >"$stubs/systemctl"', self.text)
         self.assertIn('rm -f "$stubs/systemctl"', self.text)
 
+    def test_idles_as_an_install_does(self):
+        # Stay awake was on in every Try session; Omarchy's idle lock turns
+        # itself down without the lock screen's PAM file, which Try lacks.
+        self.assertNotIn("indicators/stay-awake", self.text)
+        self.assertNotRegex(self.text, r"pam\.d/omarchy-lock-password[^\n]*<<")
+
+    def test_arms_no_watchdog_for_a_reboot_from_try(self):
+        # Closing it printed "watchdog did not stop!" over the screen.
+        m = re.search(r"/etc/systemd/system.conf.d/90-omarchy-try.conf\" <<'EOF'\n(.*?)\nEOF", self.text, re.S)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1).split(), ["[Manager]", "RebootWatchdogSec=0"])
+
+    def test_runs_the_installs_hardware_setup_from_the_offline_repository(self):
+        m = re.search(r"omarchy-try-hardware\.service\" <<'EOF'\n(.*?)\nEOF", self.text, re.S)
+        self.assertIsNotNone(m)
+        unit = m.group(1).splitlines()
+        self.assertIn("BindReadOnlyPaths=/run/omarchy-try/pacman-offline.conf:/etc/pacman.conf", unit)
+        # Detection and pacman's ldconfig take seconds: not before the desktop,
+        # and not holding multi-user.target up either.
+        self.assertNotIn("Before=display-manager.service", unit)
+        self.assertIn("Type=exec", unit)
+        m = re.search(r"omarchy-try-hardware-user\.service\" <<'EOF'\n(.*?)\nEOF", self.text, re.S)
+        self.assertIsNotNone(m)
+        self.assertIn("Before=display-manager.service", m.group(1).splitlines())
+        self.assertIn("in_try systemctl enable omarchy-try-hardware.service omarchy-try-hardware-user.service", self.text)
+        script = (ROOT / "builder/try-layer/omarchy-try-hardware").read_text()
+        self.assertIn('omarchy-apply-hardware --install-user "$user"', script)
+        for name in ("mkinitcpio", "dkms", "limine-entry-tool", "limine-update", "ukify"):
+            self.assertIn(name, self.text.split("for tool in ", 1)[1].split(";", 1)[0])
+        for hook in ("60-mkinitcpio-remove.hook", "60-limine-mkinitcpio-remove-pre.hook", "80-limine-efi-deploy.hook",
+                     "90-limine-mkinitcpio-remove-post.hook", "90-mkinitcpio-install.hook"):
+            self.assertIn(hook, self.text)
+
+    def test_says_once_what_the_session_is(self):
+        welcome = (ROOT / "builder/try-layer/omarchy-try-welcome").read_text()
+        # The glyph is its own argument; without one, -g takes the title.
+        self.assertRegex(welcome, r"omarchy-notification-send -u critical -g \$'\\u[0-9a-f]{4}' \"Try Omarchy!\"")
+        self.assertIn('"Install apps, change themes, anything. When you\'re sold, reboot and pick install instead."', welcome)
+        self.assertIn("in_try systemctl --global enable omarchy-try-welcome.service", self.text)
+
     def test_sets_utf8_locale_and_browser_policies(self):
         self.assertIn("LANG=en_US.UTF-8", self.text)
         self.assertIn("browser-policy.sh", self.text)
@@ -248,6 +288,51 @@ class DedupAndBuildIsoTest(unittest.TestCase):
             self.assertIn("/usr/lib/firmware x trusted.overlay.opaque=y", pseudo_lines)
             self.assertIn("/etc x trusted.overlay.opaque=y", pseudo_lines)
             self.assertTrue((live / "etc/omarchy-iso-live-over-image").is_file())
+
+    def test_dedup_creates_missing_loop_node_before_attaching(self):
+        text = DEDUP.read_text()
+        self.assertNotIn("-o ro,loop", text)
+        self.assertNotIn("losetup --find --show", text)
+        fn = re.search(r"attach_ro_loop\(\) \{.*?\n\}", text, re.S).group(0)
+        minor = next(n for n in range(99, 10000) if not Path(f"/dev/loop{n}").exists())
+        dev = f"/dev/loop{minor}"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            stub_bin = tmp / "bin"
+            stub_bin.mkdir()
+            log = tmp / "calls.log"
+            (stub_bin / "losetup").write_text(
+                '#!/bin/sh\n'
+                'echo "losetup $*" >>"$LOG"\n'
+                f'if [ "$1" = "--find" ]; then echo "{dev} (lost)"; exit 0; fi\n'
+                'exit "${LOSETUP_ATTACH_RC:-0}"\n'
+            )
+            (stub_bin / "mknod").write_text('#!/bin/sh\necho "mknod $*" >>"$LOG"\n')
+            for name in ("losetup", "mknod"):
+                (stub_bin / name).chmod(0o755)
+            env = {"PATH": f"{stub_bin}:/usr/bin:/bin", "LOG": str(log)}
+            res = subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", f'{fn}\ndev=$(attach_ro_loop /tmp/backing.img)\nprintf "%s\\n" "$dev"'],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(res.stdout.strip(), dev)
+            calls = log.read_text().splitlines()
+            self.assertIn(f"mknod {dev} b 7 {minor}", calls)
+            self.assertIn(f"losetup --read-only {dev} /tmp/backing.img", calls)
+
+            # Command substitution drops errexit in Bash: a failed attach must
+            # still fail attach_ro_loop without printing a device path.
+            fail_res = subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", f'{fn}\ndev=$(attach_ro_loop /tmp/backing.img)\nprintf "%s\\n" "$dev"'],
+                env={**env, "LOSETUP_ATTACH_RC": "1"},
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(fail_res.returncode, 0)
+            self.assertEqual(fail_res.stdout.strip(), "")
 
     def test_mksquashfs_shim_cleans_up_pseudo_file(self):
         shim_text = SHIM.read_text()

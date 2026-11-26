@@ -51,7 +51,9 @@ cleanup() {
 trap cleanup EXIT
 
 # --- answers ---------------------------------------------------------------
+# shellcheck disable=SC2034 # read by build_cidata, taken out of base-test.sh below
 GUEST_USER=omarchy GUEST_PASSWORD=omarchy GUEST_HOSTNAME=omarchy-arm64
+# shellcheck disable=SC2034 # as above
 BASE_DIR=$state SSH_KEY=$state/id_ed25519 CIDATA_IMG=$state/cidata.img
 ssh-keygen -q -t ed25519 -N '' -C arm64-install -f "$SSH_KEY"
 # The harness's own functions, so the two cannot drift apart: detect_packages
@@ -89,6 +91,7 @@ if [[ -n ${PLATFORM:-} ]]; then
   rng+=",romfile=$state/n1x.rom"
 fi
 port=$(( 20000 + RANDOM % 10000 ))
+# shellcheck disable=SC2154 # one of the harness settings taken out of base-test.sh above
 qemu-img create -q -f qcow2 "$state/target.qcow2" "${DISK_GB}G"
 cp "$vars" "$state/vars.fd"
 : >"$out/serial.log"
@@ -192,6 +195,7 @@ check() { # description, then a command run in the guest that must succeed
   # only be on Limine.
   check "it booted through its boot loader's unified kernel image" \
     "echo $GUEST_PASSWORD | sudo -S -p '' sh -c 'if [ \"\$(omarchy-boot-backend 2>/dev/null)\" = systemd-boot ]; then ls /boot/EFI/Linux/omarchy-\$(head -c 8 /etc/machine-id)-*.efi; else ls /boot/EFI/Linux/omarchy_*.efi; fi'"
+  # shellcheck disable=SC2154 # set by detect_packages, taken out of base-test.sh
   check "the Omarchy runtime is installed" "pacman -Q $RUNTIME_PACKAGE"
   # Node is a base package since omacom/omarchy#19917. Before it, a runtime
   # left a lazy mise shim, and one from before lazy Node unpacked the build the

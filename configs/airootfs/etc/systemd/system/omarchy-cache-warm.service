@@ -1,0 +1,21 @@
+[Unit]
+Description=Warm the install medium and live installer into page cache
+# Run after the boot-time medium verifiers and LUKS Argon2id calibration so
+# warm-up never seeks against verification or drives page-cache reclaim during
+# the 1 GiB Argon2id benchmark. Managed as a Type=exec unit so it never delays
+# multi-user.target and so luks_calibration and omarchy-try can stop it cleanly
+# before formatting or soft-rebooting; pages already read stay warm in RAM.
+After=omarchy-mirror-verify.service omarchy-root-image-verify.service omarchy-luks-calibrate.service
+ConditionPathExists=/run/archiso/bootmnt
+ConditionKernelCommandLine=!omarchy.no_prefetch
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/omarchy-cache-warm
+Nice=19
+IOSchedulingClass=idle
+IOAccounting=yes
+TimeoutStopSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Packages an x86_64 image must carry. The install asks for the T2 Mac set in
 # one pacman -S (omarchy install/hardware/apple/fix-t2.sh), and linux-t2 is
 # the live kernel on a Mac, so an image that cannot offer one of them must

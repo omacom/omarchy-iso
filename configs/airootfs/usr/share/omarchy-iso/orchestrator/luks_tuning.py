@@ -164,7 +164,9 @@ def _with_calibration(original_encrypt):
             deferred_format_command,
             format_command,
             new_volume_key,
+            pretouch_for_format,
             stop_calibration,
+            stop_early_keyring,
         )
         # When deferring Argon2id enrollment, stop any in-flight calibration
         # immediately rather than waiting ~2-3s for it: fast_cmd uses minimal
@@ -190,6 +192,8 @@ def _with_calibration(original_encrypt):
                 split = deferred_format_command(command, volume_key, candidate_temp)
                 if split is not None:
                     fast_cmd, enroll_cmd, kill_cmd = split
+                    if not any(a == "--pbkdf-force-iterations" or a.startswith("--pbkdf-force-iterations=") for a in enroll_cmd):
+                        stop_early_keyring()
                     temp_keyfile = candidate_temp
                     device = command[command.index("luksFormat") + 1]
                     no_input_kwargs = {k: v for k, v in run_kwargs.items() if k != "input_data"}
@@ -204,7 +208,9 @@ def _with_calibration(original_encrypt):
                     )
                     return result
                 candidate_temp.unlink(missing_ok=True)
-            return original_run(format_command(command, volume_key), *run_args, **run_kwargs)
+            argv = format_command(command, volume_key)
+            pretouch_for_format(argv)
+            return original_run(argv, *run_args, **run_kwargs)
 
         luks.run = calibrated_run
         try:

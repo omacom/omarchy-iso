@@ -409,9 +409,16 @@ class OmarchyInstaller(Installer):
     def __exit__(self, exc_type, exc_value, traceback):
         if exc_type is None:
             started = time.monotonic()
+            # archinstall's Installer.__exit__ calls os.sync() after
+            # post_install_check(). The target stays mounted for Phases 4-6 and
+            # is synced on final unmount, so flushing every dirty page mid-install
+            # stalls the critical path (~80 ms on NVMe) for no safety gain.
+            saved_sync = os.sync
+            os.sync = lambda: None
             try:
                 return super().__exit__(exc_type, exc_value, traceback)
             finally:
+                os.sync = saved_sync
                 elapsed = time.monotonic() - started
                 if elapsed >= 0.05:
                     info(f"[step] STEP.installer_exit (sync + post_install_check): {elapsed:.6f}s")

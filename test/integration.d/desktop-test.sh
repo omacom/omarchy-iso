@@ -208,9 +208,10 @@ verify_desktop_shortcuts() {
 }
 
 verify_universal_clipboard_shortcuts() {
-  local copy_token="OmarchyUniversalCopy$(date +%s)"
-  local paste_token="OmarchyUniversalPaste$(date +%s)"
-  local terminal_token="OmarchyTerminalPaste$(date +%s)"
+  local copy_token paste_token terminal_token
+  copy_token="OmarchyUniversalCopy$(date +%s)"
+  paste_token="OmarchyUniversalPaste$(date +%s)"
+  terminal_token="OmarchyTerminalPaste$(date +%s)"
   local terminal_result="/tmp/omarchy-universal-terminal-paste"
 
   cleanup_shortcut_state

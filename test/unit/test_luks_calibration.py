@@ -25,6 +25,7 @@ class Calibration(unittest.TestCase):
         self.enterContext(mock.patch.object(luks, 'STATE', self.path))
         self.enterContext(mock.patch.object(luks, 'memory_total', return_value=8*1024*1024))
         self.enterContext(mock.patch.object(luks, 'memory_available', return_value=4*1024*1024))
+        self.enterContext(mock.patch.object(luks, 'memory_free', return_value=4*1024*1024))
         self.enterContext(mock.patch.object(luks.os, 'cpu_count', return_value=4))
         self.data = dict(schema=1, iter_time=2000, key_size=512, cpus=4,
                          iterations=13, memory=1048576, parallel=4)
@@ -108,6 +109,30 @@ class Calibration(unittest.TestCase):
             command = COMMAND+extra
             self.assertEqual(luks.format_command(command), command)
 
+    def test_pretouch_runs_only_when_memfree_is_below_headroom(self):
+        with mock.patch.object(luks, 'memory_free', return_value=luks.FREE_HEADROOM), \
+                mock.patch.object(luks.mmap, 'mmap') as mm:
+            luks._pretouch_benchmark_memory(target_kib=64)
+            mm.assert_not_called()
+        with mock.patch.object(luks, 'memory_free', return_value=256 * 1024):
+            # Real anonymous mmap on a small buffer exercises the page-stride fault path.
+            luks._pretouch_benchmark_memory(target_kib=64)
+
+    def test_calibrate_pretouches_before_benchmark_and_skips_pretouch_on_low_memory(self):
+        events = []
+        with mock.patch.object(luks, '_pretouch_benchmark_memory', side_effect=lambda: events.append('pretouch')), \
+                mock.patch.object(luks.subprocess, 'run',
+                                  side_effect=lambda *a, **kw: (events.append('bench'), types.SimpleNamespace(stdout=LINE))[1]):
+            luks.calibrate()
+        self.assertEqual(events, ['pretouch', 'bench'])
+        events.clear()
+        with mock.patch.object(luks, 'memory_total', return_value=4*1024*1024-65536), \
+                mock.patch.object(luks, '_pretouch_benchmark_memory', side_effect=lambda: events.append('pretouch')), \
+                mock.patch.object(luks.subprocess, 'run') as run:
+            luks.calibrate()
+            run.assert_not_called()
+        self.assertEqual(events, [])
+
     def test_producer_publishes_complete_root_only_result(self):
         with mock.patch.object(luks.subprocess, 'run', return_value=types.SimpleNamespace(stdout=LINE)) as run:
             luks.calibrate()
@@ -150,7 +175,7 @@ class Calibration(unittest.TestCase):
         for failure in (OSError(), subprocess.TimeoutExpired('systemctl', 5)):
             calls = []
             def run(command, **_kwargs):
-                if command[-1] == luks.EARLY_KEYRING_UNIT:
+                if command[-1] in (luks.EARLY_KEYRING_UNIT, luks.CACHE_WARM_UNIT):
                     return types.SimpleNamespace(stdout='')
                 calls.append(command[1])
                 if command[1] == 'show':
@@ -165,7 +190,7 @@ class Calibration(unittest.TestCase):
         turn (the last one from then on), on a clock that only sleep moves."""
         calls, clock = [], [0.0]
         def run(command, **_kwargs):
-            if command[-1] == luks.EARLY_KEYRING_UNIT:
+            if command[-1] in (luks.EARLY_KEYRING_UNIT, luks.CACHE_WARM_UNIT):
                 return types.SimpleNamespace(stdout='')
             calls.append(command[1])
             state = states[min(calls.count('show') - 1, len(states) - 1)] if command[1] == 'show' else ''
@@ -195,6 +220,52 @@ class Calibration(unittest.TestCase):
         calls, waited = self.stop(['ActiveState=active\nJob=\n'], wait=2)
         self.assertEqual(calls[-1], 'stop')
         self.assertTrue(2.0 <= waited < 2.5, waited)
+
+    def test_stop_calibration_stops_keyring_only_when_uncached(self):
+        stopped = []
+        def run(command, **_kwargs):
+            if command[1] == 'stop':
+                stopped.append(command[-1])
+                return types.SimpleNamespace(stdout='')
+            return types.SimpleNamespace(stdout='ActiveState=inactive\nJob=\n')
+        with mock.patch.object(luks.subprocess, 'run', side_effect=run), \
+                mock.patch.object(luks, 'cached_options', return_value=[]):
+            luks.stop_calibration()
+        self.assertEqual(stopped, [luks.UNIT, luks.CACHE_WARM_UNIT, luks.EARLY_KEYRING_UNIT])
+
+        stopped.clear()
+        with mock.patch.object(luks.subprocess, 'run', side_effect=run), \
+                mock.patch.object(luks, 'cached_options', return_value=['--pbkdf-force-iterations', '13']):
+            luks.stop_calibration()
+        self.assertEqual(stopped, [luks.UNIT, luks.CACHE_WARM_UNIT])
+
+    def test_pretouch_for_format_runs_only_for_uncached_benchmark_with_headroom(self):
+        uncached = list(COMMAND)
+        default_time = [arg for arg in COMMAND if arg not in ('--iter-time', '2000')]
+        cached_separate = list(COMMAND) + ['--pbkdf-force-iterations', '13']
+        cached_eq = list(COMMAND) + ['--pbkdf-force-iterations=13']
+        custom_time = [arg if arg != '2000' else '10000' for arg in COMMAND]
+        with mock.patch.object(luks, '_pretouch_benchmark_memory') as pretouch, \
+                mock.patch.object(luks, 'stop_early_keyring') as stop_keyring, \
+                mock.patch.object(luks, 'memory_total', return_value=8*1024*1024), \
+                mock.patch.object(luks, 'memory_available', return_value=4*1024*1024):
+            luks.pretouch_for_format(cached_separate)
+            luks.pretouch_for_format(cached_eq)
+            luks.pretouch_for_format(['cryptsetup', 'open', '/dev/vda2', 'root'])
+            pretouch.assert_not_called()
+            stop_keyring.assert_not_called()
+            luks.pretouch_for_format(uncached)
+            luks.pretouch_for_format(default_time)
+            luks.pretouch_for_format(custom_time)
+            self.assertEqual(pretouch.call_count, 3)
+            self.assertEqual(stop_keyring.call_count, 3)
+        with mock.patch.object(luks, '_pretouch_benchmark_memory') as pretouch, \
+                mock.patch.object(luks, 'stop_early_keyring') as stop_keyring, \
+                mock.patch.object(luks, 'memory_total', return_value=3*1024*1024), \
+                mock.patch.object(luks, 'memory_available', return_value=2*1024*1024):
+            luks.pretouch_for_format(uncached)
+            pretouch.assert_not_called()
+            stop_keyring.assert_called_once_with()
 
 
 class ArchinstallBoundary(unittest.TestCase):
@@ -579,10 +650,66 @@ class KeyslotEnrollmentCpusTest(unittest.TestCase):
 
     def test_the_enrollment_runs_on_the_cpus_the_installer_started_with(self):
         with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(luks, "ATOM_CPUS_PATH", Path(tmp) / "missing"), \
                 mock.patch.dict(os.environ, {"OMARCHY_INSTALLER_ALL_CPUS": "0-15"}):
             entry, steps = self.entry(tmp)
             entry._worker()
         self.assertEqual(steps, [["taskset", "-c", "0-15", "enroll"], ["kill"]])
+
+    def test_hybrid_cpu_with_enough_e_cores_pins_enrollment_to_e_cores(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"OMARCHY_INSTALLER_ALL_CPUS": "0-15"}):
+            atom = Path(tmp) / "cpu_atom"
+            online = Path(tmp) / "online"
+            atom.write_text("4-15\n")
+            online.write_text("0-15\n")
+            with mock.patch.object(luks, "ATOM_CPUS_PATH", atom), \
+                    mock.patch.object(luks, "ONLINE_CPUS_PATH", online):
+                entry, steps = self.entry(tmp)
+                entry.enroll_cmd = ["cryptsetup", "luksAddKey", "--pbkdf-parallel", "4"]
+                entry._worker()
+        self.assertEqual(steps[0], ["taskset", "-c", "4-15", "cryptsetup", "luksAddKey", "--pbkdf-parallel", "4"])
+
+    def test_hybrid_cpu_with_fewer_e_cores_than_threads_falls_back_to_all_cpus(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"OMARCHY_INSTALLER_ALL_CPUS": "0-5"}):
+            atom = Path(tmp) / "cpu_atom"
+            online = Path(tmp) / "online"
+            atom.write_text("4-5\n")
+            online.write_text("0-5\n")
+            with mock.patch.object(luks, "ATOM_CPUS_PATH", atom), \
+                    mock.patch.object(luks, "ONLINE_CPUS_PATH", online):
+                entry, steps = self.entry(tmp)
+                entry.enroll_cmd = ["cryptsetup", "luksAddKey", "--pbkdf-parallel", "4"]
+                entry._worker()
+        self.assertEqual(steps[0], ["taskset", "-c", "0-5", "cryptsetup", "luksAddKey", "--pbkdf-parallel", "4"])
+
+    def test_taskset_affinity_failure_on_e_cores_retries_on_all_cpus(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"OMARCHY_INSTALLER_ALL_CPUS": "0-15"}):
+            atom = Path(tmp) / "cpu_atom"
+            online = Path(tmp) / "online"
+            atom.write_text("4-15\n")
+            online.write_text("0-15\n")
+            with mock.patch.object(luks, "ATOM_CPUS_PATH", atom), \
+                    mock.patch.object(luks, "ONLINE_CPUS_PATH", online):
+                entry, steps = self.entry(tmp)
+                entry.enroll_cmd = ["cryptsetup", "luksAddKey", "--pbkdf-parallel", "4"]
+                def flaky(cmd, *, input_data=None):
+                    steps.append(list(cmd))
+                    if cmd[:3] == ["taskset", "-c", "4-15"]:
+                        return 1, "taskset: failed to set pid 123's affinity: Invalid argument"
+                    return 0, ""
+                entry._run_step = flaky
+                entry._worker()
+        self.assertIsNone(entry.error)
+        self.assertEqual(steps[0][:3], ["taskset", "-c", "4-15"])
+        self.assertEqual(steps[1][:3], ["taskset", "-c", "0-15"])
+
+    def test_enrollment_starts_before_root_image_write(self):
+        source = (ROOT / "configs/airootfs/usr/share/omarchy-iso/orchestrator/phases_impl.py").read_text()
+        body = source[source.index("def arch_install_system("):]
+        self.assertLess(body.index("_start_luks_keyslot_enroll(ctx)"), body.index("_install_root_image(ctx)"))
 
     def test_an_installer_that_was_not_moved_runs_it_as_before(self):
         env = {k: v for k, v in os.environ.items() if k != "OMARCHY_INSTALLER_ALL_CPUS"}

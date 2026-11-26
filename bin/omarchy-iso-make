@@ -3,7 +3,6 @@
 set -e
 
 NO_CACHE=""
-KEEP_PKG_CACHE=""
 LOCAL_OMARCHY_PATH=""
 LOCAL_PKGS_PATH=""
 OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
@@ -97,8 +96,9 @@ while [[ $# -gt 0 ]]; do
     NO_CACHE=1
     shift
     ;;
+  # Accepted for backwards compatibility. The builder uses its own
+  # per-channel cache directory and never wipes the host pacman cache.
   --keep-pkg-cache)
-    KEEP_PKG_CACHE=1
     shift
     ;;
   --no-boot-offer)
@@ -137,7 +137,7 @@ while [[ $# -gt 0 ]]; do
     shift
     ;;
   --quattro)
-    OMARCHY_INSTALLER_REF=quattro
+    OMARCHY_ISO_REF=quattro
     OMARCHY_MIRROR=edge
     shift
     ;;
@@ -299,8 +299,6 @@ lint_file_permissions() {
 
 lint_file_permissions
 
-# --keep-pkg-cache is accepted for backwards compatibility; the builder uses
-# its own per-channel cache directory and never wipes the host pacman cache.
 git submodule update --init --recursive --jobs=8
 
 BUILD_SCRIPT="builder/build-iso.sh"

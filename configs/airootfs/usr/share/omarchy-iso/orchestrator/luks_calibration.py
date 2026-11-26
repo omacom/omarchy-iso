@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import mmap
 import os
 from pathlib import Path
 import re
@@ -13,17 +14,63 @@ import threading
 import time
 
 STATE = Path("/run/omarchy-luks-calibration/result.json")
-# The live system's other boot-time job (phases_impl EARLY_KEYRING_UNIT).
+# The live system's other boot-time install jobs, stopped before luksFormat
+# so neither gpg nor multi-GB cache warm-up competes with Argon2id.
 EARLY_KEYRING_UNIT = "omarchy-target-keyring-early.service"
+CACHE_WARM_UNIT = "omarchy-cache-warm.service"
 UNIT = "omarchy-luks-calibrate.service"
 ITER_TIME = 2000
 KEY_SIZE = 512
 MIN_MEMORY = 65536
 MAX_MEMORY = 1048576
+PRETOUCH_MEMORY = MAX_MEMORY + 128 * 1024  # 1152 MiB: clears 1 GiB + kswapd watermark headroom
+FREE_HEADROOM = MAX_MEMORY + 384 * 1024    # 1408 MiB: skip pretouch when MemFree already exceeds this
 SECTOR_SIZE = 4096
 VOLUME_KEY_DIR = Path("/run")
 ASYNC_MIN_CPUS = 4
 ASYNC_MIN_MEMORY = 2560 * 1024  # 2.5 GiB available so 1 GiB Argon2id never pressures install
+ATOM_CPUS_PATH = Path("/sys/devices/cpu_atom/cpus")
+ONLINE_CPUS_PATH = Path("/sys/devices/system/cpu/online")
+
+
+def _parse_cpu_set(spec: str) -> set[int]:
+    cpus: set[int] = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            cpus.update(range(int(lo), int(hi) + 1))
+        else:
+            cpus.add(int(part))
+    return cpus
+
+
+def _format_cpu_set(cpus: set[int]) -> str:
+    if not cpus:
+        return ""
+    ordered = sorted(cpus)
+    ranges: list[str] = []
+    start = prev = ordered[0]
+    for cpu in ordered[1:]:
+        if cpu == prev + 1:
+            prev = cpu
+        else:
+            ranges.append(f"{start}-{prev}" if start != prev else str(start))
+            start = prev = cpu
+    ranges.append(f"{start}-{prev}" if start != prev else str(start))
+    return ",".join(ranges)
+
+
+def _enroll_parallel(cmd: list[str]) -> int:
+    for idx, arg in enumerate(cmd):
+        if arg == "--pbkdf-parallel" and idx + 1 < len(cmd):
+            try:
+                return max(1, int(cmd[idx + 1]))
+            except ValueError:
+                return 4
+    return 4
 
 
 def memory_total() -> int:
@@ -32,6 +79,68 @@ def memory_total() -> int:
 
 def memory_available() -> int:
     return int(re.search(r"^MemAvailable:\s+(\d+)", Path("/proc/meminfo").read_text(), re.M)[1])
+
+
+def memory_free() -> int:
+    return int(re.search(r"^MemFree:\s+(\d+)", Path("/proc/meminfo").read_text(), re.M)[1])
+
+
+def _pretouch_benchmark_memory(target_kib: int = PRETOUCH_MEMORY) -> None:
+    """Reclaim clean page cache before cryptsetup starts its wall-clock timer.
+
+    The verify units fill RAM with clean page cache right before this service
+    runs, leaving MemFree around 200-300 MiB on an 8 GiB machine. Without free
+    pages ready, cryptsetup's first 1 GiB Argon2id trial pays 1-2 s of kswapd
+    reclaim and THP compaction inside clock_gettime(), which can push a low
+    iteration count into cryptsetup's [1900, 2200] ms acceptance window or end
+    Phase 1 early at 4 iterations. Allocating and faulting ~1.1 GiB once
+    beforehand moves that reclaim outside the benchmark window; on machines
+    that already have enough MemFree it is a no-op, and unlike drop_caches it
+    only evicts the oldest LRU pages that cryptsetup itself is about to evict.
+    """
+    if memory_free() >= FREE_HEADROOM:
+        return
+    size = target_kib * 1024
+    page = os.sysconf("SC_PAGESIZE")
+    try:
+        with mmap.mmap(-1, size, flags=mmap.MAP_PRIVATE) as buf:
+            view = memoryview(buf)
+            try:
+                view[::page] = b"\x01" * (size // page)
+            finally:
+                view.release()
+    except (MemoryError, OSError):
+        pass
+
+
+def _has_fixed_iterations(command: list[str]) -> bool:
+    return any(arg == "--pbkdf-force-iterations" or arg.startswith("--pbkdf-force-iterations=")
+               for arg in command)
+
+
+def stop_early_keyring() -> None:
+    """Stop omarchy-target-keyring-early.service so gpg does not share CPUs
+    with a live Argon2id benchmark. A finished keyring stays in place."""
+    try:
+        subprocess.run(["systemctl", "stop", EARLY_KEYRING_UNIT], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def pretouch_for_format(command: list[str]) -> None:
+    """Prepare the live system before an uncached Argon2id luksFormat
+    benchmark: stop any in-flight early keyring (including for custom
+    --iter-time/--key-size policies that bypass the standard cache) and
+    reclaim clean page cache outside cryptsetup's wall-clock timer."""
+    if "luksFormat" not in command:
+        return
+    if _has_fixed_iterations(command):
+        return
+    stop_early_keyring()
+    if memory_total() < 4 * 1024 * 1024 or memory_available() < 1536 * 1024:
+        return
+    _pretouch_benchmark_memory()
 
 
 def parse_benchmark(output: str) -> dict:
@@ -66,6 +175,7 @@ def calibrate() -> None:
     if memory_total() < 4 * 1024 * 1024 or memory_available() < 1536 * 1024:
         print("Skipping background LUKS calibration: insufficient memory headroom")
         return
+    _pretouch_benchmark_memory()
     output = subprocess.run(
         ["cryptsetup", "benchmark", "--pbkdf", "argon2id", "--iter-time", str(ITER_TIME),
          "--key-size", str(KEY_SIZE)], check=True, capture_output=True, text=True,
@@ -117,20 +227,20 @@ def stop_calibration(wait: float = 20) -> None:
             time.sleep(0.2)
     except (OSError, subprocess.TimeoutExpired):
         pass  # a poll that fails ends the wait, not the stop
-    try:
-        subprocess.run(["systemctl", "stop", UNIT], check=False,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    # The keyring the live system makes for the target is gpg on one core, and
-    # must not run beside the format's PBKDF either. One that is finished
-    # stays. One still at work is given up, and the install makes the keyring
-    # itself, as it did before that unit existed.
-    try:
-        subprocess.run(["systemctl", "stop", EARLY_KEYRING_UNIT], check=False,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+    # Always stop calibration and page-cache warm-up before luksFormat so
+    # neither a running benchmark nor multi-GB reads compete with formatting.
+    # Only stop early keyring generation when no cached calibration is ready:
+    # a cached format uses fixed --pbkdf-force-iterations (no live benchmark),
+    # so killing an in-flight keyring throws away seconds of gpg work for no
+    # gain and forces a synchronous rebuild at the end of the install.
+    for unit in (UNIT, CACHE_WARM_UNIT):
+        try:
+            subprocess.run(["systemctl", "stop", unit], check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if not cached_options(ITER_TIME, KEY_SIZE):
+        stop_early_keyring()
 
 
 def cached_options(iter_time: int, key_size: int) -> list[str]:
@@ -379,22 +489,48 @@ class DeferredKeyslot:
                     self._proc = None
 
     @staticmethod
-    def _on_all_cpus(cmd: list[str]) -> list[str]:
-        """The command, on every CPU the installer started with.
+    def _online_atom_cpus(cmd: list[str], all_cpus: str) -> str:
+        try:
+            if not ATOM_CPUS_PATH.is_file():
+                return ""
+            atom = _parse_cpu_set(ATOM_CPUS_PATH.read_text().strip())
+            atom &= _parse_cpu_set(all_cpus)
+            if ONLINE_CPUS_PATH.is_file():
+                atom &= _parse_cpu_set(ONLINE_CPUS_PATH.read_text().strip())
+            if len(atom) >= _enroll_parallel(cmd):
+                return _format_cpu_set(atom)
+        except (OSError, ValueError):
+            pass
+        return ""
 
-        On a hybrid CPU omarchy-iso-install keeps the installer on the
-        performance cores and names the CPUs it had before in
-        OMARCHY_INSTALLER_ALL_CPUS. The enrollment is four Argon2 threads for
-        about two seconds. Kept on those cores too, it shares them with the
-        install: 3.65 s against 3.52 s with nothing pinned, on a Dell XPS 16
-        with an Argon2 load of this size. Given every CPU back, it takes the
-        cores the install leaves, and the install takes 3.27 s."""
+    @classmethod
+    def _on_all_cpus(cls, cmd: list[str]) -> list[str]:
+        """The command, on efficiency cores where a hybrid CPU has enough of
+        them online, or else on every CPU the installer started with.
+
+        On a hybrid CPU omarchy-iso-install pins the installer to performance
+        cores and records the original mask in OMARCHY_INSTALLER_ALL_CPUS.
+        Running the four Argon2id threads on cpu_atom keeps the P-cores free
+        for omarchy-image-write and setup with 0 ms penalty on F1.image_write."""
         cpus = os.environ.get("OMARCHY_INSTALLER_ALL_CPUS")
-        return ["taskset", "-c", cpus, *cmd] if cpus else cmd
+        if not cpus:
+            return cmd
+        atom = cls._online_atom_cpus(cmd, cpus)
+        return ["taskset", "-c", atom or cpus, *cmd]
 
     def _worker(self) -> None:
         try:
-            rc, out = self._run_step(self._on_all_cpus(self.enroll_cmd), input_data=self._passphrase)
+            all_cpus = os.environ.get("OMARCHY_INSTALLER_ALL_CPUS")
+            atom = self._online_atom_cpus(self.enroll_cmd, all_cpus) if all_cpus else ""
+            if atom:
+                rc, out = self._run_step(["taskset", "-c", atom, *self.enroll_cmd], input_data=self._passphrase)
+                if rc != 0 and "affinity" in out.lower():
+                    rc, out = self._run_step(["taskset", "-c", all_cpus, *self.enroll_cmd], input_data=self._passphrase)
+            else:
+                rc, out = self._run_step(
+                    ["taskset", "-c", all_cpus, *self.enroll_cmd] if all_cpus else self.enroll_cmd,
+                    input_data=self._passphrase,
+                )
             if rc != 0:
                 self.error = f"cryptsetup luksAddKey failed (exit {rc}): {out}"
                 return
@@ -451,7 +587,9 @@ def main() -> None:
         # Same free-space format, with the existing defaults made explicit.
         command = ["cryptsetup", "luksFormat", sys.argv[2], "--type", "luks2", "--batch-mode",
                    "--pbkdf", "argon2id", "--key-size", "512", "--iter-time", "2000", "-"]
-        os.execvp("cryptsetup", format_command(command, Path(sys.argv[3]) if len(sys.argv) == 4 else None))
+        argv = format_command(command, Path(sys.argv[3]) if len(sys.argv) == 4 else None)
+        pretouch_for_format(argv)
+        os.execvp("cryptsetup", argv)
     else:
         raise SystemExit("usage: omarchy-luks-calibrate calibrate | volume-key | format DEVICE [VOLUME-KEY]")
 

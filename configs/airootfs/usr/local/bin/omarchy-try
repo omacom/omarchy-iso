@@ -36,6 +36,8 @@ pci_devices=${OMARCHY_PCI_DEVICES_PATH:-/sys/bus/pci/devices}
 sysfs=${OMARCHY_SYSFS:-/sys}
 live_modules=${OMARCHY_TRY_LIVE_MODULES:-/usr/lib/modules}
 omarchy_path=${OMARCHY_PATH:-/usr/share/omarchy}
+offline_mirror=${OMARCHY_TRY_OFFLINE_MIRROR:-/var/cache/omarchy/mirror/offline}
+live_pacman_conf=${OMARCHY_TRY_PACMAN_CONF:-/etc/pacman.conf}
 
 mounted=()
 started=false
@@ -129,6 +131,18 @@ if [[ ! -d $nextroot/usr/lib/modules/$kver && -d $live_modules/$kver ]]; then
     fail "could not give the session the live kernel's modules"
 fi
 
+# The session runs the hardware setup an install runs for this machine
+# (builder/try-layer/omarchy-try-hardware), and takes its packages where an
+# install does: this stick's offline repository, read-only, through the live
+# system's pacman.conf that names it. Hooks that build boot images are masked
+# for that run: Try keeps the kernel and boot image it started with.
+if [[ -d $offline_mirror && -f $live_pacman_conf ]]; then
+  mount_at --bind -o ro "$offline_mirror" "$nextroot$offline_mirror" ||
+    fail "could not give the session the offline repository"
+  sed -e "/^\[options\]/a CacheDir = $offline_mirror/\nHookDir = /etc/pacman.d/hooks/\nHookDir = /usr/local/lib/omarchy-try/pacman-hooks/" \
+    "$live_pacman_conf" >"$run/pacman-offline.conf" || fail "could not write the session's offline pacman.conf"
+fi
+
 # From here to the request, no signal: each step below is undone only on the
 # way that knows it happened, and a request systemd took needs the session
 # root it was given.
@@ -141,7 +155,8 @@ trap '' INT TERM HUP
 # while Try starts from it. Stopped first, and started again if the soft
 # reboot is refused, so an install still gets their results.
 checks=(omarchy-mirror-verify.service omarchy-root-image-verify.service
-  omarchy-luks-calibrate.service omarchy-target-keyring-early.service)
+  omarchy-luks-calibrate.service omarchy-target-keyring-early.service
+  omarchy-cache-warm.service)
 systemctl stop "${checks[@]}" 2>/dev/null || true
 systemctl reset-failed "${checks[@]}" 2>/dev/null || true
 

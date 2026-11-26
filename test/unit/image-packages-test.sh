@@ -20,13 +20,16 @@ trap 'rm -rf "$work"' EXIT
   awk '/^image_package_list\(\) \{$/,/^\}$/' "$ROOT/builder/build-iso.sh"
 } | sed "s#/builder/#$ROOT/builder/#g" >"$work/fn.sh"
 grep -q '^image_package_list() {' "$work/fn.sh" || { echo "image_package_list not found in builder/build-iso.sh"; exit 1; }
+# shellcheck source=/dev/null # the function this test just took out of the builder
 source "$work/fn.sh"
 
 archinstall_packages_file=$ROOT/builder/archinstall.packages
 build_cache_dir=$work/cache
 mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
 printf '%s\n' hyprland snapper >"$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
+# shellcheck disable=SC2034 # read by image_package_list, taken out of the builder
 image_arch_packages=()
+# shellcheck disable=SC2034 # as above
 OMARCHY_RUNTIME_PACKAGE=omarchy OMARCHY_SETTINGS_PACKAGE=omarchy-settings OMARCHY_NVIM_PACKAGE=omarchy-nvim
 
 mapfile -t image < <(image_package_list)

@@ -1,0 +1,16 @@
+#!/bin/bash
+#
+# Try Omarchy: say what this session is, once, when the desktop first shows.
+# The user unit omarchy-try-welcome.service runs it at every login; the mark it
+# leaves keeps a login after a logout from saying it again. The session's home
+# lives in RAM, so each Try boot says it once.
+
+export PATH="/usr/share/omarchy/bin:/usr/local/bin:/usr/bin:$PATH"
+mark=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/try-welcomed
+
+[[ -e $mark ]] && exit 0
+# The shell comes up well after the session starts on a slow machine.
+omarchy-notification-wait 120 || exit 0
+omarchy-notification-send -u critical -g $'\uf04b' "Try Omarchy!" \
+  "Install apps, change themes, anything. When you're sold, reboot and pick install instead." || exit 0
+mkdir -p "${mark%/*}" && : >"$mark"

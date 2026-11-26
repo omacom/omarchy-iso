@@ -173,6 +173,46 @@ class BuildTryLayerTest(unittest.TestCase):
         self.assertIn('printf \'#!/bin/sh\\nexit 0\\n\' >"$stubs/systemctl"', self.text)
         self.assertIn('rm -f "$stubs/systemctl"', self.text)
 
+    def test_idles_as_an_install_does(self):
+        # Stay awake was on in every Try session; Omarchy's idle lock turns
+        # itself down without the lock screen's PAM file, which Try lacks.
+        self.assertNotIn("indicators/stay-awake", self.text)
+        self.assertNotRegex(self.text, r"pam\.d/omarchy-lock-password[^\n]*<<")
+
+    def test_arms_no_watchdog_for_a_reboot_from_try(self):
+        # Closing it printed "watchdog did not stop!" over the screen.
+        m = re.search(r"/etc/systemd/system.conf.d/90-omarchy-try.conf\" <<'EOF'\n(.*?)\nEOF", self.text, re.S)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1).split(), ["[Manager]", "RebootWatchdogSec=0"])
+
+    def test_runs_the_installs_hardware_setup_from_the_offline_repository(self):
+        m = re.search(r"omarchy-try-hardware\.service\" <<'EOF'\n(.*?)\nEOF", self.text, re.S)
+        self.assertIsNotNone(m)
+        unit = m.group(1).splitlines()
+        self.assertIn("BindReadOnlyPaths=/run/omarchy-try/pacman-offline.conf:/etc/pacman.conf", unit)
+        # Detection and pacman's ldconfig take seconds: not before the desktop,
+        # and not holding multi-user.target up either.
+        self.assertNotIn("Before=display-manager.service", unit)
+        self.assertIn("Type=exec", unit)
+        m = re.search(r"omarchy-try-hardware-user\.service\" <<'EOF'\n(.*?)\nEOF", self.text, re.S)
+        self.assertIsNotNone(m)
+        self.assertIn("Before=display-manager.service", m.group(1).splitlines())
+        self.assertIn("in_try systemctl enable omarchy-try-hardware.service omarchy-try-hardware-user.service", self.text)
+        script = (ROOT / "builder/try-layer/omarchy-try-hardware").read_text()
+        self.assertIn('omarchy-apply-hardware --install-user "$user"', script)
+        for name in ("mkinitcpio", "dkms", "limine-entry-tool", "limine-update", "ukify"):
+            self.assertIn(name, self.text.split("for tool in ", 1)[1].split(";", 1)[0])
+        for hook in ("60-mkinitcpio-remove.hook", "60-limine-mkinitcpio-remove-pre.hook", "80-limine-efi-deploy.hook",
+                     "90-limine-mkinitcpio-remove-post.hook", "90-mkinitcpio-install.hook"):
+            self.assertIn(hook, self.text)
+
+    def test_says_once_what_the_session_is(self):
+        welcome = (ROOT / "builder/try-layer/omarchy-try-welcome").read_text()
+        # The glyph is its own argument; without one, -g takes the title.
+        self.assertRegex(welcome, r"omarchy-notification-send -u critical -g \$'\\u[0-9a-f]{4}' \"Try Omarchy!\"")
+        self.assertIn('"Install apps, change themes, anything. When you\'re sold, reboot and pick install instead."', welcome)
+        self.assertIn("in_try systemctl --global enable omarchy-try-welcome.service", self.text)
+
     def test_sets_utf8_locale_and_browser_policies(self):
         self.assertIn("LANG=en_US.UTF-8", self.text)
         self.assertIn("browser-policy.sh", self.text)

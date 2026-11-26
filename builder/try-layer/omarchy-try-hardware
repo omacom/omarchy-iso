@@ -1,0 +1,169 @@
+#!/bin/bash
+#
+# Try Omarchy: the hardware setup an install runs for this machine, run here,
+# on the machine itself, once at the start of a Try session:
+#
+#   --system  omarchy-try-hardware.service, beside the desktop's start
+#   --user    omarchy-try-hardware-user.service, before the desktop
+#
+# An install runs Omarchy's omarchy-apply-hardware in the new system
+# (omarchy-apply-system), which detects the machine and adds what it needs:
+# packages from the stick's offline repository, their services, udev rules,
+# module and kernel options. The same entry point runs here (--system), so a
+# hardware step Omarchy adds works in Try with nothing added here. The
+# per-user hardware steps, as install/user/all.sh lists them, run for the
+# session's user before it logs in (--user): they write settings the session
+# reads at its start, and need no hardware package.
+#
+# The system part does not hold the desktop up: its detection alone takes
+# seconds, and pacman's ldconfig after a package reads every library from the
+# stick. The units it enables start when it is done.
+#
+# Try keeps the kernel and boot image it started with: a step that builds a
+# boot image or a kernel module, or installs a kernel, could take effect only
+# after a reboot, which leaves Try. Those tools do nothing here, and those
+# packages are recorded without their files (live-bin/). What can take effect
+# now is applied as a boot would apply it: udev rules the setup brought, by
+# an add event for the devices each of their lines names (a boot's coldplug,
+# systemd-udev-trigger, narrowed to those, as an add event runs every rule's
+# RUN+= again; a line that names no device waits for the next boot), modules
+# and sysctl settings again if the setup changed them, the units it enabled
+# for the
+# boot's targets started (not those it enabled for sleep or shutdown), and
+# devices still without a driver probed again, for firmware or board data the
+# setup brought (omarchy-try-reprobe). A Wi-Fi or audio controller whose
+# driver bound without it (ath12k, short of its board data) is bound again
+# when anything under /usr/lib/firmware changed, a package's file or what its
+# hook wrote: omarchy-try released those classes for the session to probe,
+# before this ran. Module options for a driver already loaded take effect only
+# when it loads again, at the next boot.
+
+set -uo pipefail
+
+user=${OMARCHY_TRY_USER:-omarchy}
+root=${OMARCHY_TRY_ROOT:-}
+sysfs=${OMARCHY_SYSFS:-/sys}
+omarchy_path=${OMARCHY_PATH:-/usr/share/omarchy}
+lib=${OMARCHY_TRY_LIB:-/usr/local/lib/omarchy-try}
+export PATH="$lib/live-bin:$omarchy_path/bin:/usr/local/sbin:/usr/local/bin:/usr/bin"
+
+# The units the boot starts: what its targets want.
+boot_units() {
+  local target
+  for target in sysinit basic sockets timers paths multi-user graphical; do
+    ls "$root/etc/systemd/system/$target.target.wants" 2>/dev/null
+  done | sort -u
+}
+
+# Each rules file, with its checksum, to tell which ones the setup brought.
+rules_files() {
+  local file
+  for file in "$root"/etc/udev/rules.d/*.rules "$root"/usr/lib/udev/rules.d/*.rules; do
+    [[ -f $file ]] && printf '%s %s\n' "$(cksum <"$file" | cut -d' ' -f1)" "$file"
+  done | sort
+}
+
+# An add event for the devices a rules file's lines name, by SUBSYSTEM== and
+# KERNEL==, one trigger per line, as udevadm's matches for one call combine
+# across lines. Only lines an add event reaches: no ACTION==, or one that lists
+# add. A line that names no device could match any, and everything is never
+# triggered: it waits for the next boot, and the log says so.
+replay_add() {
+  local line subsystem kernel name status=0
+  local -a args
+  while IFS= read -r line; do
+    [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+    if [[ $line =~ (^|[[:space:],])ACTION==\"([^\"]+)\" ]]; then
+      [[ "|${BASH_REMATCH[2]}|" == *"|add|"* ]] || continue
+    fi
+    subsystem="" kernel=""
+    [[ $line =~ (^|[[:space:],])SUBSYSTEM==\"([^\"]+)\" ]] && subsystem=${BASH_REMATCH[2]}
+    [[ $line =~ (^|[[:space:],])KERNEL==\"([^\"]+)\" ]] && kernel=${BASH_REMATCH[2]}
+    if [[ -z $subsystem && -z $kernel ]]; then
+      echo "Try Omarchy: a rule in ${1##*/} names no device by SUBSYSTEM or KERNEL; it applies at the next boot" >&2
+      continue
+    fi
+    args=()
+    for name in ${subsystem//|/ }; do args+=("--subsystem-match=$name"); done
+    for name in ${kernel//|/ }; do args+=("--sysname-match=$name"); done
+    udevadm trigger --action=add "${args[@]}" || status=1
+  done <"$1"
+  return "$status"
+}
+
+digest() {
+  local dir
+  for dir in "$@"; do
+    cat "$root$dir"/* 2>/dev/null
+  done | cksum
+}
+
+system_setup() {
+  local status=0 units_before rules_before modules_before sysctl_before started device driver stamp file
+  local -a rules_added=()
+
+  stamp=$(mktemp)
+  units_before=$(boot_units)
+  rules_before=$(rules_files)
+  modules_before=$(digest /etc/modules-load.d /usr/lib/modules-load.d)
+  sysctl_before=$(digest /etc/sysctl.d /usr/lib/sysctl.d)
+
+  # The offline repository's database, for the pacman.conf this unit reads.
+  pacman -Sy --noconfirm >/dev/null || status=1
+  omarchy-apply-hardware --install-user "$user" || status=1
+
+  systemctl daemon-reload || status=1
+  mapfile -t rules_added < <(comm -13 <(printf '%s\n' "$rules_before") <(rules_files) | cut -d' ' -f2-)
+  if ((${#rules_added[@]})); then
+    udevadm control --reload || status=1
+    for file in "${rules_added[@]}"; do
+      replay_add "$file" || status=1
+    done
+    udevadm settle --timeout=30 || status=1
+  fi
+  if [[ $(digest /etc/modules-load.d /usr/lib/modules-load.d) != "$modules_before" ]]; then
+    systemctl restart systemd-modules-load.service || status=1
+  fi
+  if [[ $(digest /etc/sysctl.d /usr/lib/sysctl.d) != "$sysctl_before" ]]; then
+    systemctl restart systemd-sysctl.service || status=1
+  fi
+  mapfile -t started < <(comm -13 <(printf '%s\n' "$units_before") <(boot_units) | grep -E '\.(service|socket|timer|path)$')
+  if ((${#started[@]})); then
+    systemctl start --no-block "${started[@]}" || status=1
+  fi
+  "$lib/omarchy-try-reprobe" || status=1
+
+  if find "$root/usr/lib/firmware" -newer "$stamp" -print -quit 2>/dev/null | grep -q .; then
+    for device in "$sysfs"/bus/pci/devices/*; do
+      [[ -e $device/driver && -r $device/class ]] || continue
+      case $(<"$device/class") in
+        0x0280* | 0x0401* | 0x0403*)
+          driver=$(readlink -f "$device/driver")
+          { printf '%s' "${device##*/}" >"$driver/unbind" && printf '%s' "${device##*/}" >"$driver/bind"; } || status=1
+          ;;
+      esac
+    done
+  fi
+  rm -f "$stamp"
+  return "$status"
+}
+
+user_setup() {
+  local status=0 step home
+  home=$(getent passwd "$user" | cut -d: -f6)
+  while IFS= read -r step; do
+    runuser -u "$user" -- env HOME="$home" USER="$user" LOGNAME="$user" \
+      OMARCHY_PATH="$omarchy_path" OMARCHY_INSTALL="$omarchy_path/install" PATH="$PATH" \
+      bash "$omarchy_path/install/$step" || status=1
+  done < <(grep -oE 'user/hardware/[A-Za-z0-9_./-]+\.sh' "$omarchy_path/install/user/all.sh")
+  return "$status"
+}
+
+case ${1:-} in
+--system) system_setup ;;
+--user) user_setup ;;
+*)
+  echo "Usage: omarchy-try-hardware --system|--user" >&2
+  exit 2
+  ;;
+esac

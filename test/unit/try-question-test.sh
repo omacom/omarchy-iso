@@ -131,7 +131,8 @@ run_try() {
     OMARCHY_TRY_MEDIUM="$work/t/medium" OMARCHY_TRY_IMAGE="$work/t/image" \
     OMARCHY_TRY_RUN="$work/t/run" OMARCHY_TRY_NEXTROOT="$work/t/nextroot" \
     OMARCHY_PCI_DEVICES_PATH="$work/t/pci" OMARCHY_TRY_LIVE_MODULES="$work/t/live-modules" \
-    OMARCHY_SYSFS="$work/t/sys" \
+    OMARCHY_SYSFS="$work/t/sys" OMARCHY_TRY_OFFLINE_MIRROR="$work/t/no-mirror" \
+    OMARCHY_TRY_PACMAN_CONF="$work/t/pacman.conf" \
     OMARCHY_PATH="$work/t/omarchy" "$@" bash "$TRY" >"$work/t/out" 2>"$work/t/err"
 }
 
@@ -152,6 +153,25 @@ $(cat "$work/t/calls")"
 grep -v '^\s*#' "$TRY" | grep -Eq 'kexec|systemctl (reboot|kexec)' && fail "omarchy-try reboots another way than a soft reboot"
 [[ ! -s $work/t/err ]] || fail "an empty PCI bus printed: $(cat "$work/t/err")"
 pass "the Try layer and a tmpfs go over the image at /run/nextroot, the installer's background work stops, and the soft reboot starts it"
+
+# The session's hardware setup takes its packages where an install does: the
+# stick's offline repository, read-only, through the live pacman.conf, with the
+# hooks that build boot images masked.
+setup_try
+mkdir -p "$work/t/mirror"
+printf '[options]\nSigLevel = Never\n\n[offline]\nServer = file://%s/\n' "$work/t/mirror" >"$work/t/pacman.conf"
+run_try OMARCHY_TRY_OFFLINE_MIRROR="$work/t/mirror"
+status=$?
+((status == 0)) || fail "omarchy-try failed with an offline repository: $(cat "$work/t/err")"
+grep -Fqx "mount --bind -o ro $work/t/mirror $work/t/nextroot$work/t/mirror" "$work/t/calls" ||
+  fail "the offline repository was not given to the session: $(cat "$work/t/calls")"
+[[ $(sed -n 1,4p "$work/t/run/pacman-offline.conf") == "[options]
+CacheDir = $work/t/mirror/
+HookDir = /etc/pacman.d/hooks/
+HookDir = /usr/local/lib/omarchy-try/pacman-hooks/" ]] ||
+  fail "the session's offline pacman.conf is not the live one with the mirror and masked hooks: $(cat "$work/t/run/pacman-offline.conf")"
+grep -qx '\[offline\]' "$work/t/run/pacman-offline.conf" || fail "the session's offline pacman.conf lost the offline repository"
+pass "the session gets the stick's offline repository, and a pacman.conf for it with boot image hooks masked"
 
 setup_try
 mkdir -p "$work/t/pci/0000:01:00.0"
@@ -318,5 +338,139 @@ pass "the NVIDIA handover unbinds the framebuffer console, then unloads nouveau"
 layer="$ROOT/builder/build-try-layer.sh"
 grep -qx 'ExecStart=/usr/local/lib/omarchy-try/omarchy-try-reprobe' "$layer" || fail "the reprobe unit does not run its script"
 grep -qx 'ExecStart=/usr/local/lib/omarchy-try/omarchy-try-nvidia-handover' "$layer" || fail "the handover unit does not run its script"
+grep -qx 'ExecStart=/usr/local/lib/omarchy-try/omarchy-try-hardware --system' "$layer" || fail "the hardware unit does not run its script"
+grep -qx 'ExecStart=/usr/local/lib/omarchy-try/omarchy-try-hardware --user' "$layer" || fail "the user hardware unit does not run its script"
+grep -qx 'ExecStart=/usr/local/lib/omarchy-try/omarchy-try-welcome' "$layer" || fail "the welcome unit does not run its script"
 grep -E '^ExecStart=.*\$' "$layer" | grep -v '\$\$' && fail "a unit in the Try layer has a \$ systemd would expand"
 pass "the layer's units run their scripts, with nothing for systemd to expand"
+
+# pacman for the session's hardware setup: a kernel, its headers and a DKMS
+# module, told by their files, are recorded without them; the rest installs.
+pw="$work/pw"
+mkdir -p "$pw/pkgs"
+mkpkg() { # name, a file in it
+  mkdir -p "$pw/build/$1/${2%/*}"
+  : >"$pw/build/$1/$2"
+  bsdtar -cf "$pw/pkgs/$1.pkg.tar" -C "$pw/build/$1" "${2%%/*}"
+}
+mkpkg linux-t2 usr/lib/modules/7.2.15-t2/vmlinuz
+mkpkg linux-t2-headers usr/lib/modules/7.2.15-t2/build/Makefile
+mkpkg foo-dkms usr/src/foo-1.0/dkms.conf
+mkpkg linux-firmware-marvell usr/lib/firmware/mrvl/sd8897_uapsta.bin
+cat >"$pw/pacman" <<'EOF'
+#!/bin/bash
+if [[ $1 == -Sp ]]; then
+  echo "file://$PW/pkgs/${*: -1}.pkg.tar"
+  # Without --nodeps --nodeps, pacman lists the dependencies it would pull too.
+  [[ " $* " == *" --nodeps --nodeps "* ]] || echo "file://$PW/pkgs/a-dependency.pkg.tar"
+  exit 0
+fi
+echo "$*" >>"$PW/calls"
+EOF
+chmod +x "$pw/pacman"
+PW=$pw OMARCHY_TRY_PACMAN="$pw/pacman" bash "$LAYER_SCRIPTS/live-bin/pacman" \
+  -S --noconfirm --needed -- linux-t2 linux-firmware-marvell linux-t2-headers foo-dkms 2>/dev/null ||
+  fail "the hardware setup's pacman failed"
+[[ $(<"$pw/calls") == "-S --dbonly --nodeps --nodeps --noconfirm --needed -- linux-t2 linux-t2-headers foo-dkms
+-S --noconfirm --needed -- linux-firmware-marvell" ]] || fail "the hardware setup's pacman ran: $(cat "$pw/calls")"
+: >"$pw/calls"
+PW=$pw OMARCHY_TRY_PACMAN="$pw/pacman" bash "$LAYER_SCRIPTS/live-bin/pacman" -Q linux-t2
+[[ $(<"$pw/calls") == "-Q linux-t2" ]] || fail "a query did not reach pacman as it was: $(cat "$pw/calls")"
+pass "the hardware setup records kernels, headers and DKMS modules without their files, and installs the rest"
+
+# The hardware setup an install runs, run in the session: Omarchy's own entry
+# point as root, then the per-user hardware steps install/user/all.sh lists,
+# and what changed applied as a boot would.
+hw="$work/hw"
+mkdir -p "$hw/root/etc/udev/rules.d" "$hw/omarchy/bin" "$hw/omarchy/install/user" "$hw/lib/live-bin"
+printf '#!/bin/bash\necho "omarchy-try-reprobe" >>"$HW/calls"\n' >"$hw/lib/omarchy-try-reprobe"
+chmod +x "$hw/lib/omarchy-try-reprobe"
+cat >"$hw/omarchy/install/user/all.sh" <<'EOF'
+run_logged "$OMARCHY_INSTALL/user/theme.sh"
+run_logged "$OMARCHY_INSTALL/user/hardware/asus/fix-mic.sh"
+run_logged "$OMARCHY_INSTALL/user/hardware/dell/xps13-text-scaling.sh"
+EOF
+printf '#!/bin/bash\necho "systemctl $*" >>"$HW/calls"\n' >"$hw/omarchy/bin/systemctl"
+cat >"$hw/omarchy/bin/omarchy-apply-hardware" <<'EOF'
+#!/bin/bash
+echo "omarchy-apply-hardware $*" >>"$HW/calls"
+if [[ -n ${CHANGE:-} ]]; then
+  # One for the boot, one for hibernation, which only a hibernation starts.
+  mkdir -p "$HW/root/etc/systemd/system/multi-user.target.wants" "$HW/root/etc/systemd/system/hibernate.target.wants"
+  ln -sfn /usr/lib/systemd/system/new-haptics.service "$HW/root/etc/systemd/system/multi-user.target.wants/new-haptics.service"
+  ln -sfn /usr/lib/systemd/system/pre-hibernate.service "$HW/root/etc/systemd/system/hibernate.target.wants/pre-hibernate.service"
+  if [[ -n ${FIRMWARE:-} ]]; then
+    mkdir -p "$HW/root/usr/lib/firmware/ath12k"
+    : >"$HW/root/usr/lib/firmware/ath12k/board-2.bin"
+  fi
+  # As dell-xps-touchpad-haptics ships it, as gb10/cpuidle.sh writes it, and
+  # lines an add event does not reach.
+  printf '%s\n' '# power' \
+    'ACTION=="add", SUBSYSTEM=="pci", KERNEL=="0000:00:19.0", ATTR{power/control}="on"' \
+    'ACTION=="add", SUBSYSTEM=="platform", KERNEL=="i2c_designware.0|i2c_designware.1", ATTR{power/control}="on"' \
+    'ACTION=="add|online", SUBSYSTEM=="cpu", TEST=="cpuidle/state1", RUN+="/usr/bin/true"' \
+    'ACTION=="online", SUBSYSTEM=="cpu", ATTR{online}="1"' \
+    'ACTION=="change", SUBSYSTEM=="power_supply", RUN+="/usr/bin/true"' \
+    >"$HW/root/etc/udev/rules.d/99-new.rules"
+  [[ -z ${ANYDEVICE:-} ]] || echo 'ACTION=="add", ATTRS{idVendor}=="06cb", TAG+="uaccess"' >"$HW/root/etc/udev/rules.d/98-any.rules"
+fi
+EOF
+printf '#!/bin/bash\necho "runuser ${*: -1}" >>"$HW/calls"\n' >"$hw/omarchy/bin/runuser"
+printf '#!/bin/bash\necho "udevadm $*" >>"$HW/calls"\n' >"$hw/omarchy/bin/udevadm"
+printf '#!/bin/bash\necho "pacman $*" >>"$HW/calls"\n' >"$hw/omarchy/bin/pacman"
+chmod +x "$hw/omarchy/bin/"*
+run_hardware() {
+  : >"$hw/calls"
+  HW=$hw OMARCHY_TRY_USER=$(id -un) OMARCHY_TRY_ROOT="$hw/root" OMARCHY_PATH="$hw/omarchy" \
+    OMARCHY_TRY_LIB="$hw/lib" OMARCHY_SYSFS="$hw/no-sys" "$@"
+}
+mkdir -p "$hw/root/etc/systemd/system/graphical.target.wants" "$hw/root/usr/lib/firmware"
+ln -sfn /usr/lib/systemd/system/sddm.service "$hw/root/etc/systemd/system/graphical.target.wants/sddm.service"
+run_hardware env CHANGE=1 bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system || fail "the session's hardware setup failed"
+[[ $(<"$hw/calls") == "pacman -Sy --noconfirm
+omarchy-apply-hardware --install-user $(id -un)
+systemctl daemon-reload
+udevadm control --reload
+udevadm trigger --action=add --subsystem-match=pci --sysname-match=0000:00:19.0
+udevadm trigger --action=add --subsystem-match=platform --sysname-match=i2c_designware.0 --sysname-match=i2c_designware.1
+udevadm trigger --action=add --subsystem-match=cpu
+udevadm settle --timeout=30
+systemctl start --no-block new-haptics.service
+omarchy-try-reprobe" ]] || fail "the session's hardware setup ran: $(cat "$hw/calls")"
+# A rule that names no device could match any: everything is never
+# triggered, and the run says the rule waits for the next boot.
+rm -f "$hw/root/etc/udev/rules.d/"*.rules
+run_hardware env CHANGE=1 ANYDEVICE=1 bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system 2>"$hw/err" ||
+  fail "the session's hardware setup failed with a rule for any device"
+grep -q 'udevadm trigger --action=add$' "$hw/calls" && fail "every device was triggered: $(cat "$hw/calls")"
+grep -q '98-any.rules names no device' "$hw/err" || fail "a rule that names no device was skipped without a word: $(cat "$hw/err")"
+rm -rf "$hw/root/etc/systemd/system/multi-user.target.wants" "$hw/root/etc/systemd/system/hibernate.target.wants"
+run_hardware bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system || fail "the session's hardware setup failed with nothing to do"
+[[ $(<"$hw/calls") == "pacman -Sy --noconfirm
+omarchy-apply-hardware --install-user $(id -un)
+systemctl daemon-reload
+omarchy-try-reprobe" ]] || fail "a hardware setup that changed nothing still reloaded or started: $(cat "$hw/calls")"
+# Firmware the setup brought, a package's or what its hook wrote, binds the
+# Wi-Fi and audio controllers again, whose drivers bound before it came;
+# others are left alone.
+sys="$hw/sys"
+mkdir -p "$sys/drivers/ath12k_pci" "$sys/bus/pci/devices/0000:01:00.0" "$sys/bus/pci/devices/0000:00:02.0"
+: >"$sys/drivers/ath12k_pci/unbind"
+: >"$sys/drivers/ath12k_pci/bind"
+ln -sfn "$sys/drivers/ath12k_pci" "$sys/bus/pci/devices/0000:01:00.0/driver"
+ln -sfn "$sys/drivers/ath12k_pci" "$sys/bus/pci/devices/0000:00:02.0/driver"
+echo 0x028000 >"$sys/bus/pci/devices/0000:01:00.0/class"
+echo 0x030000 >"$sys/bus/pci/devices/0000:00:02.0/class"
+run_hardware env OMARCHY_SYSFS="$sys" CHANGE=1 FIRMWARE=1 bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system ||
+  fail "the session's hardware setup failed with firmware"
+[[ $(<"$sys/drivers/ath12k_pci/unbind") == "0000:01:00.0" && $(<"$sys/drivers/ath12k_pci/bind") == "0000:01:00.0" ]] ||
+  fail "the Wi-Fi controller was not bound again after firmware came: '$(<"$sys/drivers/ath12k_pci/unbind")'"
+: >"$sys/drivers/ath12k_pci/unbind"
+run_hardware env OMARCHY_SYSFS="$sys" CHANGE=1 bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system ||
+  fail "the session's hardware setup failed without firmware"
+[[ ! -s $sys/drivers/ath12k_pci/unbind ]] || fail "a controller was bound again though no firmware came"
+run_hardware bash "$LAYER_SCRIPTS/omarchy-try-hardware" --user || fail "the session's user hardware setup failed"
+[[ $(<"$hw/calls") == "runuser $hw/omarchy/install/user/hardware/asus/fix-mic.sh
+runuser $hw/omarchy/install/user/hardware/dell/xps13-text-scaling.sh" ]] ||
+  fail "the session's user hardware setup ran: $(cat "$hw/calls")"
+pass "the session runs the install's hardware setup and its user steps, and applies what they changed"

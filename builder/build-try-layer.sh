@@ -166,10 +166,10 @@ for cfg_script in browser-policy.sh theme-system.sh; do
   fi
 done
 
-# Stay awake: no screensaver and no idle lock in a session someone is trying
-# out (the state omarchy-toggle-idle stay-awake writes).
-in_try runuser -u "$TRY_USER" -- install -D -m 0644 /dev/null \
-  "/home/$TRY_USER/.local/state/omarchy/indicators/stay-awake"
+# Idle as an install idles: Omarchy's screensaver, then its idle lock, which
+# turns itself down here because Try ships no lock screen PAM file
+# (omarchy-lock-password), so nobody is locked out of a session with no
+# password.
 
 # No lock before a suspend (a closed lid). Try ships no lock screen PAM file,
 # so omarchy-system-sleep-lock could only send a critical notification at
@@ -245,6 +245,86 @@ ExecStart=/usr/local/lib/omarchy-try/omarchy-try-reprobe
 WantedBy=sysinit.target
 EOF
 in_try systemctl enable omarchy-try-reprobe.service >/dev/null
+
+# The hardware setup an install runs for this machine, run in the session on
+# the machine itself (omarchy-try-hardware), with packages from the stick's
+# offline repository, which omarchy-try hands over with a pacman.conf for it.
+# The system unit alone reads that pacman.conf: the session's own stays the
+# channel's. For the run, the tools that build boot images and kernel modules
+# do nothing, and pacman records kernels, headers and DKMS modules without
+# their files: they could only take effect after a reboot. The system part
+# runs beside the desktop's start; the per-user part, before it.
+install -Dm755 "$scripts/omarchy-try-hardware" "$merged/usr/local/lib/omarchy-try/omarchy-try-hardware"
+install -Dm755 "$scripts/live-bin/pacman" "$merged/usr/local/lib/omarchy-try/live-bin/pacman"
+for tool in mkinitcpio dkms limine-entry-tool limine-update ukify; do
+  install -Dm755 /dev/stdin "$merged/usr/local/lib/omarchy-try/live-bin/$tool" <<'EOF'
+#!/bin/sh
+echo "Try Omarchy: ${0##*/} left out: Try keeps the kernel and boot image it started with" >&2
+EOF
+done
+install -d "$merged/usr/local/lib/omarchy-try/pacman-hooks"
+for hook in 60-mkinitcpio-remove.hook 60-limine-mkinitcpio-remove-pre.hook 80-limine-efi-deploy.hook \
+  90-limine-mkinitcpio-remove-post.hook 90-mkinitcpio-install.hook; do
+  ln -sf /dev/null "$merged/usr/local/lib/omarchy-try/pacman-hooks/$hook"
+done
+install -Dm644 /dev/stdin "$merged/etc/systemd/system/omarchy-try-hardware.service" <<'EOF'
+[Unit]
+Description=Try Omarchy: this machine's hardware setup, as an install runs it
+ConditionPathExists=/run/omarchy-try/pacman-offline.conf
+
+# exec, not oneshot: a target waits for a oneshot it wants to finish, and
+# graphical.target and what follows it would wait out the whole run.
+[Service]
+Type=exec
+BindReadOnlyPaths=/run/omarchy-try/pacman-offline.conf:/etc/pacman.conf
+ExecStart=/usr/local/lib/omarchy-try/omarchy-try-hardware --system
+RuntimeMaxSec=10min
+
+[Install]
+WantedBy=multi-user.target
+EOF
+install -Dm644 /dev/stdin "$merged/etc/systemd/system/omarchy-try-hardware-user.service" <<'EOF'
+[Unit]
+Description=Try Omarchy: this machine's hardware setup for the session's user
+ConditionPathExists=/run/omarchy-try/pacman-offline.conf
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/omarchy-try/omarchy-try-hardware --user
+
+[Install]
+WantedBy=multi-user.target
+EOF
+in_try systemctl enable omarchy-try-hardware.service omarchy-try-hardware-user.service >/dev/null
+
+# What this session is, said once when the desktop first shows.
+install -Dm755 "$scripts/omarchy-try-welcome" "$merged/usr/local/lib/omarchy-try/omarchy-try-welcome"
+install -Dm644 /dev/stdin "$merged/etc/systemd/user/omarchy-try-welcome.service" <<'EOF'
+[Unit]
+Description=Try Omarchy: say what this session is
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/omarchy-try/omarchy-try-welcome
+
+[Install]
+WantedBy=graphical-session.target
+EOF
+in_try systemctl --global enable omarchy-try-welcome.service >/dev/null
+
+# No hardware watchdog for a reboot from Try. systemd arms it for the reboot
+# (RebootWatchdogSec, 10 minutes by default) and systemd-shutdown closes it
+# without stopping it, on purpose, so the kernel prints "watchdog did not
+# stop!" at critical level; systemd-shutdown also raises the console level to
+# show warnings (src/shutdown/shutdown.c). Nothing covers the console in Try
+# then (plymouth.enable=0 stays from the installer's kernel command line), so
+# the message printed over the screen at every reboot from Try.
+install -Dm644 /dev/stdin "$merged/etc/systemd/system.conf.d/90-omarchy-try.conf" <<'EOF'
+[Manager]
+RebootWatchdogSec=0
+EOF
 
 # The NVIDIA layer's driver can only take a card no driver holds. Try starts
 # from the live installer by a soft reboot, and the kernel keeps what the

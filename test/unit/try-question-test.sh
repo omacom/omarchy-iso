@@ -403,10 +403,14 @@ if [[ -n ${CHANGE:-} ]]; then
     mkdir -p "$HW/root/usr/lib/firmware/ath12k"
     : >"$HW/root/usr/lib/firmware/ath12k/board-2.bin"
   fi
-  # As dell-xps-touchpad-haptics ships it, and a line that names no device.
+  # As dell-xps-touchpad-haptics ships it, as gb10/cpuidle.sh writes it, and
+  # lines an add event does not reach.
   printf '%s\n' '# power' \
     'ACTION=="add", SUBSYSTEM=="pci", KERNEL=="0000:00:19.0", ATTR{power/control}="on"' \
     'ACTION=="add", SUBSYSTEM=="platform", KERNEL=="i2c_designware.0|i2c_designware.1", ATTR{power/control}="on"' \
+    'ACTION=="add|online", SUBSYSTEM=="cpu", TEST=="cpuidle/state1", RUN+="/usr/bin/true"' \
+    'ACTION=="online", SUBSYSTEM=="cpu", ATTR{online}="1"' \
+    'ACTION=="change", SUBSYSTEM=="power_supply", RUN+="/usr/bin/true"' \
     >"$HW/root/etc/udev/rules.d/99-new.rules"
   [[ -z ${ANYDEVICE:-} ]] || echo 'ACTION=="add", ATTRS{idVendor}=="06cb", TAG+="uaccess"' >"$HW/root/etc/udev/rules.d/98-any.rules"
 fi
@@ -429,13 +433,17 @@ systemctl daemon-reload
 udevadm control --reload
 udevadm trigger --action=add --subsystem-match=pci --sysname-match=0000:00:19.0
 udevadm trigger --action=add --subsystem-match=platform --sysname-match=i2c_designware.0 --sysname-match=i2c_designware.1
+udevadm trigger --action=add --subsystem-match=cpu
+udevadm settle --timeout=30
 systemctl start --no-block new-haptics.service
 omarchy-try-reprobe" ]] || fail "the session's hardware setup ran: $(cat "$hw/calls")"
-# A rule that names no device can only be applied by a whole coldplug.
+# A rule that names no device could match any: everything is never
+# triggered, and the run says the rule waits for the next boot.
 rm -f "$hw/root/etc/udev/rules.d/"*.rules
-run_hardware env CHANGE=1 ANYDEVICE=1 bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system 2>/dev/null ||
+run_hardware env CHANGE=1 ANYDEVICE=1 bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system 2>"$hw/err" ||
   fail "the session's hardware setup failed with a rule for any device"
-grep -qx 'udevadm trigger --action=add' "$hw/calls" || fail "a rule that names no device was not applied: $(cat "$hw/calls")"
+grep -q 'udevadm trigger --action=add$' "$hw/calls" && fail "every device was triggered: $(cat "$hw/calls")"
+grep -q '98-any.rules names no device' "$hw/err" || fail "a rule that names no device was skipped without a word: $(cat "$hw/err")"
 rm -rf "$hw/root/etc/systemd/system/multi-user.target.wants" "$hw/root/etc/systemd/system/hibernate.target.wants"
 run_hardware bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system || fail "the session's hardware setup failed with nothing to do"
 [[ $(<"$hw/calls") == "pacman -Sy --noconfirm

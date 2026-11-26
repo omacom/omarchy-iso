@@ -25,7 +25,8 @@
 # packages are recorded without their files (live-bin/). What can take effect
 # now is applied as a boot would apply it: udev rules the setup brought, by
 # an add event for the devices each of their lines names (a boot's coldplug,
-# narrowed to those, as an add event runs every rule's RUN+= again), modules
+# systemd-udev-trigger, narrowed to those, as an add event runs every rule's
+# RUN+= again; a line that names no device waits for the next boot), modules
 # and sysctl settings again if the setup changed them, the units it enabled
 # for the
 # boot's targets started (not those it enabled for sleep or shutdown), and
@@ -64,26 +65,30 @@ rules_files() {
 
 # An add event for the devices a rules file's lines name, by SUBSYSTEM== and
 # KERNEL==, one trigger per line, as udevadm's matches for one call combine
-# across lines. A line that names neither could match anything: the whole
-# coldplug then, once.
+# across lines. Only lines an add event reaches: no ACTION==, or one that lists
+# add. A line that names no device could match any, and everything is never
+# triggered: it waits for the next boot, and the log says so.
 replay_add() {
-  local line subsystem kernel name
+  local line subsystem kernel name status=0
   local -a args
   while IFS= read -r line; do
     [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+    if [[ $line =~ (^|[[:space:],])ACTION==\"([^\"]+)\" ]]; then
+      [[ "|${BASH_REMATCH[2]}|" == *"|add|"* ]] || continue
+    fi
     subsystem="" kernel=""
     [[ $line =~ (^|[[:space:],])SUBSYSTEM==\"([^\"]+)\" ]] && subsystem=${BASH_REMATCH[2]}
     [[ $line =~ (^|[[:space:],])KERNEL==\"([^\"]+)\" ]] && kernel=${BASH_REMATCH[2]}
     if [[ -z $subsystem && -z $kernel ]]; then
-      echo "Try Omarchy: a rule in ${1##*/} names no device; replaying add for all of them" >&2
-      udevadm trigger --action=add
-      return
+      echo "Try Omarchy: a rule in ${1##*/} names no device by SUBSYSTEM or KERNEL; it applies at the next boot" >&2
+      continue
     fi
     args=()
     for name in ${subsystem//|/ }; do args+=("--subsystem-match=$name"); done
     for name in ${kernel//|/ }; do args+=("--sysname-match=$name"); done
-    udevadm trigger --action=add "${args[@]}" || return
+    udevadm trigger --action=add "${args[@]}" || status=1
   done <"$1"
+  return "$status"
 }
 
 digest() {
@@ -114,6 +119,7 @@ system_setup() {
     for file in "${rules_added[@]}"; do
       replay_add "$file" || status=1
     done
+    udevadm settle --timeout=30 || status=1
   fi
   if [[ $(digest /etc/modules-load.d /usr/lib/modules-load.d) != "$modules_before" ]]; then
     systemctl restart systemd-modules-load.service || status=1

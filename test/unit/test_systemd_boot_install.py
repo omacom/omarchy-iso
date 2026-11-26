@@ -137,11 +137,38 @@ class SystemdBootInstallTest(unittest.TestCase):
             self.validate()
 
     def test_the_stack_swap_replaces_limine_s_packages(self):
-        phases._install_systemd_boot_stack(self.ctx)
+        seen_hooks = []
+
+        def record_hooks(command, **_kwargs):
+            self.commands.append(list(command))
+            if "--hookdir" in command:
+                hookdir = Path(command[command.index("--hookdir") + 1])
+                seen_hooks.append({
+                    p.name: p.readlink() for p in hookdir.iterdir() if p.is_symlink()
+                })
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(phases.subprocess, "run", record_hooks):
+            phases._install_systemd_boot_stack(self.ctx)
+        self.assertEqual(len(self.commands), 1)
         swap = self.commands[0]
         self.assertEqual(swap[:3], ["pacman", "--root", str(self.root)])
         self.assertIn("--ask=4", swap)
+        self.assertIn("--hookdir", swap)
         self.assertEqual(swap[-1], "omarchy-boot-systemd")
+        self.assertEqual(
+            set(seen_hooks[0]),
+            set(phases.SYSTEMD_BOOT_SWAP_MASKED_HOOKS),
+        )
+        self.assertTrue(all(target == Path("/dev/null") for target in seen_hooks[0].values()))
+
+    def test_the_stack_swap_still_removes_limine_when_the_package_does_not_conflict_with_it(self):
+        self.write("var/lib/pacman/local/limine-9.0-1/desc", "%NAME%\nlimine\n")
+        phases._install_systemd_boot_stack(self.ctx)
+        self.assertEqual(len(self.commands), 2)
+        self.assertEqual(self.commands[1][:3], ["pacman", "--root", str(self.root)])
+        self.assertIn("--hookdir", self.commands[1])
+        self.assertEqual(self.commands[1][-2:], ["-R", "limine"])
 
     def test_the_loader_goes_on_the_esp_with_an_omarchy_boot_entry(self):
         self.write("usr/lib/systemd/boot/efi/systemd-bootx64.efi", "loader")

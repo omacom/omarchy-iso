@@ -2051,23 +2051,40 @@ def _boot_loader(ctx: InstallContext) -> str:
     return loader
 
 
+def _target_has_installed_package(target: Path, name: str) -> bool:
+    """True when `name` is recorded in the target's local pacman database."""
+    local_db = target / "var" / "lib" / "pacman" / "local"
+    if not local_db.is_dir():
+        return False
+    return any(
+        entry.name.rsplit("-", 2)[0] == name and (entry / "desc").is_file()
+        for entry in local_db.iterdir()
+    )
+
+
 def _install_systemd_boot_stack(ctx: InstallContext) -> None:
     """The image boots through omarchy-boot, Limine's stack. omarchy-boot-systemd
     replaces it and conflicts with its packages (omarchy-boot,
-    limine-mkinitcpio-hook, limine-snapper-sync); --ask=4 answers pacman's
-    "remove them?" with yes. Runs while the deferred boot hooks are masked, so
-    nothing builds an initramfs yet: omarchy-boot-switch install does, at the
-    end. Limine itself, which nothing needs any more, goes too."""
+    limine-mkinitcpio-hook, limine-snapper-sync, limine); --ask=4 answers
+    pacman's "remove them?" with yes. Mask the deferred boot hooks plus the
+    chroot/cache hooks that removing limine-snapper-sync triggers for nothing
+    (no daemon runs in /mnt, _mark_updates_applied disarms ConditionNeedsUpdate,
+    and limine-snapper-restore.desktop has no MimeType). Older omarchy-boot-systemd
+    builds that do not conflict with limine still have limine removed afterwards."""
     with _time_step("BOOT.install omarchy-boot-systemd (replaces the Limine stack)"):
-        subprocess.run(
-            ["pacman", "--root", str(ctx.target), "--cachedir", str(ctx.target / "var/cache/pacman/pkg"),
-             "--noconfirm", "--ask=4", "-S", "--needed", SYSTEMD_BOOT_STACK],
-            check=True,
-        )
-        subprocess.run(
-            ["pacman", "--root", str(ctx.target), "--noconfirm", "-R", "limine"],
-            check=False, capture_output=True,
-        )
+        with tempfile.TemporaryDirectory(prefix="omarchy-boot-swap-hooks-") as hookdir:
+            for name in SYSTEMD_BOOT_SWAP_MASKED_HOOKS:
+                (Path(hookdir) / name).symlink_to("/dev/null")
+            subprocess.run(
+                ["pacman", "--root", str(ctx.target), "--cachedir", str(ctx.target / "var/cache/pacman/pkg"),
+                 "--hookdir", hookdir, "--noconfirm", "--ask=4", "-S", "--needed", SYSTEMD_BOOT_STACK],
+                check=True,
+            )
+            if _target_has_installed_package(ctx.target, "limine"):
+                subprocess.run(
+                    ["pacman", "--root", str(ctx.target), "--hookdir", hookdir, "--noconfirm", "-R", "limine"],
+                    check=False, capture_output=True,
+                )
 
 
 def _configure_limine_boot(ctx: InstallContext, installer, config) -> None:
@@ -2634,6 +2651,18 @@ DEFERRED_BOOT_HOOKS = (
     "80-limine-efi-deploy.hook",
     "90-limine-mkinitcpio-remove-post.hook",
     "90-mkinitcpio-install.hook",
+)
+# Masked during _install_systemd_boot_stack via --hookdir: no daemon runs in
+# the target, _mark_updates_applied disarms ConditionNeedsUpdate before the
+# factory snapshot, and removing limine-snapper-sync only drops its own icon
+# and MimeType-less .desktop file.
+SYSTEMD_BOOT_SWAP_MASKED_HOOKS = DEFERRED_BOOT_HOOKS + (
+    "10-limine-snapper-lock.hook",
+    "30-systemd-daemon-reload-system.hook",
+    "30-systemd-daemon-reload-user.hook",
+    "35-systemd-update.hook",
+    "gtk-update-icon-cache.hook",
+    "update-desktop-database.hook",
 )
 
 # Inside the target chroot, only the install hook is worth deferring.

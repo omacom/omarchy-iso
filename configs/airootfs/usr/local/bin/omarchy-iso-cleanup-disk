@@ -87,6 +87,27 @@ release_holders() {
   done
 }
 
+has_signatures() {
+  [[ -n $(wipefs --no-act "$@" 2>/dev/null) ]]
+}
+
+# True when the disk holds anything to tear down or wipe. Skipping flock -x and
+# wipefs --all (which opens O_RDWR and triggers udev IN_CLOSE_WRITE while the
+# lock is held) avoids a ~1s udev lock-contention retry on clean disks.
+disk_has_state() {
+  local part holder
+  for part in $(partitions); do
+    return 0
+  done
+  for holder in /sys/class/block/"$disk_name"/holders/*; do
+    [[ -e $holder ]] && return 0
+  done
+  findmnt -rn -S "$disk" >/dev/null 2>&1 && return 0
+  grep -qs "^$disk[[:space:]]" /proc/swaps && return 0
+  has_signatures --types nogpt,PMBR,dos "$disk" && return 0
+  return 1
+}
+
 release_and_wipe() {
   local part
   unuse "$disk"
@@ -96,27 +117,52 @@ release_and_wipe() {
   # back when the table is re-read. The disk's own signatures go too (an md 0.90
   # member keeps its superblock near the end), all but the partition table.
   for part in $(partitions); do
-    wipefs --all --force "/dev/$part" >/dev/null || true
+    if has_signatures "/dev/$part"; then
+      wipefs --all --force "/dev/$part" >/dev/null || true
+    fi
   done
-  wipefs --all --force --types nogpt,PMBR,dos "$disk" >/dev/null || true
-  blockdev --flushbufs "$disk" 2>/dev/null || true
-  blockdev --rereadpt "$disk" 2>/dev/null
+  if has_signatures --types nogpt,PMBR,dos "$disk"; then
+    wipefs --all --force --types nogpt,PMBR,dos "$disk" >/dev/null || true
+  fi
 }
 
-# Each attempt first waits out any activation udev already began, then holds
-# the disk's lock, which udevd honours by leaving the disk alone: nothing can
-# be assembled from a signature between reading the stack and wiping it.
-released=false
-for attempt in $(seq 1 20); do
+# Each attempt first waits out any activation udev already began. On a used
+# disk, hold the exclusive lock across teardown, wiping, and re-reading so
+# udevd neither reassembles anything mid-wipe nor opens a partition with blkid
+# before --rereadpt runs. On a clean disk, skip the lock so udevd does not hit
+# EAGAIN and stall udevadm settle.
+release_disk() {
+  local attempt lock
+  released=false
+  for attempt in $(seq 1 20); do
+    udevadm settle 2>/dev/null || true
+    if disk_has_state; then
+      # Read-write, so the close that drops the lock is an IN_CLOSE_WRITE,
+      # on which udevd requeues the events it postponed for the locked disk
+      # (systemd docs/BLOCK_DEVICE_LOCKING.md). A read-only close leaves
+      # them to its retry timer, armed 200 ms out with 1 s of slack, and
+      # udevadm settle waits with them. Nothing is written here. A disk
+      # that cannot be opened for writing cannot be installed on either,
+      # and -e keeps <> from creating a file where a device has gone.
+      if ! [[ -e $disk ]] || ! { exec {lock}<>"$disk"; } 2>/dev/null || ! flock -x "$lock"; then
+        echo "$disk cannot be opened for writing and locked. Reboot the installer and try again."
+        exit 1
+      fi
+      release_and_wipe
+      blockdev --flushbufs "$disk" 2>/dev/null || true
+      blockdev --rereadpt "$disk" 2>/dev/null && released=true
+      exec {lock}<&-
+    else
+      blockdev --flushbufs "$disk" 2>/dev/null || true
+      blockdev --rereadpt "$disk" 2>/dev/null && released=true
+    fi
+    $released && break
+    sleep 0.2
+  done
   udevadm settle 2>/dev/null || true
-  exec {lock}<"$disk"
-  flock -x "$lock"
-  release_and_wipe && released=true
-  exec {lock}<&-
-  $released && break
-  sleep 0.2
-done
-udevadm settle 2>/dev/null || true
+}
+
+release_disk
 
 if ! $released; then
   lsblk -o NAME,TYPE,FSTYPE,MOUNTPOINTS "$disk" || true

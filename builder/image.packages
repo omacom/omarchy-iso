@@ -24,11 +24,13 @@ libpulse
 wireplumber
 
 # The orchestrator's early bootstrap set: Limine, the keyring, and what seeds
-# /etc/skel before useradd.
+# /etc/skel before useradd. systemd-ukify is pre-installed so UEFI installs do
+# not unpack its Python stack during the boot swap.
 base-devel
 git
 limine
 efibootmgr
+systemd-ukify
 omarchy-keyring
 lua51
 luarocks

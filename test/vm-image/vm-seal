@@ -69,7 +69,17 @@ mkdir -p "$out"
 # installs linux-omarchy, and the boot entry, not the UKI, may hold the
 # command line.
 kernel=$(ssh_vm 'cat "/usr/lib/modules/$(uname -r)/pkgbase"')
-root "cat /boot/EFI/Linux/omarchy_$kernel.efi" >"$state/uki.efi"
+# Limine's UKI is named for the kernel. systemd-boot's are named for the
+# machine and the boot image (omarchy-boot-sync), and the one it boots by
+# default is the live system's.
+if [[ $(ssh_vm 'omarchy-boot-backend 2>/dev/null' || true) == systemd-boot ]]; then
+  uki=$(root 'sed -n "s/^default //p" /boot/loader/loader.conf | tail -1')
+  [[ $uki =~ ^omarchy-[0-9a-f]{8}-$kernel-[0-9a-f]{12}\.efi$ ]] ||
+    { echo "vm-seal: systemd-boot's default ($uki) is not a boot image of the running $kernel" >&2; exit 1; }
+else
+  uki=omarchy_$kernel.efi
+fi
+root "cat /boot/EFI/Linux/$uki" >"$state/uki.efi"
 ssh_vm 'cat /proc/cmdline' >"$state/cmdline"
 
 root '
@@ -91,9 +101,11 @@ root '
   # second entry and delete or replace the UKI of the default entry, this one:
   # a panic or a hash prompt at the next firmware boot. An entry that names no
   # machine is found by its name, TARGET_OS_NAME, and updated in place.
+  # systemd-boot keeps no menu file: a clone's first rebuild publishes boot
+  # images named for its own machine ID and makes them the default.
   mid=$(cat /etc/machine-id)
   [[ $mid =~ ^[0-9a-f]{32}$ ]]
-  sed -i "s/machine-id=$mid *//" /boot/limine.conf
+  if [ -f /boot/limine.conf ]; then sed -i "s/machine-id=$mid *//" /boot/limine.conf; fi
 
   # Empty, not "uninitialized": that string marks a first boot, and a first boot
   # applies unit presets, which on Arch disable everything not listed. Empty lets
@@ -130,7 +142,7 @@ root '
   rm -rf /var/log/journal/*
 
   test ! -s /etc/machine-id
-  test -z "$(grep "machine-id=$mid" /boot/limine.conf)"
+  test ! -f /boot/limine.conf || test -z "$(grep "machine-id=$mid" /boot/limine.conf)"
   test -z "$(ls /etc/ssh/ssh_host_* /var/lib/NetworkManager/*.lease /var/log/journal/* 2>/dev/null)"
   test ! -e /home/omarchy/.ssh/authorized_keys
   test ! -e /var/lib/systemd/random-seed

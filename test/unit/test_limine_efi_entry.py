@@ -360,7 +360,7 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
         self.nvram_with({"0004": self.entry("Limine", OTHER)}, ["0004"])
         warnings = []
         with mock.patch.dict(os.environ, {"FAKE_REFUSE_CREATE": "1"}), \
-                mock.patch.object(phases_impl, "_warn_boot_entry_refused", warnings.append):
+                mock.patch.object(phases_impl, "_warn_boot_entry_refused", lambda reason, *_: warnings.append(reason)):
             nvram = self.register()
         self.assertEqual(nvram, {"entries": {"0004": self.entry("Limine", OTHER)}, "order": ["0004"]})
         self.assertEqual(len(warnings), 1)
@@ -373,7 +373,7 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
         self.nvram_with(old, ["0003", "0004"])
         warnings = []
         with mock.patch.dict(os.environ, {"FAKE_REFUSE_CREATE": "1"}), \
-                mock.patch.object(phases_impl, "_warn_boot_entry_refused", warnings.append):
+                mock.patch.object(phases_impl, "_warn_boot_entry_refused", lambda reason, *_: warnings.append(reason)):
             nvram = self.register()
         self.assertEqual(nvram, {"entries": old, "order": ["0003", "0004"], "next": "0003"})
         self.assertEqual(self.writes(), ["--bootnext"])
@@ -389,7 +389,7 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
         )
         warnings = []
         with mock.patch.dict(os.environ, {"FAKE_REUSE": "1"}), \
-                mock.patch.object(phases_impl, "_warn_boot_entry_refused", warnings.append):
+                mock.patch.object(phases_impl, "_warn_boot_entry_refused", lambda reason, *_: warnings.append(reason)):
             phases_impl._register_limine_efi_entry(
                 Path("/dev/nvme1n1"), 3, LOADER,
                 pre_state={"entries": {"0000": "Windows Boot Manager"}, "order": ["0000"]},
@@ -413,7 +413,7 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
                 Path(str(self.nvram) + ".log").unlink(missing_ok=True)
                 warnings = []
                 with mock.patch.dict(os.environ, {"FAKE_SLOTS": slots}), \
-                        mock.patch.object(phases_impl, "_warn_boot_entry_refused", warnings.append):
+                        mock.patch.object(phases_impl, "_warn_boot_entry_refused", lambda reason, *_: warnings.append(reason)):
                     nvram = self.register()
                 self.assertEqual(nvram["entries"], old)
                 self.assertEqual(self.writes(), ["--bootorder", "--bootnext"])
@@ -433,7 +433,7 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
         self.nvram_with(old, ["0000", "0004", "0005"])
         warnings = []
         with mock.patch.dict(os.environ, {"FAKE_SLOTS": "3"}), \
-                mock.patch.object(phases_impl, "_warn_boot_entry_refused", warnings.append):
+                mock.patch.object(phases_impl, "_warn_boot_entry_refused", lambda reason, *_: warnings.append(reason)):
             nvram = self.register()
         self.assertEqual(nvram, {"entries": old, "order": ["0000", "0004", "0005"]})
         self.assertEqual(self.writes(), ["--create"])
@@ -468,6 +468,16 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
         self.assertEqual(nvram["order"], [ours, "0004", "0005", "0000", "0002"])
         self.assertEqual(nvram.get("next"), ours)
 
+
+    def test_a_limine_install_prunes_an_earlier_systemd_boot_install_s_entry(self):
+        replaced = "11111111-2222-3333-4444-555555555555"
+        self.nvram_with(
+            {"0003": self.entry("Omarchy Boot", replaced, loader="\\EFI\\systemd\\systemd-bootx64.efi")},
+            ["0003"],
+        )
+        nvram = self.register(replaced_guids={replaced})
+        self.assertNotIn("0003", nvram["entries"])
+        self.assertEqual(self.writes()[0], "--delete-bootnum")
 
     def test_boot_check_does_not_count_another_installs_entry(self):
         # validate_boot: our entry was dropped and no fallback was deployed.
@@ -516,7 +526,7 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
         self.nvram_with({}, [])
         warnings = []
         with mock.patch.dict(os.environ, {"FAKE_NO_EFIVARS": "1"}), \
-                mock.patch.object(phases_impl, "_warn_boot_entry_refused", warnings.append):
+                mock.patch.object(phases_impl, "_warn_boot_entry_refused", lambda reason, *_: warnings.append(reason)):
             self.register()
         self.assertEqual(self.writes(), [])
         self.assertEqual(len(warnings), 1)
@@ -536,7 +546,7 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
                 mock.patch.object(phases_impl, "_install_limine_efi",
                                   lambda _ctx, *, disk, part, pre_state, **_: phases_impl._register_limine_efi_entry(
                                       disk, part, LOADER, pre_state=pre_state)), \
-                mock.patch.object(phases_impl, "_warn_boot_entry_refused", warnings.append):
+                mock.patch.object(phases_impl, "_warn_boot_entry_refused", lambda reason, *_: warnings.append(reason)):
             phases_impl._install_pre_mounted_limine(ctx)
         self.assertEqual(self.writes(), [])
         self.assertEqual(len(warnings), 1)

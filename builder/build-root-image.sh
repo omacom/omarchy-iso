@@ -77,30 +77,97 @@ n1x_module_lines() {
   grep -hE '^\s*MODULES\s*\+?=' "$1" | sed -E 's/\s+/ /g; s/^ //; s/ $//' | sort -u
 }
 
-# The N1x layer: what an N1x adds to the image on disk, packed next to the
-# image for the installer to extract (phases_impl._apply_platform_layer).
+# The pre-built initramfs becomes the boot image of every systemd-boot install
+# that keeps the defaults, with the kernel next to it on the ESP, so it gets
+# the UKI's ceiling. Without kms it measures about 50 MiB.
+prebuilt_initramfs_size_ok() {
+  local bytes limit=$((128 * 1024 * 1024))
+  bytes=$(stat -c %s "$1")
+  if ((bytes > limit)); then
+    echo "ERROR: the pre-built initramfs is $bytes bytes, over the $limit limit" >&2
+    return 1
+  fi
+}
+
+# What mkinitcpio builds an initramfs from besides the packages: its
+# configuration, the hooks a hardware script adds under /etc/initcpio, and the
+# module options its modconf hook copies in. One "sha256  path" line per file
+# under the root $1, paths relative to it, sorted; a symlink is hashed as the
+# name it points to. The installer reads the target's the same way
+# (phases_impl._initramfs_inputs) and builds the initramfs on the machine when
+# they differ.
+initramfs_inputs() {
+  local root=$1 path hash
+  while IFS= read -r -d '' path; do
+    if [[ -L $root/$path ]]; then
+      hash=$(readlink "$root/$path" | sha256sum)
+    else
+      hash=$(sha256sum <"$root/$path")
+    fi
+    printf '%s  %s\n' "${hash%% *}" "$path"
+  done < <(cd "$root" && find etc/mkinitcpio.conf etc/mkinitcpio.conf.d etc/initcpio etc/modprobe.d usr/lib/modprobe.d \
+    \( -type f -o -type l \) -print0 2>/dev/null | LC_ALL=C sort -z)
+}
+
+# Build /var/lib/omarchy-iso/prebuilt-initramfs.img in the image at $root for
+# its kernel $image_kver, and record what the installer checks before it uses
+# it. Each step returns on failure: set -e does not apply in a function whose
+# status the caller tests.
+build_prebuilt_initramfs() {
+  local dir=/var/lib/omarchy-iso hook
+  local image=$dir/prebuilt-initramfs.img
+
+  # /usr/bin/mkinitcpio, as omarchy-boot-rebuild calls it: the one first in
+  # PATH is limine-mkinitcpio-hook's wrapper, which answers for plain
+  # mkinitcpio whatever this did.
+  arch-chroot "$root" /usr/bin/mkinitcpio -k "$image_kver" -g "$image" -S autodetect,kms 2>&1 | tail -25 || return 1
+  [[ -s $root$image ]] || return 1
+
+  # The hook set is the platform's baseline (00-omarchy-hooks.conf), read on
+  # the build host: make sure it is the busybox one systemd-boot needs, with
+  # the encrypt hook for cryptdevice= and Omarchy's snapshot and restore hooks.
+  arch-chroot "$root" lsinitcpio "$image" >"$work/prebuilt-initramfs.list" || return 1
+  for hook in encrypt omarchy-snapshot-overlay omarchy-restore; do
+    if ! grep -qx "hooks/$hook" "$work/prebuilt-initramfs.list"; then
+      echo "WARNING: the pre-built initramfs has no $hook hook" >&2
+      return 1
+    fi
+  done
+
+  printf '%s\n' "$image_kernel" >"$root$dir/prebuilt-initramfs.kernel"
+  printf '%s\n' "$image_kver" >"$root$dir/prebuilt-initramfs.kver"
+  # The console keymap the keymap hook compiled in, which the hashed inputs
+  # below don't cover (vconsole.conf).
+  ( [ -f "$root/etc/vconsole.conf" ] && . "$root/etc/vconsole.conf"; printf '%s\n' "${KEYMAP:-}" ) \
+    >"$root$dir/prebuilt-initramfs.keymap"
+  initramfs_inputs "$root" >"$root$dir/prebuilt-initramfs.inputs"
+}
+
+# Layers: what one kind of machine adds to the image on disk, packed next to
+# the image for the installer to extract (phases_impl._apply_platform_layer).
 # Installing the NVIDIA stack at install time took 22.6s on an N1x, 16s of it
 # depmod and ldconfig reading the freshly written disk cold; extracting the
-# same files takes a second or two. The image itself stays generic.
-n1x_layer_path() {
-  printf '%s/omarchy-layer.aarch64-n1x.tar.zst\n' "${output%/*}"
+# same files takes a second or two. The image itself stays generic. A layer is
+# named for a platform (aarch64-n1x) or for a hardware layer file (below).
+layer_path() {
+  printf '%s/omarchy-layer.%s.tar.zst\n' "${output%/*}" "$1"
 }
 
 # Pack the overlay's upper directory $1, the files pacstrap and its hooks wrote
-# over the image, as the N1x layer. Paths the target makes or owns for itself
+# over the image, as layer $2. Paths the target makes or owns for itself
 # are left out: mount points, caches and logs, the sync databases (the image
 # ships its own), and the keyring the installer creates per machine.
-write_n1x_layer() {
-  local upper=$1 layer zstd_level=15
+write_layer() {
+  local upper=$1 name=$2 layer zstd_level=15
   [[ ${OMARCHY_FAST_COMPRESSION:-} == 1 ]] && zstd_level=1
-  layer=$(n1x_layer_path)
+  layer=$(layer_path "$name")
 
   # tar has no way to say "delete": an overlay whiteout (a 0:0 character
   # device) or an opaque directory in the upper layer would be extracted as
   # junk. A pacstrap of new packages deletes nothing; fail if one did.
   if [[ -n $(find "$upper" -type c -print -quit) ]] ||
     getfattr -R --absolute-names -d -m '^trusted\.overlay\.opaque' "$upper" 2>/dev/null | grep -q .; then
-    echo "ERROR: the N1x layer deletes files from the image; it cannot be packed as a tarball" >&2
+    echo "ERROR: the $name layer deletes files from the image; it cannot be packed as a tarball" >&2
     return 1
   fi
 
@@ -111,7 +178,109 @@ write_n1x_layer() {
     --exclude=./var/tmp --exclude=./var/lib/pacman/sync \
     --exclude=./etc/pacman.d/gnupg \
     -cf - . | zstd -q -T0 "-$zstd_level" -o "$layer" || return 1
-  echo "N1x layer: $(du -h "$layer" | cut -f1) at $layer"
+  echo "Layer $name: $(du -h "$layer" | cut -f1) at $layer"
+}
+
+# Install packages $2... into the overlay at $1 as the installer would, from
+# the image's mirror, and leave what the installed system's pacman hooks would
+# have, whether or not the building system has those hooks: the module index
+# and linker cache cover the new modules and libraries, and the packages'
+# system users exist.
+install_layer_packages() {
+  local merged=$1
+  shift
+  pacstrap -C "$effective_pacman_conf" -c -G -M "$merged" --needed "$@" || return 1
+  arch-chroot "$merged" depmod "$image_kver" || return 1
+  arch-chroot "$merged" ldconfig || return 1
+  systemd-sysusers --root="$merged" || return 1
+}
+
+# Run $1 <merged> <upper> [args...] on a throwaway overlay of $root, so what it
+# installs never reaches the image itself.
+with_image_overlay() {
+  local run=$1 overlay status=0
+  shift
+  overlay=$(mktemp -d)
+  mkdir -p "$overlay/rw" "$overlay/merged"
+  # tmpfs for the upper layer: the image's btrfs has no room to spare, and the
+  # builder's own root is an overlay, which cannot be an upper layer.
+  if ! mount -t tmpfs -o size=6G omarchy-layer "$overlay/rw"; then
+    rm -rf "$overlay"
+    return 1
+  fi
+  mkdir -p "$overlay/rw/upper" "$overlay/rw/work"
+  if mount -t overlay omarchy-layer \
+       -o "lowerdir=$root,upperdir=$overlay/rw/upper,workdir=$overlay/rw/work" "$overlay/merged"; then
+    "$run" "$overlay/merged" "$overlay/rw/upper" "$@" || status=1
+    umount -R "$overlay/merged" || status=1
+  else
+    status=1
+  fi
+  umount "$overlay/rw" || status=1
+  rm -rf "$overlay"
+  return "$status"
+}
+
+# Hardware layers: what Omarchy's hardware scripts install on one kind of
+# machine, packed like the N1x layer, and extracted only where the layer's own
+# check passes (phases_impl._hardware_layer). Each <name>.layer in
+# $OMARCHY_HARDWARE_LAYERS sets layer_arch and layer_packages and defines
+# layer_matches, which only the installer runs.
+hardware_layers=${OMARCHY_HARDWARE_LAYERS:-}
+
+# The packages hardware layer file $1 installs on this build's architecture.
+hardware_layer_packages() {
+  # shellcheck disable=SC2016 # expanded by the inner shell
+  bash -c 'source "$1" && [[ $layer_arch == "$2" ]] && printf "%s\n" "${layer_packages[@]}"' _ "$1" "$(uname -m)"
+}
+
+# Omarchy's hardware scripts install these packages once the user exists, and
+# a scriptlet may act on that user: intel-ipu7-camera's adds them to the video
+# group. So a hardware layer is installed with --noscriptlet, and the packages
+# that carry a scriptlet are listed for the installer to run once the user
+# exists (phases_impl._run_layer_scriptlets).
+build_hardware_layer_in() {
+  local merged=$1 upper=$2 name=$3 logged=0
+  shift 3
+  [[ -f $merged/var/log/pacman.log ]] && logged=$(wc -l <"$merged/var/log/pacman.log")
+  install_layer_packages "$merged" --noscriptlet "$@" || return 1
+  record_layer_scriptlets "$merged" "$logged" || return 1
+  write_layer "$upper" "$name"
+}
+
+# List in /var/lib/omarchy-iso/layer-scriptlets of the overlay at $1, as
+# "name version" in the order pacman installed them after line $2 of its log,
+# the packages that carry a scriptlet.
+record_layer_scriptlets() {
+  local merged=$1 skip=$2 name version list
+  list=$merged/var/lib/omarchy-iso/layer-scriptlets
+  [[ -f $merged/var/log/pacman.log ]] || return 1
+  mkdir -p "${list%/*}" || return 1
+  : >"$list" || return 1
+  while read -r name version; do
+    if [[ -f $merged/var/lib/pacman/local/$name-$version/install ]]; then
+      printf '%s %s\n' "$name" "$version" >>"$list" || return 1
+    fi
+  done < <(tail -n +"$((skip + 1))" "$merged/var/log/pacman.log" |
+    sed -n 's/^.*\[ALPM\] installed \([^ ]*\) (\(.*\))$/\1 \2/p')
+}
+
+build_hardware_layers() {
+  local file name
+  local -a packages
+  [[ -n $hardware_layers && -d $hardware_layers ]] || return 0
+  for file in "$hardware_layers"/*.layer; do
+    [[ -f $file ]] || continue
+    name=${file##*/}
+    name=${name%.layer}
+    mapfile -t packages < <(hardware_layer_packages "$file")
+    ((${#packages[@]})) || continue
+    echo "Packing the $name hardware layer: ${packages[*]}"
+    if ! with_image_overlay build_hardware_layer_in "$name" "${packages[@]}"; then
+      echo "WARNING: no $name layer; those machines install its packages at install time"
+      rm -f "$(layer_path "$name")"
+    fi
+  done
 }
 
 # Set up N1x's boot-time state in the overlay at $1 (upper directory $2), pack
@@ -125,17 +294,10 @@ build_n1x_uki_in() {
   # install them (_platform_delta_packages), from the same mirror.
   mapfile -t n1x_packages < <(grep -hv '^\s*#\|^\s*$' "$merged/usr/share/omarchy/install/omarchy-aarch64-n1x.packages")
   ((${#n1x_packages[@]})) || return 1
-  pacstrap -C "$effective_pacman_conf" -c -G -M "$merged" --needed "${n1x_packages[@]}" || return 1
-
-  # What the installed system's pacman hooks would have left, whether or not
-  # the building system has those hooks: the module index and linker cache
-  # cover the new modules and libraries, and the packages' system users exist.
-  arch-chroot "$merged" depmod "$image_kver" || return 1
-  arch-chroot "$merged" ldconfig || return 1
-  systemd-sysusers --root="$merged" || return 1
+  install_layer_packages "$merged" "${n1x_packages[@]}" || return 1
 
   # Before anything below writes boot-time state into the overlay.
-  write_n1x_layer "$upper" || return 1
+  write_layer "$upper" aarch64-n1x || return 1
 
   # As n1x.sh sets up an N1x whose GPU drives the panel: nvidia-drm's fbdev
   # draws the console and Plymouth's LUKS prompt.
@@ -190,33 +352,13 @@ INSTALL
 # Build /var/lib/omarchy-iso/prebuilt-uki-n1x.efi from a throwaway overlay of
 # $root. Runs while the generic UKI's config and cmdline are still in $root.
 build_n1x_prebuilt_uki() {
-  local overlay status=0
   local -a n1x_lines
   mapfile -t n1x_lines < <(n1x_module_lines "$1")
   if ((${#n1x_lines[@]} == 0)); then
     echo "WARNING: $1 writes no MODULES lines" >&2
     return 1
   fi
-
-  overlay=$(mktemp -d)
-  mkdir -p "$overlay/rw" "$overlay/merged"
-  # tmpfs for the upper layer: the image's btrfs has no room to spare, and the
-  # builder's own root is an overlay, which cannot be an upper layer.
-  if ! mount -t tmpfs -o size=6G omarchy-n1x-uki "$overlay/rw"; then
-    rm -rf "$overlay"
-    return 1
-  fi
-  mkdir -p "$overlay/rw/upper" "$overlay/rw/work"
-  if mount -t overlay omarchy-n1x-uki \
-       -o "lowerdir=$root,upperdir=$overlay/rw/upper,workdir=$overlay/rw/work" "$overlay/merged"; then
-    build_n1x_uki_in "$overlay/merged" "$overlay/rw/upper" || status=1
-    umount -R "$overlay/merged" || status=1
-  else
-    status=1
-  fi
-  umount "$overlay/rw" || status=1
-  rm -rf "$overlay"
-  return "$status"
+  with_image_overlay build_n1x_uki_in
 }
 
 pacman_conf="${1:-}"
@@ -472,6 +614,8 @@ CMDLINE
 # ALL_kver as a literal path. It sets no ALL_microcode, which is deprecated;
 # the microcode hook in mkinitcpio.conf adds the microcode.
 image_kver=$(ls -1 "$root/usr/lib/modules/" | grep -E '^[0-9]+\.' | head -1)
+# The output directory persists between builds: no layer from an older one.
+rm -f "${output%/*}"/omarchy-layer.*.tar.zst
 if [[ -z $image_kver ]]; then
   echo "WARNING: no kernel version found under /usr/lib/modules/; skipping the UKI pre-build"
 else
@@ -670,19 +814,52 @@ CONF
   # layer, which the installer extracts on an N1x, so the driver in the UKI is
   # the one on disk.
   n1x_script="$root/usr/share/omarchy/install/hardware/n1x.sh"
-  # The output directory persists between builds: no layer from an older one.
-  rm -f "$(n1x_layer_path)"
   if [[ $(uname -m) == aarch64 && -z ${OMARCHY_SNAPDRAGON:-} && -f $n1x_script && -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
     build_n1x_prebuilt_uki "$n1x_script" || {
       echo "WARNING: no N1x pre-built UKI or layer; N1x installs build their own and pacstrap the NVIDIA stack"
       rm -f "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.modules" \
-        "$(n1x_layer_path)"
+        "$(layer_path aarch64-n1x)"
     }
+  fi
+
+  # systemd-boot's fast path, as the UKI is Limine's: the initramfs
+  # omarchy-boot-switch install builds on the target, 4 s of the install, built
+  # here once. The UKI's systemd hook set can't stand in: systemd-boot's boot
+  # images need Omarchy's busybox hooks for snapshots and restores. So this is
+  # the image's own mkinitcpio configuration, as the target would read it, made
+  # generic the way the UKI is: autodetect skipped, and kms with it, which
+  # without autodetect bundles every GPU's firmware (237 MB measured). The LUKS
+  # prompt then draws on the firmware framebuffer, and the first kernel update
+  # builds the machine's own, with both. The installer passes it to
+  # omarchy-boot-switch install (--initramfs) where nothing it is built from
+  # changed on the machine (phases_impl._prebuilt_initramfs), and builds one
+  # otherwise. A Snapdragon ISO installs only Snapdragon laptops, whose
+  # platform builds its own, so it ships none.
+  rm -f "$root"/var/lib/omarchy-iso/prebuilt-initramfs.*
+  # An image whose omarchy-boot-rebuild can't take it (an older omarchy) gets
+  # none: installs build theirs, as before.
+  if ! grep -q -- '--initramfs' "$root/usr/bin/omarchy-boot-rebuild" 2>/dev/null; then
+    echo "omarchy-boot-rebuild takes no pre-built initramfs; none is built"
+  elif [[ -z ${OMARCHY_SNAPDRAGON:-} ]]; then
+    echo "Pre-building systemd-boot's initramfs in the image (kver=$image_kver, the image's hooks, no autodetect, no kms)"
+    if build_prebuilt_initramfs; then
+      echo "Pre-built initramfs: $(du -h "$root/var/lib/omarchy-iso/prebuilt-initramfs.img" | cut -f1)"
+      prebuilt_initramfs_size_ok "$root/var/lib/omarchy-iso/prebuilt-initramfs.img" || exit 1
+    else
+      echo "WARNING: no pre-built initramfs; systemd-boot installs build theirs"
+      rm -f "$root"/var/lib/omarchy-iso/prebuilt-initramfs.*
+    fi
   fi
 
   # Only this build uses these; the installed system has no use for them.
   rm -f "$root/etc/mkinitcpio-prebuilt-uki.conf" "$root/etc/kernel/cmdline.prebuilt-uki" \
     "$root/etc/vconsole.conf.prebuilt-uki" "$root/usr/lib/initcpio/install/omarchy-vconsole-room"
+fi
+
+# Hardware layers, now that the image's tree is final: each is the difference
+# its packages make to the image as it ships.
+if [[ -n $image_kver ]]; then
+  build_hardware_layers
 fi
 
 # The Try layer is built against the finished image, before copying into the

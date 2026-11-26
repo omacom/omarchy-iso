@@ -148,8 +148,9 @@ while [[ $# -gt 0 ]]; do
     ;;
   # The release rehearsal: --local-source holds omarchy-pkgs with omarchy and
   # omarchy-settings pinned the way a release is (test/rehearsal-pins). Those
-  # two are built from it, under their release names; omarchy-nvim and every
-  # other package come from edge as published. The ISO ends in -rehearsal.
+  # two are built from it, under their release names, and omarchy-boot-systemd
+  # with them where it is there; omarchy-nvim and every other package come
+  # from edge as published. The ISO ends in -rehearsal.
   --rehearsal)
     REHEARSAL=1
     shift
@@ -174,7 +175,11 @@ if [[ -n $REHEARSAL ]]; then
   # promotes edge, so the rehearsal takes everything else from edge.
   OMARCHY_ISO_REF=rehearsal
   OMARCHY_MIRROR=edge
-  : "${OMARCHY_LOCAL_PACKAGES:=omarchy-settings omarchy}"
+  # omarchy-boot-systemd is released in lockstep with them, where the pkgs
+  # checkout has it.
+  rehearsal_packages="omarchy-settings omarchy"
+  [[ ! -d $LOCAL_PKGS_PATH/pkgbuilds/omarchy-boot-systemd ]] || rehearsal_packages+=" omarchy-boot-systemd"
+  : "${OMARCHY_LOCAL_PACKAGES:=$rehearsal_packages}"
 fi
 
 if [[ -n $LOCAL_OMARCHY_PATH ]]; then

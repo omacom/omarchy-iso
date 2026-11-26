@@ -183,6 +183,8 @@ else
   # Japanese or Korean at all. The launcher is the runtime's own, the one
   # first-boot owner setup is drawn with.
   # shellcheck disable=SC1091
+  source /usr/share/omarchy-iso/setup-form.sh
+  # shellcheck disable=SC1091
   source /usr/share/omarchy-iso/kmscon.sh
   # shellcheck disable=SC1091
   source /usr/share/omarchy-iso/kmscon-session.sh

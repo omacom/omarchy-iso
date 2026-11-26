@@ -102,16 +102,16 @@ fast_level=$(OMARCHY_FAST_COMPRESSION=1 bash -c 'declare -A file_permissions=();
 [[ $fast_level == 1 ]] || fail "fast squashfs compression level is $fast_level, want 1"
 echo "ok - profiledef.sh switches squashfs zstd level between 19 and 1"
 
-# build-root-image.sh syntax and N1x layer fast-mode compression.
+# build-root-image.sh syntax and layer fast-mode compression.
 bash -n "$ROOT/builder/build-root-image.sh" || fail "build-root-image.sh has a syntax error"
 (
-  eval "$(sed -n '/^n1x_layer_path() {$/,/^}$/p' "$ROOT/builder/build-root-image.sh")"
-  eval "$(sed -n '/^write_n1x_layer() {$/,/^}$/p' "$ROOT/builder/build-root-image.sh")"
+  eval "$(sed -n '/^layer_path() {$/,/^}$/p' "$ROOT/builder/build-root-image.sh")"
+  eval "$(sed -n '/^write_layer() {$/,/^}$/p' "$ROOT/builder/build-root-image.sh")"
   output="$work/iso/omarchy-root.img.zst"
   mkdir -p "$work/iso" "$work/upper/etc"
   echo fast >"$work/upper/etc/test"
-  OMARCHY_FAST_COMPRESSION=1 write_n1x_layer "$work/upper" >/dev/null
-  [[ -s $(n1x_layer_path) ]]
-  tar --zstd -tf "$(n1x_layer_path)" | grep -qxF './etc/test'
-) || fail "write_n1x_layer failed under OMARCHY_FAST_COMPRESSION=1"
-echo "ok - write_n1x_layer succeeds under OMARCHY_FAST_COMPRESSION=1"
+  OMARCHY_FAST_COMPRESSION=1 write_layer "$work/upper" aarch64-n1x >/dev/null
+  [[ -s $(layer_path aarch64-n1x) ]]
+  tar --zstd -tf "$(layer_path aarch64-n1x)" | grep -qxF './etc/test'
+) || fail "write_layer failed under OMARCHY_FAST_COMPRESSION=1"
+echo "ok - write_layer succeeds under OMARCHY_FAST_COMPRESSION=1"

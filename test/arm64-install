@@ -187,8 +187,11 @@ check() { # description, then a command run in the guest that must succeed
   check "it runs the kernel it was told to install" \
     "pacman -Qo /usr/lib/modules/\$(uname -r) | grep -q ' ${KERNEL:-linux-omarchy} '"
   check "the user can use sudo" "echo $GUEST_PASSWORD | sudo -S -p '' true"
-  check "it booted through Limine's unified kernel image" \
-    "echo $GUEST_PASSWORD | sudo -S -p '' sh -c 'ls /boot/EFI/Linux/omarchy_*.efi'"
+  # Limine's is omarchy_<kernel>.efi; systemd-boot's are named for the
+  # machine (omarchy-boot-sync). An Omarchy without omarchy-boot-backend can
+  # only be on Limine.
+  check "it booted through its boot loader's unified kernel image" \
+    "echo $GUEST_PASSWORD | sudo -S -p '' sh -c 'if [ \"\$(omarchy-boot-backend 2>/dev/null)\" = systemd-boot ]; then ls /boot/EFI/Linux/omarchy-\$(head -c 8 /etc/machine-id)-*.efi; else ls /boot/EFI/Linux/omarchy_*.efi; fi'"
   check "the Omarchy runtime is installed" "pacman -Q $RUNTIME_PACKAGE"
   # Node is a base package since omacom/omarchy#19917. Before it, a runtime
   # left a lazy mise shim, and one from before lazy Node unpacked the build the

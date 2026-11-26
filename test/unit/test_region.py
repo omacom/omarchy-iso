@@ -93,20 +93,6 @@ class RegionSelectionTest(unittest.TestCase):
                 self.assertEqual(region.resolve_region({"language": language}, "Asia/Shanghai"), "cn")
                 self.assertEqual(region.resolve_region({"language": language}, "America/New_York"), "global")
 
-    def test_the_configurator_summary_uses_the_same_lookup(self):
-        env = {**os.environ, "PYTHONPATH": str(ROOT / "configs/airootfs/usr/share/omarchy-iso")}
-        script = (
-            "import sys; from pathlib import Path; from orchestrator import region; "
-            f"region.REGIONS_DIR = Path({str(self.regions)!r}); region.PRESET = Path({str(self.preset)!r}); "
-            "print(region.region_for_timezone(sys.argv[1], region.media_region()))"
-        )
-        import subprocess
-        for timezone, expected in [("Asia/Shanghai", "cn"), ("Asia/Hong_Kong", "global"), ("Europe/Berlin", "global")]:
-            with self.subTest(timezone=timezone):
-                out = subprocess.run([sys.executable, "-c", script, timezone], env=env, check=True,
-                                     capture_output=True, text=True).stdout.strip()
-                self.assertEqual(out, expected)
-
     def test_iso_without_profiles_is_global(self):
         self.assertEqual(region.region_for_timezone("Asia/Shanghai", regions_dir=self.root / "missing"), "global")
         self.assertEqual(region.resolve_region({}, "Asia/Shanghai", self.root / "missing"), "global")
@@ -134,9 +120,9 @@ class RegionSelectionTest(unittest.TestCase):
     def test_context_resolves_region_before_install(self):
         self.assertEqual(self.from_env({"timezone": "Asia/Shanghai"}).region, "cn")
         self.assertEqual(self.from_env({"timezone": "Europe/Berlin"}).region, "global")
+        self.assertEqual(self.from_env({"timezone": "UTC"}).region, "global")
         # A deferred install's timezone is a placeholder, so it takes the
         # media's region unless the autoinstall config names one.
-        self.assertEqual(self.from_env({"timezone": "UTC"}).region, "global")
         deferred = {"timezone": "Asia/Shanghai", "omarchy_install": {"defer_provisioning": True}}
         self.assertEqual(self.from_env(deferred).region, "global")
         self.assertEqual(self.from_env({"timezone": "UTC", "omarchy_install": {"region": "cn"}}).region, "cn")

@@ -63,7 +63,7 @@ def resolve_region(
 ) -> str:
     regions_dir = regions_dir or REGIONS_DIR
     region = omarchy_install.get("region")
-    if region is None or region == "":
+    if region in (None, ""):
         return region_for_timezone(timezone, media_region(preset, regions_dir), regions_dir)
     return _validate(region, regions_dir)
 

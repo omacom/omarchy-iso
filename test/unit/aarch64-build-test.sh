@@ -228,7 +228,6 @@ lookup=$(sed -n '/^if ! installable_files="\$($/,/^fi$/p' "$ROOT/builder/build-i
 lookup=${lookup//\/tmp\/offlinedb/$fixture/offlinedb}
 lookup=${lookup//\/configs\//$ROOT/configs/}
 installable=$(
-  OMARCHY_ARCH=aarch64 OMARCHY_MIRROR=edge
   online_pacman_conf=$ROOT/configs/pacman-online-aarch64-edge.conf
   target_packages=(bundle-only alarm-only)
   eval "$lookup" 2>/dev/null

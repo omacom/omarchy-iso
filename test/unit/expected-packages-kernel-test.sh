@@ -30,7 +30,6 @@ pacman() {
 build_cache_dir=$work/cache
 image_localdb=$work/localdb
 mkdir -p "$build_cache_dir" "$image_localdb/local/base-3-3" "$image_localdb/local/mkinitcpio-40-1"
-image_packages=(base mkinitcpio)
 
 fail=0
 for arch in x86_64 aarch64; do

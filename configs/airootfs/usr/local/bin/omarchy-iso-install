@@ -22,5 +22,21 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# On a hybrid CPU, run the installer and everything it starts on the
+# performance cores (omarchy-installer-cpus says which, and why). Not when
+# something already narrowed where this may run, and only if the move gives it
+# exactly those cores: a cpuset may hold fewer of them. The CPUs it had go on
+# to the one job that must keep them all, the LUKS keyslot enrollment
+# (orchestrator luks_calibration).
+all_cpus=$(taskset -pc $$ 2>/dev/null | sed 's/.*: //') || all_cpus=
+if [[ -n $all_cpus && $all_cpus == "$(cat /sys/devices/system/cpu/online 2>/dev/null)" ]] &&
+  cpus=$(omarchy-installer-cpus) && [[ -n $cpus ]]; then
+  if taskset -pc "$cpus" $$ &>/dev/null && [[ $(taskset -pc $$ | sed 's/.*: //') == "$cpus" ]]; then
+    export OMARCHY_INSTALLER_ALL_CPUS=$all_cpus
+  else
+    taskset -pc "$all_cpus" $$ &>/dev/null || true
+  fi
+fi
+
 cd /usr/share/omarchy-iso
 exec python -m orchestrator.main

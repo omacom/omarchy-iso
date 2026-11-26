@@ -15,8 +15,10 @@
 # Kept whole, and marked opaque so the image's copies stay out of the live
 # system: what makes a file act just by being there. /etc (unit enablement,
 # configuration), /var (the pacman database and the offline mirror), /root,
-# /boot, /usr/local, systemd's and udev's directories and the snippet
-# directories systemd reads at boot. Everywhere else a file goes when the
+# /boot, /usr/local, /usr/lib/firmware and /usr/share/fonts (both trimmed for
+# the live installer, with /var/cache/fontconfig prebuilt for that tree),
+# systemd's and udev's directories and the snippet directories systemd reads
+# at boot. Everywhere else a file goes when the
 # image has the same path with the same type, mode, owner, xattrs and bytes,
 # or the same symlink.
 #
@@ -72,7 +74,7 @@ import filecmp, os, stat, sys
 
 live, image, pseudo = sys.argv[1], sys.argv[2], sys.argv[3]
 KEEP = ("etc", "var", "root", "boot", "usr/local", "usr/lib/systemd", "usr/lib/udev",
-        "usr/lib/firmware", "usr/share/dbus-1", "usr/share/polkit-1",
+        "usr/lib/firmware", "usr/share/fonts", "usr/share/dbus-1", "usr/share/polkit-1",
         "usr/lib/tmpfiles.d", "usr/lib/sysusers.d", "usr/lib/sysctl.d", "usr/lib/modprobe.d",
         "usr/lib/modules-load.d", "usr/lib/binfmt.d", "usr/lib/environment.d", "usr/share/factory")
 

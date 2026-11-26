@@ -98,7 +98,24 @@ find /usr/share/locale -mindepth 1 -maxdepth 1 ! -name 'en*' ! -name locale.alia
 # live root nobody sees.
 if [[ -d /usr/share/fonts/noto-cjk ]]; then
   find /usr/share/fonts/noto-cjk -type f ! -name NotoSansCJK-Regular.ttc -delete
-  fc-cache -f >/dev/null 2>&1 || true
+fi
+
+# Prebuild the live fontconfig cache so kmscon does not index fonts at boot.
+# mkarchiso exports SOURCE_DATE_EPOCH from before pacstrap ran, so font
+# directories created during pacstrap or trimming above are newer than
+# SOURCE_DATE_EPOCH. fc-cache embeds SOURCE_DATE_EPOCH (with tv_nsec=0) in
+# each cache header, and its own clean pass then deletes every cache file
+# whose header mismatches the directory's mtime. Clamping font directory
+# mtimes to whole seconds first keeps the cache valid both now and inside
+# squashfs, which drops nanoseconds.
+if [[ -d /usr/share/fonts ]] && command -v fc-cache >/dev/null 2>&1; then
+  font_epoch=${SOURCE_DATE_EPOCH:-$(date +%s)}
+  find /usr/share/fonts -type d -exec touch -m -d "@$font_epoch" {} +
+  fc-cache -s -f
+  if ! compgen -G '/var/cache/fontconfig/*.cache-*' >/dev/null; then
+    echo "ERROR: fc-cache left no cache files in /var/cache/fontconfig" >&2
+    exit 1
+  fi
 fi
 
 mirror=/var/cache/omarchy/mirror/offline

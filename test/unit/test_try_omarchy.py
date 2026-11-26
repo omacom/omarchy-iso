@@ -243,7 +243,7 @@ class LiveSystemLeavesTheMachineTest(unittest.TestCase):
 class DedupAndBuildIsoTest(unittest.TestCase):
     def test_dedup_keeps_firmware_dbus_polkit_and_creates_missing_keep_dirs(self):
         text = DEDUP.read_text()
-        for rel in ("usr/lib/firmware", "usr/share/dbus-1", "usr/share/polkit-1"):
+        for rel in ("usr/lib/firmware", "usr/share/fonts", "usr/share/dbus-1", "usr/share/polkit-1"):
             self.assertIn(f'"{rel}"', text)
         # Extract and run the embedded Python dedup logic on synthetic trees.
         py_src = re.search(r"python3 - .*?<<'PY'\n(.*?)\nPY", text, re.S).group(1)
@@ -255,6 +255,14 @@ class DedupAndBuildIsoTest(unittest.TestCase):
             # Directory present in image and in KEEP, absent from live -> must become opaque!
             (image / "usr/lib/firmware/iwlwifi").mkdir(parents=True)
             (image / "usr/lib/firmware/iwlwifi/test.ucode").write_bytes(b"fw")
+            # Identical file inside a KEEP directory (usr/share/fonts) must stay in live
+            # and the directory must be opaque so image-only fonts (noto/) stay out.
+            (image / "usr/share/fonts/noto").mkdir(parents=True)
+            (image / "usr/share/fonts/noto/NotoSans.ttf").write_bytes(b"noto")
+            (image / "usr/share/fonts/TTF").mkdir(parents=True)
+            (image / "usr/share/fonts/TTF/JetBrainsMono.ttf").write_bytes(b"jb")
+            (live / "usr/share/fonts/TTF").mkdir(parents=True)
+            (live / "usr/share/fonts/TTF/JetBrainsMono.ttf").write_bytes(b"jb")
             (live / "etc").mkdir(parents=True)
             # Identical file outside KEEP -> must be deduplicated!
             (live / "usr/bin").mkdir(parents=True)
@@ -274,9 +282,22 @@ class DedupAndBuildIsoTest(unittest.TestCase):
             self.assertTrue((live / "usr/bin/diff").exists())
             self.assertTrue((live / "usr/lib/firmware").is_dir())
             pseudo_lines = pseudo.read_text().splitlines()
+            self.assertTrue((live / "usr/share/fonts/TTF/JetBrainsMono.ttf").is_file())
             self.assertIn("/usr/lib/firmware x trusted.overlay.opaque=y", pseudo_lines)
+            self.assertIn("/usr/share/fonts x trusted.overlay.opaque=y", pseudo_lines)
             self.assertIn("/etc x trusted.overlay.opaque=y", pseudo_lines)
             self.assertTrue((live / "etc/omarchy-iso-live-over-image").is_file())
+
+    def test_customize_airootfs_clamps_font_dir_mtimes_before_fc_cache(self):
+        text = (ROOT / "configs/airootfs/root/customize_airootfs.sh").read_text()
+        self.assertIn('font_epoch=${SOURCE_DATE_EPOCH:-$(date +%s)}', text)
+        self.assertIn('find /usr/share/fonts -type d -exec touch -m -d "@$font_epoch" {} +', text)
+        self.assertIn("fc-cache -s -f", text)
+        self.assertNotIn("fc-cache -f >/dev/null 2>&1 || true", text)
+        self.assertIn('/var/cache/fontconfig/*.cache-*', text)
+        # Clamp must run after trimming noto-cjk and before fc-cache.
+        self.assertLess(text.index("NotoSansCJK-Regular.ttc -delete"), text.index("touch -m -d"))
+        self.assertLess(text.index("touch -m -d"), text.index("fc-cache -s -f"))
 
     def test_dedup_creates_missing_loop_node_before_attaching(self):
         text = DEDUP.read_text()

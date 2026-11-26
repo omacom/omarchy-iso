@@ -499,11 +499,15 @@ install_duration() {
 
   if [[ -f $STATE_FILE ]]; then
     duration="$(jq -r '
-      ((.started_at // 0) | tonumber? // 0) as $started
+      ((.duration // -1) | tonumber? // -1) as $dur
+      | ((.started_at // 0) | tonumber? // 0) as $started
       | ((.finished_at // 0) | tonumber? // 0) as $finished
-      | if $started <= 0 or $finished <= 0 or $finished < $started then empty
-        else (($finished - $started) * 100 | round) as $cs
-          | (($finished - $started) | round) as $secs
+      | (if $dur >= 0 then $dur
+         elif $started > 0 and $finished > 0 and $finished >= $started then ($finished - $started)
+         else -1 end) as $elapsed
+      | if $elapsed < 0 then empty
+        else ($elapsed * 100 | round) as $cs
+          | ($elapsed | round) as $secs
           | if $cs < 3000 then "\($cs / 100 | floor).\($cs % 100 | tostring | if length < 2 then "0" + . else . end)s"
             elif $secs < 60 then "\($secs)s"
             elif $secs >= 3600 then "\($secs / 3600 | floor)h \($secs % 3600 / 60 | floor)m \($secs % 60)s"
@@ -566,7 +570,7 @@ render_finish() {
     # Reuse mode restores a saved cursor before moving up over its input. Save
     # this anchor so the effect occupies the reserved wordmark rows.
     printf '%s%d;1H\0337' "$CSI" "$((FINISH_TOP_ROW + LOGO_HEIGHT))" >"$TTY_PATH"
-    # Laseretch runs ~4s at 260fps, so the 8s cap is a stuck-process guard rather
+    # Laseretch runs ~2s at 520fps, so the 8s cap is a stuck-process guard rather
     # than a trim. --xterm-colors keeps the whole effect in the 256-index palette
     # the way the greeter does, since the console reduces indexed codes well and
     # truecolor ones badly. It settles on indexed 2, the Tokyo Night green used
@@ -580,7 +584,7 @@ render_finish() {
     timeout 8s ttfx -i "$LOGO_PATH" \
       --canvas-width "$effect_canvas_width" \
       --anchor-text c \
-      --frame-rate 260 \
+      --frame-rate 520 \
       --reuse-canvas \
       "${colors[@]}" \
       laseretch \
@@ -965,8 +969,8 @@ launch_child
 
 frame=0
 while jobs -pr | grep -qx "$child_pid"; do
-  # Keep package counting/state reads at 2 Hz; animate the trace at 10 Hz.
-  (( frame % 5 == 0 )) && update_progress
+  # Keep state reads at 5 Hz so sub-5s installs track 1:1; animate at 10 Hz.
+  (( frame % 2 == 0 )) && update_progress
   render_dynamic >"$TTY_PATH" 2>/dev/null || true
   frame=$((frame + 1))
   sleep 0.1
@@ -1003,7 +1007,11 @@ if (( status == 0 )); then
   LAST_PM=1000
   PHASE_NAME="Installation complete"
   progress_icon_finish "" "$(t progress.tipLine "$(current_tip)")" >"$TTY_PATH" 2>/dev/null || true
-  sleep 0.4
+  # Direct installs hold the solid 100% icon on screen while release_target and
+  # warm_reboot_path run next; only deferred installs clear and reboot at once.
+  if [[ ${OMARCHY_UI_DEFER_PROVISIONING:-} == "yes" ]]; then
+    sleep 0.15
+  fi
 fi
 
 if (( status != 0 )); then

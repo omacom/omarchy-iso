@@ -24,6 +24,9 @@ class PhaseError(Exception):
 def run(ctx: InstallContext, phases: list[tuple[str, PhaseFn]]) -> None:
     ctx.state_dir.mkdir(parents=True, exist_ok=True)
     state_path = ctx.state_dir / "state.json"
+    # Measure durations on the monotonic clock so a mid-install NTP or timezone
+    # wall-clock step cannot skew phase elapsed times or the reported total.
+    run_mono_start = time.monotonic()
     state = {
         "started_at": time.time(),
         # The dashboard counts packages under <target>/var/lib/pacman/local;
@@ -46,11 +49,11 @@ def run(ctx: InstallContext, phases: list[tuple[str, PhaseFn]]) -> None:
         write_state(state_path, state)
 
         info(f"› {name}")
-        started = time.time()
+        started = time.monotonic()
         try:
             fn(ctx)
         except Exception as exc:  # noqa: BLE001
-            elapsed = time.time() - started
+            elapsed = time.monotonic() - started
             state["phases"].append({
                 "name": name,
                 "status": "failed",
@@ -63,13 +66,15 @@ def run(ctx: InstallContext, phases: list[tuple[str, PhaseFn]]) -> None:
             traceback.print_exc()
             raise PhaseError(f"phase {name} failed: {exc}") from exc
 
-        elapsed = time.time() - started
+        elapsed = time.monotonic() - started
         state["phases"].append({"name": name, "status": "ok", "elapsed": elapsed})
         write_state(state_path, state)
 
+    duration = time.monotonic() - run_mono_start
     state["current_index"] = max(len(phases) - 1, 0)
     state["current_phase"] = "Installation complete"
-    state["finished_at"] = time.time()
+    state["duration"] = duration
+    state["finished_at"] = state["started_at"] + duration
     # Expected vs actual for the bar's denominator, so drift is visible in
     # acceptance runs rather than only by watching a bar creep.
     state["installed_packages"] = _installed_package_count(ctx.target)

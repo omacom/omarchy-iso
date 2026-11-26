@@ -47,6 +47,10 @@ class TrimTargetTest(unittest.TestCase):
         _, lines = self.trim(side_effect=subprocess.TimeoutExpired(["fstrim"], phases_impl.TRIM_BUDGET))
         self.assertIn(f"still running after {phases_impl.TRIM_BUDGET}s", lines[-1])
 
+    def test_an_interrupted_trim_leaves_the_finished_install_alone(self):
+        _, lines = self.trim(side_effect=KeyboardInterrupt)
+        self.assertIn("was interrupted", lines[-1])
+
     def test_a_missing_fstrim_does_not_raise(self):
         _, lines = self.trim(side_effect=FileNotFoundError("fstrim"))
         self.assertIn("could not run fstrim", lines[-1])

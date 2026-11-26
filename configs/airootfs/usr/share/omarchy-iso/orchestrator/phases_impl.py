@@ -5328,9 +5328,11 @@ def trim_target(ctx: InstallContext) -> None:
     dashboard releases it before the finish screen). It runs in the
     installer's process group, so cancelling the install stops it too.
 
-    Best effort: it never fails the install. A failed or unsupported trim is
-    logged, and a slow one is stopped after TRIM_BUDGET seconds; btrfs checks
-    for a fatal signal between the ranges it discards."""
+    Best effort: it never fails the install, which is complete by now. A
+    failed, unsupported or interrupted trim is logged. A slow one is killed
+    after TRIM_BUDGET seconds: btrfs sends at most 1 GiB per discard request
+    (BTRFS_MAX_DISCARD_CHUNK_SIZE) and checks for a fatal signal after each,
+    so it stops within one request."""
     target = str(ctx.target)
     started = time.monotonic()
     try:
@@ -5342,6 +5344,10 @@ def trim_target(ctx: InstallContext) -> None:
         return
     except OSError as exc:
         info(f"› trim: WARNING: could not run fstrim on {target} ({exc}); continuing without it")
+        return
+    except KeyboardInterrupt:
+        # subprocess.run has killed fstrim and waited for it.
+        info(f"› trim: WARNING: fstrim {target} was interrupted; the install itself is complete")
         return
     elapsed = time.monotonic() - started
     output = " ".join((result.stdout + result.stderr).split())

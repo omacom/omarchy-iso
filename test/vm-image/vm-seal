@@ -82,7 +82,9 @@ fi
 root "cat /boot/EFI/Linux/$uki" >"$state/uki.efi"
 ssh_vm 'cat /proc/cmdline' >"$state/cmdline"
 
-root '
+# A quoted here-document, not a single-quoted string: an apostrophe in a
+# comment ended that string, and this host ran the rest of the script itself.
+root "$(cat <<'GUEST'
   # The ISO writes autologin only for encrypted installs; a test has nobody at
   # SDDM, and a desktop check that skips for want of a session reads as a pass.
   printf "[Autologin]\nUser=omarchy\nSession=omarchy.desktop\n" >/etc/sddm.conf.d/autologin.conf
@@ -150,7 +152,9 @@ root '
   sync
   # Hand freed blocks back to the disk image, so the copy skips them.
   fstrim -av >/dev/null
-  (sleep 1; systemctl poweroff) >/dev/null 2>&1 &'
+  (sleep 1; systemctl poweroff) >/dev/null 2>&1 &
+GUEST
+)"
 
 # The key that let us in is gone, so the poweroff above was the last word.
 pid=$(cat "$state/qemu.pid")

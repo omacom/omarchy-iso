@@ -56,6 +56,14 @@ class EncryptedCmdlineTest(unittest.TestCase):
         once = self.luks_tuning.with_cmdline_options(ENCRYPTED)
         self.assertEqual(self.luks_tuning.with_cmdline_options(once), once)
 
+    def test_idempotent_call_does_not_reinvoke_blkid(self):
+        partuuid_cmdline = "cryptdevice=PARTUUID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:root root=/dev/mapper/root rw"
+        with mock.patch.object(self.luks_tuning, "_luks_uuid_of", return_value=UUID) as lookup:
+            once = self.luks_tuning.with_cmdline_options(partuuid_cmdline)
+            twice = self.luks_tuning.with_cmdline_options(once)
+        self.assertEqual(twice, once)
+        lookup.assert_called_once_with("PARTUUID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+
     def test_an_unencrypted_cmdline_is_left_alone(self):
         plain = "root=UUID=abc rw quiet"
         self.assertEqual(self.luks_tuning.with_cmdline_options(plain), plain)

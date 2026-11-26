@@ -64,3 +64,41 @@ truncate -s 257M "$work/n1x-big.efi"
 n1x_prebuilt_uki_size_ok "$work/n1x.efi" >/dev/null 2>&1 || fail "a 190 MiB N1x UKI is refused"
 if n1x_prebuilt_uki_size_ok "$work/n1x-big.efi" >/dev/null 2>&1; then fail "a 257 MiB N1x UKI is accepted"; fi
 echo "ok - the N1x UKI has a ceiling of its own"
+
+# Snapdragon ISOs install only Snapdragon laptops, which always build their own
+# UKI with board firmware and device trees; skip the unused generic UKI so it
+# does not bloat the root image, while ordinary builds still invoke mkinitcpio.
+uki_branch=$(awk '
+  !in_block && /^  if \[\[ -n \$\{OMARCHY_SNAPDRAGON:-\} \]\]; then$/ { in_block = 1 }
+  in_block { print; if (/^  fi$/) exit }
+' "$builder")
+[[ -n $uki_branch ]] || fail "could not extract the OMARCHY_SNAPDRAGON pre-built UKI branch"
+
+run_uki_branch() {
+  local snapdragon=$1 root="$work/root-${snapdragon:-ordinary}" log="$work/chroot-${snapdragon:-ordinary}.log"
+  mkdir -p "$root/var/lib/omarchy-iso"
+  printf 'stale' >"$root/var/lib/omarchy-iso/prebuilt-uki.efi"
+  rm -f "$log"
+  (
+    image_kver="7.3.6-2-omarchy"
+    OMARCHY_SNAPDRAGON=$snapdragon
+    arch-chroot() {
+      printf '%s\n' "$*" >>"$log"
+      printf 'built-uki' >"$1/var/lib/omarchy-iso/prebuilt-uki.efi"
+    }
+    eval "$uki_branch"
+  ) >/dev/null
+}
+
+run_uki_branch 1
+[[ ! -e $work/chroot-1.log ]] || fail "Snapdragon build must not invoke arch-chroot/mkinitcpio: $(cat "$work/chroot-1.log")"
+[[ ! -e $work/root-1/var/lib/omarchy-iso/prebuilt-uki.efi ]] || fail "Snapdragon build must remove stale prebuilt-uki.efi"
+
+run_uki_branch ""
+[[ -f $work/chroot-ordinary.log ]] || fail "ordinary build must invoke arch-chroot/mkinitcpio"
+grep -Fq "mkinitcpio" "$work/chroot-ordinary.log" || fail "ordinary build did not invoke mkinitcpio: $(cat "$work/chroot-ordinary.log")"
+grep -Fq -- "-U /var/lib/omarchy-iso/prebuilt-uki.efi" "$work/chroot-ordinary.log" ||
+  fail "ordinary build did not target prebuilt-uki.efi: $(cat "$work/chroot-ordinary.log")"
+[[ $(cat "$work/root-ordinary/var/lib/omarchy-iso/prebuilt-uki.efi") == "built-uki" ]] ||
+  fail "ordinary build did not write prebuilt-uki.efi"
+echo "ok - Snapdragon builds remove stale generic UKI without calling mkinitcpio, ordinary builds still build it"

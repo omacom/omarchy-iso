@@ -783,25 +783,33 @@ CONF
   printf '%s%s\n' "$prebuilt_cmdline" "$(printf '%*s' $((1800 - ${#prebuilt_cmdline})) '' | tr ' ' 0)" \
     >"$root/etc/kernel/cmdline.prebuilt-uki"
 
-  echo "Pre-building the UKI in the image (kver=$image_kver, generic cmdline, systemd and sd-encrypt hooks, no autodetect)"
-  # mkinitcpio is called directly: the preset flow (-P) runs Limine's install
-  # hooks, which fail without a mounted ESP.
-  if arch-chroot "$root" mkinitcpio \
-       -k "/usr/lib/modules/${image_kver}/vmlinuz" \
-       -c /etc/mkinitcpio-prebuilt-uki.conf \
-       --cmdline /etc/kernel/cmdline.prebuilt-uki \
-       -U /var/lib/omarchy-iso/prebuilt-uki.efi \
-       -S autodetect 2>&1 | tail -25 ; then
-    if [[ -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
-      echo "Pre-built UKI: $(du -h "$root/var/lib/omarchy-iso/prebuilt-uki.efi" | cut -f1)"
-      prebuilt_uki_size_ok "$root/var/lib/omarchy-iso/prebuilt-uki.efi" || exit 1
-    else
-      echo "WARNING: mkinitcpio ran but left no UKI; the installer will build one"
-    fi
-  else
-    echo "WARNING: mkinitcpio failed; the installer will build the UKI"
-    # Clean up any partial output that would upset btrfs shrink downstream.
+  if [[ -n ${OMARCHY_SNAPDRAGON:-} ]]; then
+    # A Snapdragon ISO installs only Snapdragon laptops, whose platform builds
+    # its own UKI with board firmware and device trees, so shipping the generic
+    # ~116 MiB pre-built UKI only bloats the root image and slows image writes.
     rm -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi"
+    echo "Skipping generic pre-built UKI on Snapdragon image (platform builds its own)"
+  else
+    echo "Pre-building the UKI in the image (kver=$image_kver, generic cmdline, systemd and sd-encrypt hooks, no autodetect)"
+    # mkinitcpio is called directly: the preset flow (-P) runs Limine's install
+    # hooks, which fail without a mounted ESP.
+    if arch-chroot "$root" mkinitcpio \
+         -k "/usr/lib/modules/${image_kver}/vmlinuz" \
+         -c /etc/mkinitcpio-prebuilt-uki.conf \
+         --cmdline /etc/kernel/cmdline.prebuilt-uki \
+         -U /var/lib/omarchy-iso/prebuilt-uki.efi \
+         -S autodetect 2>&1 | tail -25 ; then
+      if [[ -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
+        echo "Pre-built UKI: $(du -h "$root/var/lib/omarchy-iso/prebuilt-uki.efi" | cut -f1)"
+        prebuilt_uki_size_ok "$root/var/lib/omarchy-iso/prebuilt-uki.efi" || exit 1
+      else
+        echo "WARNING: mkinitcpio ran but left no UKI; the installer will build one"
+      fi
+    else
+      echo "WARNING: mkinitcpio failed; the installer will build the UKI"
+      # Clean up any partial output that would upset btrfs shrink downstream.
+      rm -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi"
+    fi
   fi
   # N1x: a second pre-built UKI. Its hardware setup always adds the same
   # early-loading modules, the NVIDIA stack for early KMS and the I2C keyboard

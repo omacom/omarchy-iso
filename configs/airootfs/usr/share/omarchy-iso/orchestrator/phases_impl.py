@@ -2308,6 +2308,9 @@ def _register_limine_efi_entry(
             reason = f"efibootmgr --create exited {created.returncode}"
             _warn_boot_entry_refused(f"{reason}: {detail}" if detail else reason, label)
             return
+        if created.stdout:
+            sys.stdout.write(created.stdout)
+            sys.stdout.flush()
         if detail:
             error(f"efibootmgr: {detail}")
 
@@ -2317,7 +2320,14 @@ def _register_limine_efi_entry(
         # The first such entry may be another install's, so one that starts
         # this loader on this ESP comes first; a listing without device paths
         # keeps list order.
-        post_state = _read_efibootmgr()
+        # efibootmgr --create --verbose reads NVRAM back and prints the updated
+        # listing itself; parse it directly when complete to avoid a redundant
+        # EFI variable read pass, falling back to _read_efibootmgr() otherwise.
+        parsed_created = _parse_efibootmgr(created.stdout or "")
+        if parsed_created["entries"] and parsed_created["order"]:
+            post_state = parsed_created
+        else:
+            post_state = _read_efibootmgr()
         if post_state.get("unreadable"):
             _warn_boot_entry_refused(
                 "efibootmgr --create exited 0 but the boot entries cannot be read back "
@@ -2401,22 +2411,16 @@ def _register_limine_efi_entry(
 
 
 def _create_limine_efi_entry(disk: Path, part: int, loader: str, label: str = "Limine") -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [
-            "efibootmgr",
-            "--create",
-            "--disk", str(disk),
-            "--part", str(part),
-            "--label", label,
-            "--loader", loader,
-            "--unicode",
-            "--verbose",
-        ],
-        check=False,
-        stderr=subprocess.PIPE,
-        text=True,
-        errors="replace",
-    )
+    return capture([
+        "efibootmgr",
+        "--create",
+        "--disk", str(disk),
+        "--part", str(part),
+        "--label", label,
+        "--loader", loader,
+        "--unicode",
+        "--verbose",
+    ])
 
 
 def _warn_boot_entry_refused(reason: str, label: str = "Limine") -> None:
@@ -2950,6 +2954,24 @@ _BOOT_ENTRY_RE = re.compile(r"^Boot([0-9A-Fa-f]{4})(\*?)\s+(.*)$")
 _BOOT_ORDER_RE = re.compile(r"^BootOrder:\s*(.*)$")
 
 
+def _parse_efibootmgr(raw: str) -> dict:
+    entries: dict[str, str] = {}
+    inactive: set[str] = set()
+    order: list[str] = []
+    for line in raw.splitlines():
+        m = _BOOT_ENTRY_RE.match(line)
+        if m:
+            num = m.group(1).upper()
+            entries[num] = m.group(3).strip()
+            if not m.group(2):
+                inactive.add(num)
+            continue
+        m = _BOOT_ORDER_RE.match(line)
+        if m:
+            order = [n.strip().upper() for n in m.group(1).split(",") if n.strip()]
+    return {"entries": entries, "inactive": inactive, "order": order, "raw": raw}
+
+
 def _read_efibootmgr() -> dict:
     """The boot entries and BootOrder, as `efibootmgr --verbose` lists them,
     and under "inactive" the entries listed without the "*" that marks
@@ -2963,24 +2985,10 @@ def _read_efibootmgr() -> dict:
     the phase dying before the removable loader is written.
     """
     res = capture(["efibootmgr", "--verbose"])
-    entries: dict[str, str] = {}
-    inactive: set[str] = set()
-    order: list[str] = []
     if res.returncode != 0:
         reason = (res.stderr or "").strip() or f"efibootmgr exited {res.returncode}"
-        return {"entries": entries, "inactive": inactive, "order": order, "raw": res.stdout, "unreadable": reason}
-    for line in res.stdout.splitlines():
-        m = _BOOT_ENTRY_RE.match(line)
-        if m:
-            num = m.group(1).upper()
-            entries[num] = m.group(3).strip()
-            if not m.group(2):
-                inactive.add(num)
-            continue
-        m = _BOOT_ORDER_RE.match(line)
-        if m:
-            order = [n.strip().upper() for n in m.group(1).split(",") if n.strip()]
-    return {"entries": entries, "inactive": inactive, "order": order, "raw": res.stdout}
+        return {"entries": {}, "inactive": set(), "order": [], "raw": res.stdout, "unreadable": reason}
+    return _parse_efibootmgr(res.stdout)
 
 
 def _find_label_entries(entries: dict[str, str], needle: str) -> list[str]:

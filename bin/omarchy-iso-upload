@@ -15,16 +15,38 @@ fi
 # hidden by a checksum that did.
 status=0
 
-rclone copy "$1" Omarchy:omarchy/ -P || status=1
+# One file of the release directory goes up at a time. rclone applies
+# --immutable only to a directory source: given a single file as the source,
+# it replaces the object (rclone 1.75.2).
+put() { # file, flags...
+  local file=$1
+  shift
+  rclone copy "$(dirname -- "$file")" Omarchy:omarchy/ -P --files-from <(basename -- "$file") --no-traverse "$@"
+}
+
+# A published ISO is written once. iso.omarchy.org keeps an ISO at the edge
+# for a year, while its .sha256 is not cached, so other bytes under the same
+# name would reach users beside a checksum and signature that no longer match
+# them. --immutable refuses those bytes; --checksum lets a re-run of the same
+# ISO through as a no-op.
+if ! put "$1" --checksum --immutable; then
+  echo "Refused: iso.omarchy.org already has ${1##*/} with other bytes, or the upload failed." >&2
+  echo "A published ISO never changes. Release a re-spin under a new name." >&2
+  exit 1
+fi
 
 # The signature and the checksum are only worth anything to someone who can
 # reach them beside the ISO, so they go up in the same run rather than a step
-# a release can finish without.
-for sidecar in "$1.sig" "$1.sha256"; do
-  if [[ -f $sidecar ]]; then
-    rclone copy "$sidecar" Omarchy:omarchy/ -P || status=1
-  fi
-done
+# a release can finish without. The checksum is written once like the ISO. A
+# signature made again for the same ISO has other bytes but is just as valid,
+# so the first one published stays: the step above guarantees it signs these
+# bytes.
+if [[ -f $1.sha256 ]]; then
+  put "$1.sha256" --checksum --immutable || status=1
+fi
+if [[ -f $1.sig ]]; then
+  put "$1.sig" --ignore-existing || status=1
+fi
 
 if [[ ! -f $1.sha256 ]]; then
   echo "Warning: no $1.sha256 to publish, so nobody can verify this download" >&2

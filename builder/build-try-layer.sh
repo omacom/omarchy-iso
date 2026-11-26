@@ -246,6 +246,22 @@ WantedBy=sysinit.target
 EOF
 in_try systemctl enable omarchy-try-reprobe.service >/dev/null
 
+# What this session is, said once when the desktop first shows.
+install -Dm755 "$scripts/omarchy-try-welcome" "$merged/usr/local/lib/omarchy-try/omarchy-try-welcome"
+install -Dm644 /dev/stdin "$merged/etc/systemd/user/omarchy-try-welcome.service" <<'EOF'
+[Unit]
+Description=Try Omarchy: say what this session is
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/omarchy-try/omarchy-try-welcome
+
+[Install]
+WantedBy=graphical-session.target
+EOF
+in_try systemctl --global enable omarchy-try-welcome.service >/dev/null
+
 # No hardware watchdog for a reboot from Try. systemd arms it for the reboot
 # (RebootWatchdogSec, 10 minutes by default) and systemd-shutdown closes it
 # without stopping it, on purpose, so the kernel prints "watchdog did not

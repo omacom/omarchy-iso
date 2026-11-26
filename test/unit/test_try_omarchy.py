@@ -185,6 +185,13 @@ class BuildTryLayerTest(unittest.TestCase):
         self.assertIsNotNone(m)
         self.assertEqual(m.group(1).split(), ["[Manager]", "RebootWatchdogSec=0"])
 
+    def test_says_once_what_the_session_is(self):
+        welcome = (ROOT / "builder/try-layer/omarchy-try-welcome").read_text()
+        # The glyph is its own argument; without one, -g takes the title.
+        self.assertRegex(welcome, r"omarchy-notification-send -u critical -g \$'\\u[0-9a-f]{4}' \"Try Omarchy!\"")
+        self.assertIn('"Install apps, change themes, anything. When you\'re sold, reboot and pick install instead."', welcome)
+        self.assertIn("in_try systemctl --global enable omarchy-try-welcome.service", self.text)
+
     def test_sets_utf8_locale_and_browser_policies(self):
         self.assertIn("LANG=en_US.UTF-8", self.text)
         self.assertIn("browser-policy.sh", self.text)

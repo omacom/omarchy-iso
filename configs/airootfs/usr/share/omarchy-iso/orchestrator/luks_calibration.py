@@ -13,6 +13,8 @@ import threading
 import time
 
 STATE = Path("/run/omarchy-luks-calibration/result.json")
+# The live system's other boot-time job (phases_impl EARLY_KEYRING_UNIT).
+EARLY_KEYRING_UNIT = "omarchy-target-keyring-early.service"
 UNIT = "omarchy-luks-calibrate.service"
 ITER_TIME = 2000
 KEY_SIZE = 512
@@ -117,6 +119,15 @@ def stop_calibration(wait: float = 20) -> None:
         pass  # a poll that fails ends the wait, not the stop
     try:
         subprocess.run(["systemctl", "stop", UNIT], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    # The keyring the live system makes for the target is gpg on one core, and
+    # must not run beside the format's PBKDF either. One that is finished
+    # stays. One still at work is given up, and the install makes the keyring
+    # itself, as it did before that unit existed.
+    try:
+        subprocess.run(["systemctl", "stop", EARLY_KEYRING_UNIT], check=False,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         pass

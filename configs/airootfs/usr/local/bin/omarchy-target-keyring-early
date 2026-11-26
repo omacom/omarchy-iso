@@ -1,0 +1,52 @@
+#!/bin/bash
+#
+# Make the installed system's pacman keyring in /run/omarchy-target-keyring
+# before the install starts (omarchy-target-keyring-early.service). The same
+# two pacman-key commands the installer runs when it has to make the keyring
+# itself (orchestrator _start_target_keyring_init), from the live ISO's
+# keyring packages, which are the root image's.
+#
+# "complete" is written last and holds a time: the installer takes the
+# keyring only with it, and only if the clock is not behind that time, which
+# would date the new master key in the future.
+
+set -euo pipefail
+
+dir=${OMARCHY_TARGET_KEYRING_DIR:-/run/omarchy-target-keyring}
+keyrings=${OMARCHY_KEYRINGS_DIR:-/usr/share/pacman/keyrings}
+calibration=${OMARCHY_LUKS_CALIBRATION_RESULT:-/run/omarchy-luks-calibration/result.json}
+names=(archlinux omarchy)
+# Arch Linux ARM signs its packages with keys only archlinuxarm-keyring has.
+[[ $(uname -m) != aarch64 ]] || names+=(archlinuxarm)
+
+# Not beside the LUKS calibration, and not when it left no result: the wizard
+# then stopped it to calibrate at the format, which this must not share the
+# CPUs with either. The installer makes the keyring itself in that case.
+while systemctl is-active --quiet omarchy-luks-calibrate.service; do
+  sleep 0.5
+done
+[[ -e $calibration ]] || exit 0
+
+# Without the keyring packages the installer makes the keyring from the
+# target's own once the image is on the disk.
+for name in "${names[@]}"; do
+  [[ -f $keyrings/$name.gpg ]] || exit 0
+done
+
+uptime_s() { cut -d. -f1 /proc/uptime; }
+
+rm -rf "$dir/complete" "$dir/complete.new" "$dir/gnupg"
+install -d -m 700 "$dir" "$dir/gnupg"
+began=$(date +%s)
+began_up=$(uptime_s)
+pacman-key --gpgdir "$dir/gnupg" --init
+pacman-key --gpgdir "$dir/gnupg" --populate-from "$keyrings" --populate "${names[@]}"
+
+# The latest time anything in the keyring can be dated: the clock now, or the
+# clock at the start plus the time this took if the clock was set back
+# meanwhile. Written beside the marker and renamed, so it is never read empty.
+latest=$((began + $(uptime_s) - began_up + 1))
+now=$(date +%s)
+((now <= latest)) || latest=$now
+echo "$latest" >"$dir/complete.new"
+mv "$dir/complete.new" "$dir/complete"

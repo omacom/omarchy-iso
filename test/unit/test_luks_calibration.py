@@ -150,6 +150,8 @@ class Calibration(unittest.TestCase):
         for failure in (OSError(), subprocess.TimeoutExpired('systemctl', 5)):
             calls = []
             def run(command, **_kwargs):
+                if command[-1] == luks.EARLY_KEYRING_UNIT:
+                    return types.SimpleNamespace(stdout='')
                 calls.append(command[1])
                 if command[1] == 'show':
                     raise failure
@@ -163,6 +165,8 @@ class Calibration(unittest.TestCase):
         turn (the last one from then on), on a clock that only sleep moves."""
         calls, clock = [], [0.0]
         def run(command, **_kwargs):
+            if command[-1] == luks.EARLY_KEYRING_UNIT:
+                return types.SimpleNamespace(stdout='')
             calls.append(command[1])
             state = states[min(calls.count('show') - 1, len(states) - 1)] if command[1] == 'show' else ''
             return types.SimpleNamespace(stdout=state)

@@ -100,4 +100,16 @@ reads=$(warm_reads finished)
 [[ -z $reads ]] \
   || fail "4 GiB machine warmed an image larger than its budget: $(paste -sd, <<<"$reads")"
 
+
+# Current ISOs ship omarchy-root.img.zst plus hardware layers next to it.
+rm -f "$fixture/medium/arch/$(uname -m)/omarchy-root.sfs"
+head -c 65536 /dev/zero >"$fixture/medium/arch/$(uname -m)/omarchy-root.img.zst"
+head -c 65536 /dev/zero >"$fixture/medium/arch/$(uname -m)/omarchy-layer.intel-ptl-ipu7.tar.zst"
+echo "MemAvailable:    8388608 kB" >"$fixture/meminfo"
+reads=$(warm_reads finished)
+[[ $reads == $'finished omarchy-root.img.zst
+finished omarchy-layer.intel-ptl-ipu7.tar.zst
+finished linux-firmware-1-1-any.pkg.tar.zst' ]] \
+  || fail "the warm-up did not read omarchy-root.img.zst and hardware layers: $(paste -sd, <<<"$reads")"
+
 echo "warm offline mirror tests passed"

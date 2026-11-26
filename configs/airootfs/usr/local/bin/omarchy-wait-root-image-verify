@@ -27,6 +27,9 @@ BOOT_MEDIUM_MOUNT=/run/archiso/bootmnt
 # archiso names the directory after the architecture, as uname -m does.
 IMAGE="$BOOT_MEDIUM_MOUNT/arch/$(uname -m)/omarchy-root.img.zst"
 CHECKSUM="$IMAGE.sha256"
+# A platform layer beside the image (the N1x's) is in the same sums file, read
+# right after the image, in this glob's order.
+LAYER_GLOB="${IMAGE%/*}/omarchy-layer.*.tar.zst"
 
 fail() { echo "$1" >&2; exit 1; }
 
@@ -49,7 +52,7 @@ unit_prop() {
 }
 
 # Where the unit's hasher is: the file it has open on the medium (the image,
-# or a mirror package) and its byte offset in it, from the fdinfo of the
+# a platform layer, or a mirror package) and its byte offset in it, from the fdinfo of the
 # unit's MainPID (sha256sum while it runs; the same source the orchestrator
 # mirrors into the dashboard). Fails silently between opens or once the unit
 # is done; callers just skip that sample.
@@ -59,24 +62,31 @@ hash_where() {
   [[ $pid =~ ^[0-9]+$ && $pid -gt 0 ]] || return 1
   for fd in /proc/"$pid"/fd/*; do
     path=$(readlink "$fd" 2>/dev/null) || continue
-    [[ $path == "$IMAGE" || $path == "$MIRROR_DIR"/* ]] || continue
+    # shellcheck disable=SC2053 # LAYER_GLOB is a pattern on purpose
+    [[ $path == "$IMAGE" || $path == $LAYER_GLOB || $path == "$MIRROR_DIR"/* ]] || continue
     pos=$(awk '/^pos:/ {print $2; exit}' "/proc/$pid/fdinfo/${fd##*/}" 2>/dev/null)
     [[ -n $pos ]] && { printf '%s\t%s\n' "$path" "$pos"; return 0; }
   done
   return 1
 }
 
-# How far the hasher is, as an integer percent: of the image's bytes, or for
-# the mirror (one package after another, in the sums file's order) the place
+# How far the hasher is, as an integer percent: of the bytes of the image and
+# the layers after it, or for the mirror (one package after another, in the sums file's order) the place
 # of the package it has open in that list.
 hash_pct() {
-  local where path pos size line total
+  local where path pos size line total file done=0
   where=$(hash_where) || return 1
   path=${where%$'\t'*} pos=${where##*$'\t'}
-  if [[ $path == "$IMAGE" ]]; then
-    size=$(stat -c %s "$IMAGE" 2>/dev/null) || return 1
-    ((size > 0)) || return 1
-    echo $((pos * 100 / size))
+  if [[ $path != "$MIRROR_DIR"/* ]]; then
+    total=0
+    for file in "$IMAGE" $LAYER_GLOB; do
+      [[ -f $file ]] || continue
+      size=$(stat -c %s "$file" 2>/dev/null) || return 1
+      [[ $file == "$path" ]] && done=$((total + pos))
+      total=$((total + size))
+    done
+    ((total > 0)) || return 1
+    echo $((done * 100 / total))
     return 0
   fi
   total=$(grep -c . "$MIRROR_SUMS" 2>/dev/null) || return 1

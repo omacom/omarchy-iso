@@ -122,7 +122,7 @@ class KernelSelectionTest(unittest.TestCase):
                     # unjoined (ResourceWarning: subprocess is still running).
                     for name in ("_mount_offline_package_cache", "_mask_mkinitcpio_pacman_hooks",
                                  "_configure_limine_boot", "_write_pre_mounted_fstab", "_install_root_image",
-                                 "_start_target_keyring_init"):
+                                 "_start_target_keyring_init", "_start_library_warmup"):
                         stack.enter_context(mock.patch.object(phases_impl, name))
                     unmask = stack.enter_context(mock.patch.object(phases_impl, "_unmask_mkinitcpio_pacman_hooks"))
                     unmount = stack.enter_context(mock.patch.object(phases_impl, "_unmount_offline_package_cache"))
@@ -137,8 +137,8 @@ class KernelSelectionTest(unittest.TestCase):
                         phases_impl.arch, "install_base_delta", create=True,
                         side_effect=lambda *args, **kwargs: events.append("base")))
                     stack.enter_context(mock.patch.object(
-                        phases_impl.arch, "target_has_package", create=True,
-                        side_effect=lambda target, name: name in in_image))
+                        phases_impl.arch, "target_missing_packages", create=True,
+                        side_effect=lambda target, names: [n for n in names if n not in in_image]))
                     stack.enter_context(mock.patch.object(phases_impl.arch, "sanity_check", create=True))
                     opened = stack.enter_context(mock.patch.object(phases_impl.arch, "open_installer", create=True))
                     opened.return_value.__enter__.return_value = installer

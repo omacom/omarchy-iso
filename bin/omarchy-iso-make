@@ -7,8 +7,14 @@ KEEP_PKG_CACHE=""
 LOCAL_OMARCHY_PATH=""
 LOCAL_PKGS_PATH=""
 OMARCHY_ARCH="${OMARCHY_ARCH:-x86_64}"
+SNAPDRAGON=""
 N1X_DEV_SSH_KEY=""
 PACKAGE_DIR=""
+OEM_CONFIG=""
+OEM_SCRIPTS=()
+OEM_BUNDLE_DIR=""
+REHEARSAL=""
+PRESET=""
 while [[ $# -gt 0 ]]; do
   case $1 in
   --arch)
@@ -21,6 +27,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     esac
     shift 2
+    ;;
+  --snapdragon)
+    # The aarch64 image for Snapdragon laptops: the plain one plus their live
+    # UKI, Qualcomm firmware and every OEM's firmware package. Only this image
+    # carries them, so the plain aarch64 one stays lean for NVIDIA and Pi.
+    SNAPDRAGON=1
+    OMARCHY_ARCH=aarch64
+    shift
     ;;
   --dev-ssh)
     # DEV ONLY: bakes the given public key into an N1x image for key-only root
@@ -43,6 +57,42 @@ while [[ $# -gt 0 ]]; do
     fi
     shift 2
     ;;
+  --oem)
+    OMARCHY_OEM_INSTALL=1
+    shift
+    ;;
+  --preset)
+    # presets/<code>.json answers the installer's language, keyboard and
+    # timezone questions ahead of time, so it does not ask them, and can name
+    # the Omarchy region whose mirrors the installed system downloads from.
+    PRESET="${2:-}"
+    if [[ -z $PRESET ]]; then
+      echo "Error: --preset requires a preset code" >&2
+      exit 1
+    fi
+    shift 2
+    ;;
+  --oem-config)
+    # What first-boot setup shows the owner of a machine this OEM ISO
+    # installs: the OEM's name, logo, tagline and colour, and an agreement to
+    # accept. builder/oem-bundle.py describes the file and checks it.
+    OEM_CONFIG="${2:-}"
+    if [[ -z $OEM_CONFIG ]]; then
+      echo "Error: --oem-config requires a JSON file" >&2
+      exit 1
+    fi
+    shift 2
+    ;;
+  --oem-script)
+    # A bash script the install runs as root in the new system. Repeat it to
+    # run several, in the order given.
+    if [[ -z ${2:-} ]]; then
+      echo "Error: --oem-script requires a script" >&2
+      exit 1
+    fi
+    OEM_SCRIPTS+=("$2")
+    shift 2
+    ;;
   --no-cache)
     NO_CACHE=1
     shift
@@ -57,6 +107,12 @@ while [[ $# -gt 0 ]]; do
     ;;
   --debug)
     OMARCHY_INSTALL_DEBUG=1
+    shift
+    ;;
+  --fast)
+    # DEV/TEST ONLY: trade ISO size for build speed with minimal zstd
+    # compression in the root image, squashfs, and N1x layer.
+    OMARCHY_FAST_COMPRESSION=1
     shift
     ;;
   --edge)
@@ -90,20 +146,78 @@ while [[ $# -gt 0 ]]; do
     OMARCHY_MIRROR=rc
     shift
     ;;
+  # The release rehearsal: --local-source holds omarchy-pkgs with omarchy and
+  # omarchy-settings pinned the way a release is (test/rehearsal-pins). Those
+  # two are built from it, under their release names, and omarchy-boot-systemd
+  # with them where it is there; omarchy-nvim and every other package come
+  # from edge as published. The ISO ends in -rehearsal.
+  --rehearsal)
+    REHEARSAL=1
+    shift
+    ;;
   *)
     echo "Unknown option: $1"
-    echo "Usage: $0 [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout>]"
-    echo "       $0 --arch aarch64 [--edge|--rc] [--package-dir DIR] [--dev-ssh <pubkey>] [--local-source <omarchy-checkout> <pkgs-checkout>] [...]"
+    echo "Usage: $0 [--oem [--oem-config FILE] [--oem-script FILE]...] [--preset CODE] [--no-cache] [--keep-pkg-cache] [--no-boot-offer] [--debug] [--fast] [--edge] [--dev|--rc] [--local-source <omarchy-checkout> <pkgs-checkout> [--rehearsal]]"
+    echo "       $0 --arch aarch64|--snapdragon [--fast] [--edge|--rc] [--package-dir DIR] [--dev-ssh <pubkey>] [--local-source <omarchy-checkout> <pkgs-checkout>] [...]"
     exit 1
     ;;
   esac
 done
+
+if [[ -n $SNAPDRAGON && $OMARCHY_ARCH != aarch64 ]]; then
+  echo "Error: --snapdragon builds an aarch64 image" >&2
+  exit 1
+fi
+
+if [[ -n $REHEARSAL ]]; then
+  [[ -n $LOCAL_OMARCHY_PATH ]] || { echo "Error: --rehearsal builds from --local-source, which is missing" >&2; exit 1; }
+  # Whatever other channel option came before or after: a feature release
+  # promotes edge, so the rehearsal takes everything else from edge.
+  OMARCHY_ISO_REF=rehearsal
+  OMARCHY_MIRROR=edge
+  # omarchy-boot-systemd is released in lockstep with them, where the pkgs
+  # checkout has it.
+  rehearsal_packages="omarchy-settings omarchy"
+  [[ ! -d $LOCAL_PKGS_PATH/pkgbuilds/omarchy-boot-systemd ]] || rehearsal_packages+=" omarchy-boot-systemd"
+  : "${OMARCHY_LOCAL_PACKAGES:=$rehearsal_packages}"
+fi
 
 if [[ -n $LOCAL_OMARCHY_PATH ]]; then
   [[ -d $LOCAL_OMARCHY_PATH ]] || { echo "Error: Omarchy checkout not found at $LOCAL_OMARCHY_PATH" >&2; exit 1; }
   [[ -d $LOCAL_PKGS_PATH ]]    || { echo "Error: pkgs checkout not found at $LOCAL_PKGS_PATH" >&2; exit 1; }
   LOCAL_OMARCHY_PATH=$(realpath "$LOCAL_OMARCHY_PATH")
   LOCAL_PKGS_PATH=$(realpath "$LOCAL_PKGS_PATH")
+fi
+
+# A preset answers what the installer would ask: language, keyboard (a label
+# of the setup form's list) and timezone, plus region (an Omarchy region
+# profile, written to the target's /etc/omarchy/region). Each is optional.
+PRESET_FILE=""
+if [[ -n $PRESET ]]; then
+  PRESET_FILE="$(realpath "${BASH_SOURCE[0]%/*}/..")/presets/$PRESET.json"
+  if [[ ! $PRESET =~ ^[a-z]{2}$ || ! -f $PRESET_FILE ]]; then
+    echo "Error: no preset $PRESET; the presets are: $(cd "${PRESET_FILE%/*}" && ls *.json | sed 's/\.json$//' | xargs)" >&2
+    exit 1
+  fi
+  if ! jq -e 'type == "object" and all(to_entries[]; (.key | IN("language", "keyboard", "timezone", "region")) and (.value | type == "string" and . != ""))' \
+    "$PRESET_FILE" >/dev/null 2>&1; then
+    echo "Error: $PRESET_FILE may only set language, keyboard, timezone and region, each to a string" >&2
+    exit 1
+  fi
+fi
+
+# An OEM's bundle is checked and laid out here, before anything is built, so a
+# logo the console cannot draw stops this command and not a machine's first boot.
+if [[ -n $OEM_CONFIG ]] || (( ${#OEM_SCRIPTS[@]} )); then
+  if [[ ${OMARCHY_OEM_INSTALL:-} != "1" ]]; then
+    echo "Error: --oem-config and --oem-script are for an OEM ISO; add --oem" >&2
+    exit 1
+  fi
+  OEM_BUNDLE_DIR=$(mktemp -d)
+  trap 'rm -rf "$OEM_BUNDLE_DIR"' EXIT
+  python3 "${BASH_SOURCE[0]%/*}/../builder/oem-bundle.py" "$OEM_BUNDLE_DIR" \
+    ${OEM_CONFIG:+"--config=$OEM_CONFIG"} "${OEM_SCRIPTS[@]/#/--script=}"
+  chmod -R u=rwX,go=rX "$OEM_BUNDLE_DIR"
 fi
 
 # Architecture selection. Both architectures boot linux-omarchy live; x86_64
@@ -113,7 +227,11 @@ fi
 # otherwise, as on x86_64, and make one image for every board, on the
 # linux-omarchy that repository publishes.
 # build-iso.sh refuses a runtime without the platform support.
-CONTAINER_IMAGE=ghcr.io/archlinux/archlinux:latest
+# The x86_64 builder is an Arch image of 2026-09-26, pinned by digest. Its tools
+# are upgraded to the channel's Arch snapshot with pacman -Syu, which does not
+# downgrade them, so the image must be older than every channel's snapshot.
+# :latest broke stable builds once Arch moved to openssl 4.
+CONTAINER_IMAGE=docker.io/archlinux/archlinux@sha256:a1cd6a460b8c8d2c9e9482d7853b7acab4888f448a7914fdc676ce037ff0a5dc
 CONTAINER_PLATFORM_ARGS=()
 OMARCHY_KERNEL=linux-omarchy
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
@@ -181,12 +299,8 @@ lint_file_permissions() {
 
 lint_file_permissions
 
-# Purging the host package cache needs interactive sudo; --keep-pkg-cache
-# skips it so unattended builds (test rigs, agents) can run without a prompt.
-# aarch64 builds never touch the host cache (see below), so nothing to purge.
-if [[ -z $KEEP_PKG_CACHE && $OMARCHY_ARCH == x86_64 ]]; then
-  sudo rm -rf /var/cache/pacman/pkg/*
-fi
+# --keep-pkg-cache is accepted for backwards compatibility; the builder uses
+# its own per-channel cache directory and never wipes the host pacman cache.
 git submodule update --init --recursive --jobs=8
 
 BUILD_SCRIPT="builder/build-iso.sh"
@@ -202,8 +316,12 @@ DOCKER_ARGS=(
   --privileged
   -e "OMARCHY_ISO_REF=$OMARCHY_ISO_REF"
   -e "OMARCHY_MIRROR=$OMARCHY_MIRROR"
+  -e "OMARCHY_OEM_INSTALL=${OMARCHY_OEM_INSTALL:-}"
+  -e "OMARCHY_PRESET=$PRESET"
   -e "OMARCHY_INSTALL_DEBUG=${OMARCHY_INSTALL_DEBUG:-}"
+  -e "OMARCHY_FAST_COMPRESSION=${OMARCHY_FAST_COMPRESSION:-}"
   -e "OMARCHY_ARCH=$OMARCHY_ARCH"
+  -e "OMARCHY_SNAPDRAGON=$SNAPDRAGON"
   -e "OMARCHY_KERNEL=$OMARCHY_KERNEL"
   -e "OMARCHY_N1X_DEV_SSH=${N1X_DEV_SSH_KEY:+1}"
   # Optional overrides of the Omarchy package pair build-iso.sh installs, e.g.
@@ -211,6 +329,8 @@ DOCKER_ARGS=(
   # instead of the -dev ones that track quattro.
   -e "OMARCHY_RUNTIME_PACKAGE=${OMARCHY_RUNTIME_PACKAGE:-}"
   -e "OMARCHY_SETTINGS_PACKAGE=${OMARCHY_SETTINGS_PACKAGE:-}"
+  # Which of them --local-source builds; all of them unless this names fewer.
+  -e "OMARCHY_LOCAL_PACKAGES=${OMARCHY_LOCAL_PACKAGES:-}"
   -e "HOST_UID=$(id -u)"
   -e "HOST_GID=$(id -g)"
   -v "$BUILD_RELEASE_PATH/:/out/"
@@ -235,26 +355,33 @@ if [[ -n $N1X_DEV_SSH_KEY ]]; then
   DOCKER_ARGS+=(-v "$N1X_DEV_SSH_KEY:/dev-ssh/authorized_keys:ro")
 fi
 
-# The host pacman cache belongs to the host architecture; sharing it with an
-# aarch64 container would leak foreign packages into the offline mirror.
-if [[ $OMARCHY_ARCH == x86_64 && -d /var/cache/pacman/pkg ]]; then
-  DOCKER_ARGS+=(-v "/var/cache/pacman/pkg:/var/cache/pacman/pkg")
+if [[ -n $OEM_BUNDLE_DIR ]]; then
+  DOCKER_ARGS+=(-v "$OEM_BUNDLE_DIR:/oem:ro")
 fi
 
-# Mount the build cache directory where packages are downloaded. Channels and
-# architectures use different package snapshots and must never share an
-# offline mirror cache.
+if [[ -n $PRESET_FILE ]]; then
+  DOCKER_ARGS+=(-v "$PRESET_FILE:/preset.json:ro")
+fi
+
+# Mount the build cache directories where packages are downloaded. Channels and
+# architectures use different package snapshots and must never share a cache or
+# mount the host's /var/cache/pacman/pkg.
 if [[ -z "$NO_CACHE" ]]; then
-  OFFLINE_REPO_BUILD_CACHE_DIR="$HOME/.cache/omarchy/iso_${OMARCHY_MIRROR}_${OMARCHY_ARCH}/airootfs/var/cache/omarchy"
+  # The Snapdragon image's mirror holds 1 GiB the plain aarch64 one prunes, so
+  # each keeps its own rather than downloading it again after the other.
+  OFFLINE_REPO_BUILD_CACHE_DIR="$HOME/.cache/omarchy/iso_${OMARCHY_MIRROR}_${OMARCHY_ARCH}${SNAPDRAGON:+_snapdragon}/airootfs/var/cache/omarchy"
   if [[ $OMARCHY_ARCH == x86_64 ]]; then
     # Keep the historical cache path for x86_64 builds.
     OFFLINE_REPO_BUILD_CACHE_DIR="$HOME/.cache/omarchy/iso_${OMARCHY_MIRROR}/airootfs/var/cache/omarchy"
   fi
-  mkdir -p "$OFFLINE_REPO_BUILD_CACHE_DIR"
-  DOCKER_ARGS+=(-v "$OFFLINE_REPO_BUILD_CACHE_DIR:/var/cache/airootfs/var/cache/omarchy")
+  BUILDER_PKG_CACHE_DIR="$HOME/.cache/omarchy/builder_pkg_${OMARCHY_MIRROR}_${OMARCHY_ARCH}"
+  mkdir -p "$OFFLINE_REPO_BUILD_CACHE_DIR" "$BUILDER_PKG_CACHE_DIR"
+  DOCKER_ARGS+=(
+    -v "$OFFLINE_REPO_BUILD_CACHE_DIR:/var/cache/omarchy-offline-cache"
+    -v "$BUILDER_PKG_CACHE_DIR:/var/cache/pacman/pkg"
+  )
 else
-  # The locally cached :latest image is a cache too — docker run never
-  # re-checks the registry for it, so refresh it when building cold.
+  # Refresh the pinned builder image when building cold.
   DOCKER_ARGS+=(--pull=always)
 fi
 
@@ -268,12 +395,11 @@ fi
 
 "${DOCKER[@]}" run "${CONTAINER_PLATFORM_ARGS[@]}" "${DOCKER_ARGS[@]}" "$CONTAINER_IMAGE" /$BUILD_SCRIPT
 
-latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*.iso | head -n1)
-if [[ $OMARCHY_ARCH == aarch64 ]]; then
-  iso_ref="${latest_iso%.*}${N1X_DEV_SSH_KEY:+-devssh}-$OMARCHY_ISO_REF.iso"
-else
-  iso_ref="${latest_iso%.*}-$OMARCHY_ISO_REF.iso"
-fi
+iso_name=omarchy
+[[ ${OMARCHY_OEM_INSTALL:-} == "1" ]] && iso_name=omarchy-oem
+[[ -n $PRESET ]] && iso_name=$iso_name-$PRESET
+latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/"$iso_name"-*.iso | head -n1)
+iso_ref="${latest_iso%.*}${SNAPDRAGON:+-snapdragon}${N1X_DEV_SSH_KEY:+-devssh}${OMARCHY_FAST_COMPRESSION:+-fast}-$OMARCHY_ISO_REF.iso"
 mv -f "$latest_iso" "$iso_ref"
 
 if [[ -z "${NO_BOOT_OFFER:-}" ]]; then

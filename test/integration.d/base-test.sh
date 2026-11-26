@@ -56,17 +56,19 @@ KB_LAYOUT="${OMARCHY_INTEGRATION_KB_LAYOUT:-us}"
 # own keymap: KB_LAYOUT at the installed system's console, LUKS prompt and
 # desktop, us on the live ISO (an autoinstall skips the configurator, the one
 # thing there that loads another). TYPE_LAYOUT is the layout being typed
-# into; a caller typing into anything else sets it. type_text knows us and
-# uk: of what it sends, kbd's uk map moves only @ (Shift+') and ~ (Shift+#,
-# the key beside Enter). Other layouts move what every run types: de swaps y
-# and z, so the passphrase "omarchy" arrives as "omarchz" and the unlock and
-# the console login fail. Teach type_text a layout's keys before allowing it
-# here.
+# into; a caller typing into anything else sets it. type_text knows us, uk
+# and the letters of de: of what it sends, kbd's uk map moves only @ (Shift+')
+# and ~ (Shift+#, the key beside Enter). de swaps y and z, so the passphrase
+# "omarchy" is typed on the keys o m a r c h z, and a LUKS prompt that came up
+# in us instead reads "omarchz" and does not unlock: an encrypted de install
+# that boots proves the prompt has the install's layout. de moves every
+# symbol type_text sends as well, and those it refuses. Teach type_text a
+# layout's keys before allowing it here.
 kb_layout_typeable() {
   case "$1" in
-    us | uk) ;;
+    us | uk | de) ;;
     *)
-      echo "OMARCHY_INTEGRATION_KB_LAYOUT=$1: the harness can type only the us and uk layouts" >&2
+      echo "OMARCHY_INTEGRATION_KB_LAYOUT=$1: the harness can type only the us, uk and de layouts" >&2
       return 1
       ;;
   esac
@@ -319,7 +321,58 @@ start_vm_from_base() {
     cp "$BASE_OVMF" "$RUN_DIR/OVMF_VARS.4m.fd"
     ACTIVE_OVMF="$RUN_DIR/OVMF_VARS.4m.fd"
   fi
-  start_vm "$RUN_DIR/run.qcow2" "$RUN_DIR/serial.log"
+  start_vm "$RUN_DIR/run.qcow2" "$RUN_DIR/serial.log" "$@"
+}
+
+# QEMU arguments, one on each line, that make the guest authorize the
+# harness's SSH key by itself on a boot that starts without it: a factory
+# first boot, whose reset removed the owner, the host keys and sshd's
+# enablement, so the harness cannot log in to do it. systemd takes
+# credentials from SMBIOS type 11 strings (systemd.io/CREDENTIALS), and its
+# debug generator makes units of systemd.extra-unit.* and
+# systemd.unit-dropin.* (systemd-debug-generator(8), since 256). The unit
+# waits until the first boot's setup has made the owner and finished, then
+# does what a person would type at a console. On a boot that already has all
+# of it, it changes nothing.
+#
+# A console login did this before. The setup ends by starting the display
+# manager, which takes the screen, and on an unencrypted install it did so
+# between the login prompt and the username in every run: the username went
+# to the desktop and the harness read the desktop for 60 s.
+ssh_authorize_smbios() {
+  local key script unit dropin
+  key=$(<"$SSH_KEY.pub")
+
+  script=$(cat <<SCRIPT
+set -eu
+until id -u $GUEST_USER >/dev/null 2>&1 && [ ! -e /var/lib/omarchy/provisioning/pending ]; do
+  sleep 1
+done
+home=\$(getent passwd $GUEST_USER | cut -d: -f6)
+install -d -m 700 -o $GUEST_USER -g "\$(id -gn $GUEST_USER)" "\$home/.ssh"
+grep -qxF "$key" "\$home/.ssh/authorized_keys" 2>/dev/null || echo "$key" >>"\$home/.ssh/authorized_keys"
+chown $GUEST_USER: "\$home/.ssh/authorized_keys"
+chmod 600 "\$home/.ssh/authorized_keys"
+ufw allow from 10.0.2.2 to any port 22 proto tcp
+systemctl enable --now sshd.service
+SCRIPT
+  )
+  unit=$(cat <<'UNIT'
+[Unit]
+Description=Authorize the integration harness's SSH key
+ConditionPathExists=!/etc/initrd-release
+
+[Service]
+ImportCredential=omarchy-test.authorize-ssh
+ExecStart=/bin/bash %d/omarchy-test.authorize-ssh
+UNIT
+  )
+  dropin=$'[Unit]\nWants=omarchy-test-authorize-ssh.service'
+
+  printf -- '-smbios\ntype=11,value=io.systemd.credential.binary:%s=%s\n' \
+    omarchy-test.authorize-ssh "$(base64 -w0 <<<"$script")" \
+    systemd.extra-unit.omarchy-test-authorize-ssh.service "$(base64 -w0 <<<"$unit")" \
+    "systemd.unit-dropin.multi-user.target~omarchy-test" "$(base64 -w0 <<<"$dropin")"
 }
 
 # ------------------------------------------------------------ console driver
@@ -348,8 +401,19 @@ ocr_screen_once() {
   [[ -s $shot ]] || return 0
   # Black on white: the negated grays alone read the focused button on the
   # finished install, dark text on a light bar, as "Reboot Nou".
-  magick "$shot" -colorspace gray -negate -resize 150% -threshold 50% "$prepped" 2>/dev/null || return 0
-  tesseract "$prepped" - --psm 6 2>/dev/null || true
+  # OCR_KMSCON=1 for a screen kmscon draws, the installer's welcome and
+  # first-boot setup: at its text size luminance reads "DHH" as "OHH", and it draws
+  # the purple headings and prompts as dark as gum asks, where the console
+  # brightened them to its palette, so there the gray is the brightest channel,
+  # not luminance, and the screen is read as a column of lines, since as one
+  # block a lone thin prompt under the logo is dropped. Not for every screen:
+  # read that way, Ventoy's menu loses its footer.
+  local gray=(-colorspace gray) psm=6
+  if [[ -n ${OCR_KMSCON:-} ]]; then
+    gray=(-grayscale Brightness) psm=4
+  fi
+  magick "$shot" "${gray[@]}" -negate -resize 150% -threshold 50% "$prepped" 2>/dev/null || return 0
+  tesseract "$prepped" - --psm "$psm" 2>/dev/null || true
 }
 
 wait_for_screen() {
@@ -394,6 +458,14 @@ type_text() {
 
   for ((i = 0; i < ${#text}; i++)); do
     ch=${text:i:1}
+    if [[ $TYPE_LAYOUT == de ]]; then
+      case "$ch" in
+        [yY]) ch=$(tr yY zZ <<<"$ch") ;;
+        [zZ]) ch=$(tr zZ yY <<<"$ch") ;;
+        [a-zA-Z0-9" "]) ;;
+        *) echo "type_text: cannot type $ch on the de layout" >&2; return 1 ;;
+      esac
+    fi
     case "$ch" in
       [a-z0-9]) press "$ch" ;;
       [A-Z]) press "shift-${ch,,}" ;;
@@ -431,6 +503,13 @@ ssh_guest() {
 
 ssh_sudo() {
   ssh_guest "echo $GUEST_PASSWORD | sudo -S -p '' bash -c $(printf %q "$1")"
+}
+
+# The boot loader the installed system runs. An Omarchy that predates
+# omarchy-boot-backend (an ISO built from packages without the systemd-boot
+# stack, as CI's edge builds are until it is published) can only be on Limine.
+installed_boot_loader() {
+  ssh_guest "if command -v omarchy-boot-backend >/dev/null; then omarchy-boot-backend; else echo limine; fi" | tr -d '\r\n'
 }
 
 # Answer an encrypted boot's LUKS prompt, given what OCR read off the screen.
@@ -505,79 +584,10 @@ wait_for_ssh() {
   done
 }
 
-# Authorize SSH the way a person would when the guest has no key yet (or a
-# reset just scrubbed it): console login on a spare TTY, then a bootstrap
-# script fetched from a throwaway host HTTP server.
-bootstrap_ssh() {
-  log "Authorizing SSH access via console login"
-
-  mkdir -p "$BASE_DIR/www"
-  cat >"$BASE_DIR/www/bootstrap" <<EOF
-mkdir -p ~/.ssh && chmod 700 ~/.ssh
-echo "$(cat "$SSH_KEY.pub")" >>~/.ssh/authorized_keys
-chmod 600 ~/.ssh/authorized_keys
-echo "$GUEST_PASSWORD" | sudo -S ufw allow from 10.0.2.2 to any port 22 proto tcp
-echo "$GUEST_PASSWORD" | sudo -S systemctl enable --now sshd.service
-EOF
-
-  (cd "$BASE_DIR/www" && exec python3 -m http.server "$HTTP_PORT" --bind 127.0.0.1 >/dev/null 2>&1) &
-  HTTP_PID=$!
-
-  # The typing below races whatever else owns the console: on a factory
-  # first boot, provisioning finishing mid-command starts the graphical
-  # session and switches the VT, and the rest of the line lands in Hyprland,
-  # so the bootstrap never runs. Each attempt uses a fresh getty (tty3, tty4,
-  # tty5) so a half-typed session on the previous one cannot get in the way.
-  local attempt waited
-  for attempt in 1 2 3; do
-    waited=0
-    while true; do
-      press "ctrl-alt-f$((attempt + 2))"
-      sleep 4
-      ocr_screen | grep -qi "login:" && break
-      ((waited += 8))
-
-      if ((waited >= 300)); then
-        capture_console "failure-console-timeout"
-        echo "Timed out waiting for a console login prompt" >&2
-        return 1
-      fi
-      sleep 4
-    done
-
-    type_text "$GUEST_USER"
-    press ret
-    # The VT can switch away before the prompt shows; that loses this
-    # attempt, not the scenario.
-    if ! wait_for_screen "Password" 60; then
-      log "No password prompt after the username (attempt $attempt); retrying on the next VT"
-      continue
-    fi
-    type_text "$GUEST_PASSWORD"
-    press ret
-    sleep 3
-
-    type_text "curl -fsS http://10.0.2.2:$HTTP_PORT/bootstrap -o /tmp/bs && bash /tmp/bs"
-    press ret
-
-    if wait_for_ssh 120 "failure-bootstrap-ssh-timeout-$attempt"; then
-      capture_console "success-bootstrap-ssh"
-      kill "$HTTP_PID" 2>/dev/null || true
-      HTTP_PID=""
-      press ctrl-alt-f1
-      return 0
-    fi
-    log "SSH did not come up after the console login (attempt $attempt); retrying on the next VT"
-  done
-
-  echo "SSH bootstrap failed after 3 console logins" >&2
-  return 1
-}
-
 # Root SSH into the live ISO itself (not the installed system). The live root
 # runs sshd and autologs in on tty1 with an empty password, but sshd refuses
-# empty passwords, so authorize our key the same console-login way as above,
-# on tty3 and up (tty1 is the installer's).
+# empty passwords, so authorize our key by a console login, on tty3 and up
+# (tty1 is the installer's).
 ssh_live_root() {
   ssh -i "$SSH_KEY" -p "$SSH_PORT" \
     -o BatchMode=yes \
@@ -646,7 +656,7 @@ EOF
   # timed out waiting for a command that never ran. So a root prompt must be
   # on screen before the command is typed, the VT is selected again right
   # before each line, and an attempt that still loses its console moves to a
-  # fresh getty (tty3, tty4, tty5), as bootstrap_ssh does.
+  # fresh getty (tty3, tty4, tty5).
   local attempt vt waited deadline up=false
   for attempt in 1 2 3; do
     vt=$((attempt + 2))
@@ -898,9 +908,9 @@ detect_packages() {
 }
 
 # The firmware names what it starts on the serial port: the ISO's medium while
-# the installer runs, the installed disk's Limine once the install is over.
+# the installer runs, the installed disk's boot loader once the install is over.
 installed_system_started() {
-  grep -aq 'starting Boot.*"Limine"' "$1" 2>/dev/null
+  grep -aqE 'starting Boot.*"(Limine|Omarchy Boot)"' "$1" 2>/dev/null
 }
 
 # Wait out an unattended cidata install to its reboot into the installed

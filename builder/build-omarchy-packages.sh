@@ -42,11 +42,8 @@ pacman -Sy --noconfirm
 : "${OMARCHY_SETTINGS_PACKAGE:=omarchy-settings-dev}"
 : "${OMARCHY_NVIM_PACKAGE:=omarchy-nvim}"
 
-packages=(
-  "$OMARCHY_SETTINGS_PACKAGE"
-  "$OMARCHY_RUNTIME_PACKAGE"
-  "$OMARCHY_NVIM_PACKAGE"
-)
+# build-iso.sh names them in OMARCHY_LOCAL_PACKAGES; all three by default.
+read -ra packages <<<"${OMARCHY_LOCAL_PACKAGES:-$OMARCHY_SETTINGS_PACKAGE $OMARCHY_RUNTIME_PACKAGE $OMARCHY_NVIM_PACKAGE}"
 
 # Local-source packages must replace every cached build of the same package,
 # even when the checkout's generated pkgver sorts below a published build.

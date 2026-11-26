@@ -31,3 +31,29 @@ for harness in bin/omarchy-iso-test test/integration.d/base-test.sh; do
   fi
 done
 echo "ok - both harnesses read the Reboot Now button on the finished install"
+
+# Only the installer harness walks the wizard, whose console font draws "w"
+# as a "u" with a 1-px stem. While gum's blinking cursor is off, OCR reads the
+# Password step as "Passuord>", and the free-space install timed out on this
+# screen in CI. Run the harness's own wait for that step, as
+# drive_configurator has it.
+SCREEN="$ROOT/test/unit/fixtures/installer-password-screen.png"
+harness=bin/omarchy-iso-test
+unset -f ocr_screen ocr_screen_once
+for name in ocr_screen wait_for_screen wait_for_screen_any; do
+  eval "$(sed -n "/^$name() {\$/,/^}\$/p" "$ROOT/$harness")"
+done
+step=$(sed -n '/^drive_configurator() {$/,/^}$/p' "$ROOT/$harness" |
+  grep -m1 -E '^[[:space:]]*wait_for_screen(_any)? "Password' || true)
+if [[ -z $step ]]; then
+  echo "$harness no longer waits for the Password step in drive_configurator" >&2
+  exit 1
+fi
+vm_running() { true; }
+capture_console() { :; }
+sleep() { :; }
+if ! eval "$step"; then
+  printf '%s read the Password step as:\n%s\n' "$harness" "$(ocr_screen)" >&2
+  exit 1
+fi
+echo "ok - the installer harness sees the Password step while gum's cursor is off"

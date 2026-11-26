@@ -5,6 +5,7 @@ archinstall config handler and mirror list handler)."""
 from __future__ import annotations
 import platform
 
+import copy
 import json
 import os
 import secrets
@@ -41,6 +42,10 @@ class InstallContext:
     arch_config_path: Path
     omarchy_install: dict[str, Any]
     defer_provisioning: bool = False
+    # An OEM's bundle (omarchy-iso-make --oem-config, --oem-script). Its
+    # branding and agreement are for the owner a deferred install hands the
+    # machine to, so no other install takes it.
+    oem_dir: Path | None = None
 
     target: Path = Path("/mnt")
     omarchy_path: Path = Path("/usr/share/omarchy")
@@ -98,8 +103,21 @@ class InstallContext:
             if encryption_password:
                 user_credentials["encryption_password"] = encryption_password
 
-        arch_configuration = dict(user_configuration)
+        if defer_provisioning:
+            # Encrypted deferred-provisioning installs have no user password to protect LUKS
+            # with. Generate a throwaway passphrase (staged for first-boot
+            # re-key by the stage_provisioning_state phase) and hand it to archinstall
+            # through both places it may look: the disk_encryption block and
+            # the credentials file.
+            _inject_provisioning_encryption_password(user_configuration, user_credentials)
+
+        # Keep the persistent identity from cidata for cleanup/support, but
+        # feed archinstall canonical /dev names. Archinstall indexes its
+        # BlockDevice objects by canonical kernel path and silently drops a
+        # layout whose device is a valid /dev/disk/by-id symlink.
+        arch_configuration = copy.deepcopy(user_configuration)
         arch_configuration.pop("omarchy_install", None)
+        _canonicalize_install_devices(arch_configuration)
 
         if defer_provisioning:
             # The userless invariant covers the archinstall config too: a
@@ -112,12 +130,6 @@ class InstallContext:
         state_dir.mkdir(parents=True, exist_ok=True)
 
         if defer_provisioning:
-            # Encrypted deferred-provisioning installs have no user password to protect LUKS
-            # with. Generate a throwaway passphrase (staged for first-boot
-            # re-key by the stage_provisioning_state phase) and hand it to archinstall
-            # through both places it may look: the disk_encryption block and
-            # the credentials file.
-            _inject_provisioning_encryption_password(arch_configuration, user_credentials)
             creds_path = state_dir / "provisioning-user_credentials.json"
             creds_path.write_text(json.dumps(user_credentials, indent=2) + "\n")
             creds_path.chmod(0o600)
@@ -136,6 +148,7 @@ class InstallContext:
             arch_config_path=arch_config_path,
             omarchy_install=omarchy_install,
             defer_provisioning=defer_provisioning,
+            oem_dir=_optional_path(os.environ.get("OMARCHY_INSTALL_OEM_DIR")) if defer_provisioning else None,
             state_dir=state_dir,
         )
         disk_config = user_configuration.get("disk_config", {})
@@ -179,13 +192,39 @@ def _strip_account_fields(arch_configuration: dict) -> None:
             auth.pop(key, None)
 
 
-def _inject_provisioning_encryption_password(arch_configuration: dict, user_credentials: dict) -> None:
+def _canonicalize_install_devices(arch_configuration: dict) -> None:
+    """Resolve persistent disk aliases before handing JSON to archinstall.
+
+    Cidata deliberately names a stable /dev/disk/by-id path.  Keep that value
+    in ``user_configuration`` for diagnostics, but archinstall needs the
+    canonical runtime name (for example /dev/nvme0n1 or /dev/vda).
+    """
+    modifications = (
+        (arch_configuration.get("disk_config") or {}).get("device_modifications") or []
+    )
+    for modification in modifications:
+        device = modification.get("device")
+        if not device:
+            continue
+        path = Path(device)
+        try:
+            canonical = path.resolve(strict=True)
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"install device does not exist: {device}") from exc
+        except OSError as exc:
+            raise RuntimeError(f"cannot resolve install device {device}: {exc.strerror or exc}") from exc
+        if not canonical.is_block_device():
+            raise RuntimeError(f"install device is not a block device: {device} -> {canonical}")
+        modification["device"] = str(canonical)
+
+
+def _inject_provisioning_encryption_password(user_configuration: dict, user_credentials: dict) -> None:
     """Ensure an encrypted deferred-provisioning install has a LUKS passphrase archinstall can
     use. Reuse one the input already carries (an autoinstall rig may supply
-    its own); otherwise generate a throwaway. Mutates the disk_encryption
-    block in place — arch_configuration shares it with user_configuration, so
-    the stage_provisioning_state phase can read the effective passphrase back."""
-    disk_encryption = (arch_configuration.get("disk_config") or {}).get("disk_encryption")
+    its own); otherwise generate a throwaway. Mutates user_configuration before
+    arch_configuration is copied from it, so both archinstall and
+    stage_provisioning_state see the effective passphrase."""
+    disk_encryption = (user_configuration.get("disk_config") or {}).get("disk_encryption")
     if disk_encryption is None:
         return
 

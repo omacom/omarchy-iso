@@ -14,7 +14,9 @@
 #     while the UKI initramfs had us.map.gz and no vconsole.conf. A passphrase
 #     enrolled under a non-US layout is then untypeable at the prompt, locking
 #     the owner out of a fresh install with no recovery but reinstalling
-#     (upstream omarchy#8196). Such an install builds its own UKI.
+#     (upstream omarchy#8196). Such an install writes its layout into the
+#     room the image reserved in the UKI's vconsole.conf, or builds its own
+#     UKI where there is none.
 #
 #   * build-root-image.sh pre-uncomments en_US.UTF-8 in locale.gen to skip
 #     0.77 s of locale-gen, but archinstall's set_locale only matches
@@ -70,13 +72,16 @@ boot_initramfs_manifest() {
 # vconsole.conf it bundles, so "a keymap is present" plus "the bundled
 # vconsole.conf names the chosen layout" pins it for both hook sets without
 # decoding kbd's binary format here.
-# lsinitcpio -x extracts to the current directory and has no -d; --cpio limits
-# it to the main image, skipping the microcode early cpio.
+# lsinitcpio -x extracts to the current directory and has no -d. Both
+# archives, the early cpio and the main image, in the order the kernel unpacks
+# them: the pre-built UKI carries its vconsole.conf in the early one, where
+# the installer writes the install's layout in place (uki_vconsole.py), and a
+# UKI built on the target carries it in the main one.
 initramfs_bundled_keymap() {
   ssh_sudo "$(boot_initramfs)"'; \
     [ -n "$img" ] || exit 1; \
     d=$(mktemp -d); trap "rm -rf $d" EXIT; \
-    ( cd "$d" && lsinitcpio -x --cpio "$img" ) >/dev/null 2>&1 || exit 1; \
+    ( cd "$d" && lsinitcpio -x "$img" ) >/dev/null 2>&1 || exit 1; \
     . "$d/etc/vconsole.conf" 2>/dev/null; printf "%s" "${KEYMAP:-}"'
 }
 

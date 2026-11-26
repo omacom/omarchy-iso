@@ -118,6 +118,44 @@ grep -q "(11 frames, 2 zero, 11 cached, 8 threads)" "$work/stderr" ||
   fail "write reports what it did" "$(cat "$work/stderr")"
 pass "write reports what it did"
 
+# The installer's progress bar reads the frames taken while the tool writes.
+target "$work/target" 0
+OMARCHY_IMAGE_WRITE_PROGRESS="$work/progress" run write "$image" "$work/target" 2
+[[ $status == 0 && $(cat "$work/progress" 2>/dev/null) == "11 11" ]] ||
+  fail "write reports its progress to OMARCHY_IMAGE_WRITE_PROGRESS" "status $status, progress '$(cat "$work/progress" 2>/dev/null)'"
+pass "write reports its progress to OMARCHY_IMAGE_WRITE_PROGRESS"
+
+# The progress reporter must not keep the tool alive once the frames are
+# written: it used to sleep out its quarter second first, every time. So the
+# frames of a write with a reporter take as long as those of a write without
+# one, however slow the disk under $work is. Five tries, so that a stalled
+# test machine does not fail this.
+frames_took() {
+  sed -n 's/.* frames \([0-9.]*\) s .*/\1/p' "$work/stderr"
+}
+
+prompt=no
+for _ in 1 2 3 4 5; do
+  target "$work/target" 0
+  run write "$image" "$work/target" 2
+  [[ $status == 0 ]] || fail "write without progress succeeds" "$(cat "$work/stderr")"
+  plain=$(frames_took)
+
+  target "$work/target" 0
+  OMARCHY_IMAGE_WRITE_PROGRESS="$work/progress" run write "$image" "$work/target" 2
+  [[ $status == 0 ]] || fail "write with progress succeeds" "$(cat "$work/stderr")"
+  reported=$(frames_took)
+
+  if awk -v p="$plain" -v r="$reported" 'BEGIN { exit !(p != "" && r != "" && r - p < 0.1) }'; then
+    prompt=yes
+    break
+  fi
+done
+[[ $prompt == yes ]] ||
+  fail "write ends when its frames are written, not at the reporter's next sample" \
+    "frames took ${reported}s with the reporter and ${plain}s without"
+pass "write ends when its frames are written, not at the reporter's next sample"
+
 # The split the installer log keeps: wall time by stage, and the workers'
 # thread-seconds by activity, which cannot add up to more than the threads had.
 python3 - "$work/stderr" <<'PY' || fail "write reports where its time went" "$(cat "$work/stderr")"

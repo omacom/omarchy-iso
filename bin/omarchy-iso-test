@@ -19,6 +19,12 @@
 #   --encrypt          Drive the encrypted install flow (default: unencrypted)
 #   --provision              Drive the deferred-provisioning install flow: no user during install, the
 #                      first boot runs omarchy-provision-owner and creates it there
+#   --oem              Test an OEM ISO: it installs onto the VM's one disk with
+#                      no keystrokes, encrypted, and reboots into the first-boot
+#                      setup, which is then driven the way --provision drives it
+#   --oem-config FILE  The config the OEM ISO was built with (omarchy-iso-make
+#                      --oem-config): first boot is then expected to carry its
+#                      branding, and to end on its agreement where it has one
 #   --free-space       Install into the free space of a synthetic Windows-style
 #                      disk (existing ESP + data partition kept) and verify the
 #                      existing partitions survive
@@ -46,6 +52,8 @@ INSTALL_TIMEOUT=2400
 BOOT_TIMEOUT=600
 ENCRYPT=false
 PROVISION=false
+OEM=false
+OEM_CONFIG=""
 FREE_SPACE=false
 REUSE_BASE=false
 INSTALL_ONLY=false
@@ -87,13 +95,19 @@ NO_NETWORK=false
 
 GUEST_USER="omarchy"
 GUEST_PASSWORD="omarchy"
-GUEST_HOSTNAME="omarchy-test"
+# Not asked: the setup form makes it from the user and the machine, which a
+# QEMU guest reports as a virtual machine.
+GUEST_HOSTNAME="omarchy-vm"
 
 while (($#)); do
   case "$1" in
     --keyboard) KEYBOARD_LABEL="$2"; shift ;;
     --encrypt) ENCRYPT=true ;;
     --provision) PROVISION=true ;;
+    # An OEM install is a deferred-provisioning install nobody answers for:
+    # always full-disk and encrypted (the configurator's --oem path).
+    --oem) OEM=true; PROVISION=true; ENCRYPT=true ;;
+    --oem-config) OEM_CONFIG="$2"; shift ;;
     --free-space) FREE_SPACE=true ;;
     --reuse-base) REUSE_BASE=true ;;
     --install-only) INSTALL_ONLY=true ;;
@@ -135,6 +149,22 @@ case "$KEYBOARD_LABEL" in
   *) echo "The VM harness cannot type credentials with keyboard: $KEYBOARD_LABEL" >&2; exit 1 ;;
 esac
 
+if $OEM && $FREE_SPACE; then
+  echo "--oem installs over the whole disk, so there is no free-space install to test with it" >&2
+  exit 1
+fi
+
+if [[ -n $OEM_CONFIG ]]; then
+  if ! $OEM; then
+    echo "--oem-config describes an OEM ISO's bundle; add --oem" >&2
+    exit 1
+  fi
+  if [[ ! -f $OEM_CONFIG ]]; then
+    echo "No OEM config at $OEM_CONFIG" >&2
+    exit 1
+  fi
+fi
+
 omarchy-pkg-add qemu-full edk2-ovmf socat imagemagick tesseract tesseract-data-eng
 # --battery and --acpi-hid compile their SSDT with iasl.
 if $BATTERY || ((${#ACPI_HIDS[@]})); then
@@ -167,6 +197,24 @@ HTTP_PORT=$((SSH_PORT + 1))
 HTTP_PID=""
 
 mkdir -p "$BASE_DIR" "$RUN_DIR"
+
+# First-boot setup's greeter is known by its tagline. An OEM's config can
+# replace that with words OCR may misread, so there the greeter is known by
+# the hint under it, which is dim and needs a threshold of its own.
+GREETER_TEXT="Linux by DHH"
+GREETER_OCR_THRESHOLD=50
+OEM_BUNDLE=""
+OEM_EULA=false
+if [[ -n $OEM_CONFIG ]]; then
+  # Laid out the way the build lays it out, to hold the installed machine to.
+  OEM_BUNDLE="$RUN_DIR/oem-bundle"
+  python3 "$REPO_DIR/builder/oem-bundle.py" "$OEM_BUNDLE" "--config=$OEM_CONFIG"
+  if grep -q '^  "tagline":' "$OEM_BUNDLE/oem.json"; then
+    GREETER_TEXT="Start Setup"
+    GREETER_OCR_THRESHOLD=80
+  fi
+  [[ ! -f $OEM_BUNDLE/eula.txt ]] || OEM_EULA=true
+fi
 
 # Unix socket paths are capped at ~108 bytes, which a run directory nested in
 # test-runs/<iso-name>/runs/<timestamp> can exceed. Keep the socket in /tmp.
@@ -364,8 +412,13 @@ ocr_screen() {
   [[ -s $shot ]] || return 0
   # Black on white: the negated grays alone read the focused button on the
   # finished install, dark text on a light bar, as "Reboot Nou".
-  magick "$shot" -colorspace gray -negate -resize 150% -threshold 50% "$prepped" 2>/dev/null || return 0
-  tesseract "$prepped" - --psm 6 2>/dev/null || true
+  # Gray by the brightest channel, not by luminance: kmscon draws the form's
+  # purple headings and prompts as dark as gum asks for them, where the console
+  # brightened them to its palette, and by luminance they fall with the dim
+  # hints the harness must not read. --psm 4, a column of lines: as one block
+  # of text (6) a lone thin prompt under the logo is dropped.
+  magick "$shot" -grayscale Brightness -negate -resize 150% -threshold "${OCR_THRESHOLD:-50}%" "$prepped" 2>/dev/null || return 0
+  tesseract "$prepped" - --psm 4 2>/dev/null || true
 }
 
 # Wait until the console shows the given text. Saves the offending screen as
@@ -393,6 +446,43 @@ wait_for_screen() {
   done
 
   sleep 1 # let the screen settle before typing
+}
+
+# Wait until the console shows either text, and set SCREEN_MATCHED to the one
+# it found.
+wait_for_screen_any() {
+  local first="$1" second="$2" timeout="$3" waited=0 screen slug
+
+  while true; do
+    screen=$(ocr_screen)
+    if grep -qi "$first" <<<"$screen"; then
+      SCREEN_MATCHED="$first"
+      sleep 1
+      return 0
+    fi
+    if grep -qi "$second" <<<"$screen"; then
+      SCREEN_MATCHED="$second"
+      sleep 1
+      return 0
+    fi
+
+    if ! vm_running; then
+      echo "VM exited while waiting for screen: $first or $second" >&2
+      return 1
+    fi
+
+    if ((waited >= timeout)); then
+      slug=${first,,}
+      slug=${slug// /-}
+      slug=${slug//[^a-z0-9-]/}
+      capture_console "failure-installer-waiting-for-$slug"
+      echo "Timed out after ${timeout}s waiting for screen: $first or $second" >&2
+      return 1
+    fi
+
+    sleep 3
+    ((waited += 3))
+  done
 }
 
 # Press a key or chord, dash-separated: "ret", "ctrl-c", "ctrl-alt-f3".
@@ -531,11 +621,21 @@ guest_layer_absent() {
   ! guest_layer_present "$1"
 }
 
-cleanup_shortcut_state() {
+# Close every shortcut surface, so one left open by a failed check cannot hold
+# the keyboard for the checks after it. The dock's app picker has no hide
+# command; its apps command toggles it.
+close_shortcut_surfaces() {
   ssh_session 'for plugin in omarchy.menu omarchy.emojis omarchy.clipboard omarchy.audio; do
     omarchy-shell shell hide "$plugin" >/dev/null 2>&1 || true
   done
-  while read -r address; do
+  if hyprctl -j layers | jq -e '\''[.. | objects | select(.namespace? == "omarchy-dock-apps")] | length > 0'\'' >/dev/null; then
+    omarchy-shell omarchy.dock apps >/dev/null 2>&1 || true
+  fi' >/dev/null 2>&1 || true
+}
+
+cleanup_shortcut_state() {
+  close_shortcut_surfaces
+  ssh_session 'while read -r address; do
     hyprctl dispatch "hl.dsp.window.close({ window = \"address:$address\" })" >/dev/null 2>&1 ||
       hyprctl dispatch closewindow "address:$address" >/dev/null 2>&1 || true
   done < <(hyprctl -j clients | jq -r '\''.[] | select(.class == "foot") | .address'\'')
@@ -543,12 +643,12 @@ cleanup_shortcut_state() {
 }
 
 verify_surface_shortcut() {
-  local name="$1" chord="$2" namespace="$3" plugin="$4"
+  local name="$1" chord="$2" namespace="$3"
 
   press "$chord"
   if ! wait_for_guest_state "$name shortcut opens" 15 guest_layer_present "$namespace"; then
     capture_console "failure-shortcut-$name-open"
-    ssh_session "omarchy-shell shell hide '$plugin' >/dev/null 2>&1 || true" || true
+    close_shortcut_surfaces
     return 1
   fi
   capture_console "success-shortcut-$name"
@@ -556,7 +656,7 @@ verify_surface_shortcut() {
   press esc
   if ! wait_for_guest_state "$name shortcut surface closes" 15 guest_layer_absent "$namespace"; then
     capture_console "failure-shortcut-$name-close"
-    ssh_session "omarchy-shell shell hide '$plugin' >/dev/null 2>&1 || true" || true
+    close_shortcut_surfaces
     return 1
   fi
 }
@@ -639,9 +739,9 @@ verify_universal_clipboard_shortcuts() {
   local terminal_result="/tmp/omarchy-universal-terminal-paste"
 
   cleanup_shortcut_state
-  ssh_session "setsid -f chromium --new-window about:blank >/dev/null 2>&1"
-  if ! wait_for_guest_state "universal clipboard test opens Chromium" 45 \
-    ssh_session "hyprctl -j clients | jq -e '[.[] | select(.class | test(\"(?i)chromium\"))] | length == 1'"; then
+  ssh_session "setsid -f google-chrome-stable --new-window about:blank >/dev/null 2>&1"
+  if ! wait_for_guest_state "universal clipboard test opens Chrome" 45 \
+    ssh_session "hyprctl -j clients | jq -e '[.[] | select(.class | test(\"(?i)google-chrome\"))] | length == 1'"; then
     capture_console "failure-shortcut-universal-clipboard-browser"
     return 1
   fi
@@ -676,7 +776,7 @@ verify_universal_clipboard_shortcuts() {
   ssh_session 'while read -r address; do
     hyprctl dispatch "hl.dsp.window.close({ window = \"address:$address\" })" >/dev/null 2>&1 ||
       hyprctl dispatch closewindow "address:$address" >/dev/null 2>&1 || true
-  done < <(hyprctl -j clients | jq -r '\''.[] | select(.class | test("(?i)chromium")) | .address'\'')' || true
+  done < <(hyprctl -j clients | jq -r '\''.[] | select(.class | test("(?i)google-chrome")) | .address'\'')' || true
 
   ssh_session "rm -f '$terminal_result'; \
     setsid -f bash -c 'printf \"%s\" \"$terminal_token\" | wl-copy' >/dev/null 2>&1; \
@@ -708,16 +808,21 @@ shortcut_smoke_phase() {
   log "Exercising primary desktop shortcuts through the VM keyboard"
 
   local status=0
-  local name chord namespace plugin
-  local shortcuts='menu|meta_l-spc|omarchy-menu|omarchy.menu
-apps-menu|meta_l-alt-spc|omarchy-menu|omarchy.menu
-emojis|meta_l-ctrl-e|omarchy-emojis|omarchy.emojis
-clipboard|meta_l-ctrl-v|omarchy-clipboard|omarchy.clipboard
-audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel|omarchy.audio'
+  local name chord namespace apps_namespace=omarchy-menu
+  # Super+Alt+Space opens the dock's app picker since omacom/omarchy#15263
+  # and the menu before it. Expect whichever the installed Omarchy binds.
+  if ssh_session "grep -q 'omarchy.dock apps' /usr/share/omarchy/default/hypr/bindings/utilities.lua"; then
+    apps_namespace=omarchy-dock-apps
+  fi
+  local shortcuts="menu|meta_l-spc|omarchy-menu
+apps|meta_l-alt-spc|$apps_namespace
+emojis|meta_l-ctrl-e|omarchy-emojis
+clipboard|meta_l-ctrl-v|omarchy-clipboard
+audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel"
 
   cleanup_shortcut_state
-  while IFS='|' read -r name chord namespace plugin; do
-    if ! verify_surface_shortcut "$name" "$chord" "$namespace" "$plugin"; then
+  while IFS='|' read -r name chord namespace; do
+    if ! verify_surface_shortcut "$name" "$chord" "$namespace"; then
       status=1
     fi
   done <<<"$shortcuts"
@@ -765,6 +870,13 @@ PYTHON
 }
 
 drive_configurator() {
+  if $OEM; then
+    # Nothing to drive: an OEM ISO picks the machine's one internal disk and
+    # installs without a question. A keystroke here would be a test bug.
+    log "OEM install: sending no keys"
+    return 0
+  fi
+
   log "Driving the installer wizard"
 
   # A greeter (animated logo + tagline) opens the installer; Return begins.
@@ -772,10 +884,20 @@ drive_configurator() {
   capture_console "success-installer-00-greeter"
   press ret
 
-  # Language is the first screen, with English preselected. Ctrl+C there is the
-  # hidden entry into deferred provisioning; a normal install picks a language.
-  wait_for_screen "Language" 300
-  capture_console "success-installer-00-language"
+  # The language picker is first only when the live system's omarchy package
+  # carries default/i18n/locales.json (quattro and edge). A stable ISO has no
+  # such file, so the configurator opens on the keyboard layout instead.
+  # Ctrl+C on the language picker is the only entry into deferred
+  # provisioning, so --provision needs it.
+  wait_for_screen_any "Language" "keyboard layout" 300
+  have_language=false
+  if [[ $SCREEN_MATCHED == "Language" ]]; then
+    have_language=true
+    capture_console "success-installer-00-language"
+  elif $PROVISION; then
+    echo "This ISO has no language screen, so it cannot arm deferred provisioning" >&2
+    return 1
+  fi
 
   if $PROVISION; then
     press ctrl-c # arm "prepare for another owner"
@@ -783,11 +905,12 @@ drive_configurator() {
     capture_console "success-installer-02-prepare-confirm"
     press ret # "Yes, prepare for another owner" is the affirmative default
 
-    # Jumps straight to disk selection, then the overwrite confirm.
-    wait_for_screen "install disk" 60
-    capture_console "success-installer-03-prepare-install-disk"
-    press ret
-
+    # Jumps to the overwrite confirm. The VM's one disk is no choice, but an
+    # ISO from before that (a stable release) lists it first.
+    wait_for_screen "install disk\|recovery possible" 60
+    if ocr_screen | grep -qi "install disk"; then
+      press ret
+    fi
     wait_for_screen "recovery possible" 60
     capture_console "success-installer-04-prepare-disk-warning-encrypted"
     if ! $ENCRYPT; then
@@ -805,7 +928,9 @@ drive_configurator() {
     return 0
   fi
 
-  press ret
+  if $have_language; then
+    press ret
+  fi
   wait_for_screen "keyboard layout" 60
   capture_console "success-installer-01-keyboard-layout"
 
@@ -825,35 +950,39 @@ drive_configurator() {
   capture_console "success-installer-03-username"
   press ret
 
-  wait_for_screen "Password" 60
+  # The live ISO's console font draws "w" as a "u" with a 1-px stem, and OCR
+  # reads this label as "Passuord" while gum's blinking cursor is off. Polls
+  # come about three blink cycles apart, so they can all land in that phase
+  # until the timeout. "user + root" in the placeholder reads in both phases.
+  wait_for_screen_any "Password" "user + root" 60
   type_text "$GUEST_PASSWORD"
   capture_console "success-installer-04-password"
   press ret
 
-  wait_for_screen "Must match" 60
+  # The prompt, or its placeholder: kmscon draws the placeholder too dim to
+  # read, and on the console the cursor covers its first letter in one phase.
+  wait_for_screen_any "Conf *irm>" "you just typed" 60
   type_text "$GUEST_PASSWORD"
   capture_console "success-installer-05-password-confirmation"
-  press ret
-
-  wait_for_screen "Hostname" 60
-  type_text "$GUEST_HOSTNAME"
-  capture_console "success-installer-07-hostname"
   press ret
 
   wait_for_screen "look right" 60
   capture_console "success-installer-09-review"
   press ret
 
-  wait_for_screen "install disk" 60
-  capture_console "success-installer-10-install-disk"
-  press ret # the single virtio disk
-
+  # The VM's one virtio disk is taken without a disk list, except by an ISO
+  # from before that (a stable release), which lists it first.
+  wait_for_screen "install disk\|installation mode\|recovery possible" 60
+  if ocr_screen | grep -qi "install disk"; then
+    press ret
+  fi
   if $FREE_SPACE; then
     # The picker only appears when the disk has usable free space on UEFI.
     wait_for_screen "installation mode" 60
     capture_console "success-installer-11-install-mode"
-    # The fixture has existing partitions: the safe free-space choice is first.
+    # "Full disk install" comes first; free space is the next entry.
     press home
+    press down
     press ret
     # BitLocker/ESP checks and the free-space analysis run, then the confirm.
     wait_for_screen "of free space" 120
@@ -892,23 +1021,93 @@ drive_configurator() {
   capture_console "success-installer-14-install-started"
 }
 
+# The OEM's agreement is first-boot setup's last question. The driver reads
+# on, then takes each way out but the last before accepting: Ctrl+C offers a
+# reboot, declining offers to shut down, and neither may cost the owner more
+# than a keypress to come back from.
+drive_oem_agreement() {
+  wait_for_screen "accept this agreement" 60
+  capture_console "success-provision-08-agreement-1-shown"
+  press pgdn
+  capture_console "success-provision-08-agreement-2-read-on"
+
+  press ctrl-c
+  wait_for_screen "Reboot this machine" 30
+  capture_console "success-provision-08-agreement-3-ctrl-c"
+  press right
+  press ret
+  wait_for_screen "accept this agreement" 30
+
+  press tab
+  capture_console "success-provision-08-agreement-4-decline-in-focus"
+  press ret
+  # The answer in focus, which has no "w" for OCR to read as "u".
+  wait_for_screen "back to the agreement" 30
+  capture_console "success-provision-08-agreement-5-declined"
+  # Going back to the agreement is the answer in focus.
+  press ret
+  wait_for_screen "accept this agreement" 30
+
+  press end
+  capture_console "success-provision-08-agreement-6-read-to-the-end"
+  press ret
+}
+
+# What an ISO built with --oem-config leaves on the installed machine: the
+# bundle as the config lays it out, where first-boot setup reads it, and a
+# record that this owner accepted this OEM's agreement, by the hash of its text.
+verify_oem_setup() {
+  local report="$RUN_DIR/oem-setup.txt" file expected record
+  local name='import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["name"])'
+  local accepted='import json, sys; record = json.load(sys.stdin); print(record["oem"], record["sha256"], record["accepted_by"], sep="|")'
+
+  ssh_guest "tail -n +1 /etc/omarchy/oem/* /var/lib/omarchy/oem/eula-accepted.json; ls -la /etc/omarchy/oem" >"$report" 2>&1 || true
+
+  for file in oem.json logo.txt eula.txt; do
+    [[ -f $OEM_BUNDLE/$file ]] || continue
+    if [[ $(ssh_guest "cat /etc/omarchy/oem/$file" 2>/dev/null | sha256sum) != "$(sha256sum <"$OEM_BUNDLE/$file")" ]]; then
+      echo "The installed system's /etc/omarchy/oem/$file is not what the config lays out; see $report" >&2
+      return 1
+    fi
+  done
+  log "OEM bundle laid down for first-boot setup"
+
+  if $OEM_EULA; then
+    expected="$(python3 -c "$name" "$OEM_BUNDLE/oem.json")|$(sha256sum <"$OEM_BUNDLE/eula.txt" | cut -d' ' -f1)|$GUEST_USER"
+    record=$(ssh_guest "cat /var/lib/omarchy/oem/eula-accepted.json" 2>/dev/null | python3 -c "$accepted" 2>/dev/null) || record=""
+    if [[ $record != "$expected" ]]; then
+      echo "The record of the accepted agreement is '${record:-missing}', not '$expected'; see $report" >&2
+      return 1
+    fi
+    log "OEM agreement recorded as accepted by $GUEST_USER"
+  fi
+}
+
 # The deferred-provisioning first boot runs the user form on tty1 (omarchy-provision-owner) before
 # SDDM. Encrypted deferred-provisioning installs auto-unlock from the staged keyfile, so there
 # is no LUKS prompt to answer here either way.
 drive_provision_owner() {
   log "Driving the deferred-provisioning first-boot setup"
 
-  # Deferred provisioning defers the keyboard step to first boot; it comes before the user form.
+  # A greeter (animated logo + tagline) opens first boot; Return begins.
+  OCR_THRESHOLD=$GREETER_OCR_THRESHOLD wait_for_screen "$GREETER_TEXT" 600
+  capture_console "success-provision-00-greeter"
+  press ret
+
+  # A runtime that lets the owner pick a language asks that first, as the
+  # installer does; an older one opens on the keyboard layout.
+  wait_for_screen_any "Language" "keyboard layout" 120
+  if [[ $SCREEN_MATCHED == "Language" ]]; then
+    capture_console "success-provision-00-language"
+    press ret
+    wait_for_screen "keyboard layout" 60
+  fi
+
+  # Deferred provisioning defers the keyboard step to first boot.
   # Pick English (UK) (one row below the preselected English (US), which leads
   # the list) so the verifier can prove the deferred step applied a non-default
   # layout — UK leaves every letter identical to US, so the typed password (sent
   # as raw keycodes) still matches the literal one the harness pipes to sudo.
-  # A greeter (animated logo + tagline) opens first boot; Return begins.
-  wait_for_screen "Linux by DHH" 600
-  capture_console "success-provision-00-greeter"
-  press ret
-
-  wait_for_screen "keyboard layout" 120
   if [[ $KEYBOARD_LABEL == "English (US)" ]]; then
     press down # preserve the harness's default UK provisioning coverage
   else
@@ -917,39 +1116,94 @@ drive_provision_owner() {
   capture_console "success-provision-01-keyboard-layout"
   press ret
 
-  wait_for_screen "Username" 120
-  capture_console "success-provision-02-username"
-  type_text "$GUEST_USER"
-  press ret
+  # The account questions, in whatever order this runtime asks them: each is
+  # told apart by its prompt, the only one on screen while it waits (the
+  # placeholders are too dim for OCR). The review table ends the form.
+  local screen prompt answered="" waited=0
+  while true; do
+    screen=$(ocr_screen)
+    prompt=""
+    if grep -qi "look right" <<<"$screen"; then
+      break
+    elif grep -qi "Conf *irm" <<<"$screen"; then
+      prompt=confirmation
+    elif grep -qi "Password" <<<"$screen"; then
+      prompt=password
+    elif grep -qi "Username" <<<"$screen"; then
+      prompt=username
+    elif grep -q "[A-Z][a-z]\+/[A-Z][a-z]" <<<"$screen"; then
+      # The picker's list of zones, not a heading that names the step while
+      # the guess is still being fetched: a Return sent then is lost.
+      prompt=timezone
+    fi
 
-  wait_for_screen "Password" 60
-  type_text "$GUEST_PASSWORD"
-  capture_console "success-provision-03-password"
-  press ret
+    # The screen still showing a prompt just answered is the console catching
+    # up, not the question asked twice.
+    if [[ -n $prompt && " $answered " != *" $prompt "* ]]; then
+      case $prompt in
+        username) type_text "$GUEST_USER" ;;
+        password | confirmation) type_text "$GUEST_PASSWORD" ;;
+        timezone) ;; # accept the guess that leads the list
+      esac
+      capture_console "success-provision-02-$prompt"
+      press ret
+      answered+=" $prompt"
+      waited=0
+    fi
 
-  wait_for_screen "Conf *irm" 60
-  type_text "$GUEST_PASSWORD"
-  press ret
+    if ! vm_running; then
+      echo "VM exited during first-boot setup" >&2
+      return 1
+    fi
+    # Generous: the timezone guess over first-boot networking can lag.
+    if ((waited >= 180)); then
+      capture_console "failure-provision-form-stalled"
+      echo "First-boot setup stopped answering after:${answered:- nothing}" >&2
+      return 1
+    fi
+    sleep 2
+    ((waited += 2))
+  done
 
-  # Hostname is deferred to first boot too.
-  wait_for_screen "Hostname" 60
-  type_text "$GUEST_HOSTNAME"
-  capture_console "success-provision-05-hostname"
-  press ret
-
-  # Timezone is deferred to first boot too; accept the geo-guessed default.
-  # Generous timeout: the tzupdate geo-guess over first-boot networking can lag.
-  wait_for_screen "Timezone" 180
-  capture_console "success-provision-06-timezone"
-  press ret
-
-  wait_for_screen "look right" 60
   capture_console "success-provision-07-review"
   press ret
 
-  # Finalization (user setup, LUKS re-key on encrypted installs)
-  # runs before SDDM appears.
-  capture_console "success-provision-08-finalizing"
+  if $OEM_EULA; then
+    drive_oem_agreement
+  fi
+
+  # Finalization (user setup, LUKS re-key on encrypted installs) runs under the
+  # progress screen until the display manager takes the console. Its percentage
+  # is the one line bright enough for OCR, which reads the sign as anything.
+  # OCR reads nothing from a screen caught mid-redraw or gone black for the
+  # handoff, which says nothing either way: it takes two readable screens in a
+  # row without the percentage to call the progress screen gone.
+  local shots=0 gone=0 progress
+  waited=0
+  sleep 2
+  while ((gone < 2)); do
+    if ((waited >= 900)); then
+      capture_console "failure-provision-finalizing-timeout"
+      echo "Timed out waiting for first-boot setup to finish" >&2
+      return 1
+    fi
+
+    progress=$(ocr_screen | tr -d ' \n')
+    if [[ $progress =~ ^[0-9]{1,3}.?$ ]]; then
+      gone=0
+      if ((waited % 20 == 0)); then
+        printf -v prompt 'success-provision-08-finalizing-%03ds' "$waited"
+        capture_console "$prompt"
+        shots=$((shots + 1))
+      fi
+    elif [[ -n $progress ]]; then
+      gone=$((gone + 1))
+    fi
+
+    sleep 4
+    ((waited += 4))
+  done
+  ((shots)) || capture_console "success-provision-08-finalizing"
 }
 
 wait_for_install() {
@@ -959,7 +1213,9 @@ wait_for_install() {
   while true; do
     text=$(ocr_screen)
 
-    if grep -qi "Reboot Now" <<<"$text"; then
+    # The button, or the line above it: dark on its light bar, the button is
+    # the one thing on the screen OCR drops in some fonts.
+    if grep -qi "Reboot Now\|Installed Omarchy in" <<<"$text"; then
       log "Install finished. Confirming the reboot prompt."
       capture_console "success-installer-15-reboot"
       press ret
@@ -969,7 +1225,7 @@ wait_for_install() {
     # Deferred-provisioning installs skip the celebration and reboot on their own
     # (no Reboot Now prompt); the first-boot greeter tagline appearing means the
     # install finished and rebooted into setup.
-    if $PROVISION && grep -qi "Linux by DHH" <<<"$text"; then
+    if $PROVISION && OCR_THRESHOLD=$GREETER_OCR_THRESHOLD ocr_screen | grep -qi "$GREETER_TEXT"; then
       log "Install finished and auto-rebooted into first-boot setup."
       capture_console "success-installer-15-autoreboot"
       return 0
@@ -1306,8 +1562,8 @@ install_phase() {
 
     # The owner's hostname and timezone are set at first boot now, not baked
     # into the install — confirm they actually landed on the running system.
-    # Hostname is deterministic (we typed it), so a mismatch is a hard failure;
-    # timezone is geo-guessed, so just report what landed.
+    # Hostname is deterministic (made from the owner and the VM), so a mismatch
+    # is a hard failure; timezone is geo-guessed, so just report what landed.
     local got_host="" got_tz=""
     got_host=$(ssh_guest "cat /etc/hostname" 2>/dev/null | tr -d '\r\n') || got_host=""
     got_tz=$(ssh_guest "timedatectl show -p Timezone --value" 2>/dev/null | tr -d '\r\n') || got_tz=""
@@ -1317,6 +1573,9 @@ install_phase() {
       return 1
     fi
     log "hostname applied at first boot: $got_host"
+    if [[ -n $OEM_CONFIG ]]; then
+      verify_oem_setup
+    fi
     if [[ -n $got_tz && $got_tz != "UTC" ]]; then
       log "timezone applied at first boot: $got_tz"
     else

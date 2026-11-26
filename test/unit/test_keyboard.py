@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,6 +24,10 @@ SETUP_FORM_CANDIDATES = (
     ROOT.parent / "omarchy/install/provisioning/setup-form.sh",
     Path("/usr/share/omarchy/install/provisioning/setup-form.sh"),
 )
+
+
+def setup_form() -> Path | None:
+    return next((candidate for candidate in SETUP_FORM_CANDIDATES if candidate.is_file()), None)
 
 
 def supported_keymaps():
@@ -58,6 +63,45 @@ def localectl_lists_keymaps() -> bool:
 LOCALECTL_AVAILABLE = localectl_lists_keymaps()
 
 
+class FallbackXkbSettingsTest(unittest.TestCase):
+    def test_reads_extra_xkb_lines_from_setup_form(self):
+        with tempfile.TemporaryDirectory() as directory:
+            form = Path(directory) / "setup-form.sh"
+            form.write_text(
+                "omarchy_keymap_xkb_settings() {\n"
+                "  case $1 in\n"
+                "    no-latin1) printf 'XKBLAYOUT=no\\nXKBMODEL=pc105\\n' ;;\n"
+                "    *) return 1 ;;\n"
+                "  esac\n"
+                "}\n"
+            )
+            with mock.patch.dict(os.environ, {"SETUP_FORM": str(form)}):
+                self.assertEqual(KEYBOARD.fallback_xkb_settings("no-latin1"), "XKBLAYOUT=no\nXKBMODEL=pc105\n")
+                self.assertEqual(KEYBOARD.fallback_xkb_settings("us"), "")
+
+    def test_older_setup_form_without_helper_returns_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            form = Path(directory) / "setup-form.sh"
+            form.write_text("OMARCHY_KEYBOARD_LAYOUTS=$'English (US)|us'\n")
+            with mock.patch.dict(os.environ, {"SETUP_FORM": str(form)}):
+                self.assertEqual(KEYBOARD.fallback_xkb_settings("no-latin1"), "")
+
+    def test_empty_omarchy_path_does_not_resolve_relative_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rel = Path(directory) / "install/provisioning/setup-form.sh"
+            rel.parent.mkdir(parents=True)
+            rel.write_text("omarchy_keymap_xkb_settings() { echo XKBLAYOUT=no; }\n")
+            cwd = os.getcwd()
+            try:
+                os.chdir(directory)
+                real_is_file = Path.is_file
+                with mock.patch.dict(os.environ, {"SETUP_FORM": "", "OMARCHY_PATH": ""}), \
+                        mock.patch.object(Path, "is_file", new=lambda p: False if str(p) == "/usr/share/omarchy-iso/setup-form.sh" else real_is_file(p)):
+                    self.assertIsNone(KEYBOARD.setup_form_path())
+            finally:
+                os.chdir(cwd)
+
+
 @unittest.skipUnless(LOCALECTL_AVAILABLE, "localectl cannot list keymaps on this host")
 class KeyboardConfigurationTest(unittest.TestCase):
     def target(self, directory: str) -> Path:
@@ -69,8 +113,8 @@ class KeyboardConfigurationTest(unittest.TestCase):
         return target
 
     def test_writes_keymap_and_xkb_settings_and_preserves_font(self):
-        # XKBLAYOUT is load-bearing: omarchy's detect-keyboard-layout.sh copies
-        # it into Hyprland's kb_layout on the installed system.
+        # XKBLAYOUT is load-bearing: Omarchy's default/hypr/keyboard.lua reads
+        # it for Hyprland's kb_layout on the installed system.
         with tempfile.TemporaryDirectory() as directory:
             target = self.target(directory)
             self.assertTrue(KEYBOARD.configure_keyboard(target, "us"))
@@ -89,6 +133,26 @@ class KeyboardConfigurationTest(unittest.TestCase):
                 lines = (target / "etc/vconsole.conf").read_text().splitlines()
                 self.assertIn(f"KEYMAP={keymap}", lines)
                 self.assertEqual(lines.count("FONT=default8x16"), 1)
+
+    def test_every_configurator_keymap_ends_with_an_xkb_layout(self):
+        # systemd-firstboot writes XKBLAYOUT only for keymaps in kbd-model-map.
+        # Without it Hyprland falls back to a US layout on the installed system.
+        # The XKB lines come from the same form as the layout list.
+        form = setup_form()
+        if SUPPORTED_KEYMAPS is None or form is None:
+            self.skipTest("no Omarchy runtime checkout to read the layout list from")
+        if "omarchy_keymap_xkb_settings" not in form.read_text():
+            self.skipTest("the Omarchy runtime predates omarchy_keymap_xkb_settings")
+        for keymap in SUPPORTED_KEYMAPS:
+            with self.subTest(keymap=keymap), tempfile.TemporaryDirectory() as directory, \
+                    mock.patch.dict(os.environ, {"SETUP_FORM": str(form)}):
+                target = self.target(directory)
+                self.assertTrue(KEYBOARD.configure_keyboard(target, keymap))
+                lines = (target / "etc/vconsole.conf").read_text().splitlines()
+                self.assertTrue(
+                    any(line.startswith("XKBLAYOUT=") and len(line) > 10 for line in lines),
+                    f"no XKBLAYOUT for {keymap}: {lines}",
+                )
 
     def test_unknown_and_empty_keymaps_match_archinstall_behavior(self):
         for keymap, expected in (("definitely-not-a-keymap", False), ("", True)):

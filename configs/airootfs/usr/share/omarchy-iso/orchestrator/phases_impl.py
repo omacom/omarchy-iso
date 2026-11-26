@@ -752,7 +752,7 @@ def arch_install_system(ctx: InstallContext) -> None:
                 # sof-firmware when Omarchy's own Intel SOF script handles it
                 # in Phase 4) and wires the per-user PipeWire units.
                 info("› applying archinstall application selections")
-                with _time_step("STEP.install_applications"):
+                with _time_step("STEP.install_applications"), _pipewire_units_without_chroot():
                     arch.install_applications(
                         installer,
                         config,
@@ -1658,6 +1658,123 @@ def _target_passwd_entry(target: Path, username: str) -> tuple[int, int, str] | 
         if len(parts) >= 6 and parts[0] == username:
             return int(parts[2]), int(parts[3]), parts[5]
     return None
+
+
+PIPEWIRE_USER_UNITS = ("pipewire-pulse.service", "pipewire-pulse.socket")
+
+
+def _target_group_id(target: Path, name: str) -> int | None:
+    try:
+        lines = (target / "etc" / "group").read_text().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        parts = line.split(":")
+        if len(parts) >= 3 and parts[0] == name and parts[2].isdigit():
+            return int(parts[2])
+    return None
+
+
+def _enable_pipewire_without_chroot(install_session, users) -> bool:
+    """archinstall's AudioApp._enable_pipewire, leaving the same files with
+    the same owners, without a chroot. False when the target is not what this
+    reproduces exactly, and archinstall's own commands must run instead.
+
+    archinstall makes ~/.config/systemd/user/default.target.wants as root,
+    then runs `chown -R user:user /home/user` and two `su - user -c 'ln -sf
+    ...'` through arch-chroot: three chroots, 100 ms on a Dell XPS 16, for
+    three small file operations.
+
+    chown -R does not follow symbolic links (-P is its default with -R), so
+    -hR from outside the target, with the ids the target gives the user and
+    the group of the same name, changes the same entries. Each link is made
+    beside its place and renamed over it, as ln -sf does, and belongs to the
+    user and the user's own group, or to the directory's group where that
+    directory is setgid, as a link the user makes there would.
+
+    A symbolic link on the way to the directory, /home included, would be
+    followed in the live system here and in the target there. So would ln,
+    into a directory or a link standing where a unit's link goes. Those are
+    left to archinstall, like a directory the user could not write to."""
+    target = install_session.target
+    plans = []
+    for user in users:
+        entry = _target_passwd_entry(target, user.username)
+        named_gid = _target_group_id(target, user.username)
+        if entry is None or named_gid is None:
+            return False
+        uid, gid, _home = entry
+        home = target / "home" / user.username
+        wants = home / ".config" / "systemd" / "user" / "default.target.wants"
+        step = target
+        for part in wants.relative_to(target).parts:
+            step = step / part
+            if step.is_symlink() or (step.exists() and not step.is_dir()):
+                return False
+        # The user makes the links there: a directory the user could not
+        # enter on the way, or could not write to at the end, would refuse.
+        step = home
+        for part in wants.relative_to(home).parts:
+            step = step / part
+            if step.is_dir() and not step.stat().st_mode & 0o100:
+                return False
+        if wants.is_dir() and wants.stat().st_mode & 0o300 != 0o300:
+            return False
+        for unit in PIPEWIRE_USER_UNITS:
+            link = wants / unit
+            if link.is_symlink():
+                if os.readlink(link) != f"/usr/lib/systemd/user/{unit}":
+                    return False
+            elif link.is_dir():
+                return False
+            staged = wants / f".{unit}.omarchy-new"
+            if staged.is_symlink() or staged.exists():
+                return False
+        plans.append((home, wants, uid, gid, named_gid))
+    for home, wants, uid, gid, named_gid in plans:
+        wants.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["chown", "-hR", f"{uid}:{named_gid}", str(home)], check=True)
+        link_gid = -1 if wants.stat().st_mode & stat.S_ISGID else gid
+        for unit in PIPEWIRE_USER_UNITS:
+            staged = wants / f".{unit}.omarchy-new"
+            staged.symlink_to(f"/usr/lib/systemd/user/{unit}")
+            os.lchown(staged, uid, link_gid)
+            os.replace(staged, wants / unit)
+    return True
+
+
+@_contextmanager
+def _pipewire_units_without_chroot():
+    """Have archinstall's audio application wire the PipeWire units through
+    _enable_pipewire_without_chroot for the length of the block. Its own
+    method still runs for a target that function does not take, and an
+    archinstall without the method keeps its own way."""
+    import importlib
+    audio_app = None
+    for module in ("archinstall.applications.audio", "archinstall.lib.applications.audio"):
+        try:
+            audio_app = getattr(importlib.import_module(module), "AudioApp", None)
+        except ImportError:
+            continue
+        if audio_app is not None and hasattr(audio_app, "_enable_pipewire"):
+            break
+        audio_app = None
+    if audio_app is None:
+        yield
+        return
+    original = audio_app._enable_pipewire
+
+    def enable(app, install_session, users=None):
+        if users is None:
+            return
+        if not _enable_pipewire_without_chroot(install_session, users):
+            original(app, install_session, users)
+
+    audio_app._enable_pipewire = enable
+    try:
+        yield
+    finally:
+        audio_app._enable_pipewire = original
 
 
 def _create_users_with_reflink_skel(ctx: InstallContext, installer, users) -> None:

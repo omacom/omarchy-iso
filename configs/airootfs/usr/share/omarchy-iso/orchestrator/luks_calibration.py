@@ -210,13 +210,21 @@ def stop_calibration(wait: float = 20) -> None:
             time.sleep(0.2)
     except (OSError, subprocess.TimeoutExpired):
         pass  # a poll that fails ends the wait, not the stop
-    # Stop calibration, early keyring generation, and page-cache warm-up before
-    # luksFormat runs so neither gpg nor multi-GB reads compete with Argon2id.
-    # Completed calibration, a finished keyring, and pages already cached all
-    # stay in place when their units stop.
-    for unit in (UNIT, EARLY_KEYRING_UNIT, CACHE_WARM_UNIT):
+    # Always stop calibration and page-cache warm-up before luksFormat so
+    # neither a running benchmark nor multi-GB reads compete with formatting.
+    # Only stop early keyring generation when no cached calibration is ready:
+    # a cached format uses fixed --pbkdf-force-iterations (no live benchmark),
+    # so killing an in-flight keyring throws away seconds of gpg work for no
+    # gain and forces a synchronous rebuild at the end of the install.
+    for unit in (UNIT, CACHE_WARM_UNIT):
         try:
             subprocess.run(["systemctl", "stop", unit], check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if not cached_options(ITER_TIME, KEY_SIZE):
+        try:
+            subprocess.run(["systemctl", "stop", EARLY_KEYRING_UNIT], check=False,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             pass

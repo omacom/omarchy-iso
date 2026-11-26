@@ -221,16 +221,23 @@ class Calibration(unittest.TestCase):
         self.assertEqual(calls[-1], 'stop')
         self.assertTrue(2.0 <= waited < 2.5, waited)
 
-    def test_stop_calibration_stops_keyring_and_cache_warm_units(self):
+    def test_stop_calibration_stops_keyring_only_when_uncached(self):
         stopped = []
         def run(command, **_kwargs):
             if command[1] == 'stop':
                 stopped.append(command[-1])
                 return types.SimpleNamespace(stdout='')
             return types.SimpleNamespace(stdout='ActiveState=inactive\nJob=\n')
-        with mock.patch.object(luks.subprocess, 'run', side_effect=run):
+        with mock.patch.object(luks.subprocess, 'run', side_effect=run), \
+                mock.patch.object(luks, 'cached_options', return_value=[]):
             luks.stop_calibration()
-        self.assertEqual(stopped, [luks.UNIT, luks.EARLY_KEYRING_UNIT, luks.CACHE_WARM_UNIT])
+        self.assertEqual(stopped, [luks.UNIT, luks.CACHE_WARM_UNIT, luks.EARLY_KEYRING_UNIT])
+
+        stopped.clear()
+        with mock.patch.object(luks.subprocess, 'run', side_effect=run), \
+                mock.patch.object(luks, 'cached_options', return_value=['--pbkdf-force-iterations', '13']):
+            luks.stop_calibration()
+        self.assertEqual(stopped, [luks.UNIT, luks.CACHE_WARM_UNIT])
 
     def test_pretouch_for_format_runs_only_for_uncached_benchmark_with_headroom(self):
         uncached = list(COMMAND)

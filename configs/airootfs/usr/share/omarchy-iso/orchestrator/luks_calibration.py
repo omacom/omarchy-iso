@@ -13,6 +13,8 @@ import threading
 import time
 
 STATE = Path("/run/omarchy-luks-calibration/result.json")
+# The live system's other boot-time job (phases_impl EARLY_KEYRING_UNIT).
+EARLY_KEYRING_UNIT = "omarchy-target-keyring-early.service"
 UNIT = "omarchy-luks-calibrate.service"
 ITER_TIME = 2000
 KEY_SIZE = 512
@@ -117,6 +119,15 @@ def stop_calibration(wait: float = 20) -> None:
         pass  # a poll that fails ends the wait, not the stop
     try:
         subprocess.run(["systemctl", "stop", UNIT], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    # The keyring the live system makes for the target is gpg on one core, and
+    # must not run beside the format's PBKDF either. One that is finished
+    # stays. One still at work is given up, and the install makes the keyring
+    # itself, as it did before that unit existed.
+    try:
+        subprocess.run(["systemctl", "stop", EARLY_KEYRING_UNIT], check=False,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         pass
@@ -367,9 +378,23 @@ class DeferredKeyslot:
                 if self._proc is proc:
                     self._proc = None
 
+    @staticmethod
+    def _on_all_cpus(cmd: list[str]) -> list[str]:
+        """The command, on every CPU the installer started with.
+
+        On a hybrid CPU omarchy-iso-install keeps the installer on the
+        performance cores and names the CPUs it had before in
+        OMARCHY_INSTALLER_ALL_CPUS. The enrollment is four Argon2 threads for
+        about two seconds. Kept on those cores too, it shares them with the
+        install: 3.65 s against 3.52 s with nothing pinned, on a Dell XPS 16
+        with an Argon2 load of this size. Given every CPU back, it takes the
+        cores the install leaves, and the install takes 3.27 s."""
+        cpus = os.environ.get("OMARCHY_INSTALLER_ALL_CPUS")
+        return ["taskset", "-c", cpus, *cmd] if cpus else cmd
+
     def _worker(self) -> None:
         try:
-            rc, out = self._run_step(self.enroll_cmd, input_data=self._passphrase)
+            rc, out = self._run_step(self._on_all_cpus(self.enroll_cmd), input_data=self._passphrase)
             if rc != 0:
                 self.error = f"cryptsetup luksAddKey failed (exit {rc}): {out}"
                 return

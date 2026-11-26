@@ -671,6 +671,8 @@ def arch_install_system(ctx: InstallContext) -> None:
 
         with _time_step("STEP.install_root_image"):
             _install_root_image(ctx)
+        if config.auth_config and config.auth_config.users:
+            _start_skel_warmup(ctx)
         # Start Argon2id slot-0 enrollment now, after the 8-thread image write
         # finishes, so it overlaps single-threaded setup without contending for
         # CPU or memory bandwidth with omarchy-image-write.
@@ -758,7 +760,7 @@ def arch_install_system(ctx: InstallContext) -> None:
                 # sof-firmware when Omarchy's own Intel SOF script handles it
                 # in Phase 4) and wires the per-user PipeWire units.
                 info("› applying archinstall application selections")
-                with _time_step("STEP.install_applications"):
+                with _time_step("STEP.install_applications"), _pipewire_units_without_chroot():
                     arch.install_applications(
                         installer,
                         config,
@@ -1408,6 +1410,10 @@ def _finish_root_image(ctx: InstallContext) -> None:
 
 # Transient systemd unit that initialises the target's pacman keyring.
 TARGET_KEYRING_UNIT = "omarchy-target-keyring"
+# The live system's own copy of that work, made while the wizard is open
+# (omarchy-target-keyring-early.service), and where it leaves the keyring.
+EARLY_KEYRING_UNIT = "omarchy-target-keyring-early.service"
+EARLY_KEYRING_DIR = Path("/run/omarchy-target-keyring")
 LIVE_KEYRINGS_DIR = Path("/usr/share/pacman/keyrings")
 
 
@@ -1509,6 +1515,8 @@ def _start_target_keyring_init(ctx: InstallContext, *, keyrings_dir: Path | None
     if ctx.state.get("target_keyring_proc") is not None or ctx.state.get("target_keyring_installed"):
         return
     staged = _target_keyring_stage_dir(ctx)
+    if keyrings_dir is not None and _early_target_keyring(ctx, staged):
+        return
     keyrings = keyrings_dir or (ctx.target / "usr" / "share" / "pacman" / "keyrings")
     staged_q = shlex.quote(str(staged))
     keyrings_q = shlex.quote(str(keyrings))
@@ -1529,6 +1537,71 @@ def _start_target_keyring_init(ctx: InstallContext, *, keyrings_dir: Path | None
         stderr=subprocess.STDOUT,
         text=True,
     )
+
+
+def _early_target_keyring_ready() -> bool:
+    """Whether the live system's keyring is finished and usable now. Its
+    marker holds the time it was finished. A clock set back since (a first
+    answer from a time server, on a machine whose hardware clock runs ahead)
+    would leave the new master key dated in the future, which gpg refuses to
+    sign with until the clock catches up. Such a keyring is removed, and the
+    install makes its own, as it always has at this point."""
+    marker = EARLY_KEYRING_DIR / "complete"
+    if not marker.is_file():
+        return False
+    try:
+        finished = int(marker.read_text().strip())
+    except (OSError, ValueError):
+        finished = None
+    if finished is None or finished > time.time():
+        info("› the pacman keyring the live system made is dated after the clock; not using it")
+        shutil.rmtree(EARLY_KEYRING_DIR / "gnupg", ignore_errors=True)
+        marker.unlink(missing_ok=True)
+        return False
+    return (EARLY_KEYRING_DIR / "gnupg").is_dir()
+
+
+def _early_target_keyring(ctx: InstallContext, staged: Path) -> bool:
+    """Use the keyring the live system made while the wizard was open, or
+    wait for it if that unit is still at it. False when there is none to use
+    and the install makes its own: the unit is not on this ISO, it made none,
+    or an earlier install in this live session took its keyring.
+
+    Made in the install, the keyring is 3 to 4.4 s of gpg on one core of a
+    Dell XPS 16, which an install of about that length waits for at its end.
+    The unit runs the same two pacman-key commands from the same keyring
+    packages, so the keyring differs only in when it was made."""
+    if _early_target_keyring_ready():
+        waiter = ["true"]
+    else:
+        active = subprocess.run(["systemctl", "is-active", EARLY_KEYRING_UNIT],
+                                capture_output=True, text=True, check=False)
+        if active.stdout.strip() != "activating":
+            # The install makes its own. A unit still queued behind the
+            # hashes must not make a second one beside it.
+            subprocess.run(["systemctl", "stop", EARLY_KEYRING_UNIT], check=False, capture_output=True)
+            return False
+        # The unit is still running: starting it again joins that run. If it
+        # finished since the check above, there is nothing to wait for.
+        waiter = ["true"] if _early_target_keyring_ready() else ["systemctl", "start", EARLY_KEYRING_UNIT]
+    info("› using the pacman keyring the live system made before the install")
+    ctx.state["target_keyring_stage"] = staged
+    ctx.state["target_keyring_early"] = True
+    ctx.state["target_keyring_proc"] = subprocess.Popen(
+        waiter, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    return True
+
+
+def _take_early_target_keyring(staged: Path) -> bool:
+    """Move the live system's finished keyring to the staging directory the
+    rest of the install reads. False if it is not there to take."""
+    if not _early_target_keyring_ready():
+        return False
+    shutil.rmtree(staged, ignore_errors=True)
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(EARLY_KEYRING_DIR / "gnupg"), str(staged))
+    (EARLY_KEYRING_DIR / "complete").unlink(missing_ok=True)
+    return True
 
 
 def _target_supports_iso_managed_keyring(target: Path) -> bool:
@@ -1574,6 +1647,14 @@ def _join_target_keyring_init(ctx: InstallContext, *, raise_on_error: bool = Tru
         return
     with _time_step("STEP.join_target_keyring"):
         out, _ = proc.communicate()
+    if ctx.state.pop("target_keyring_early", False) and raise_on_error:
+        if proc.returncode != 0 or staged is None or not _take_early_target_keyring(staged):
+            # The live system's keyring did not arrive: make one now, the way
+            # an install without that unit does, and wait for it.
+            info("› the live system's pacman keyring is not there; making one now")
+            _start_target_keyring_init(ctx)
+            _join_target_keyring_init(ctx, raise_on_error=raise_on_error)
+            return
     if proc.returncode != 0:
         if staged is not None:
             shutil.rmtree(staged, ignore_errors=True)
@@ -1598,6 +1679,12 @@ def stop_target_keyring_init(ctx: InstallContext) -> None:
     install's own error must win, so a keyring failure is not raised here."""
     if ctx.state.get("target_keyring_proc") is None:
         return
+    if ctx.state.get("target_keyring_early"):
+        # End the wait, and the unit if it is still at work, so that no gpg
+        # runs on beside whatever comes next. A keyring it had finished stays
+        # for the next attempt in this live session.
+        ctx.state["target_keyring_proc"].kill()
+        subprocess.run(["systemctl", "stop", EARLY_KEYRING_UNIT], check=False, capture_output=True)
     subprocess.run(["systemctl", "stop", TARGET_KEYRING_UNIT], check=False, capture_output=True)
     _join_target_keyring_init(ctx, raise_on_error=False)
 
@@ -1626,32 +1713,62 @@ def _start_library_warmup(ctx: InstallContext) -> None:
         info(f"› library warm-up did not start ({exc}); pacman reads the libraries itself")
 
 
+def _start_skel_warmup(ctx: InstallContext) -> None:
+    """Read /etc/skel's inodes in the background, so the copy into the new
+    home finds them cached.
+
+    The image write leaves nothing cached, and cp then waits for each inode's
+    metadata block in turn: 169 ms of a 461 ms copy of 7,910 files on a Dell
+    XPS 16, which this walk brings down to 133 ms. du only stats, so it writes
+    nothing. It starts as soon as the image is in place, before the layer,
+    and only when the install creates a user, and ends with the library scan.
+    An install goes on without it when it cannot start."""
+    state = getattr(ctx, "state", None)
+    skel = ctx.target / "etc" / "skel"
+    if state is None or not skel.is_dir():
+        return
+    try:
+        state["skel_warmup_proc"] = subprocess.Popen(
+            ["du", "-s", str(skel)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        info(f"› skel warm-up did not start ({exc}); the copy reads it itself")
+
+
+# The background readers that only warm the page cache, and what the log
+# calls each.
+_WARMUPS = (("skel_warmup_proc", "skel"), ("library_warmup_proc", "library"))
+
+
 def _join_library_warmup(ctx: InstallContext) -> None:
-    """Wait for the scan before the target is snapshotted or unmounted. It
-    only warms the page cache, so a failed scan is noted and the install goes
-    on. The handle stays in ctx.state until the wait returns, so an
+    """Wait for the warm-up readers before the target is snapshotted or
+    unmounted. They only warm the page cache, so a failed one is noted and the
+    install goes on. A handle stays in ctx.state until its wait returns, so an
     interrupted wait still leaves stop_library_warmup a process to end."""
     state = getattr(ctx, "state", None)
-    proc = state.get("library_warmup_proc") if state else None
-    if proc is None:
-        return
-    with _time_step("STEP.join_library_warmup"):
-        status = proc.wait()
-    state.pop("library_warmup_proc", None)
-    if status != 0:
-        info(f"› library warm-up exited {status}; nothing depends on it")
+    for key, name in _WARMUPS:
+        proc = state.get(key) if state else None
+        if proc is None:
+            continue
+        with _time_step(f"STEP.join_{name}_warmup"):
+            status = proc.wait()
+        state.pop(key, None)
+        if status != 0:
+            info(f"› {name} warm-up exited {status}; nothing depends on it")
 
 
 def stop_library_warmup(ctx: InstallContext) -> None:
-    """Exit path: end the scan if it still runs, so it holds no file on the
-    target when the install stops early and the target is torn down."""
+    """Exit path: end the warm-up readers that still run, so they hold no file
+    on the target when the install stops early and the target is torn down."""
     state = getattr(ctx, "state", None)
-    proc = state.pop("library_warmup_proc", None) if state else None
-    if proc is None:
-        return
-    if proc.poll() is None:
-        proc.kill()
-    proc.wait()
+    for key, _name in _WARMUPS:
+        proc = state.pop(key, None) if state else None
+        if proc is None:
+            continue
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
 
 
 def _start_luks_keyslot_enroll(ctx: InstallContext) -> None:
@@ -1705,6 +1822,123 @@ def _target_passwd_entry(target: Path, username: str) -> tuple[int, int, str] | 
         if len(parts) >= 6 and parts[0] == username:
             return int(parts[2]), int(parts[3]), parts[5]
     return None
+
+
+PIPEWIRE_USER_UNITS = ("pipewire-pulse.service", "pipewire-pulse.socket")
+
+
+def _target_group_id(target: Path, name: str) -> int | None:
+    try:
+        lines = (target / "etc" / "group").read_text().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        parts = line.split(":")
+        if len(parts) >= 3 and parts[0] == name and parts[2].isdigit():
+            return int(parts[2])
+    return None
+
+
+def _enable_pipewire_without_chroot(install_session, users) -> bool:
+    """archinstall's AudioApp._enable_pipewire, leaving the same files with
+    the same owners, without a chroot. False when the target is not what this
+    reproduces exactly, and archinstall's own commands must run instead.
+
+    archinstall makes ~/.config/systemd/user/default.target.wants as root,
+    then runs `chown -R user:user /home/user` and two `su - user -c 'ln -sf
+    ...'` through arch-chroot: three chroots, 100 ms on a Dell XPS 16, for
+    three small file operations.
+
+    chown -R does not follow symbolic links (-P is its default with -R), so
+    -hR from outside the target, with the ids the target gives the user and
+    the group of the same name, changes the same entries. Each link is made
+    beside its place and renamed over it, as ln -sf does, and belongs to the
+    user and the user's own group, or to the directory's group where that
+    directory is setgid, as a link the user makes there would.
+
+    A symbolic link on the way to the directory, /home included, would be
+    followed in the live system here and in the target there. So would ln,
+    into a directory or a link standing where a unit's link goes. Those are
+    left to archinstall, like a directory the user could not write to."""
+    target = install_session.target
+    plans = []
+    for user in users:
+        entry = _target_passwd_entry(target, user.username)
+        named_gid = _target_group_id(target, user.username)
+        if entry is None or named_gid is None:
+            return False
+        uid, gid, _home = entry
+        home = target / "home" / user.username
+        wants = home / ".config" / "systemd" / "user" / "default.target.wants"
+        step = target
+        for part in wants.relative_to(target).parts:
+            step = step / part
+            if step.is_symlink() or (step.exists() and not step.is_dir()):
+                return False
+        # The user makes the links there: a directory the user could not
+        # enter on the way, or could not write to at the end, would refuse.
+        step = home
+        for part in wants.relative_to(home).parts:
+            step = step / part
+            if step.is_dir() and not step.stat().st_mode & 0o100:
+                return False
+        if wants.is_dir() and wants.stat().st_mode & 0o300 != 0o300:
+            return False
+        for unit in PIPEWIRE_USER_UNITS:
+            link = wants / unit
+            if link.is_symlink():
+                if os.readlink(link) != f"/usr/lib/systemd/user/{unit}":
+                    return False
+            elif link.is_dir():
+                return False
+            staged = wants / f".{unit}.omarchy-new"
+            if staged.is_symlink() or staged.exists():
+                return False
+        plans.append((home, wants, uid, gid, named_gid))
+    for home, wants, uid, gid, named_gid in plans:
+        wants.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["chown", "-hR", f"{uid}:{named_gid}", str(home)], check=True)
+        link_gid = -1 if wants.stat().st_mode & stat.S_ISGID else gid
+        for unit in PIPEWIRE_USER_UNITS:
+            staged = wants / f".{unit}.omarchy-new"
+            staged.symlink_to(f"/usr/lib/systemd/user/{unit}")
+            os.lchown(staged, uid, link_gid)
+            os.replace(staged, wants / unit)
+    return True
+
+
+@_contextmanager
+def _pipewire_units_without_chroot():
+    """Have archinstall's audio application wire the PipeWire units through
+    _enable_pipewire_without_chroot for the length of the block. Its own
+    method still runs for a target that function does not take, and an
+    archinstall without the method keeps its own way."""
+    import importlib
+    audio_app = None
+    for module in ("archinstall.applications.audio", "archinstall.lib.applications.audio"):
+        try:
+            audio_app = getattr(importlib.import_module(module), "AudioApp", None)
+        except ImportError:
+            continue
+        if audio_app is not None and hasattr(audio_app, "_enable_pipewire"):
+            break
+        audio_app = None
+    if audio_app is None:
+        yield
+        return
+    original = audio_app._enable_pipewire
+
+    def enable(app, install_session, users=None):
+        if users is None:
+            return
+        if not _enable_pipewire_without_chroot(install_session, users):
+            original(app, install_session, users)
+
+    audio_app._enable_pipewire = enable
+    try:
+        yield
+    finally:
+        audio_app._enable_pipewire = original
 
 
 def _create_users_with_reflink_skel(ctx: InstallContext, installer, users) -> None:

@@ -150,6 +150,8 @@ class Calibration(unittest.TestCase):
         for failure in (OSError(), subprocess.TimeoutExpired('systemctl', 5)):
             calls = []
             def run(command, **_kwargs):
+                if command[-1] == luks.EARLY_KEYRING_UNIT:
+                    return types.SimpleNamespace(stdout='')
                 calls.append(command[1])
                 if command[1] == 'show':
                     raise failure
@@ -163,6 +165,8 @@ class Calibration(unittest.TestCase):
         turn (the last one from then on), on a clock that only sleep moves."""
         calls, clock = [], [0.0]
         def run(command, **_kwargs):
+            if command[-1] == luks.EARLY_KEYRING_UNIT:
+                return types.SimpleNamespace(stdout='')
             calls.append(command[1])
             state = states[min(calls.count('show') - 1, len(states) - 1)] if command[1] == 'show' else ''
             return types.SimpleNamespace(stdout=state)
@@ -553,6 +557,39 @@ class DeferredArgon2Keyslot(unittest.TestCase):
         subprocess.run(
             ['cryptsetup', 'open', '--test-passphrase', str(image)],
             input=b'test-passphrase', check=True, capture_output=True)
+
+
+
+class KeyslotEnrollmentCpusTest(unittest.TestCase):
+    """With the installer kept on a hybrid CPU's performance cores, the Argon2
+    enrollment still gets every CPU the installer started with."""
+
+    def entry(self, tmp):
+        vk, tk = Path(tmp) / "vk", Path(tmp) / "tk"
+        vk.write_text("k")
+        tk.write_text("k")
+        entry = luks.DeferredKeyslot("/dev/vda2", vk, tk, ["enroll"], ["kill"], b"secret")
+        steps = []
+
+        def run_step(cmd, *, input_data=None):
+            steps.append(list(cmd))
+            return 0, ""
+        entry._run_step = run_step
+        return entry, steps
+
+    def test_the_enrollment_runs_on_the_cpus_the_installer_started_with(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"OMARCHY_INSTALLER_ALL_CPUS": "0-15"}):
+            entry, steps = self.entry(tmp)
+            entry._worker()
+        self.assertEqual(steps, [["taskset", "-c", "0-15", "enroll"], ["kill"]])
+
+    def test_an_installer_that_was_not_moved_runs_it_as_before(self):
+        env = {k: v for k, v in os.environ.items() if k != "OMARCHY_INSTALLER_ALL_CPUS"}
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, env, clear=True):
+            entry, steps = self.entry(tmp)
+            entry._worker()
+        self.assertEqual(steps, [["enroll"], ["kill"]])
 
 
 if __name__ == '__main__': unittest.main()

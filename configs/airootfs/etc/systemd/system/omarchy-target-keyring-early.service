@@ -1,0 +1,29 @@
+[Unit]
+Description=Make the installed system's pacman keyring while the installer wizard is open
+# The keyring is the same work whichever disk and user the wizard ends with:
+# a new master key (pacman-key --init) and the Arch and Omarchy keys signed
+# with it (--populate), 3 to 4.4 s of gpg on one core of a Dell XPS 16. Made
+# inside the install it is what the install waits for at its end; made here
+# it is ready before the first question is answered. The installer takes it
+# (orchestrator _early_target_keyring) and makes its own when there is none.
+#
+# After the hashing units, like the LUKS calibration, and only once that
+# calibration has finished with a result (the script waits and checks): a
+# benchmark that shares the CPUs measures low, and its result sets the cost of
+# the disk password.
+After=omarchy-mirror-verify.service omarchy-root-image-verify.service omarchy-luks-calibrate.service
+ConditionPathExists=/run/archiso/bootmnt
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/omarchy-target-keyring-early
+RuntimeDirectory=omarchy-target-keyring
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+# No UMask: gpg's own files must get the modes they get when the installer
+# makes the keyring (0644 for tofu.db), and the directory above is 0700.
+Nice=10
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

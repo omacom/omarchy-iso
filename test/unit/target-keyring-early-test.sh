@@ -62,8 +62,9 @@ expected="--gpgdir $work/run/gnupg --init
 [[ $(cat "$work/calls") == "$expected" ]] || fail "init, then populate from the live keyrings: $(cat "$work/calls")"
 [[ -e $work/run/complete ]] || fail "a finished keyring is marked complete"
 finished=$(cat "$work/run/complete")
-now=$(date +%s)
-[[ $finished =~ ^[0-9]+$ ]] && ((finished <= now + 1 && finished > now - 60)) || fail "the marker holds the time it was finished: $finished"
+now=${EPOCHREALTIME}
+[[ $finished =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk -v f="$finished" -v n="$now" 'BEGIN{exit !(f <= n && f > n - 60)}' ||
+  fail "the marker holds the time it was finished and is never in the future: finished=$finished now=$now"
 [[ ! -e $work/run/complete.new ]] || fail "the marker is renamed into place"
 
 # A clock set back while the keyring is made must not date the marker before
@@ -78,7 +79,7 @@ chmod +x "$work/bin/date"
 rm -f "$work/date-calls"
 DATE_CALLS="$work/date-calls" run || fail "a run across a clock change succeeds"
 stepped=$(cat "$work/run/complete")
-((stepped >= 2000000000 && stepped <= 2000000060)) || fail "a clock set back does not date the marker before the keyring: $stepped"
+awk -v s="$stepped" 'BEGIN{exit !(s >= 2000000000 && s <= 2000000060)}' || fail "a clock set back does not date the marker before the keyring: $stepped"
 rm "$work/bin/date"
 [[ $(stat -c %a "$work/run/gnupg") == 700 ]] || fail "the keyring directory is 0700"
 

@@ -90,8 +90,10 @@ fi
 warm_offline_mirror() {
   local mirror=/var/cache/omarchy/mirror/offline
   local mem_avail_kb half_kb headroom_kb budget_kb spent_kb=0 size_kb path
-  # The orchestrator's ROOT_IMAGE.
-  local image=/run/archiso/bootmnt/arch/$(uname -m)/omarchy-root.sfs
+  # The orchestrator's ROOT_IMAGE (zstd image, or legacy squashfs) and layers.
+  local arch_dir; arch_dir=/run/archiso/bootmnt/arch/$(uname -m)
+  local image="$arch_dir/omarchy-root.img.zst"
+  [[ -f $image ]] || image="$arch_dir/omarchy-root.sfs"
 
   [[ ${OMARCHY_NO_PREFETCH:-} == 1 ]] && return 0
 
@@ -134,6 +136,16 @@ warm_offline_mirror() {
     spent_kb=$size_kb
   fi
 
+  # Warm hardware/platform layers on the medium (e.g. omarchy-layer.intel-ptl-ipu7.tar.zst)
+  # so tar reads them from RAM on a fresh boot instead of cold from USB.
+  for path in "$arch_dir"/omarchy-layer.*.tar.zst; do
+    [[ -f $path ]] || continue
+    size_kb=$(du -k -- "$path" | cut -f1)
+    ((spent_kb + size_kb > budget_kb)) && continue
+    cat -- "$path" >/dev/null 2>&1 || true
+    spent_kb=$((spent_kb + size_kb))
+  done
+
   [[ -d $mirror ]] || return 0
 
   # Then the mirror, largest first: when the budget cannot cover all of it
@@ -145,9 +157,24 @@ warm_offline_mirror() {
   done < <(du -k "$mirror"/*.pkg.tar.zst 2>/dev/null | sort -rn)
 }
 
+# Read live installer binaries and Python modules from airootfs.sfs into page
+# cache while the wizard is open (copytoram=n leaves them cold on USB).
+warm_installer_tools() {
+  [[ ${OMARCHY_NO_PREFETCH:-} == 1 ]] && return 0
+  local mem_avail_kb bin path
+  mem_avail_kb=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
+  ((mem_avail_kb > 2097152)) || return 0
+  for bin in omarchy-image-write cryptsetup parted sfdisk wipefs mkfs.fat mkfs.btrfs     btrfs tar zstd efibootmgr genfstab arch-chroot cp chown du ldconfig lsblk blkid     systemd-machine-id-setup; do
+    path=$(command -v "$bin" 2>/dev/null) || continue
+    cat -- "$path" >/dev/null 2>&1 || true
+  done
+  cat /usr/share/omarchy-iso/orchestrator/*.py >/dev/null 2>&1 || true
+  find /usr/lib/python*/site-packages/archinstall -type f \( -name "*.py" -o -name "*.pyc" \)     -exec cat {} + >/dev/null 2>&1 || true
+}
+
 # Inside kmscon the tty1 run is still warming the cache.
 if [[ ${OMARCHY_KMSCON:-} != 1 ]]; then
-  warm_offline_mirror &
+  ( warm_offline_mirror; warm_installer_tools ) &
   warm_pid=$!
   trap 'kill "$warm_pid" 2>/dev/null; printf "\e[?25h" >/dev/tty1 2>/dev/null' EXIT
 fi

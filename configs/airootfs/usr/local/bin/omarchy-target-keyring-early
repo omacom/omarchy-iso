@@ -33,20 +33,40 @@ for name in "${names[@]}"; do
   [[ -f $keyrings/$name.gpg ]] || exit 0
 done
 
-uptime_s() { cut -d. -f1 /proc/uptime; }
+# Read wall and monotonic clocks together (<1 us apart) when using the system
+# date binary, avoiding both uutils date +%s%3N rollover bugs and any inter-call
+# gap between wall and monotonic samples. Falls back to date +%s when date is
+# overridden (e.g. unit test clock-step stubs).
+sample_clocks() {
+  local order=$1 date_bin
+  date_bin=$(type -P date 2>/dev/null || true)
+  if command -v python3 >/dev/null 2>&1 && [[ $date_bin == /usr/bin/date || $date_bin == /bin/date ]]; then
+    python3 -c '
+import sys, time
+if sys.argv[1] == "start":
+    w = time.time_ns(); m = time.monotonic_ns()
+else:
+    m = time.monotonic_ns(); w = time.time_ns()
+print(w // 1_000_000, m // 1_000_000)
+' "$order"
+    return
+  fi
+  local w_ms m_ms
+  w_ms="$(date +%s)000"
+  m_ms=$(awk '{printf "%.0f\n", $1*1000}' /proc/uptime)
+  echo "$w_ms $m_ms"
+}
 
 rm -rf "$dir/complete" "$dir/complete.new" "$dir/gnupg"
 install -d -m 700 "$dir" "$dir/gnupg"
-began=$(date +%s)
-began_up=$(uptime_s)
+read -r began_ms began_mono_ms < <(sample_clocks start)
 pacman-key --gpgdir "$dir/gnupg" --init
 pacman-key --gpgdir "$dir/gnupg" --populate-from "$keyrings" --populate "${names[@]}"
 
-# The latest time anything in the keyring can be dated: the clock now, or the
-# clock at the start plus the time this took if the clock was set back
-# meanwhile. Written beside the marker and renamed, so it is never read empty.
-latest=$((began + $(uptime_s) - began_up + 1))
-now=$(date +%s)
-((now <= latest)) || latest=$now
-echo "$latest" >"$dir/complete.new"
+read -r end_ms end_mono_ms < <(sample_clocks end)
+elapsed_ms=$((end_mono_ms - began_mono_ms))
+((elapsed_ms >= 0)) || elapsed_ms=0
+latest_ms=$((began_ms + elapsed_ms))
+((end_ms <= latest_ms)) || latest_ms=$end_ms
+awk -v ms="$latest_ms" 'BEGIN{printf "%.3f\n", ms/1000}' >"$dir/complete.new"
 mv "$dir/complete.new" "$dir/complete"

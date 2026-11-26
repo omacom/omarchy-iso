@@ -1476,7 +1476,7 @@ fi
 built_iso=$(iso_written_since /out "$build_started")
 [[ -f $built_iso ]] || { echo "ERROR: the build left no ISO in /out" >&2; exit 1; }
 if ! iso_has_valid_gpt "$built_iso"; then
-  echo "ERROR: $built_iso has no valid GPT: no protective MBR entry in front of a GPT header" >&2
+  echo "ERROR: $built_iso has no valid GPT: blkid finds none behind a protective MBR entry" >&2
   exit 1
 fi
 

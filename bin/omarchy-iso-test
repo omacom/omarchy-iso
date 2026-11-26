@@ -1479,6 +1479,20 @@ verify_preserved_partitions() {
   log "WINDOWS_ESP and WINDOWS_DATA (with its marker file) are intact"
 }
 
+# The configurator discards the new root partition before LUKS and mkfs
+# (omarchy-discard-partition). cidata installs never reach the configurator,
+# so only this job sees that call; the install log has its outcome.
+verify_root_discarded() {
+  local report="$RUN_DIR/root-discard.txt"
+  ssh_guest "echo $GUEST_PASSWORD | sudo -S -p '' grep -a 'omarchy-discard-partition:' /var/log/omarchy-install.log" \
+    >"$report" 2>&1 || true
+  if ! grep -q 'omarchy-discard-partition: discarded ' "$report"; then
+    echo "The free-space install did not discard its new root partition; see $report" >&2
+    return 1
+  fi
+  log "The new root partition was discarded: $(head -n 1 "$report")"
+}
+
 # The installer encrypts in 4096-byte sectors, which cryptsetup refuses on a
 # partition whose size 4096 does not divide; both paths make one that it does.
 verify_luks_sector_size() {
@@ -1532,6 +1546,7 @@ install_phase() {
   fi
   bootstrap_ssh
   $FREE_SPACE && verify_preserved_partitions
+  $FREE_SPACE && verify_root_discarded
   $ENCRYPT && verify_luks_sector_size
 
   # SSH can come up (console bootstrap logs in on a spare TTY) while

@@ -25,15 +25,10 @@ from orchestrator import context, phases_impl, region  # noqa: E402
 
 def write_profiles(root: Path) -> Path:
     regions = root / "regions"
-    (regions / "global").mkdir(parents=True)
-    (regions / "global/theme").write_text("Tokyo Night\n")
+    for profile in ("global", "cn"):
+        (regions / profile).mkdir(parents=True)
     (regions / "global/timezones").write_text("Asia/Hong_Kong\nHongkong\nAsia/Macau\nAsia/Macao\nAsia/Taipei\nROC\n")
-    cn = regions / "cn"
-    (cn / "pacman").mkdir(parents=True)
-    (cn / "timezones").write_text("# China\nAsia/Shanghai\n\n  Asia/Urumqi  \n")
-    for channel in ("stable", "rc", "edge"):
-        (cn / f"pacman/mirrorlist-{channel}.prepend").write_text(f"Server = https://{channel}.example.invalid/$repo/os/$arch\n")
-        (cn / f"pacman/omarchy-{channel}.prepend").write_text(f"Server = https://pkgs.example.invalid/{channel}/$arch\n")
+    (regions / "cn/timezones").write_text("# China\nAsia/Shanghai\n\n  Asia/Urumqi  \n")
     return regions
 
 

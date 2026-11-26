@@ -1,0 +1,103 @@
+#!/bin/bash
+#
+# Warm the install medium and live installer into the page cache while the
+# wizard is open (omarchy-cache-warm.service).
+#
+# Runs only after the boot-time medium verifiers and LUKS Argon2id calibration
+# finish, so warm-up never seeks against verification or drives page-cache
+# reclaim during the 1 GiB Argon2id benchmark. Managed by systemd so the
+# installer (before luksFormat) and omarchy-try (before soft-reboot) can stop
+# it cleanly; any pages already read stay warm in RAM.
+#
+# Disable via kernel cmdline omarchy.no_prefetch or OMARCHY_NO_PREFETCH=1.
+
+set -euo pipefail
+
+[[ ${OMARCHY_NO_PREFETCH:-} == 1 ]] && exit 0
+
+bootmnt=${OMARCHY_BOOTMNT:-/run/archiso/bootmnt}
+mirror=${OMARCHY_OFFLINE_MIRROR:-/var/cache/omarchy/mirror/offline}
+meminfo=${OMARCHY_MEMINFO:-/proc/meminfo}
+orchestrator_dir=${OMARCHY_ORCHESTRATOR_DIR:-/usr/share/omarchy-iso/orchestrator}
+
+wait_for_boot_checks() {
+  # The service orders After= all three units, and omarchy-luks-calibrate.service
+  # is Type=exec so its start job completes before the benchmark exits: poll
+  # is-active as well, and list-jobs in case this script is invoked directly.
+  while [[ -n $(systemctl list-jobs --no-legend omarchy-mirror-verify.service \
+    omarchy-root-image-verify.service omarchy-luks-calibrate.service 2>/dev/null) ]] ||
+    systemctl is-active --quiet omarchy-luks-calibrate.service 2>/dev/null; do
+    sleep 0.5
+  done
+}
+
+warm_offline_mirror() {
+  local arch_dir image mem_avail_kb half_kb headroom_kb budget_kb spent_kb=0 size_kb path
+  arch_dir="$bootmnt/arch/$(uname -m)"
+  image="$arch_dir/omarchy-root.img.zst"
+  [[ -f $image ]] || image="$arch_dir/omarchy-root.sfs"
+  [[ -f $image || -d $mirror ]] || return 0
+
+  # Reserve 2 GiB for the live system, wizard, and installer; fall back to
+  # half of available RAM on small machines.
+  mem_avail_kb=$(awk '/^MemAvailable:/ { print $2 }' "$meminfo")
+  [[ -n $mem_avail_kb ]] || return 0
+  half_kb=$((mem_avail_kb / 2))
+  headroom_kb=$((mem_avail_kb - 2097152))
+  budget_kb=$((headroom_kb > half_kb ? headroom_kb : half_kb))
+  ((budget_kb > 262144)) || return 0
+
+  # The root image first, and only when all of it fits: a second read of pages
+  # the verify just cached keeps them cached through the install. When it does
+  # not fit, leave the cache alone so we do not evict what verify left behind.
+  if [[ -f $image ]]; then
+    size_kb=$(du -k -- "$image" | cut -f1)
+    ((size_kb > budget_kb)) && return 0
+    cat -- "$image" >/dev/null 2>&1 || true
+    spent_kb=$size_kb
+  fi
+
+  # Warm hardware/platform layers on the medium so tar reads them from RAM
+  # on a fresh boot instead of cold from USB.
+  for path in "$arch_dir"/omarchy-layer.*.tar.zst; do
+    [[ -f $path ]] || continue
+    size_kb=$(du -k -- "$path" | cut -f1)
+    ((spent_kb + size_kb > budget_kb)) && continue
+    cat -- "$path" >/dev/null 2>&1 || true
+    spent_kb=$((spent_kb + size_kb))
+  done
+
+  [[ -d $mirror ]] || return 0
+
+  # Then the mirror, largest first: when the budget cannot cover all of it
+  # this still front-loads the bytes that dominate.
+  while read -r size_kb path; do
+    ((spent_kb + size_kb > budget_kb)) && continue
+    cat -- "$path" >/dev/null 2>&1 || true
+    spent_kb=$((spent_kb + size_kb))
+  done < <(du -k "$mirror"/*.pkg.tar.zst 2>/dev/null | sort -rn)
+}
+
+# Read live installer binaries and Python modules from airootfs.sfs into page
+# cache while the wizard is open (copytoram=n leaves them cold on USB).
+warm_installer_tools() {
+  local mem_avail_kb bin path
+  mem_avail_kb=$(awk '/^MemAvailable:/ { print $2 }' "$meminfo")
+  [[ -n $mem_avail_kb ]] || return 0
+  ((mem_avail_kb > 2097152)) || return 0
+  for bin in omarchy-image-write cryptsetup parted sfdisk wipefs mkfs.fat mkfs.btrfs \
+    btrfs tar zstd efibootmgr genfstab arch-chroot cp chown du ldconfig lsblk blkid \
+    systemd-machine-id-setup; do
+    path=$(command -v "$bin" 2>/dev/null) || continue
+    cat -- "$path" >/dev/null 2>&1 || true
+  done
+  if [[ -d $orchestrator_dir ]]; then
+    cat -- "$orchestrator_dir"/*.py >/dev/null 2>&1 || true
+  fi
+  find /usr/lib/python*/site-packages/archinstall -type f \( -name "*.py" -o -name "*.pyc" \) \
+    -exec cat {} + >/dev/null 2>&1 || true
+}
+
+wait_for_boot_checks
+warm_offline_mirror
+warm_installer_tools

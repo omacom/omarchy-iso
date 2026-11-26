@@ -80,107 +80,9 @@ if [[ ${OMARCHY_INSTALL_DEBUG:-} == "1" ]]; then
   echo "================================"
 fi
 
-# Warm the page cache for the root image and bundled packages while the user
-# works through the wizard. The install writes a multi-GB root image to the
-# target and then pacstraps a few packages out of the offline mirror; on media
-# slower than the target the install is read-bound and every byte cached here
-# is a byte it never waits for. On faster media this costs nothing but
-# otherwise-idle bandwidth: the medium is untouched while the user types, and
-# the target disk it writes to later is a different device.
-#
-# Clean page cache only, so the kernel reclaims it under pressure instead of
-# OOMing, and a budget so small machines never evict what was just warmed.
-# Set OMARCHY_NO_PREFETCH=1 to A/B the same ISO with this disabled.
-warm_offline_mirror() {
-  local mirror=/var/cache/omarchy/mirror/offline
-  local mem_avail_kb half_kb headroom_kb budget_kb spent_kb=0 size_kb path
-  # The orchestrator's ROOT_IMAGE (zstd image, or legacy squashfs) and layers.
-  local arch_dir; arch_dir=/run/archiso/bootmnt/arch/$(uname -m)
-  local image="$arch_dir/omarchy-root.img.zst"
-  [[ -f $image ]] || image="$arch_dir/omarchy-root.sfs"
-
-  [[ ${OMARCHY_NO_PREFETCH:-} == 1 ]] && return 0
-
-  # Keep at least 2 GiB free (or half of MemAvailable when MemAvailable <= 4 GiB)
-  # so an 8 GiB machine can hold the full ~4 GiB root image warm in clean page
-  # cache while small machines still avoid evicting what verify just cached.
-  mem_avail_kb=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
-  half_kb=$((mem_avail_kb / 2))
-  headroom_kb=$((mem_avail_kb - 2097152))
-  budget_kb=$((headroom_kb > half_kb ? headroom_kb : half_kb))
-  ((budget_kb > 262144)) || return 0
-
-  # omarchy-mirror-verify.service and then omarchy-root-image-verify.service
-  # (started at boot) read the shipped mirror and the whole image as they hash
-  # them, and two readers on one USB stick seek against each other: let both
-  # finish first, whatever their verdict. Wait for omarchy-luks-calibrate.service
-  # as well: it starts right after the verify units, and streaming the root
-  # image beside it drives gigabytes of page-cache reclaim while cryptsetup
-  # benchmarks 1 GiB of Argon2id (causing the benchmark to measure low and
-  # weaken the disk passphrase's KDF cost). Running warm-up after calibration
-  # also restores any page cache calibration's 1 GiB allocation evicted. Wait
-  # on list-jobs while queued behind verify and on is-active while the Type=exec
-  # calibration unit is running.
-  while [[ -n $(systemctl list-jobs --no-legend omarchy-mirror-verify.service \
-    omarchy-root-image-verify.service omarchy-luks-calibrate.service 2>/dev/null) ]] ||
-    systemctl is-active --quiet omarchy-luks-calibrate.service 2>/dev/null; do
-    sleep 1
-  done
-
-  # The image first, and only when all of it fits: a second read of pages
-  # the verify just cached keeps them cached through the install. When it does
-  # not fit, leave the cache alone. omarchy-image-write writes whatever part
-  # of the image is still cached first and reads the rest once; re-reading
-  # the head here, or the mirror after it, would only evict the part the
-  # verify left behind (on a 4 GB machine, most of what was cached).
-  if [[ -f $image ]]; then
-    size_kb=$(du -k -- "$image" | cut -f1)
-    ((size_kb > budget_kb)) && return 0
-    cat -- "$image" >/dev/null 2>&1 || true
-    spent_kb=$size_kb
-  fi
-
-  # Warm hardware/platform layers on the medium (e.g. omarchy-layer.intel-ptl-ipu7.tar.zst)
-  # so tar reads them from RAM on a fresh boot instead of cold from USB.
-  for path in "$arch_dir"/omarchy-layer.*.tar.zst; do
-    [[ -f $path ]] || continue
-    size_kb=$(du -k -- "$path" | cut -f1)
-    ((spent_kb + size_kb > budget_kb)) && continue
-    cat -- "$path" >/dev/null 2>&1 || true
-    spent_kb=$((spent_kb + size_kb))
-  done
-
-  [[ -d $mirror ]] || return 0
-
-  # Then the mirror, largest first: when the budget cannot cover all of it
-  # this still front-loads the bytes that dominate.
-  while read -r size_kb path; do
-    ((spent_kb + size_kb > budget_kb)) && continue
-    cat -- "$path" >/dev/null 2>&1 || true
-    spent_kb=$((spent_kb + size_kb))
-  done < <(du -k "$mirror"/*.pkg.tar.zst 2>/dev/null | sort -rn)
-}
-
-# Read live installer binaries and Python modules from airootfs.sfs into page
-# cache while the wizard is open (copytoram=n leaves them cold on USB).
-warm_installer_tools() {
-  [[ ${OMARCHY_NO_PREFETCH:-} == 1 ]] && return 0
-  local mem_avail_kb bin path
-  mem_avail_kb=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
-  ((mem_avail_kb > 2097152)) || return 0
-  for bin in omarchy-image-write cryptsetup parted sfdisk wipefs mkfs.fat mkfs.btrfs     btrfs tar zstd efibootmgr genfstab arch-chroot cp chown du ldconfig lsblk blkid     systemd-machine-id-setup; do
-    path=$(command -v "$bin" 2>/dev/null) || continue
-    cat -- "$path" >/dev/null 2>&1 || true
-  done
-  cat /usr/share/omarchy-iso/orchestrator/*.py >/dev/null 2>&1 || true
-  find /usr/lib/python*/site-packages/archinstall -type f \( -name "*.py" -o -name "*.pyc" \)     -exec cat {} + >/dev/null 2>&1 || true
-}
-
-# Inside kmscon the tty1 run is still warming the cache.
+# Restore the cursor on exit if the wizard or installer left it hidden.
 if [[ ${OMARCHY_KMSCON:-} != 1 ]]; then
-  ( warm_offline_mirror; warm_installer_tools ) &
-  warm_pid=$!
-  trap 'kill "$warm_pid" 2>/dev/null; printf "\e[?25h" >/dev/tty1 2>/dev/null' EXIT
+  trap 'printf "\e[?25h" >/dev/tty1 2>/dev/null' EXIT
 fi
 
 cd /root
@@ -227,7 +129,7 @@ else
 
   # The answers a relaunch carries hold the password: however this run ends,
   # none outlive it.
-  trap 'kill "$warm_pid" 2>/dev/null || true; rm -f "$KMSCON_RESUME"*; printf "\e[?25h" >/dev/tty1 2>/dev/null' EXIT
+  trap 'rm -f "$KMSCON_RESUME"*; printf "\e[?25h" >/dev/tty1 2>/dev/null' EXIT
 
   # Before any language is picked, the one an ISO presets (presets/<code>.json).
   language=$(jq -r '.language // empty' /usr/share/omarchy-iso/preset.json 2>/dev/null || true)

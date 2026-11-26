@@ -124,8 +124,15 @@ class FormatCoverage(unittest.TestCase):
         # ordinary format while the host's speed moved between unlocks.
         self.format_with_cache(dict(cached=10, absent=13, malformed=10, archinstall=10),
                                dict(cached=1.54, absent=2.61, malformed=2.04, archinstall=1.54))
-        self.assertAlmostEqual(self.report['cached_to_ordinary_iterations_ratio'], 10 / 11.5)
+        self.assertAlmostEqual(self.report['cached_to_ordinary_iterations_ratio'], 10 / 13)
         self.assertLess(self.report['cached_to_ordinary_unlock_ratio'], 0.70)
+
+    def test_a_single_noisy_ordinary_benchmark_does_not_fail_a_quiet_cache(self):
+        # CI run 45881254985: cached=14 (1.92 s) and absent=14 (2.06 s) matched
+        # while a 14 s host CPU steal burst slowed malformed to 5 iters (1.78 s).
+        self.format_with_cache(dict(cached=14, absent=14, malformed=5, archinstall=14),
+                               dict(cached=1.92, absent=2.06, malformed=1.78, archinstall=1.95))
+        self.assertEqual(self.report['cached_to_ordinary_iterations_ratio'], 1.0)
 
     def test_a_materially_weaker_or_stronger_cache_fails(self):
         for cached in (8, 19):

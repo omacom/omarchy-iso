@@ -8,6 +8,7 @@ Description=Verify the Omarchy root image on the install medium
 # collects the verdict, waits for the unit if it is still running, and fails
 # the install if it could not run.
 # One architecture's directory per ISO (arch/x86_64 or arch/aarch64).
+After=omarchy-greeter-ready.service
 ConditionPathExistsGlob=/run/archiso/bootmnt/arch/*/omarchy-root.sfs
 ConditionPathExistsGlob=/run/archiso/bootmnt/arch/*/omarchy-root.sfs.sha256
 

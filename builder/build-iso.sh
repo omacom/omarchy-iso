@@ -267,6 +267,13 @@ rm -rf "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/ref
 rm -rf "$build_cache_dir/airootfs/etc/systemd/system/reflector.service.d"
 rm -rf "$build_cache_dir/airootfs/etc/xdg/reflector"
 
+# The live installer never configures Wi-Fi or cellular modems (and
+# customize_airootfs.sh strips radio firmware); drop iwd and ModemManager from
+# live boot so they do not burn CPU or I/O before the greeter. Try Omarchy and
+# installed systems keep their own service enablement in omarchy-root.
+rm -rf "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/iwd.service"
+rm -rf "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/ModemManager.service"
+
 # Bring in our archiso profile additions.
 cp -r /configs/* "$build_cache_dir/"
 install -Dm755 /usr/local/bin/omarchy-image-write "$build_cache_dir/airootfs/usr/local/bin/omarchy-image-write"

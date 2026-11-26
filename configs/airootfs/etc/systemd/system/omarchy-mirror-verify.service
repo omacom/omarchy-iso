@@ -9,6 +9,7 @@ Description=Verify the offline package mirror on the install medium
 # before the install writes it, or on a machine whose RAM cannot hold both this
 # hash evicts the image pages the write would reuse (30 MiB/s, 4 GB: 8190 MiB
 # read off the medium with the mirror second, against 5598 without it).
+After=omarchy-greeter-ready.service
 Before=omarchy-root-image-verify.service
 ConditionPathExists=/usr/share/omarchy-iso/offline-mirror.sha256
 

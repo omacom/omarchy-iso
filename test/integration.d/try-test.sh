@@ -38,9 +38,22 @@ welcome_waits() {
 
 # Space on the welcome, as a key through QEMU: Linux reads it, where the
 # firmware could not read every keyboard.
+# The NIC's link up ($1 true) or down (false). qmp() sends qmp_capabilities
+# first, so both its replies must be returns.
+nic_link() {
+  local reply
+  reply=$(qmp "\"set_link\", \"arguments\": {\"name\": \"nic0\", \"up\": $1}")
+  [[ $(grep -c '"return"' <<<"$reply") == 2 ]] && ! grep -q '"error"' <<<"$reply"
+}
+
 pick_try() {
   capture_console "success-try-welcome"
   press spc
+}
+
+# The network comes up only once Try runs (see start_vm below).
+network_up() {
+  nic_link true
 }
 
 # Omarchy's first-login notifications: any of them is the desktop. They are
@@ -119,14 +132,23 @@ if [[ $FIRMWARE == uefi ]]; then
 fi
 
 log "Booting the ISO alone and picking Try in the installer"
+# The live system runs with no network, as on a laptop whose Wi-Fi it has no
+# firmware for, and Try gets one: the NIC's link stays down until Try's
+# desktop shows. The live system's network state must not reach Try, whose
+# clock then never synchronized. The NIC has
+# an id because set_link on the netdev does not tell the guest.
+NIC_EXTRA=",id=nic0"
 start_vm "$disk" "$RUN_DIR/serial.log" \
   -drive "file=$ISO,media=cdrom,if=none,format=raw,id=cdrom0" \
   -device ide-cd,drive=cdrom0,bootindex=2 \
   -device intel-hda -device hda-duplex,audiodev=noaudio -audiodev none,id=noaudio
+nic_link false ||
+  { echo "Could not take the NIC's link down" >&2; exit 1; }
 check "GRUB shows no menu, and the installer greets with no key pressed" installer_greets_without_a_key
 check "the welcome waits for a key" welcome_waits
-pick_try
+check "Space picks Just try" pick_try
 check "Try Omarchy reaches the desktop" wait_for_desktop
+check "the network comes up in Try" network_up
 capture_console "success-try-desktop"
 
 mkdir -p "$BASE_DIR/www"

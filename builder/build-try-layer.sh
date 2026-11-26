@@ -196,6 +196,22 @@ EOF
 # reporting the zone it read at start. It runs from no-wait.d, so its retries
 # hold up no other dispatcher script.
 in_try systemctl enable systemd-timesyncd.service >/dev/null
+# Try runs no systemd-networkd, but it starts by a soft reboot from the live
+# system, which does, and /run comes along. The live system's networkd state
+# (/run/systemd/netif) then tells what the network was before Try: off, on a
+# laptop whose Wi-Fi the live system has no firmware for. timesyncd reads it
+# (sd_network) and waits for that network, which never comes, so the clock
+# never synchronized on a Dell XPS 16. None of it is Try's: removed at boot,
+# and systemd's own tmpfiles make the directory again, empty. timesyncd waits
+# for that: it starts before tmpfiles otherwise, reads the old state, and
+# notices its removal only through an inotify watch the removal itself drops.
+install -Dm644 /dev/stdin "$merged/etc/tmpfiles.d/omarchy-try-netif.conf" <<'EOF'
+R /run/systemd/netif
+EOF
+install -Dm644 /dev/stdin "$merged/etc/systemd/system/systemd-timesyncd.service.d/10-omarchy-try.conf" <<'EOF'
+[Unit]
+After=systemd-tmpfiles-setup.service
+EOF
 printf '0.0 0 0\n0\nLOCAL\n' >"$merged/etc/adjtime"
 install -Dm755 /dev/stdin "$merged/etc/NetworkManager/dispatcher.d/no-wait.d/50-omarchy-try-timezone" <<'EOF'
 #!/bin/bash

@@ -23,7 +23,7 @@ warm=${warm//\/var\/cache\/omarchy\/mirror\/offline/$fixture/mirror}
 warm=${warm//\/proc\/meminfo/$fixture/meminfo}
 
 mkdir -p "$fixture/bin" "$fixture/medium/arch/$(uname -m)" "$fixture/mirror"
-head -c 65536 /dev/zero >"$fixture/medium/arch/$(uname -m)/omarchy-root.img.zst"
+head -c 65536 /dev/zero >"$fixture/medium/arch/$(uname -m)/omarchy-root.sfs"
 head -c 65536 /dev/zero >"$fixture/mirror/linux-firmware-1-1-any.pkg.tar.zst"
 echo "MemAvailable:    8388608 kB" >"$fixture/meminfo"
 
@@ -68,11 +68,11 @@ warm_reads() { # the boot's phases, one per systemctl call -> the reads, one per
 }
 
 reads=$(warm_reads mirror mirror image image finished)
-[[ $reads == $'finished omarchy-root.img.zst\nfinished linux-firmware-1-1-any.pkg.tar.zst' ]] \
+[[ $reads == $'finished omarchy-root.sfs\nfinished linux-firmware-1-1-any.pkg.tar.zst' ]] \
   || fail "the warm-up read the medium before both checks had finished: $(paste -sd, <<<"$reads")"
 
 reads=$(warm_reads finished)
-[[ $reads == $'finished omarchy-root.img.zst\nfinished linux-firmware-1-1-any.pkg.tar.zst' ]] \
+[[ $reads == $'finished omarchy-root.sfs\nfinished linux-firmware-1-1-any.pkg.tar.zst' ]] \
   || fail "the warm-up does not read the medium once the checks are done: $(paste -sd, <<<"$reads")"
 
 # An 8 GiB machine (~7.3 GiB MemAvailable) must still cache a ~3.9 GiB image
@@ -83,7 +83,7 @@ cat >"$fixture/bin/du" <<'EOF'
 while [[ ${1:-} == -* ]]; do shift; done
 for path in "$@"; do
   case "$path" in
-    *omarchy-root.img.zst) printf '3962000\t%s\n' "$path" ;;
+    *omarchy-root.sfs) printf '3962000\t%s\n' "$path" ;;
     *) printf '64\t%s\n' "$path" ;;
   esac
 done
@@ -92,7 +92,7 @@ chmod +x "$fixture/bin/du"
 
 echo "MemAvailable:    7654604 kB" >"$fixture/meminfo"
 reads=$(warm_reads finished)
-[[ $reads == $'finished omarchy-root.img.zst\nfinished linux-firmware-1-1-any.pkg.tar.zst' ]] \
+[[ $reads == $'finished omarchy-root.sfs\nfinished linux-firmware-1-1-any.pkg.tar.zst' ]] \
   || fail "8 GiB machine failed to warm a 3.8 GiB root image: $(paste -sd, <<<"$reads")"
 
 echo "MemAvailable:    3670016 kB" >"$fixture/meminfo"

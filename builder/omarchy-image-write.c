@@ -75,6 +75,9 @@ static uint8_t *zero_frame;
 static size_t zero_frame_size;
 static atomic_size_t next_frame, bytes_written, zero_frames;
 static atomic_int failed, workers_done;
+/* A worker that finishes wakes report_progress, which else sleeps on. */
+static pthread_mutex_t done_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t done_cv;
 /* Thread-nanoseconds, summed over the workers: decoding (including the page
  * faults on the image), in pwrite, and checking for zeros (the compressed
  * bytes against the zero frame, or a decoded frame for all zeros). */
@@ -516,7 +519,10 @@ static void *worker(void *arg)
 		atomic_fetch_add(&bytes_written, n);
 	}
 out:
+	pthread_mutex_lock(&done_mu);
 	atomic_fetch_add(&workers_done, 1);
+	pthread_cond_signal(&done_cv);
+	pthread_mutex_unlock(&done_mu);
 	atomic_fetch_add(&decode_ns, decode);
 	atomic_fetch_add(&write_ns, write);
 	atomic_fetch_add(&skip_ns, skip);
@@ -602,15 +608,19 @@ static void plan_order(size_t size, unsigned char *vec)
  * goes there four times a second and once more when the workers are done, for the
  * installer's progress bar. Best effort: a sample that cannot be written is
  * skipped, and a reader may see the file empty between two samples.
+ *
+ * The wait between samples ends when a worker finishes. A plain sleep kept the
+ * tool alive until its next quarter second after the last frame was written:
+ * 0.94 s of writing took 1.00 s on a Dell XPS 16.
  */
 static void report_progress(const char *path, int workers)
 {
-	const struct timespec quarter = { 0, 250000000 };
+	struct timespec until;
 	char line[64];
 	size_t k;
 	int fd, n, done;
 
-	do {
+	for (;;) {
 		done = atomic_load(&workers_done) >= workers;
 		k = atomic_load(&next_frame);
 		n = snprintf(line, sizeof(line), "%zu %zu\n", k < nframes ? k : nframes, nframes);
@@ -621,12 +631,26 @@ static void report_progress(const char *path, int workers)
 			}
 			close(fd);
 		}
-	} while (!done && !nanosleep(&quarter, NULL));
+		if (done)
+			break;
+		pthread_mutex_lock(&done_mu);
+		if (atomic_load(&workers_done) < workers) {
+			clock_gettime(CLOCK_MONOTONIC, &until);
+			until.tv_nsec += 250000000;
+			if (until.tv_nsec >= 1000000000) {
+				until.tv_sec++;
+				until.tv_nsec -= 1000000000;
+			}
+			pthread_cond_timedwait(&done_cv, &done_mu, &until);
+		}
+		pthread_mutex_unlock(&done_mu);
+	}
 }
 
 static int write_image(const char *path, const char *target, int threads)
 {
 	pthread_t tid[MAX_THREADS];
+	pthread_condattr_t cv_attr;
 	uint64_t t0, t1, t2, t3;
 	unsigned char *cached;
 	size_t size;
@@ -650,6 +674,15 @@ static int write_image(const char *path, const char *target, int threads)
 		die(FAILED, "%s: %s", target, strerror(errno));
 	if (target_size(target_fd, target) < (uint64_t)total)
 		die(FAILED, "%s: smaller than the %lld-byte image", target, (long long)total);
+
+	/*
+	 * The reporter's wait is timed on the monotonic clock: the live system
+	 * may step the wall clock when it first reaches a time server.
+	 */
+	pthread_condattr_init(&cv_attr);
+	pthread_condattr_setclock(&cv_attr, CLOCK_MONOTONIC);
+	pthread_cond_init(&done_cv, &cv_attr);
+	pthread_condattr_destroy(&cv_attr);
 
 	writing = 1;
 	t1 = now_ns();

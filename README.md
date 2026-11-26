@@ -2,7 +2,7 @@
 
 [![Nightly ISO Build](https://github.com/omacom/omarchy-iso/actions/workflows/nightly-build.yml/badge.svg?branch=quattro&event=schedule)](https://github.com/omacom/omarchy-iso/actions/workflows/nightly-build.yml?query=branch%3Aquattro+event%3Aschedule)
 
-The Omarchy ISO is the only supported way to install Omarchy. It ships the Omarchy Configurator, writes a pre-built Arch Linux + Omarchy root image (a zstd-compressed btrfs partition image) onto the target with `zstdcat | dd`, gives it a fresh filesystem id and grows it to the partition, installs the per-machine packages (audio firmware, and a kernel the image lacks) from the bundled mirror, runs target system setup in the chroot, creates the user, and runs `omarchy-provision-user` for that user.
+The Omarchy ISO is the supported way to install Omarchy on x86_64 and non-Apple aarch64 machines (Apple Silicon Macs install from macOS instead). It boots into the Omarchy Configurator to install a pre-built Arch Linux + Omarchy system, or — on x86_64 — lets you **Just try** Omarchy live without touching any drive.
 
 ## Get Omarchy
 
@@ -10,13 +10,13 @@ The Omarchy ISO is the only supported way to install Omarchy. It ships the Omarc
 2. Write it to a USB stick. Use [balenaEtcher](https://etcher.balena.io/) on Mac or Windows, or [caligula](https://github.com/ifd3f/caligula) on Linux.
 3. Turn off Secure Boot and/or TPM in the BIOS.
 4. Boot from the stick.
-5. Answer the configuration questions and select a drive.
+5. Press Return to start the install (or Space on x86_64 to try Omarchy live), then answer the configuration questions and select a drive.
 
-The install takes under a minute on the fastest machines and up to 5 minutes on an older computer.
+The install takes seconds on fast modern hardware and up to 5 minutes on an older computer.
 
 ### Verify the download
 
-Verify the ISO before you write it to the stick. Otherwise, a corrupted download causes a pacman "invalid or corrupted package" error several minutes into the install.
+Verify the ISO before you write it to the stick. The live ISO checks the SHA-256 checksums of its bundled mirror and root image at boot and refuses a corrupt medium before touching the disk; verifying upfront saves flashing a bad stick and catches corruption in the live boot files too.
 
 Every release ISO has a `.sha256` file and a `.sig` file next to it. Run these commands to download and verify the ISO of the latest release of [omacom/omarchy](https://github.com/omacom/omarchy/releases):
 
@@ -47,593 +47,150 @@ The output must say `Good signature from "Omarchy <pkgs@omarchy.org>"` and show 
 
 # For maintainers
 
-The rest of this file covers building, testing and publishing the ISO.
-
-## What is published, and where
-
-| What | Where | When |
-| --- | --- | --- |
-| Release ISO | `https://iso.omarchy.org/omarchy-<version>-x86.iso`, `-aarch64.iso` and `-snapdragon.iso` (before 4.5.0: `omarchy-<version>.iso`) | Each release |
-| Edge ISO | `https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.iso` | Every night |
-| VM image of edge | `https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.qcow2` | Every night |
-| VM image of the latest release | `https://nightly.omarchy.org/stable/<version>/<run>/omarchy-<version>.qcow2` | Once per release |
-| `latest.json` | `https://nightly.omarchy.org/edge/latest.json` and `.../stable/latest.json` | With each nightly build |
-
-Every ISO and every VM image has a `.sha256` file next to it. The release ISO also has a `.sig` file. Each VM image has an `unpacked/` folder next to it.
-
-On nightly.omarchy.org, a published file is never replaced. Only `latest.json` changes. It is written last, after every file of the version has been fetched back through the CDN and compared.
-
-## The nightly build
-
-`.github/workflows/nightly-build.yml` runs every night for two channels:
-
-- `edge`: builds the ISO from the edge channel: the edge packages and mirrors, and the edge builds of Omarchy (`omarchy-dev`).
-- `stable`: uses the latest release. The latest release of omacom/omarchy determines the version. The ISO comes from iso.omarchy.org and is used only if its signature matches the release key. A scheduled run skips a release that is already published. A manual run builds it again.
-
-Each ISO goes through the same install test that runs for pull requests: an unattended install, then a boot of the installed system. `test/vm-image/vm-seal` then turns the installed disk into a VM image, and `test/vm-image/vm-verify` boots that image and checks it. Nothing is published unless every check passes.
-
-A separate job publishes. It is the only job with the bucket's key, and it runs only on `quattro`. To try a change, run the workflow manually on a branch. That run builds and checks everything and publishes nothing.
-
-`test/vm-image/nightly-plan` decides which channels a run builds and where they are published. `test/vm-image/nightly-layout` lays out the files and writes `latest.json`. `test/unit/nightly-test.sh` tests both.
-
-## latest.json
-
-| Field | What it is |
-| --- | --- |
-| `version` | Edge: the build's date and run number, `2026.10.09.431`. Stable: the release, `4.0.4`. |
-| `channel` | `edge` or `stable`. |
-| `built_at` | When this file was written, after the image passed its checks. UTC, `2026-10-09T18:02:35Z`. |
-| `url` | The ISO that was installed. Edge: on nightly.omarchy.org. Stable: the release ISO on iso.omarchy.org. |
-| `sha256`, `size` | The ISO's SHA-256 and its size in bytes. |
-| `iso_commit` | The omarchy-iso commit the nightly build ran from. |
-| `omarchy_version` | The version of the Omarchy package in the image. |
-| `omarchy_commit` | Edge: the omarchy commit that package was built from. Stable: empty. |
-| `kernel` | The image's kernel release, as reported by `uname -r`. |
-| `vm.url`, `vm.sha256`, `vm.size` | The VM image: its URL, SHA-256 and size in bytes. |
-| `vm.unpacked` | The URL of the image's `unpacked/` folder, ending in `/`. |
-| `vm.unpacked_files` | Every file in that folder. |
-| `vm.user`, `vm.password` | The account for the desktop and `sudo`. |
-| `vm.ssh` | SSH authentication: keys only. Password authentication is off. |
-
-The version is also in the edge ISO's file name.
-
-## VM images
-
-VM images are for testing. Users download the release ISO from iso.omarchy.org.
-
-A VM image is Omarchy already installed, as one `.qcow2` file. There is an image of the edge channel, rebuilt every night, and an image of the latest release. Its first boot makes it a new machine, with a new machine ID and new SSH host keys. `vm-boot` and `snapshot=on` make every boot a first boot.
-
-The user is `omarchy` and the password is `omarchy`. SSH takes keys only.
-
-### Boot the image by itself
-
-The image boots through UEFI with no other file. Run these commands on a Linux machine with QEMU, read and write access to `/dev/kvm`, `curl` and `jq`:
-
-```bash
-latest=https://nightly.omarchy.org/edge/latest.json    # or .../stable/latest.json
-image=$(curl -fsSL "$latest" | jq -r .vm.url)
-curl -fLO "$image"
-curl -fsSLO "$image.sha256"
-sha256sum -c "${image##*/}.sha256"
-
-cp /usr/share/edk2/x64/OVMF_VARS.4m.fd vars.fd
-qemu-system-x86_64 -enable-kvm -cpu host -smp 4 -m 4G \
-  -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.4m.fd \
-  -drive if=pflash,format=raw,file=vars.fd \
-  -drive file="${image##*/}",if=virtio,snapshot=on \
-  -device virtio-vga
-```
-
-The firmware paths are Arch's. `snapshot=on` keeps the downloaded image unchanged. The image is a 4 to 5 GB download.
-
-### Boot it faster, with SSH
-
-The `unpacked/` folder next to each image holds what a direct boot needs:
-
-| File | What it is |
-| --- | --- |
-| `vmlinuz`, `initrd`, `cmdline` | The image's own kernel, initramfs and kernel arguments. |
-| `vm-boot` | A script that boots the image directly into its kernel and gives it an SSH key. |
-| `SHA256SUMS` | Checksums of the files above. |
-
-A direct boot skips the firmware and the boot loader: SSH answers after about 6 seconds instead of about 20. Download the folder next to the image, then run `vm-boot`. It also needs `qemu-img` and `ssh`:
-
-```bash
-unpacked=$(curl -fsSL "$latest" | jq -r .vm.unpacked)
-for file in $(curl -fsSL "$latest" | jq -r '.vm.unpacked_files[]'); do curl -fsSLO "$unpacked$file"; done
-sha256sum -c SHA256SUMS
-chmod +x vm-boot
-
-./vm-boot "${image##*/}"             # boots, prints how to log in, runs until Ctrl-C
-./vm-boot "${image##*/}" uname -r    # boots, runs the command over SSH, powers off
-```
-
-`vm-boot` makes a new SSH key for each boot. It runs the machine on an overlay under `/var/tmp`, so the downloaded image is never changed, and deletes the overlay on exit. Set `VM_STATE_DIR` to put the overlay somewhere else.
-
-To get the URL of the edge ISO, run `jq -r .url` on the same `latest.json`.
-
-### Give it your own SSH key
-
-The image holds no SSH key. The VM manager gives the keys to each boot in an SMBIOS type 11 string. The string carries the systemd credential [`tmpfiles.extra`](https://www.freedesktop.org/software/systemd/man/latest/systemd.system-credentials.html). `vm-boot` uses this channel, and any VM manager that can set an SMBIOS type 11 string can use it too.
-
-The last block of each part below is complete. Paste it into a shell and it ends in an SSH login to the new machine. It makes a key pair for the machine, `omarchy-vm` and `omarchy-vm.pub`, in the current folder. Both blocks use the stable image. For edge, change `stable` to `edge` in the first line.
-
-#### With QEMU
-
-This boots through UEFI, with a window for the desktop. `snapshot=on` keeps the downloaded image unchanged, so every boot is a fresh machine. The firmware paths are Arch's. On Arch, install what it needs first:
-
-```bash
-sudo pacman -S --needed qemu-desktop edk2-ovmf jq openssh
-```
-
-```bash
-latest=https://nightly.omarchy.org/stable/latest.json
-image=$(curl -fsSL "$latest" | jq -r .vm.url)
-if [ ! -f "${image##*/}" ]; then
-  curl -fL -o download.qcow2 "$image"
-  echo "$(curl -fsSL "$image.sha256" | cut -d' ' -f1)  download.qcow2" | sha256sum -c && mv download.qcow2 "${image##*/}"
-fi
-
-[ -f omarchy-vm ] || ssh-keygen -q -t ed25519 -N '' -C omarchy-vm -f omarchy-vm
-keys=$(base64 -w0 omarchy-vm.pub)
-credential=io.systemd.credential.binary:tmpfiles.extra=$(printf 'd /home/omarchy/.ssh 0700 omarchy omarchy -\nf+~ /home/omarchy/.ssh/authorized_keys 0600 omarchy omarchy - %s\n' "$keys" | base64 -w0)
-
-cp /usr/share/edk2/x64/OVMF_VARS.4m.fd vars.fd
-qemu-system-x86_64 -enable-kvm -cpu host -smp 4 -m 4G \
-  -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.4m.fd \
-  -drive if=pflash,format=raw,file=vars.fd \
-  -drive file="${image##*/}",if=virtio,snapshot=on \
-  -device virtio-vga \
-  -smbios "type=11,value=$credential" \
-  -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:2222-:22 &
-
-ssh_opts=(-i omarchy-vm -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
-until ssh -n "${ssh_opts[@]}" -o BatchMode=yes -o ConnectTimeout=2 omarchy@127.0.0.1 true 2>/dev/null; do kill -0 $! || break; sleep 2; done
-ssh "${ssh_opts[@]}" omarchy@127.0.0.1
-```
-
-#### With libvirt
-
-This defines a machine named `omarchy` that keeps its disk, in `/var/lib/libvirt/images/omarchy`, across boots. It boots through UEFI, so it boots its own kernel after `omarchy update` installs a new one. Watch its desktop with `virt-viewer -c qemu:///system omarchy` or virt-manager. The firmware paths are Arch's. On Arch, install and start libvirt first. Its default network needs `dnsmasq` and `iptables`:
-
-```bash
-sudo pacman -S --needed libvirt qemu-base edk2-ovmf dnsmasq iptables jq openssh virt-viewer
-```
-
-```bash
-sudo systemctl enable --now libvirtd.service
-```
-
-```bash
-latest=https://nightly.omarchy.org/stable/latest.json
-dir=/var/lib/libvirt/images/omarchy
-image=$(curl -fsSL "$latest" | jq -r .vm.url)
-sudo mkdir -p "$dir"
-if [ ! -f "$dir/omarchy.qcow2" ]; then
-  sudo curl -fL -o "$dir/download.qcow2" "$image"
-  echo "$(curl -fsSL "$image.sha256" | cut -d' ' -f1)  $dir/download.qcow2" | sha256sum -c && sudo mv "$dir/download.qcow2" "$dir/omarchy.qcow2"
-fi
-
-[ -f omarchy-vm ] || ssh-keygen -q -t ed25519 -N '' -C omarchy-vm -f omarchy-vm
-keys=$(base64 -w0 omarchy-vm.pub)
-credential=io.systemd.credential.binary:tmpfiles.extra=$(printf 'd /home/omarchy/.ssh 0700 omarchy omarchy -\nf+~ /home/omarchy/.ssh/authorized_keys 0600 omarchy omarchy - %s\n' "$keys" | base64 -w0)
-
-cat >omarchy.xml <<EOF
-<domain type='kvm'>
-  <name>omarchy</name>
-  <memory unit='GiB'>4</memory>
-  <vcpu>4</vcpu>
-  <os>
-    <type arch='x86_64' machine='q35'>hvm</type>
-    <loader readonly='yes' type='pflash'>/usr/share/edk2/x64/OVMF_CODE.4m.fd</loader>
-    <nvram template='/usr/share/edk2/x64/OVMF_VARS.4m.fd'/>
-    <smbios mode='sysinfo'/>
-  </os>
-  <sysinfo type='smbios'>
-    <oemStrings>
-      <entry>$credential</entry>
-    </oemStrings>
-  </sysinfo>
-  <features><acpi/></features>
-  <cpu mode='host-passthrough'/>
-  <devices>
-    <disk type='file' device='disk'>
-      <driver name='qemu' type='qcow2'/>
-      <source file='$dir/omarchy.qcow2'/>
-      <target dev='vda' bus='virtio'/>
-    </disk>
-    <interface type='network'><source network='default'/><model type='virtio'/></interface>
-    <video><model type='virtio'/></video>
-    <graphics type='vnc'/>
-  </devices>
-</domain>
-EOF
-sudo virsh net-info default | grep -q 'Active:.*yes' || sudo virsh net-start default
-sudo virsh define omarchy.xml
-sudo virsh start omarchy
-
-until ip=$(sudo virsh domifaddr omarchy | awk '/ipv4/ {sub("/.*", "", $4); print $4}'); [ -n "$ip" ]; do sleep 2; done
-ssh_opts=(-i omarchy-vm -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
-until ssh -n "${ssh_opts[@]}" -o BatchMode=yes -o ConnectTimeout=2 "omarchy@$ip" true 2>/dev/null; do sleep 2; done
-ssh "${ssh_opts[@]}" "omarchy@$ip"
-```
-
-#### What the credential holds
-
-For another VM manager, pass the same SMBIOS type 11 string. It is the credential's name and the base64 encoding of two [tmpfiles.d](https://www.freedesktop.org/software/systemd/man/latest/tmpfiles.d.html) lines. The first line creates `~/.ssh`. The second line writes `authorized_keys` from its base64 encoding, so one credential can carry several keys:
-
-```
-d /home/omarchy/.ssh 0700 omarchy omarchy -
-f+~ /home/omarchy/.ssh/authorized_keys 0600 omarchy omarchy - <the authorized_keys file, base64>
-```
-
-To install your own keys in place of `omarchy-vm`, set `keys=$(base64 -w0 ~/.ssh/id_ed25519.pub)` and remove `-i omarchy-vm` from `ssh_opts`.
-
-How the image uses the credential:
-
-- Each boot that carries the credential writes `authorized_keys` again. To change the keys, change the credential and boot again. On a disk that keeps its writes, a boot without the credential keeps the file from the last boot.
-- The initrd also reads the credential. It logs `Failed to resolve user 'omarchy'` for both lines, because the initrd has no such user. The installed system then writes the file.
-- The first boot takes the machine ID from the VM's SMBIOS UUID, such as a libvirt domain's `<uuid>` or QEMU's `-uuid`. Without a UUID, the ID is random. On a disk that keeps its writes, later boots keep the first ID, even when the UUID changes.
-- Omarchy ignores the power button, so `virsh shutdown` does not stop the machine. Run `systemctl poweroff` in the guest, or `virsh destroy` to cut the power.
-
-## Autoinstall
-
-The [manual's page](https://omarchy.org/manual/unattended-installs/) is the one for users; this is the same feature in full.
-
-The shipped ISO installs itself with no keyboard when it finds its configuration on a second drive. Attach a drive labeled `cidata` alongside the ISO and the installer copies the config off it and skips the configurator; with no such drive, nothing changes and the wizard runs as usual. No rebuild, no extra boot entry.
-
-`cidata` is the cloud-init `NoCloud` label, so Proxmox, libvirt, and Packer already know how to attach one.
-
-### Configuration files
-
-These are the configurator's own output files, so the way to get a starting set is to run one interactive install and copy what it wrote into `/root`.
-
-| File | Required | Purpose |
-|------|----------|---------|
-| `user_configuration.json` | Yes | archinstall config: disk, hostname, timezone, keyboard |
-| `user_credentials.json` | Yes | Username and password hash |
-| `user_encrypt_installation.txt` | No | `true` when `user_configuration.json` carries a `disk_encryption` block; defaults to false |
-| `authorized_keys` | No | SSH public keys in sshd's own format, one per line |
-| `tailscale_authkey` | No | Tailscale auth key; the machine joins your tailnet on first boot |
-
-Both required files must be present or the installer falls back to the configurator. (A `defer-provisioning` marker file can stand in for `user_credentials.json`: user creation is then deferred to first boot.) Generate the password hash for `user_credentials.json` with `openssl passwd -6 "yourpassword"`.
-
-Encryption itself is configured by the `disk_encryption` block inside `user_configuration.json`, which names the partitions to encrypt. The passphrase goes at the top level of `user_credentials.json` as `encryption_password`: archinstall reads it there and ignores the copy the configurator writes into the block, so a cidata drive built from an encrypted install should be treated as the secret it is. The flag file must match the configuration: it drives the encrypted install's SDDM autologin and the final boot validation, not the encryption.
-
-`authorized_keys` is the same file sshd reads — copy your own or write one key per line:
-
-```
-ssh-ed25519 AAAA... you@host
-```
-
-When `authorized_keys` is present, autoinstall installs it as the user's `~/.ssh/authorized_keys`, enables `sshd`, and adds a `ufw allow ssh` rule — a stock Omarchy install ships openssh with the service disabled and its firewall opens neither port 22 nor anything else beyond LocalSend and Docker's DNS. Networking needs nothing extra; NetworkManager is already enabled with DHCP. Password SSH authentication is left at the distro default. An `authorized_keys` with no keys in it fails the install rather than producing a machine nobody can reach.
-
-When `tailscale_authkey` is present (one key, blank lines and `#` comments ignored), the install adds the `tailscale` package from the ISO's bundled mirror — nothing is fetched from the network at install or boot — and stages the join for first boot: the key lands at `/etc/tailscale/authkey` (root-only), `tailscaled` is enabled, ufw allows traffic in on `tailscale0`, and a background unit runs `tailscale up` once the network is actually up, retrying until it succeeds without holding up the boot. After a successful join the key is deleted and the unit disables itself; until then both survive reboots, so a machine installed offline joins whenever it first gets connectivity. The node appears on the tailnet under the configured hostname. Use a reusable, pre-authorized (tagged) key so one drive image serves many machines — or an ephemeral key for disposable VMs.
-
-The region follows `timezone`, exactly as in an interactive install and as the runtime's `docs/regions.md` defines it: a timezone listed in one of the runtime's region profiles (`default/regions/*/timezones`, such as `Asia/Shanghai` for `cn`) selects that profile, Hong Kong, Macau and Taiwan are always global, and any other timezone keeps the media's region: a preset's `region`, or global on the standard ISO. The installer's language plays no part. Set `omarchy_install.region` in `user_configuration.json` to pick one explicitly, for example `"global"` to keep the default mirrors regardless of timezone. An override naming a profile this ISO does not carry is rejected before any disk operation. A deferred-provisioning install has no owner timezone yet, so it takes the media's region, or the one `region` names. Unless `region` is set, it also writes the media's region as `REGION=` in the target's `/etc/omarchy/form-defaults`, and first-boot setup settles it against the owner's timezone by the same rule. The installer writes the region marker after unpacking the shared root image; the runtime's system finalizer then applies the mirrors. A profile only puts regional mirrors of the same repositories first, so a regional install needs no extra packages or network either. Current regional mirrors are x86-only: ARM records the selected region but keeps its platform's original channel templates.
-
-### Building the drive
-
-```bash
-mkdir cidata
-cp user_configuration.json user_credentials.json authorized_keys cidata/
-genisoimage -output cidata.iso -volid cidata -joliet -rock cidata/
-```
-
-### Proxmox example
-
-```bash
-qm create 101 --name my-omarchy \
-  --bios ovmf --machine q35 --cpu host --cores 4 --memory 8192 \
-  --ostype l26 --scsihw virtio-scsi-single \
-  --efidisk0 local-lvm:0,efitype=4m,pre-enrolled-keys=0 \
-  --scsi0 local-lvm:40,discard=on,iothread=1 \
-  --net0 virtio,bridge=vmbr0 --vga virtio --serial0 socket \
-  --ide2 local:iso/omarchy.iso,media=cdrom \
-  --ide3 local:iso/cidata.iso,media=cdrom \
-  --boot order='scsi0;ide2'
-
-qm start 101
-```
-
-Boot order is disk first: the empty disk falls through to the ISO on the first boot, and the installed system boots from disk afterwards. The machine reboots into Omarchy on its own when the install finishes.
-
-Encrypted autoinstalls are not fully unattended — the LUKS passphrase prompt still needs someone at the first boot.
-
-`omarchy_install.language` in `user_configuration.json` takes a code from Omarchy's language registry, like `da` or `ja`, and becomes the installed system's language. Leave it out, or set `en`, for English.
-
-## OEM ISO
-
-Build factory installation media tracking quattro with `./bin/omarchy-iso-make --oem --edge --keep-pkg-cache --no-boot-offer`. The output is named `omarchy-oem-<date>-<architecture>-edge.iso`, separate from the ordinary interactive ISO, and `omarchy-iso-release` never publishes one. The current quattro installer requires the shared progress display from the edge runtime. Add the usual architecture options when needed.
-
-Booting this ISO immediately erases and installs onto the sole eligible internal disk, without a wizard, credentials, a cidata drive, or any key presses. It keeps the existing boot splash and install dashboard, uses the encrypted full-disk "for another user" flow, and reboots automatically after a successful install. The next boot runs the existing owner setup, where the owner chooses their account, password, language, keyboard and timezone, and the hostname is made from their username and the machine (`dhh-dell-xps14`). Installation defaults are English, US keyboard, UTC and hostname `omarchy`.
-
-An eligible disk is writable, unmounted, neither removable nor hotplug, not connected by USB or FireWire, and at least 32 GiB. Mounted descendants, including the boot medium and active swap, exclude the entire disk. If zero or multiple eligible disks exist, installation stops without changing any disk; disconnect extra internal disks before trying again. Existing unmounted partitions on the selected disk are erased. Configure firmware to boot the internal disk before the installation medium so the completed machine boots into owner setup instead of reinstalling from the OEM ISO.
-
-### The OEM's branding, agreement and setup scripts
-
-An OEM ISO can carry what its maker wants the machine's owner to see at first boot, and scripts for the factory install to run:
-
-```bash
-./bin/omarchy-iso-make --oem --edge --keep-pkg-cache --no-boot-offer \
-  --oem-config acme/oem.json \
-  --oem-script acme/support-info.sh --oem-script acme/owner-defaults.sh
-```
-
-`--oem-config` takes a JSON file. Only `name` is required, and paths are relative to the file:
-
-```json
-{
-  "name": "Acme Computers",
-  "logo": "logo.txt",
-  "tagline": "Acme Book 14, powered by Omarchy",
-  "color": "#ff9e64",
-  "eula": {
-    "title": "Acme Computers License Agreement",
-    "file": "eula.txt"
-  }
-}
-```
-
-| Key | What first-boot setup does with it |
-| --- | --- |
-| `name` | Names the OEM: in the title of an agreement that has none of its own, and in the record of its acceptance. |
-| `logo` | A text file, drawn in place of the Omarchy logo on setup's opening screen and on the agreement. The steps between keep Omarchy's. |
-| `tagline` | One line under the logo on setup's opening screen, in place of Omarchy's. |
-| `color` | That logo's colour, as `#RRGGBB`. Omarchy's green without it. |
-| `eula.file` | The agreement's text. With it, accepting the agreement is setup's last question. |
-| `eula.title` | The heading the agreement is shown under. |
-
-First-boot setup runs on the Linux console, before there is a desktop: text in a 512-glyph font and sixteen colours. So a logo is text art, not an SVG or a PNG: at most 81 columns by 12 rows, drawn with ASCII, the characters `▀ ▄ █ ░ ▒ ▓ ─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼` (the Omarchy logo uses the first three), or braille dots (`⠁` to `⣿`), which give four times the detail. `chafa` draws an image either way; add `--invert` for dark artwork on a light or transparent background:
-
-```bash
-chafa --format symbols --symbols braille --colors none --size 81x12 logo.svg >logo.txt             # dots
-chafa --format symbols --symbols vhalf+solid+space --colors none --size 81x12 logo.svg >logo.txt   # blocks
-```
-
-The console font has no braille. Setup draws the dot patterns a logo uses into the font while a screen that shows the logo is up, in glyphs that neither the logo nor that screen's text needs, so a logo takes at most 128 different patterns, and they and the characters beyond ASCII in the bundle's text come to at most 256.
-
-The agreement is UTF-8 text in what that font has: Latin, Greek and Cyrillic, with their punctuation. Setup wraps it to its column. `builder/oem-bundle.py` checks the whole bundle before the build starts and names the first thing the console could not draw, so a mistake stops the build and not a machine's first boot.
-
-The agreement comes after the owner has reviewed their account and before anything is created. It scrolls with the arrow, Page Up, Page Down, Home and End keys, with Accept in focus. Declining offers to shut the machine down, with going back to the agreement in focus; a machine whose owner declines is left as it was shipped, and asks again at its next boot. Accepting records the OEM's name, the SHA-256 of the text, the account and the time in `/var/lib/omarchy/oem/eula-accepted.json`. Showing all of it needs a runtime with `install/provisioning/oem.sh`; the install stops if the one this ISO bundles lacks it.
-
-Each `--oem-script` is a bash script the install runs once, as root, in the new system (a chroot, with no services running), in the order given. They run after Omarchy has configured the system and built its boot files, and before the boot checks and the factory snapshot, so a factory reset returns to the machine as they left it. A script that exits non-zero fails the install, at the factory. So does one that leaves `/etc/omarchy/oem` other than the build checked it: the branding and the agreement are the config's to set, not a script's. The system's pacman is by then set to its online repositories, so a script can install packages only where the factory has a network.
-
-`test/unit/fixtures/oem/` is a complete bundle.
-
-## Translations
-
-The configurator asks for a language first, on the screen that carries the intro and the hidden Ctrl+C entry into preparing the machine for another owner. It offers every language in Omarchy's registry (`default/i18n/locales.json` in the settings package). A language with a catalog in `configs/airootfs/usr/share/omarchy-iso/i18n/` also translates the installer. The others are listed by their English name, the installer stays in English, and the language still goes to the installed system as `/etc/omarchy/language`. The keyboard list then preselects the language's layout from `language-defaults.json`. The timezone list preselects the network's guess, and when that fails, the capital of the language's country from the same file. English, Arabic, Swahili and Tamil have no single home country, so they fall back to the plain timezone search.
-
-The installer runs inside kmscon, which draws the gum screens with fontconfig: JetBrains Mono (Omarchy's terminal font), and the bundled Noto Sans Mono CJK for Chinese, Japanese and Korean, with Han characters in the picked language's forms. `.automated_script.sh` starts kmscon on tty1 and runs itself again inside it, and the whole install, the dashboard included, stays there. The launcher is the runtime's own (`install/provisioning/kmscon.sh` in omarchy), vendored at build time like the setup form, so the installer and first-boot owner setup are drawn and typed in alike. kmscon reads keys through XKB rather than the console keymap and takes its layout and font once, at its start: when the keyboard screen picks another layout, or the language another Han form, the configurator saves the answers so far and exits 75, and `.automated_script.sh` starts kmscon again from the step after the keyboard. The saved answers hold the password, so `kmscon-session.sh` writes them (mode 600) only while the tty1 run is waiting to start kmscon again, and that run removes them however it ends; a configurator run by hand on another VT keeps its kmscon and saves nothing. A kmscon that dies under the installer is started again, from the saved answers if they were not taken yet, otherwise from the first screen, for as long as it keeps dying: nothing else draws the installer. zh-CN, zh-TW, ja and ko have CJK catalogs so far. Arabic, Hebrew, the Indic scripts, Thai and Vietnamese stay in English. The plain console draws only OEM and cidata installs, which ask nothing. The kernel's own console fonts carry just the IBM PC character set, so there the installer loads Terminus, patched by `console-font.py` with the half blocks the logo is drawn with; it covers Latin, Greek and Cyrillic, and Chinese, Japanese and Korean stay in English.
-
-To add a string, put it in `en.json` and print it with `t <key> [args]`, where `%1`, `%2` take the arguments. A catalog that lacks the key shows it in English until a translation lands. `test/unit/test_installer_i18n.py` fails on a key English does not have, on placeholders that differ from English, and, outside the kmscon languages, on a character the patched font cannot draw. The setup form vendored from Omarchy translates its own strings from Omarchy's catalogs, in the language the configurator names in `OMARCHY_FORM_LANGUAGE`, and takes the keyboard default and the offline timezone through `OMARCHY_FORM_KEYBOARD_DEFAULT` and `OMARCHY_FORM_TIMEZONE_FALLBACK`.
+The rest of this file covers how to build, test, and publish the ISO, and how the installer works.
 
 ## Creating the ISO
 
-The builder image is pinned by digest in `bin/omarchy-iso-make`. Update that digest through review when changing the builder. Build on a disposable host without credentials: pinning the image does not remove the container's `--privileged` access.
+The builder image is pinned by digest in `bin/omarchy-iso-make`; update it through review and build on a disposable host without credentials (pinning does not remove the container's `--privileged` access).
 
-Run `./bin/omarchy-iso-make`; output goes into `./release`. By default the ISO uses the Omarchy packages and tracks the `quattro` branch, from the stable mirror. Pass `--edge` to use `omarchy-dev` and `omarchy-settings-dev` from the edge mirror.
-
-For local development, build the ISO from sibling checkouts:
+Run `./bin/omarchy-iso-make` to build into `./release`. By default it installs `omarchy` and `omarchy-settings` from the stable mirror. Pass `--edge` (or `--dev`) for `omarchy-dev` and `omarchy-settings-dev` tracking `quattro` from the edge mirror, `--rc` for the release-candidate channel, or `--fast` for minimal zstd compression (`-fast-<ref>.iso`, never selected by `omarchy-iso-release`). For local development against sibling checkouts:
 
 ```bash
 ./bin/omarchy-iso-make --local-source ../omarchy-installer ../omarchy-pkgs
 ```
 
-Despite the local folder name, the first argument is the Omarchy source checkout (runtime commands, configs, setup scripts, themes, shell, migrations). The installer itself lives in this ISO repo.
-
-Use `--dev` or `--rc` to build against those package channels. Both `--dev` and `--edge` select the dev packages from the edge mirror. Pass `--fast` for test builds to trade ISO size for faster builds with minimal zstd compression (`-fast-<ref>.iso`, which `omarchy-iso-release` never selects).
+Despite the folder name, the first argument is the Omarchy runtime checkout (commands, configs, themes, shell, migrations); the installer itself lives in this repository.
 
 ### Preset ISOs
 
-`--preset <code>` builds `omarchy-<code>-*.iso` from `presets/<code>.json`. The code is the ISO 3166-1 alpha-2 code of the place the ISO is for. A preset answers the installer's questions ahead of time, and each key is optional:
+`--preset <code>` builds `omarchy-<code>-*.iso` from `presets/<code>.json` (ISO 3166-1 alpha-2 code) to pre-answer installer questions. Each key is optional:
 
 | Key | Value | Effect |
 | --- | --- | --- |
-| `language` | an Omarchy language code, such as `zh-CN` or `da` | The installer skips the language screen and runs in that language. |
-| `keyboard` | a label from the setup form's keyboard list, such as `Chinese (Simplified, Pinyin)` or `Danish` | The installer skips the keyboard screen, and loads that layout for the disk password. |
-| `timezone` | a tzdata zone, such as `Asia/Shanghai` | The installer skips the timezone question. |
-| `region` | an Omarchy region (`default/regions/<code>/` in the runtime; only `cn` so far) | The install writes it to the target's `/etc/omarchy/region`. The runtime's pacman finalizer (`omarchy-apply-pacman`) then puts that region's mirrors ahead of the `.org` ones, which stay as the fallback. It is the media's region: a timezone another profile lists, or Hong Kong, Macau and Taiwan, still overrides it, as on the standard ISO, where Asia/Shanghai also selects `cn`. A preset without it is global media. |
+| `language` | Omarchy language code (e.g. `zh-CN`, `da`) | Skips the language screen and runs the installer in that language. |
+| `keyboard` | Setup-form keyboard label (e.g. `Chinese (Simplified, Pinyin)`) | Skips the keyboard screen and loads that layout for the disk password. |
+| `timezone` | tzdata zone (e.g. `Asia/Shanghai`) | Skips the timezone question. |
+| `region` | Omarchy region (`default/regions/<code>/`, currently `cn`) | Sets `/etc/omarchy/region` so `omarchy-apply-pacman` prefers that region's mirrors with `.org` as fallback. A timezone matching another profile — or Hong Kong, Macau, or Taiwan — still overrides it. |
 
-The summary the installer shows before the disk step lists only what the user answered. A preset that sets the language, keyboard and timezone leaves only the username and password to ask, so it shows no summary.
-
-`presets/cn.json` is the China ISO: Chinese, Pinyin input (fcitx5) on a US layout, Asia/Shanghai, and Omarchy's China mirrors (`*.omarchy.cn`). The China mirrors are x86 only so far, so an aarch64 China ISO keeps the global mirrors. `test/unit/test_installer_i18n.py` checks every preset against the language list, the setup form's keyboards, tzdata and the runtime's regions.
-
-A preset goes with the channel flags (`--preset cn --edge`) and with `--oem`. `--oem --preset cn` builds `omarchy-oem-cn-*.iso`, which installs with the China mirrors and Asia/Shanghai. The owner's first-boot setup opens in Chinese and asks for the language, keyboard and timezone as on every OEM install. A preset language also removes the language screen's Ctrl+C entry into preparing the machine for another owner. `omarchy-iso-release` publishes only `omarchy-[0-9]*`, so a preset ISO is never released as the global one.
+The pre-disk summary lists only answers the user gave (and is skipped if only username and password remain). `presets/cn.json` builds the China ISO (Chinese, Pinyin/fcitx5 on a US layout, `Asia/Shanghai`, x86-only `*.omarchy.cn` mirrors); `test/unit/test_installer_i18n.py` validates every preset. Presets combine with channel flags and `--oem` (`--oem --preset cn` builds `omarchy-oem-cn-*.iso`, opening first-boot setup in Chinese). A preset language also removes the Ctrl+C owner-prep shortcut, and `omarchy-iso-release` publishes only `omarchy-[0-9]*` so preset ISOs are never released as the global image.
 
 ### aarch64
 
 ```bash
-./bin/omarchy-iso-make --arch aarch64 --edge --local-source ../omarchy-installer ../omarchy-pkgs
-./bin/omarchy-iso-make --snapdragon --edge --local-source ../omarchy-installer ../omarchy-pkgs
+./bin/omarchy-iso-make --arch aarch64 --local-source ../omarchy-installer ../omarchy-pkgs
+./bin/omarchy-iso-make --snapdragon --local-source ../omarchy-installer ../omarchy-pkgs
 ```
 
-There are two aarch64 images. The plain one (`--arch aarch64`) serves the NVIDIA boards, the Raspberry Pi and every other board that installs from a USB stick. The Snapdragon one (`--snapdragon`, released as `omarchy-<version>-snapdragon.iso`) is the same image plus what only Snapdragon laptops need: their live UKI, `linux-firmware-qcom` and `qcom-firmware-extract`, the Qualcomm platform packages, and every OEM's signed firmware package, over 1 GiB, which the plain image leaves out. Apple Silicon Macs install from neither, since they are installed from macOS. The build chooses nothing else. The installer asks the machine which platform it is on, with the runtime's own `omarchy-hw-platform`, and installs that platform's packages from the offline mirror, which carries them for every platform.
+The plain image (`--arch aarch64`) serves NVIDIA boards, Raspberry Pi, and other USB-booting hardware, and pre-packs the N1x NVIDIA stack as a platform layer beside the root image. The Snapdragon image (`--snapdragon`, released as `omarchy-<version>-snapdragon.iso`) adds the Snapdragon live UKI (GRUB boots it on Snapdragon and `systemd-stub` matches the SMBIOS device tree; other boards boot the kernel directly), `linux-firmware-qcom`, `qcom-firmware-extract`, baked Qualcomm platform packages, and >1 GiB of OEM signed firmware. Apple Silicon Macs install from macOS instead.
 
-An aarch64 image is built from the stable channel unless `--rc` or `--edge` names another, as on x86_64: Omarchy's aarch64 repository for that channel and its mirror of Arch Linux ARM (`arm-stable-mirror.omarchy.org`, `arm-rc-mirror.omarchy.org`, `arm-mirror.omarchy.org`), from `configs/pacman-online-aarch64-<channel>.conf`.
-
-The kernel is `linux-omarchy`, as on x86_64, and it is the only one an aarch64 image is built on. It comes from the channel's aarch64 repository. A package bundle (`--package-dir`) can put a kernel under test or pinned packages ahead of it, as [N1X.md](N1X.md) describes.
-
-Snapdragon laptops get no device tree from their firmware, so the Snapdragon image's live system also carries a UKI with one for every supported laptop, built from the device trees the kernel package ships. GRUB boots it by default where the processor is a Snapdragon, and systemd-stub picks the device tree by the machine's SMBIOS data. Every other machine boots the kernel directly. The plain aarch64 image has no UKI, so a Snapdragon laptop does not boot it.
-
-The runtime an aarch64 image installs must have the platform detector, and for the Snapdragon image the Snapdragon hardware setup (`install/hardware/qualcomm/`), which lists those device trees for the installed system's own UKI. The build refuses a runtime without them. On a laptop that still has Windows, the installer copies the vendor-signed firmware off the Windows partition before the disk is written.
+Both images default to the stable channel (`--rc` or `--edge` selects another via `configs/pacman-online-aarch64-<channel>.conf` and `arm-*mirror.omarchy.org`) and build on `linux-omarchy`; `--package-dir` can place a test kernel or pinned packages ahead of it (see [N1X.md](N1X.md)). At install time, `omarchy-hw-platform` detects the board, extracts any matching platform layer, installs remaining platform packages from the offline mirror, and — on Snapdragon machines with Windows — copies vendor-signed firmware off the Windows partition before touching the disk. The build refuses a runtime missing the platform detector or `install/hardware/qualcomm/`.
 
 ## Testing the ISO
 
-Run `./bin/omarchy-iso-boot [release/omarchy.iso]`.
+- **Unit tests:** `./test/all` runs the fast, VM-free suite under `test/unit/` (cidata autoinstall, orchestrator phases, ISO builds, OEM bundles, boot/UKI setup, LUKS calibration, release tooling). Requires `shellcheck` (`test/unit/shellcheck-test.sh`).
+- **Interactive VM boot:** `./bin/omarchy-iso-boot [release/omarchy.iso]`.
+- **Dual-boot fixture:** `./bin/omarchy-iso-test-windows-disk [release/omarchy.iso]` builds a synthetic `/tmp` disk with an ESP, data partition, and unallocated space (no Windows) to exercise partition preservation.
 
-Run `./test/all` for the fast, VM-free tests under `test/unit/`, which cover cidata autoinstall loading and the orchestrator's phases without needing a built ISO. They need `shellcheck`: `test/unit/shellcheck-test.sh` runs it on every shell script in the repository.
+### Acceptance testing
 
-To exercise installation alongside existing Windows-style partitions, run
-`./bin/omarchy-iso-test-windows-disk [release/omarchy.iso]`. It creates a
-synthetic disk in `/tmp` with an existing ESP and data partition plus ample
-unallocated space, then offers to start an interactive installation on it. The
-fixture exercises Windows partition preservation but does not contain Windows.
-
-## Acceptance testing the ISO
-
-Run `./bin/omarchy-iso-test [release/omarchy.iso]` to install the ISO into a headless VM by driving the real interactive install flow — the harness reads each screen via QMP screendumps + OCR and answers with virtual keystrokes, so the configurator wizard, install dashboard, reboot prompt, and SDDM login are all exercised exactly as a user would. It then boots the installed system, sends real VM keyboard shortcuts for the primary shell and window-management actions, and runs the in-guest acceptance suite (`test/acceptance` in the omarchy repo). The suite checks session and service health, the complete core-package manifest, user defaults, representative applications, menus, panels, live weather, launchers, visual selectors, notifications, clipboard, and other interactive shell behavior.
-
-Visual checkpoints are saved as `success-<step>.png` or `failure-<step>.png` alongside the serial and install logs in `test-runs/<iso>/runs/<timestamp>/`. Independent test files and applications continue after a failure so one broken surface does not hide the rest of the report. The harness then stops the VM and opens the ordered screenshots in `imv` for quick visual review.
-
-The harness syncs the acceptance suite from `$OMARCHY_PATH` when it is available. The install phase produces a reusable base image, so iterating against another checkout is fast:
+`./bin/omarchy-iso-test [release/omarchy.iso]` drives the real interactive install in a headless VM (QMP screendumps + OCR + virtual keystrokes), boots the installed system, and runs `test/acceptance` synced from `$OMARCHY_PATH`. Visual checkpoints (`success-<step>.png` / `failure-<step>.png`) and logs land in `test-runs/<iso>/runs/<timestamp>/` and open in `imv` (skip with `--no-preview`; add `--encrypt` for the encrypted flow).
 
 ```bash
-./bin/omarchy-iso-test release/omarchy.iso --install-only        # once per ISO
-./bin/omarchy-iso-test release/omarchy.iso --reuse-base \
-  --sync-omarchy ../omarchy                                      # fast loop against local tests
-```
-
-Pass `--encrypt` to drive the encrypted install flow (including typing the LUKS passphrase at boot) instead of the unencrypted one. Pass `--no-preview` to collect the same visual artifacts without opening them in `imv` when the run finishes.
-
-Pass `--oem` to test an OEM ISO: the harness sends the install no keys, waits for it to reboot on its own, then drives the first-boot owner setup (language, keyboard, account) and carries on as above.
-
-```bash
-./bin/omarchy-iso-make --oem --edge --keep-pkg-cache --no-boot-offer
-./bin/omarchy-iso-test release/omarchy-oem-*.iso --oem --install-only
-```
-
-For an ISO built with `--oem-config`, pass the harness the same file. Where the config has an agreement, it drives it: reads on, comes back from Ctrl+C's reboot offer and from declining, reads to the end and accepts. Once the installed system is up it checks that the bundle and the record of acceptance are on it, and saves both as `oem-setup.txt`.
-
-```bash
+./bin/omarchy-iso-test release/omarchy.iso --install-only                              # build reusable base
+./bin/omarchy-iso-test release/omarchy.iso --reuse-base --sync-omarchy ../omarchy      # iterate on tests
 ./bin/omarchy-iso-test release/omarchy-oem-*.iso --oem --oem-config acme/oem.json --install-only
 ```
 
-## Integration testing the ISO
+With `--oem`, the harness waits for the unattended factory install to reboot, drives first-boot owner setup (and the EULA flow when `--oem-config` is passed), and verifies the OEM bundle and acceptance record (`oem-setup.txt`).
 
-Scenarios under `test/integration.d/` boot a real ISO install in QEMU and assert on what the running system actually does. The runner installs the ISO once — unattended, from a generated cidata drive — and saves the result as a reusable base image; every scenario then boots a throwaway overlay of that base with its own copy of the firmware vars, so neither disk nor NVRAM state leaks between runs. Shared machinery (VM lifecycle, QMP screendump + OCR console driving, virtual keystrokes, guest SSH, the cidata build) lives in `test/integration.d/base-test.sh`, so a new scenario is one file.
+### Integration testing
+
+Scenarios in `test/integration.d/` install the ISO once (unattended via cidata) into a reusable base image and boot throwaway overlays with isolated firmware NVRAM (shared harness in `test/integration.d/base-test.sh`; artifacts in `test-runs/<iso>-integration/runs/<timestamp>-<scenario>/`; supports `--no-preview`).
 
 ```bash
 ./test/integration release/omarchy.iso                   # install once, run all scenarios
-./test/integration release/omarchy.iso --reuse-base      # fast loop against the saved base
-./test/integration release/omarchy.iso factory-reset     # a single named scenario
+./test/integration release/omarchy.iso --reuse-base      # rerun against saved base
+./test/integration release/omarchy.iso factory-reset     # single named scenario
 ```
 
-The first scenario is `factory-reset`: it proves `omarchy-system-factory-reset` hands a machine on without destroying a shared ESP. The installed ESP gets a Windows entry with payload plus a second Linux cloned under a foreign machine-id with its own boot directory and UKIs; a real factory reset is then driven through a guest pty, and the harness asserts the foreign entries survive both the staged reset and first-boot provisioning, that the old Omarchy identity is fully retired, and that the machine reaches first-boot setup unattended.
+- `factory-reset` fixtures Windows and foreign Linux boot entries on the ESP (and Limine entries on BIOS), runs `omarchy-system-factory-reset`, and asserts foreign entries survive while the old Omarchy identity is retired.
+- `corrupt-image` flips one byte inside `omarchy-root.sfs` (located via `xorriso`) and proves `omarchy-root-image-verify.service` halts pre-flight with "re-flash" before touching the disk (runs standalone with `OMARCHY_INTEGRATION_ISO`).
 
-`corrupt-image` proves a bad install medium is refused before the disk is touched. It copies the ISO and flips one byte a megabyte into the root image stream itself — addressed from the extent xorriso reports out of the ISO9660 directory records, so the damage lands in the shipped bytes and nowhere else — then autoinstalls from that copy: `omarchy-root-image-verify.service` (which hashes the image at boot, while a user would be in the configurator) must fail, the install must halt in its pre-flight phase with the "re-flash" advice on screen, and the target disk must still have no partition table. It boots the ISO itself rather than the base image, so it also works standalone with `OMARCHY_INTEGRATION_ISO` set.
+### Upgrade testing
 
-Artifacts — screenshots, the fixtured/staged/final `limine.conf`, the reset typescript, and the factory-reset log — land under `test-runs/<iso>-integration/runs/<timestamp>-<scenario>/`, and `--no-preview` skips the `imv` review just like the acceptance harness.
+`test/upgrade-test` switches an installed system to another channel via `omarchy-channel-set`, reboots, and checks exit status, skipped migrations, channel and Omarchy package updates, booted kernel, failed units, desktop/shell theme, wallpaper, and `systemd-boot` or Limine boot config, writing `report.md` and before/after screenshots to the evidence folder.
 
-## Release rehearsal
+```bash
+./test/integration release/omarchy.iso boot                                # pass --release-iso for shipped ISOs
+./test/upgrade-test test-runs/omarchy-integration edge upgrade-evidence    # edge or rc
+gh workflow run upgrade-test.yml -f to=edge                                # add -f from=<version> for older releases
+```
 
-Twice a day, the "Install test" workflow builds the ISO quattro would be released as now, and runs every install job on it. `test/rehearsal-pins` pins `omarchy` and `omarchy-settings` to quattro's tip with omarchy-pkgs' own release engine (`bin/omarchy-pkgs release rc`), against the rc channel's database, as `omarchy-release rc` does for the next feature release. It pushes nothing. The ISO is then built from that pin with `--local-source --rehearsal`, which installs the release packages and names the ISO `*-rehearsal.iso`. Every other package comes from edge as published, `omarchy-nvim` included.
+Pass `--release-iso` to `test/integration` when starting from a shipped release (such as `4.0.6`) so legacy first-boot `ConditionNeedsUpdate=` units are noted rather than failed. The workflow posts and updates a PR comment when run on a PR branch.
 
-A failed rehearsal means the next release candidate would fail the same way, before anyone cuts it. Run it by hand on any branch:
+### Release rehearsal and RC validation
+
+Twice a day, "Install test" builds `quattro`'s tip as a release using `test/rehearsal-pins` (`bin/omarchy-pkgs release rc`, lockstep `omarchy-boot-systemd` when present, `--local-source --rehearsal` producing `*-rehearsal.iso`, all other packages from edge) and runs every install job. Trigger or build it manually:
 
 ```bash
 gh workflow run install-test.yml --ref <branch> -f channel=rehearsal
+./test/rehearsal-pins x86_64 /path/to/rehearsal && ./bin/omarchy-iso-make --local-source /path/to/rehearsal/omarchy /path/to/rehearsal/omarchy-pkgs --rehearsal
 ```
 
-To build the same ISO yourself:
+Validate a feature release candidate cut from `quattro` in this order (example `4.6.0rc1`):
 
 ```bash
-./test/rehearsal-pins x86_64 /path/to/rehearsal
-./bin/omarchy-iso-make --local-source /path/to/rehearsal/omarchy /path/to/rehearsal/omarchy-pkgs --rehearsal
+gh workflow run install-test.yml -R omacom/omarchy-iso --ref quattro -f channel=rehearsal  # 1. before cutting RC
+gh workflow run install-test.yml -R omacom/omarchy-iso --ref quattro -f channel=rc         # 2. fresh x86_64 + aarch64 RC install
+gh workflow run upgrade-test.yml -R omacom/omarchy-iso --ref quattro -f to=rc -f from=4.5.0 # 3. latest release -> RC (wait to finish)
+gh workflow run upgrade-test.yml -R omacom/omarchy-iso --ref quattro -f to=rc -f from=4.0.6 # 4. older supported series & prior RC
 ```
 
-## Upgrade testing
+Finish the fresh `rc` install and upgrade runs before publishing the next candidate to `rc`. Always pass `from`, and run one upgrade workflow at a time (a new run on the same branch cancels the one in progress). `upgrade-test.yml` tests unencrypted x86_64 only — verify an aarch64 upgrade and an encrypted upgrade manually in a VM.
 
-`test/upgrade-test` checks what an existing user gets. It takes an installed system, moves it to another channel with `omarchy-channel-set`, reboots it, and checks what came back: the update's exit status, skipped migrations, that the reboot comes back by itself into an installed kernel, failed units, the desktop, the user's wallpaper and the boot menu.
+## Releasing and publishing
 
-```bash
-./test/integration release/omarchy.iso boot                                # installs once, leaves the installed disk
-./test/upgrade-test test-runs/omarchy-integration edge upgrade-evidence    # edge or rc
-```
+- **Full release:** `./bin/omarchy-iso-release VERSION` builds, signs, checksums, and uploads an x86_64 ISO (does not run tests). Pass `--arch aarch64`, `--snapdragon`, `--rc`, or `--no-make` (publishes the latest existing build).
+- **Sign:** `./bin/omarchy-iso-sign <release/omarchy.iso>` writes `<iso>.sig` using the signing key from the shared Omarchy 1Password vault.
+- **Upload:** `./bin/omarchy-iso-upload <release/omarchy.iso>` uploads the ISO plus adjacent `.sig` and `.sha256` sidecars to R2 (configure rclone first via `./bin/omarchy-iso-rclone-config`).
 
-The evidence folder gets `report.md`, the update's output, and a picture of the desktop before and after.
+### What is published, and where
 
-Pass `--release-iso` to `test/integration` when the ISO is a shipped release rather than a build of this tree. The install is then not held to what only this tree's installer does: a first boot that runs the `ConditionNeedsUpdate=` units, as the 4.0.6 ISO does, is noted instead of failing the install. The "Upgrade test" workflow and the nightly `stable` image pass it.
+| What | Where | When |
+| --- | --- | --- |
+| Release ISO | `https://iso.omarchy.org/omarchy-<version>-x86.iso`, `-aarch64.iso` and `-snapdragon.iso` (before 4.5.0: `omarchy-<version>.iso`) | Each release |
+| Edge ISO | `https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.iso`, `.../edge-aarch64/<version>/omarchy-edge-<version>-aarch64.iso` and `.../edge-snapdragon/<version>/omarchy-edge-<version>-snapdragon.iso` | Every night |
+| VM image of edge (x86_64) | `https://nightly.omarchy.org/edge/<version>/omarchy-edge-<version>.qcow2` | Every night |
+| VM image of the latest release | `https://nightly.omarchy.org/stable/<version>/<run>/omarchy-<version>.qcow2` | Once per release |
+| `latest.json` | `https://nightly.omarchy.org/<channel>/latest.json` (`edge`, `edge-aarch64`, `edge-snapdragon`, `stable`) | With each nightly build |
 
-The "Upgrade test" workflow does both steps from a release's ISO. Start it by hand, from the latest release to edge by default:
+Every ISO and VM image ships with a `.sha256` sidecar (release ISOs also have `.sig`; VM images have an `unpacked/` folder). On `nightly.omarchy.org`, published files are immutable; only `latest.json` updates, written last after CDN readback verification.
 
-```bash
-gh workflow run upgrade-test.yml -f to=edge
-```
+### Nightly builds and `latest.json`
 
-`-f from=<version>` starts from another release or a numbered release candidate, such as `4.0.6` or `4.6.0rc1`. Its signed x86_64 ISO must be on iso.omarchy.org.
+`.github/workflows/nightly-build.yml` runs nightly for four channels: `edge` (x86_64 ISO + VM image from `omarchy-dev`), `edge-aarch64` (`--arch aarch64 --edge`, ISO only, plus N1x install test), `edge-snapdragon` (`--snapdragon --edge`, ISO only), and `stable` (downloads and GPG-verifies the latest release ISO from `iso.omarchy.org` to seal a VM image; scheduled runs skip already-published releases while manual runs rebuild).
 
-It only runs when started. When the branch it ran on has a pull request, the result is posted there as one comment and updated in place on later runs.
+Every ISO passes the PR install test, and x86_64 channels also pass `test/vm-image/vm-seal` and `test/vm-image/vm-verify` before publishing. Only the separate publish job holds the bucket key, and it runs only on `quattro` (on schedule, or manually when `publish` is enabled; default `false`). `test/vm-image/nightly-plan` and `test/vm-image/nightly-layout` drive the layout and `latest.json`, tested by `test/unit/nightly-test.sh`.
 
-## Testing a release candidate
+| Field | What it is |
+| --- | --- |
+| `version`, `channel`, `arch` | Date + run number (`2026.10.09.431`) or release (`4.0.4`); channel name; `arch: "aarch64"` on ARM channels (omitted on x86_64). |
+| `built_at`, `url`, `sha256`, `size` | UTC write timestamp; installed ISO URL (nightly or `iso.omarchy.org`), SHA-256, and byte size. |
+| `iso_commit`, `omarchy_version`, `omarchy_commit`, `kernel` | `omarchy-iso` commit, Omarchy package version, Omarchy commit (empty on `stable`), and `uname -r`. |
+| `vm.url`, `vm.sha256`, `vm.size`, `vm.unpacked`, `vm.unpacked_files` | VM `.qcow2` metadata and `unpacked/` folder URL + file list (`edge` and `stable` only). |
+| `vm.user`, `vm.password`, `vm.ssh` | Desktop/`sudo` credentials and key-only SSH notice (`edge` and `stable` only). |
 
-Test a feature release candidate, cut from quattro, with these runs in this order. The commands below are the ones for 4.6.0rc1.
+## How the install works
 
-Before you cut the candidate, rehearse it on quattro's tip, as [Release rehearsal](#release-rehearsal) describes. The scheduled rehearsal runs twice a day, so start one by hand when quattro has changed since the last run:
+- **Live boot & Just try:** Interactive media boot into the Omarchy Configurator inside `kmscon`. On x86_64 consumer ISOs, the welcome screen also offers **Just try**, which soft-reboots (`systemctl soft-reboot`) into a live Omarchy desktop over a tmpfs + `omarchy-root.sfs` + `omarchy-try.sfs` overlay without touching any disk.
+- **Background prep units:** Once the greeter draws its logo (`omarchy-greeter-ready.service`, released immediately on unattended and OEM paths), background units verify the medium's SHA-256 checksums (`omarchy-mirror-verify.service`, `omarchy-root-image-verify.service`), calibrate LUKS Argon2id (`omarchy-luks-calibrate.service`), pre-build a per-machine pacman keyring, and warm the page cache.
+- **Disk, encryption, and root image:** Before touching any disk, the orchestrator checks the verification verdicts, partitions and optionally encrypts the target (reusing cached LUKS Argon2id calibration when valid, and on capable machines — at least 4 CPUs, 4 GiB usable RAM, and 2.5 GiB available RAM — deferring full-disk slot-0 Argon2id enrollment to a background thread in parallel with the rest of the install before removing the temporary slot prior to `@factory`), and writes the pre-built Arch Linux + Omarchy btrfs root image (`omarchy-root.sfs`) in parallel with `omarchy-image-write`.
+- **System setup, boot, and handoff:** The orchestrator assigns a fresh filesystem ID, grows the filesystem and reshapes its subvolumes, extracts any matching pre-packed hardware/platform layer and installs remaining per-machine packages from the bundled offline mirror, creates the user, and runs `omarchy-apply-system` in the chroot. Boot setup (`systemd-boot` on UEFI, Limine on BIOS and Intel T2 Macs) then runs in parallel with `omarchy-provision-user` (or defers user setup to first boot), followed by boot validation, a read-only `@factory` btrfs snapshot, and target unmount/close so the stick can be removed before rebooting.
 
-```bash
-gh workflow run install-test.yml -R omacom/omarchy-iso --ref quattro -f channel=rehearsal
-```
+## Guides
 
-Once `omarchy-release rc` has published the candidate to the rc channel, install it fresh. This builds an x86_64 and an aarch64 ISO from the rc channel and runs every install job on them. This run and the upgrade runs test what the rc channel serves while they run, so finish them before the next candidate goes there:
-
-```bash
-gh workflow run install-test.yml -R omacom/omarchy-iso --ref quattro -f channel=rc
-```
-
-Then upgrade to the candidate from the latest release, the path stable users take when the release ships. Start one upgrade run at a time and wait for it to finish. A new run on the same branch cancels the one in progress, whatever its `from`:
-
-```bash
-gh workflow run upgrade-test.yml -R omacom/omarchy-iso --ref quattro -f to=rc -f from=4.5.0
-```
-
-The report's Omarchy row names the version each upgrade reached.
-
-Also upgrade from the last release of each older series that users still run, one run for each:
-
-```bash
-gh workflow run upgrade-test.yml -R omacom/omarchy-iso --ref quattro -f to=rc -f from=4.0.6
-```
-
-From the second candidate on, also upgrade from the previous candidate (`-f from=4.6.0rc1`), as rc testers do. Always name `from`. Without it the workflow starts from the latest release, and that changes when a release ships.
-
-The upgrade test runs on x86_64 only. It upgrades an unencrypted install, so it never unlocks LUKS after the update. Check an aarch64 upgrade and an encrypted one by hand in a VM.
-
-## Signing the ISO
-
-Run `./bin/omarchy-iso-sign [release/omarchy.iso]`. The signing key is retrieved from the shared Omarchy vault with the 1Password CLI.
-
-## Uploading the ISO
-
-Run `./bin/omarchy-iso-upload [release/omarchy.iso]`. This requires rclone configuration (`rclone config`). The `.sig` and `.sha256` sidecars go up with the ISO when they exist beside it.
-
-## Full release of the ISO
-
-Run `./bin/omarchy-iso-release VERSION` to create, test, sign, and upload the ISO in one flow. Add `--rc` to release an RC build instead.
-
-## LUKS calibration during live boot
-
-`omarchy-luks-calibrate.service` runs cryptsetup's 2000 ms Argon2id benchmark
-after the medium verifiers, while the wizard is open. It publishes only the
-iteration, memory and parallel costs in a root-only file under
-`/run/omarchy-luks-calibration/`; no password, volume key or header is cached.
-Both the free-space wizard and archinstall's full-disk format consume it.
-Each format still creates a fresh header, salt and volume key.
-
-An unfinished benchmark is cancelled before formatting. Missing, malformed or
-incompatible results leave cryptsetup's normal calibration in
-place; custom iteration times and key sizes are preserved. Background work is
-skipped below 4 GiB usable RAM or 1.5 GiB available RAM. Only a benchmark
-that retains the full default 1 GiB memory cost is reusable, and it is rejected
-if memory has since become tight. Below 4 GiB without swap, cryptsetup caps
-Argon2 at half of free RAM; the medium's page cache makes that cap change
-between boot and format, so those machines keep normal calibration. The benchmark runs at normal priority after the hash
-jobs, without changing CPU governors. Timing depends on machine load and
-power policy; moving calibration does not guarantee identical unlock times.
-
-`test/unit/test_luks_calibration.py` checks parsing, validation and command
-fallbacks. The QEMU calibration scenario waits for a successful service exit,
-not for a cache file: a slow CPU can legitimately skip caching even with 8 GiB
-of RAM. With a cache it compares actual Argon2 keyslot costs and unlock times;
-without one it checks normal formatting and passphrase unlocks through both
-installer callers. The 4 GiB guest exercises that fallback too. Missing,
-failed, killed or unfinished services still fail the scenario, with service
-state and journal evidence retained. `test/unit/test_luks_calibration_scenario.py`
-covers those distinctions and ensures a failed fallback unlock is not hidden.
-
-Review validation (2026-10-25): the shell suite and 327 Python tests passed
-on the MSI desktop. The revised QEMU scenario passed with an 8 GiB cached
-result and a successful 4 GiB skip; the latter formatted and unlocked through
-both callers, including the malformed-cache fallback. This test-only update
-reused the previously built RC ISO; installer code was unchanged.
+- [VM images](docs/vm-images.md) — booting nightly and release `.qcow2` images with QEMU, `vm-boot`, or libvirt, and injecting SSH keys via SMBIOS credentials.
+- [Autoinstall](docs/autoinstall.md) — unattended installs from a `cidata` drive, SSH and Tailscale provisioning, region selection, and Proxmox setup.
+- [OEM ISO](docs/oem.md) — factory installation media, OEM branding/logo/EULA bundles, and post-install setup scripts.
+- [Translations](docs/translations.md) — installer language catalogs, `kmscon` XKB/CJK rendering, and Terminus console fallbacks.
+- [NVIDIA N1x laptops](N1X.md) — normal and dev-SSH aarch64 builds, platform differences, and hardware notes for N1x laptops.

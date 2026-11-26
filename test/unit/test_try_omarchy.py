@@ -179,6 +179,12 @@ class BuildTryLayerTest(unittest.TestCase):
         self.assertNotIn("indicators/stay-awake", self.text)
         self.assertNotRegex(self.text, r"pam\.d/omarchy-lock-password[^\n]*<<")
 
+    def test_arms_no_watchdog_for_a_reboot_from_try(self):
+        # Closing it printed "watchdog did not stop!" over the screen.
+        m = re.search(r"/etc/systemd/system.conf.d/90-omarchy-try.conf\" <<'EOF'\n(.*?)\nEOF", self.text, re.S)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1).split(), ["[Manager]", "RebootWatchdogSec=0"])
+
     def test_sets_utf8_locale_and_browser_policies(self):
         self.assertIn("LANG=en_US.UTF-8", self.text)
         self.assertIn("browser-policy.sh", self.text)

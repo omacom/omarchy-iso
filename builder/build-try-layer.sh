@@ -246,6 +246,18 @@ WantedBy=sysinit.target
 EOF
 in_try systemctl enable omarchy-try-reprobe.service >/dev/null
 
+# No hardware watchdog for a reboot from Try. systemd arms it for the reboot
+# (RebootWatchdogSec, 10 minutes by default) and systemd-shutdown closes it
+# without stopping it, on purpose, so the kernel prints "watchdog did not
+# stop!" at critical level; systemd-shutdown also raises the console level to
+# show warnings (src/shutdown/shutdown.c). Nothing covers the console in Try
+# then (plymouth.enable=0 stays from the installer's kernel command line), so
+# the message printed over the screen at every reboot from Try.
+install -Dm644 /dev/stdin "$merged/etc/systemd/system.conf.d/90-omarchy-try.conf" <<'EOF'
+[Manager]
+RebootWatchdogSec=0
+EOF
+
 # The NVIDIA layer's driver can only take a card no driver holds. Try starts
 # from the live installer by a soft reboot, and the kernel keeps what the
 # installer loaded: nouveau, bound to the card and to the console. Before udev

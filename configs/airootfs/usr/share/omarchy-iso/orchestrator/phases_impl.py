@@ -36,6 +36,7 @@ import platform
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -1554,7 +1555,9 @@ def _early_target_keyring_ready() -> bool:
     if not marker.is_file():
         return False
     try:
-        finished = int(marker.read_text().strip())
+        finished = float(marker.read_text().strip())
+        if not math.isfinite(finished):
+            finished = None
     except (OSError, ValueError):
         finished = None
     if finished is None or finished > time.time():

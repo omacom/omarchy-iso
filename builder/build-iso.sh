@@ -1425,6 +1425,10 @@ if grep -Fq '_run_once _prepare_airootfs_image' "$mkarchiso_path" &&
   overlap_mkarchiso=1
 fi
 
+# /out is the launcher's release directory, which keeps the ISOs of earlier
+# builds. This file's time tells the ISO this build writes from them.
+build_started=$(mktemp)
+
 if (( overlap_mkarchiso )); then
   root_image_log=/tmp/omarchy-root-image.log
   run_root_image_build >"$root_image_log" 2>&1 &
@@ -1469,13 +1473,12 @@ fi
 # Firmware has to find the ISO's partitions in a GPT it accepts, or a USB disk
 # that reports itself as fixed may never appear in the boot menu
 # (builder/iso-partition-table.sh).
-for built_iso in /out/*.iso; do
-  [[ -f $built_iso ]] || { echo "ERROR: the build left no ISO in /out" >&2; exit 1; }
-  if ! iso_has_valid_gpt "$built_iso"; then
-    echo "ERROR: $built_iso has no valid GPT: no protective MBR entry in front of a GPT header" >&2
-    exit 1
-  fi
-done
+built_iso=$(iso_written_since /out "$build_started")
+[[ -f $built_iso ]] || { echo "ERROR: the build left no ISO in /out" >&2; exit 1; }
+if ! iso_has_valid_gpt "$built_iso"; then
+  echo "ERROR: $built_iso has no valid GPT: no protective MBR entry in front of a GPT header" >&2
+  exit 1
+fi
 
 # The live initramfs must stay small enough for GRUB and the kernel to place
 # it. omarchy-iso#128: at 241 MiB (every DRM driver's firmware, via the kms

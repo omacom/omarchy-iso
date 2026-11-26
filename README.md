@@ -552,7 +552,43 @@ The "Upgrade test" workflow does both steps from a release's ISO. Start it by ha
 gh workflow run upgrade-test.yml -f to=edge
 ```
 
+`-f from=<version>` starts from another release or a numbered release candidate, such as `4.0.6` or `4.6.0rc1`. Its signed x86_64 ISO must be on iso.omarchy.org.
+
 It only runs when started. When the branch it ran on has a pull request, the result is posted there as one comment and updated in place on later runs.
+
+## Testing a release candidate
+
+Test a feature release candidate, cut from quattro, with these runs in this order. The commands below are the ones for 4.6.0rc1.
+
+Before you cut the candidate, rehearse it on quattro's tip, as [Release rehearsal](#release-rehearsal) describes. The scheduled rehearsal runs twice a day, so start one by hand when quattro has changed since the last run:
+
+```bash
+gh workflow run install-test.yml -R omacom/omarchy-iso --ref quattro -f channel=rehearsal
+```
+
+Once `omarchy-release rc` has published the candidate to the rc channel, install it fresh. This builds an x86_64 and an aarch64 ISO from the rc channel and runs every install job on them. This run and the upgrade runs test what the rc channel serves while they run, so finish them before the next candidate goes there:
+
+```bash
+gh workflow run install-test.yml -R omacom/omarchy-iso --ref quattro -f channel=rc
+```
+
+Then upgrade to the candidate from the latest release, the path stable users take when the release ships. Start one upgrade run at a time and wait for it to finish. A new run on the same branch cancels the one in progress, whatever its `from`:
+
+```bash
+gh workflow run upgrade-test.yml -R omacom/omarchy-iso --ref quattro -f to=rc -f from=4.5.0
+```
+
+The report's Omarchy row names the version each upgrade reached.
+
+Also upgrade from the last release of each older series that users still run, one run for each:
+
+```bash
+gh workflow run upgrade-test.yml -R omacom/omarchy-iso --ref quattro -f to=rc -f from=4.0.6
+```
+
+From the second candidate on, also upgrade from the previous candidate (`-f from=4.6.0rc1`), as rc testers do. Always name `from`. Without it the workflow starts from the latest release, and that changes when a release ships.
+
+The upgrade test runs on x86_64 only. It upgrades an unencrypted install, so it never unlocks LUKS after the update. Check an aarch64 upgrade and an encrypted one by hand in a VM.
 
 ## Signing the ISO
 

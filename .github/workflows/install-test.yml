@@ -1,13 +1,25 @@
 name: Install test
 
-# Builds the ISO a pull request produces once per architecture, then installs
-# it unattended in KVM guests. On x86_64, one job per variant: the default
-# install and the encrypted one run every scenario in test/integration.d/, the
-# others install a machine the default does not cover (another keyboard, a
-# small disk, little memory, BIOS firmware, a slow medium) and run the
-# scenarios that concern it. On aarch64, the live ISO, the install, and the
-# install as an N1x. The default variant's build, install and boot times are
-# what every later change is measured against in its own PR.
+# Builds the ISO a pull request produces once per architecture, then tests it
+# in KVM guests, in parallel jobs that each fetch that ISO. On x86_64, the
+# default install and the encrypted one run the scenarios in
+# test/integration.d/ that boot the installed system; the scenarios that
+# reinstall, and the ones that only boot the live ISO, run in jobs of their
+# own; the other variants install a machine the default does not cover
+# (another keyboard, a small disk, little memory, BIOS firmware, a slow
+# medium) and run the scenarios that concern it. On aarch64, the live ISO,
+# the install, and the install as an N1x, each in its own job. The default
+# variant's build, install and boot times are what every later change is
+# measured against in its own PR.
+#
+# A pull request runs only the architectures its paths build
+# (test/install-test-arches), and none for documentation or unit tests alone.
+#
+# Twice a day, and by hand, the rehearsal: the ISO quattro would be released
+# as now. omarchy and omarchy-settings are pinned to quattro's tip by the same
+# engine and against the same rc database as omarchy-release's next candidate
+# (test/rehearsal-pins), built into the ISO, and the ISO goes through every
+# job below. A quattro that cannot be released fails here, before an rc does.
 
 on:
   pull_request:
@@ -17,21 +29,26 @@ on:
   # By hand, the ISO can be built from another package channel: rc builds a
   # release candidate the way omarchy-release does (omarchy-iso-make --rc), to
   # test a fresh install of it, on both architectures, and stable the release
-  # the same way. A pull request builds x86_64 from stable and aarch64 from
-  # edge.
+  # the same way. A pull request or a merge builds both from edge: this branch
+  # is built against omarchy's quattro, which the edge packages track.
   workflow_dispatch:
     inputs:
       channel:
-        description: "Package channel the ISO is built from (a pull request: stable on x86_64, edge on aarch64)"
+        description: "Package channel the ISO is built from (a pull request or merge: edge; rehearsal: quattro released now)"
         type: choice
-        options: [stable, rc, edge]
-        default: stable
+        options: [stable, rc, edge, rehearsal]
+        default: edge
+  schedule:
+    - cron: "37 5,17 * * *" # the rehearsal, at 05:37 and 17:37 UTC
 
 permissions:
   contents: read
 
+env:
+  CHANNEL: ${{ inputs.channel || (github.event_name == 'schedule' && 'rehearsal') || 'edge' }}
+
 concurrency:
-  group: install-test-${{ github.event.pull_request.number || github.ref }}-${{ inputs.channel || 'stable' }}
+  group: install-test-${{ github.event.pull_request.number || github.ref }}-${{ inputs.channel || (github.event_name == 'schedule' && 'rehearsal') || 'edge' }}
   cancel-in-progress: true
 
 jobs:
@@ -49,8 +66,14 @@ jobs:
   trust:
     name: "Is the author trusted to use our runners"
     runs-on: ubuntu-26.04
+    # pull-requests: read is for listing the files a pull request changes.
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       trusted: ${{ steps.gate.outputs.trusted }}
+      x86_64: ${{ steps.arches.outputs.x86_64 }}
+      aarch64: ${{ steps.arches.outputs.aarch64 }}
     steps:
       # A lookup that fails must not stop the test: the author is then
       # untrusted and the test runs on GitHub's runner.
@@ -79,6 +102,30 @@ jobs:
           echo "trusted=$trusted" >>"$GITHUB_OUTPUT"
           echo "$AUTHOR: $STATUS, trusted=$trusted" | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # A pull request tests the architectures its paths build
+      # (test/install-test-arches): a change to the Snapdragon live startup
+      # does not need the x86_64 matrix, nor documentation either. A push to
+      # quattro, the rehearsal and a manual run test both, as does a pull
+      # request whose files cannot be listed. A renamed file counts by its old
+      # path too: moving the ISO builder into plans/ still changes the ISO.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          sparse-checkout: test/install-test-arches
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - id: arches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [[ $GITHUB_EVENT_NAME == pull_request ]] &&
+            files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files?per_page=100" -q '.[] | .filename, (.previous_filename // empty)'); then
+            ./test/install-test-arches <<<"$files" | tee -a "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' x86_64=true aarch64=true | tee -a "$GITHUB_OUTPUT"
+          fi
+
   # One build job per architecture, both with the same steps, so that each
   # architecture's install jobs wait for their own ISO only: a job that needs
   # a matrix job waits for every leg, and one architecture's failed build
@@ -87,6 +134,7 @@ jobs:
   build-x86_64:
     name: "x86_64: build the ISO"
     needs: trust
+    if: needs.trust.outputs.x86_64 == 'true'
     runs-on: ${{ needs.trust.outputs.trusted != 'true' && 'ubuntu-26.04' || 'namespace-profile-linux-amd64-16x32' }}
     timeout-minutes: 60
     env:
@@ -107,24 +155,32 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         if: env.ARCH == 'x86_64'
 
-      # A pull request's aarch64 ISO installs what the edge channel serves, as
-      # the nightly does, on linux-omarchy: the one kernel for every aarch64
-      # board. A run by hand builds both from the channel it names. Every
-      # package comes from the package repositories, none is built here.
+      # A pull request's or merge's ISO installs what the edge channel serves,
+      # built from omarchy's quattro, as the nightly does; on aarch64 that runs
+      # linux-omarchy, the one kernel for every aarch64 board. A run by hand
+      # builds both from the channel it names. Every package comes from the
+      # package repositories, none is built here, except in the rehearsal:
+      # omarchy and omarchy-settings pinned to quattro as a release candidate,
+      # everything else from edge, which a feature release promotes to rc.
       - name: Build the ISO
-        env:
-          CHANNEL: ${{ inputs.channel || (env.ARCH == 'aarch64' && 'edge' || 'stable') }}
         run: |
-          start=$(date +%s)
+          flag=(--fast)
           case $CHANNEL in
-            rc) flag=--rc ;;
-            edge) flag=--edge ;;
-            *) flag= ;;
+            rc) flag+=(--rc) ;;
+            edge) flag+=(--edge) ;;
+            rehearsal)
+              # Not piped: this step runs bash -e without pipefail, and a
+              # failed pin must stop it before the build.
+              pinned=$(./test/rehearsal-pins "$ARCH" "$RUNNER_TEMP/rehearsal")
+              echo "$pinned" | tee -a "$GITHUB_STEP_SUMMARY"
+              flag+=(--local-source "$RUNNER_TEMP/rehearsal/omarchy" "$RUNNER_TEMP/rehearsal/omarchy-pkgs" --rehearsal)
+              ;;
           esac
+          start=$(date +%s)
           if [[ $ARCH == aarch64 ]]; then
-            ./bin/omarchy-iso-make --arch aarch64 $flag --no-boot-offer
+            ./bin/omarchy-iso-make --arch aarch64 "${flag[@]}" --no-boot-offer
           else
-            NO_BOOT_OFFER=1 ./bin/omarchy-iso-make $flag
+            NO_BOOT_OFFER=1 ./bin/omarchy-iso-make "${flag[@]}"
           fi
           mkdir -p test-runs && echo $(( $(date +%s) - start )) >test-runs/build-seconds
 
@@ -166,7 +222,7 @@ jobs:
   build-aarch64:
     name: "aarch64: build the ISO"
     needs: trust
-    if: needs.trust.outputs.trusted == 'true'
+    if: needs.trust.outputs.trusted == 'true' && needs.trust.outputs.aarch64 == 'true'
     runs-on: namespace-profile-arm64-linux-apple-12x32
     timeout-minutes: 60
     env:
@@ -182,24 +238,57 @@ jobs:
       fail-fast: false
       matrix:
         # scenarios: the test/integration.d/ scenarios to run after the
-        # install; empty runs all of them. options go to test/integration,
-        # env to the harness (OMARCHY_INTEGRATION_*, base-test.sh).
+        # install; empty runs all of them but those in except. live: run the
+        # scenarios without the shared install, for the ones that boot the
+        # ISO themselves. options go to test/integration, env to the harness
+        # (OMARCHY_INTEGRATION_*, base-test.sh).
+        #
+        # default and encrypted run every scenario no other job runs, so a
+        # new scenario runs there until it is given a job; except lists the
+        # ones that have one. A scenario that boots only the live ISO runs
+        # once, as the variant changes nothing it does before it stops.
         include:
           - variant: default
+            except: &elsewhere used-disk full-nvram live-lowmem pxe slow-medium corrupt-image luks-calibration
           - variant: encrypted
+            except: *elsewhere
             env: OMARCHY_INTEGRATION_ENCRYPT=true
-          - variant: kb-uk
+          # Reinstalls over a disk the base install has used, and over
+          # firmware with a full NVRAM. live-lowmem boots the live ISO with
+          # the UEFI variables the shared install leaves, so it runs after
+          # one. used-disk and full-nvram also install with LUKS, as the
+          # encrypted job did.
+          - variant: default-reinstall
+            scenarios: used-disk full-nvram live-lowmem
+          - variant: encrypted-reinstall
+            scenarios: used-disk full-nvram
+            env: OMARCHY_INTEGRATION_ENCRYPT=true
+          # The live ISO, without the shared install: pxe installs over the
+          # network itself, the others stop before any disk is formatted.
+          # pxe runs encrypted only: the plain install's path is a subset of
+          # it, and the default job covers that path on local media.
+          - variant: live-pxe-encrypted
+            scenarios: pxe
+            live: true
+            env: OMARCHY_INTEGRATION_ENCRYPT=true
+          - variant: live-media
+            scenarios: slow-medium corrupt-image
+            live: true
+          - variant: live-misc
+            scenarios: luks-calibration
+            live: true
+          # One keyboard variant, the harder case: encrypted, and de, not uk:
+          # its y and z are swapped, so the passphrase omarchy only unlocks at
+          # boot if the LUKS prompt has the install's layout. keymap-locale
+          # checks the desktop's layout in the same install.
+          - variant: encrypted-kb-de
             scenarios: boot keymap-locale
-            env: OMARCHY_INTEGRATION_KB_LAYOUT=uk
-          - variant: encrypted-kb-uk
-            scenarios: boot keymap-locale
-            env: OMARCHY_INTEGRATION_ENCRYPT=true OMARCHY_INTEGRATION_KB_LAYOUT=uk
+            env: OMARCHY_INTEGRATION_ENCRYPT=true OMARCHY_INTEGRATION_KB_LAYOUT=de
           - variant: small-disk
             scenarios: boot
             env: OMARCHY_INTEGRATION_DISK_GB=24
-          - variant: low-memory
-            scenarios: boot
-            memory: 4096
+          # One low-memory variant, the harder case: 2 GiB, with LUKS, whose
+          # key derivation needs memory of its own. usb2-4g installs in 4 GiB.
           - variant: low-memory-encrypted
             scenarios: boot
             memory: 2048
@@ -234,6 +323,26 @@ jobs:
         with:
           name: iso-${{ github.run_id }}-x86_64
 
+      # The ventoy scenario boots the ISO from a real Ventoy stick. Making
+      # one takes loop devices and a mount: the runner's own container has
+      # no loop devices, so a privileged container with the host's /dev
+      # makes it, as the ISO build does, for the jobs that run every
+      # scenario.
+      - name: Make a Ventoy stick with the ISO
+        if: matrix.scenarios == ''
+        run: |
+          mkdir -p ventoy
+          docker run --rm --privileged -v /dev:/dev -v "$PWD:/w" -w /w \
+            ghcr.io/archlinux/archlinux:latest bash -euo pipefail -c '
+              if ! grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then
+                printf "#!/bin/sh\nexec /usr/bin/pacman --disable-sandbox \"\$@\"\n" >/usr/local/bin/pacman
+                chmod 0755 /usr/local/bin/pacman
+              fi
+              sed -i "1i Server = https://mirror.omarchy.org/\$repo/os/\$arch" /etc/pacman.d/mirrorlist
+              pacman -Syu --noconfirm --needed parted dosfstools >/dev/null
+              bin/omarchy-iso-test-ventoy-disk release/*.iso ventoy/ventoy.img
+            '
+
       # The harness runs in an Arch container: Arch's current QEMU and OVMF
       # (QEMU 11) instead of the runner's older one, at the paths the
       # harness expects, the same as on an Omarchy workstation.
@@ -242,15 +351,34 @@ jobs:
           VARIANT: ${{ matrix.variant }}
           VARIANT_ENV: ${{ matrix.env }}
           SCENARIOS: ${{ matrix.scenarios }}
+          EXCEPT: ${{ matrix.except }}
+          LIVE: ${{ matrix.live && 'true' || '' }}
           OPTIONS: ${{ matrix.options }}
           MEMORY: ${{ matrix.memory || 8192 }}
         run: |
           sudo chmod 0666 /dev/kvm
+          if [[ -n $EXCEPT ]]; then
+            # Each scenario left to another job must have one, or it would
+            # run nowhere.
+            for name in $EXCEPT; do
+              grep -Eq "^ +scenarios: (.* )?$name( |$)" .github/workflows/install-test.yml ||
+                { echo "::error::$name is left out of the $VARIANT job, and no other job runs it"; exit 1; }
+            done
+            SCENARIOS=
+            for scenario in test/integration.d/*-test.sh; do
+              name=$(basename "$scenario" -test.sh)
+              [[ $name == base || " $EXCEPT " == *" $name "* ]] || SCENARIOS+="$name "
+            done
+            echo "Scenarios: $SCENARIOS"
+          fi
           variant_env=()
           for setting in $VARIANT_ENV; do variant_env+=(-e "$setting"); done
+          if [[ -f ventoy/ventoy.img ]]; then
+            variant_env+=(-e OMARCHY_INTEGRATION_VENTOY_DISK=/w/ventoy/ventoy.img)
+          fi
           docker run --rm --device /dev/kvm -v "$PWD:/w" -w /w \
             -e OMARCHY_INTEGRATION_DISK_CACHE=none -e OMARCHY_INTEGRATION_DISCARD_DISKS=1 \
-            -e OMARCHY_INTEGRATION_VARIANT="$VARIANT" -e SCENARIOS -e OPTIONS -e MEMORY \
+            -e OMARCHY_INTEGRATION_VARIANT="$VARIANT" -e SCENARIOS -e LIVE -e OPTIONS -e MEMORY \
             "${variant_env[@]}" \
             ghcr.io/archlinux/archlinux:latest bash -euo pipefail -c '
               # pacman 7 fails every sync on a kernel without Landlock, which
@@ -273,6 +401,19 @@ jobs:
               printf "#!/bin/sh\nexit 0\n" >/usr/local/bin/omarchy-pkg-add
               chmod 0755 /usr/local/bin/omarchy-pkg-add
               qemu-system-x86_64 --version | head -1
+              if [ -n "$LIVE" ]; then
+                # What test/integration does around a scenario, without its
+                # install: these boot the ISO themselves.
+                export OMARCHY_INTEGRATION_ISO OMARCHY_INTEGRATION_MEMORY="$MEMORY" \
+                  OMARCHY_INTEGRATION_INSTALL_TIMEOUT=1800 OMARCHY_INTEGRATION_NO_PREVIEW=true
+                OMARCHY_INTEGRATION_ISO=$(realpath release/*.iso)
+                status=0
+                for name in $SCENARIOS; do
+                  printf "\033[1;35m==> %s\033[0m\n" "test/integration.d/$name-test.sh"
+                  env -u SCENARIO bash "test/integration.d/$name-test.sh" || status=1
+                done
+                exit "$status"
+              fi
               # shellcheck disable=SC2086 # scenario names and options are separate words
               ./test/integration release/*.iso $SCENARIOS $OPTIONS --no-preview --memory "$MEMORY" --timeout 1800
             '
@@ -286,8 +427,9 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" test-runs
           echo "${{ job.status }}" >test-runs/status
 
+      # A live job installs nothing, so it has no times to report.
       - name: Report times
-        if: always()
+        if: always() && !matrix.live
         env:
           VARIANT: ${{ matrix.variant }}
           VARIANT_ENV: ${{ matrix.env }}
@@ -320,7 +462,7 @@ jobs:
           {
             echo "## Install test: x86_64, ${{ matrix.variant }}"
             echo
-            echo "Channel: \`${{ inputs.channel || 'stable' }}\`"
+            echo "Channel: \`${{ env.CHANNEL }}\`"
             echo
             if [ -f "$base/omarchy-install-timing.json" ]; then
               jq -r '"**Install:** \((.finished_at - .started_at) * 10 | round / 10) s across \(.phases | length) phases"' "$base/omarchy-install-timing.json"
@@ -373,12 +515,120 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # The free-space install formats inside the configurator, before the
+  # orchestrator or archinstall runs, and cidata autoinstall never reaches the
+  # configurator. bin/omarchy-iso-test drives the real wizard instead, on a
+  # synthetic Windows-style disk (an ESP and an ext4 data partition with a
+  # marker file), and checks the pre-existing partitions survive. --install-only
+  # still runs those checks and the LUKS-sector check before it stops.
+  free-space:
+    name: "x86_64: free-space install"
+    needs: [trust, build-x86_64]
+    runs-on: ${{ needs.trust.outputs.trusted != 'true' && 'ubuntu-26.04' || 'namespace-profile-linux-amd64-16x32' }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Fetch the ISO
+        if: needs.trust.outputs.trusted == 'true'
+        uses: namespace-actions/download-artifact@7cbad919e4b0e09f17e9d6311a444ff002992b5b # v2.0.1
+        with:
+          name: iso-${{ github.run_id }}-x86_64
+
+      - name: Fetch the ISO (GitHub's runner)
+        if: needs.trust.outputs.trusted != 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: iso-${{ github.run_id }}-x86_64
+
+      # The same container and tools as the install job: Arch's current QEMU
+      # and OVMF at the paths the harness expects.
+      - name: Install into the free space of a Windows-style disk
+        run: |
+          sudo chmod 0666 /dev/kvm
+          docker run --rm --device /dev/kvm -v "$PWD:/w" -w /w \
+            ghcr.io/archlinux/archlinux:latest bash -euo pipefail -c '
+              # pacman 7 fails every sync on a kernel without Landlock, which
+              # these runners have; builder/build-iso.sh does the same.
+              if ! grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then
+                printf "#!/bin/sh\nexec /usr/bin/pacman --disable-sandbox \"\$@\"\n" >/usr/local/bin/pacman
+                chmod 0755 /usr/local/bin/pacman
+              fi
+              # The tools come from our own Arch mirror first, the public ones
+              # after it. A mirror that drops one file must not fail the test:
+              # try again.
+              sed -i "1i Server = https://mirror.omarchy.org/\$repo/os/\$arch" /etc/pacman.d/mirrorlist
+              for attempt in 1 2 3; do
+                pacman -Syu --noconfirm --needed qemu-system-x86 qemu-hw-display-virtio-gpu qemu-hw-display-virtio-vga qemu-img edk2-ovmf seabios socat \
+                  imagemagick tesseract tesseract-data-eng mtools dosfstools e2fsprogs parted libisoburn acpica cpio zstd file jq openssh openssl python curl >/dev/null && break
+                [ "$attempt" -lt 3 ] || { echo "::error::the test container could not install its tools"; exit 1; }
+                echo "pacman failed, attempt $attempt of 3; trying again in 15 s"; sleep 15
+              done
+              # bin/omarchy-iso-test installs its tools through omarchy-pkg-add;
+              # they are installed above.
+              printf "#!/bin/sh\nexit 0\n" >/usr/local/bin/omarchy-pkg-add
+              chmod 0755 /usr/local/bin/omarchy-pkg-add
+              qemu-system-x86_64 --version | head -1
+              ./bin/omarchy-iso-test release/*.iso --free-space --encrypt --install-only \
+                --no-preview --memory 8192 --timeout 1800
+            '
+
+      # The harness ran as root in its container: test-runs and what QEMU
+      # wrote there belong to root until this step.
+      - name: Hand the results to the runner's user
+        if: always()
+        run: |
+          mkdir -p test-runs
+          sudo chown -R "$(id -u):$(id -g)" test-runs
+          echo "${{ job.status }}" >test-runs/status
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # Not install-test-*: that prefix is the comment workflow's two
+          # per-architecture result artifacts, and install-test-artifacts-test.sh
+          # holds that contract.
+          name: free-space-test-${{ github.run_id }}-${{ github.run_attempt }}-x86_64
+          path: |
+            test-runs/status
+            test-runs/*/runs/*/*.png
+            test-runs/*/runs/*/*.txt
+            test-runs/*/runs/*/*.log
+            test-runs/*/runs/*/*.json
+          if-no-files-found: ignore
+          retention-days: 14
+
   install-aarch64:
-    name: "aarch64: install it unattended, boot the result"
+    name: "aarch64: ${{ matrix.name }}"
     # Skipped with its build, which runs for a trusted author only.
     needs: build-aarch64
     runs-on: namespace-profile-arm64-linux-apple-12x32
     timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        # The same on aarch64, by its own tests, in the image the ISO is
+        # built in: the live ISO to its installer, the install, and the
+        # install as an N1x (the default set and the NVIDIA module that the
+        # installer gives that laptop). artifact: the prefix of the job's
+        # artifact; the install's has none, as the comment workflow reads it.
+        include:
+          - name: install it unattended, boot the result
+            test: arm64-install
+            results: aarch64-integration
+          - name: boot the live ISO to its installer
+            test: arm64-live-boot
+            results: aarch64-live
+            artifact: live-
+          - name: install it as an N1x, boot the result
+            test: arm64-install
+            results: aarch64-n1x
+            platform: aarch64-n1x
+            artifact: n1x-
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -390,16 +640,14 @@ jobs:
         with:
           name: iso-${{ github.run_id }}-aarch64
 
-      # The same on aarch64, by its own tests, in the image the ISO is built
-      # in: first the live ISO to its installer, then the install.
-      - name: Install unattended, then boot the installed system (aarch64)
+      - name: Run the test (aarch64)
+        env:
+          TEST: ${{ matrix.test }}
+          RESULTS: ${{ matrix.results }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
           sudo chmod 0666 /dev/kvm
-          ./test/arm64-container ./test/arm64-live-boot release/*.iso test-runs/aarch64-live
-          ./test/arm64-container ./test/arm64-install release/*.iso test-runs/aarch64-integration
-          # The same ISO once more, as an N1x: the default set and the NVIDIA
-          # module that the installer gives that laptop.
-          PLATFORM=aarch64-n1x ./test/arm64-container ./test/arm64-install release/*.iso test-runs/aarch64-n1x
+          ./test/arm64-container "./test/$TEST" release/*.iso "test-runs/$RESULTS"
 
       # The harness ran as root in its container: test-runs and what QEMU
       # wrote there (the serial logs) belong to root until this step.
@@ -411,7 +659,7 @@ jobs:
           echo "${{ job.status }}" >test-runs/status
 
       - name: Report times
-        if: always()
+        if: always() && matrix.results == 'aarch64-integration'
         run: |
           base=$(ls -d test-runs/*-integration 2>/dev/null | head -1)
           # Without the firmware's share and the total it is part of: in the
@@ -421,7 +669,7 @@ jobs:
           {
             echo "## Install test: aarch64"
             echo
-            echo "Channel: \`${{ inputs.channel || 'edge' }}\`"
+            echo "Channel: \`${{ env.CHANNEL }}\`"
             echo
             if [ -f "$base/omarchy-install-timing.json" ]; then
               jq -r '"**Install:** \((.finished_at - .started_at) * 10 | round / 10) s across \(.phases | length) phases"' "$base/omarchy-install-timing.json"
@@ -446,14 +694,14 @@ jobs:
       # The comment workflow runs from quattro and reads only this artifact;
       # it needs the PR number, which a workflow_run event omits for forks.
       - name: Record the pull request
-        if: always() && github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request' && !matrix.artifact
         run: echo "${{ github.event.pull_request.number }}" > test-runs/pr-number
 
       - name: Upload test artifacts
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: install-test-${{ github.run_id }}-${{ github.run_attempt }}-aarch64
+          name: install-test-${{ matrix.artifact }}${{ github.run_id }}-${{ github.run_attempt }}-aarch64
           path: |
             test-runs/pr-number
             test-runs/status

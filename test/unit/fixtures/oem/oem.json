@@ -1,0 +1,10 @@
+{
+  "name": "Acme Computers",
+  "logo": "logo.txt",
+  "tagline": "Acme Book 14, powered by Omarchy",
+  "color": "#ff9e64",
+  "eula": {
+    "title": "Acme Computers License Agreement",
+    "file": "eula.txt"
+  }
+}

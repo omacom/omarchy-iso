@@ -3,12 +3,14 @@
 # The disk and mode screens are gum lists, and gum highlights the first entry,
 # so the first entry is the default a user confirms with Enter. Seen on an MSI
 # desktop with a GL.iNet Comet KVM attached: the disk list opened on the
-# Comet's 5.7 GB USB storage and offered its 0-byte optical drive, and on the
-# disk that held the owner's daily install the mode list opened on "Full disk
-# install".
+# Comet's 5.7 GB USB storage and offered its 0-byte optical drive. The mode
+# list opens on "Full disk install" on every disk, the common case; the
+# overwrite confirmation after it names the disk.
 #
 # install_disk_candidates() and install_mode_choices() decide those lists, and
 # the configurator calls them (checked by text below; it cannot be sourced).
+# Esc on either list goes back instead of ending the install, as on the
+# screens before them: 4.5.0rc2 quit the installer there.
 
 set -uo pipefail
 
@@ -84,24 +86,60 @@ check "an SD card goes after the internal disks; an eMMC's boot areas are not of
   "/dev/mmcblk1 /dev/nvme0n1 /dev/mmcblk0" "$(install_disk_candidates "" | list)"
 
 echo "==> the mode list"
-check "a disk with partitions and room: free space first" \
-  "free_space|full_disk|other_disk" \
-  "$(install_mode_choices true 3 | paste -sd'|' -)"
-check "an empty disk with room: full disk first" \
+check "free space on offer: full disk still first" \
   "full_disk|free_space|other_disk" \
-  "$(install_mode_choices true 0 | paste -sd'|' -)"
+  "$(install_mode_choices true | paste -sd'|' -)"
 check "no free-space mode on offer (BIOS, or no room)" \
   "full_disk|other_disk" \
-  "$(install_mode_choices false 3 | paste -sd'|' -)"
+  "$(install_mode_choices false | paste -sd'|' -)"
+check "the only disk: no other disk to choose" \
+  "full_disk|free_space" \
+  "$(install_mode_choices true false | paste -sd'|' -)"
+check "the only disk, and no free-space mode: a single choice the picker skips" \
+  "full_disk" \
+  "$(install_mode_choices false false | paste -sd'|' -)"
+
+echo "==> one disk is no choice"
+# disk_form as the configurator defines it, with the screen it would draw
+# recorded instead of shown.
+eval "$(awk '/^disk_form\(\) \{/,/^\}/' "$CONFIGURATOR")"
+step() { shown=true; }
+gum() { shown=true; printf '%s\n' "$CHOSEN"; }
+t() { printf '%s' "$1"; }
+get_disk_info() { printf '%s 1TB\n' "$1"; }
+findmnt() { :; }
+get_root_disk() { printf '%s' "${BOOT_DISK:-}"; }
+
+LSBLK_DISKS='/dev/nvme0n1 disk 1000204886016 0 nvme'
+disk="" only_disk=false shown=false
+disk_form
+check "the only disk is taken without a disk list" "/dev/nvme0n1 true false" "$disk $only_disk $shown"
+
+# A second disk plugged in after the first call: the list is back, and the
+# mode picker offers another disk again.
+LSBLK_DISKS=$'/dev/nvme0n1 disk 1000204886016 0 nvme\n/dev/sda disk 512110190592 0 sata'
+disk="" shown=false CHOSEN="/dev/sda 512GB"
+disk_form
+check "two disks show the list again" "/dev/sda false true" "$disk $only_disk $shown"
+
+LSBLK_DISKS='/dev/sda disk 64023257088 1 usb'
+status=0
+( BOOT_DISK=/dev/sda; abort() { printf '%s' "$1" >"$SYSFS_BLOCK/aborted"; exit 3; }; disk_form ) || status=$?
+check "no disk but the boot medium ends the install, saying why" "3 disk.none" \
+  "$status $(cat "$SYSFS_BLOCK/aborted" 2>/dev/null)"
 
 echo "==> the configurator calls them"
 check "disk list from install_disk_candidates" "1" \
   "$(grep -v '^\s*#' "$CONFIGURATOR" | grep -c 'install_disk_candidates "\$exclude_disk"')"
 check "mode list from install_mode_choices" "1" \
   "$(grep -v '^\s*#' "$CONFIGURATOR" | grep -c 'install_mode_choices "\$free_space_offered"')"
+check "Esc on the disk or mode list does not end the install" "0" \
+  "$(grep -E 't (disk|mode)\.header' "$CONFIGURATOR" | grep -c '|| abort')"
+check "Esc on the mode list goes back to the disk list" "1" \
+  "$(grep -v '^\s*#' "$CONFIGURATOR" | grep -c 'install_mode="other_disk"')"
 
 if ((failures > 0)); then
   echo "FAIL: $failures check(s) failed"
   exit 1
 fi
-echo "ok: the disk and mode screens open on a safe default"
+echo "ok: the disk and mode screens open on full disk and go back on Esc"

@@ -10,6 +10,11 @@ name: Nightly ISO Build
 #           the same for aarch64, on the ARM runner with KVM: the ISO is built
 #           from the edge channel, booted, installed, and installed again as an
 #           N1x. Only the ISO is published, no VM image yet.
+#   edge-snapdragon
+#           the Snapdragon laptops' own aarch64 ISO (--snapdragon), the same
+#           way: built from the edge channel, booted and installed. QEMU is no
+#           Snapdragon, so this proves the image builds and installs, not that
+#           a laptop boots it. Only the ISO is published.
 #   stable  the ISO is the last release: omacom/omarchy's latest release names
 #           the version, iso.omarchy.org has the ISO, its signature is checked.
 #           Done once for each release, skipped on the nights after.
@@ -21,6 +26,7 @@ name: Nightly ISO Build
 #   https://nightly.omarchy.org/stable/<version>/<run>/omarchy-<version>.qcow2
 #   https://nightly.omarchy.org/stable/<version>/<run>/unpacked/
 #   https://nightly.omarchy.org/edge-aarch64/<version>/omarchy-edge-<version>-aarch64.iso
+#   https://nightly.omarchy.org/edge-snapdragon/<version>/omarchy-edge-<version>-snapdragon.iso
 #
 # Nothing is published unless the ISO installed and the image passed its
 # checks. A version's files are written once and never replaced: the CDN keeps
@@ -118,13 +124,17 @@ jobs:
         if: matrix.channel == 'edge-aarch64'
         run: ./bin/omarchy-iso-make --arch aarch64 --edge --no-boot-offer
 
+      - name: Build the edge ISO (Snapdragon)
+        if: matrix.channel == 'edge-snapdragon'
+        run: ./bin/omarchy-iso-make --snapdragon --edge --no-boot-offer
+
       # Good only if the signature is the release key's, the one in this repo.
       - name: Download the released ISO and check its signature
         if: matrix.channel == 'stable'
         run: |
           set -euo pipefail
           mkdir -p release
-          iso=omarchy-$VERSION.iso
+          iso=$(./test/vm-image/release-iso-name "$VERSION")
           curl -fSL --retry 3 -o "release/$iso" "https://iso.omarchy.org/$iso"
           curl -fsSL --retry 3 -o "release/$iso.sig" "https://iso.omarchy.org/$iso.sig"
           home=$(mktemp -d)
@@ -175,7 +185,8 @@ jobs:
 
       # The install test of install-test.yml's aarch64 job, in the image the ISO
       # is built in: the live ISO to its installer, the install and two boots
-      # of the result, then the same ISO installed as an N1x. No image is
+      # of the result, then the same ISO installed as an N1x (only the plain
+      # aarch64 ISO, the one N1x machines install from). No image is
       # sealed for aarch64 yet.
       - name: Boot, install unattended and boot the installed system (aarch64)
         if: matrix.arch == 'aarch64'
@@ -183,7 +194,9 @@ jobs:
           sudo chmod 0666 /dev/kvm
           ./test/arm64-container ./test/arm64-live-boot release/*.iso test-runs/aarch64-live
           ./test/arm64-container ./test/arm64-install release/*.iso test-runs/aarch64-integration
-          PLATFORM=aarch64-n1x ./test/arm64-container ./test/arm64-install release/*.iso test-runs/aarch64-n1x
+          if [[ $CHANNEL == edge-aarch64 ]]; then
+            PLATFORM=aarch64-n1x ./test/arm64-container ./test/arm64-install release/*.iso test-runs/aarch64-n1x
+          fi
 
       # The container ran as root; what it wrote belongs to root until here.
       - name: Hand the results to the runner's user
@@ -197,7 +210,7 @@ jobs:
           ISO_COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [[ $CHANNEL == edge-aarch64 ]]; then
+          if [[ $CHANNEL == edge-aarch64 || $CHANNEL == edge-snapdragon ]]; then
             ./test/vm-image/nightly-layout "$CHANNEL" "$VERSION" "$RELEASE" release/*.iso - test-runs/aarch64-integration/packages.txt out
           else
             ./test/vm-image/nightly-layout "$CHANNEL" "$VERSION" "$RELEASE" release/*.iso sealed vm-packages.txt out
@@ -340,21 +353,7 @@ jobs:
       # Fetched the way a user fetches them. It proves what is served, and it
       # is the first request the CDN sees for each file.
       - name: Check what the CDN serves
-        run: |
-          set -euo pipefail
-          dir=out/$RELEASE
-          check() { # url, expected sha256
-            got=$(curl -fsSL --retry 3 "$1" | sha256sum | cut -d" " -f1)
-            [ "$got" = "$2" ] || { echo "::error::$1 serves $got, expected $2"; exit 1; }
-            echo "ok $1"
-          }
-          # Every file of the version, the checksum files too.
-          (cd "$dir" && find . -type f -printf '%P\n' | sort) >files.txt
-          [ -s files.txt ] || { echo "::error::nothing to check under $dir"; exit 1; }
-          while read -r file; do
-            check "$SITE/$RELEASE/$file" "$(sha256sum "$dir/$file" | cut -d" " -f1)"
-          done <files.txt
-          echo "$(wc -l <files.txt) files published and checked"
+        run: ./test/vm-image/nightly-check-cdn "out/$RELEASE" "$SITE/$RELEASE"
 
       - name: Point latest.json at it
         run: |

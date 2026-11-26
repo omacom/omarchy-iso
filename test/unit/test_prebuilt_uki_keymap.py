@@ -42,7 +42,7 @@ from orchestrator import phases_impl  # noqa: E402
 
 
 class PrebuiltUkiKeymapTest(unittest.TestCase):
-    def target(self, *, recorded=None, chosen=None) -> Path:
+    def target(self, *, recorded=None, chosen=None, xkblayout="gb", xkbvariant="") -> Path:
         """A stand-in install target. recorded=None omits the file entirely
         (an image built before it existed); chosen=None omits vconsole.conf."""
         root = Path(tempfile.mkdtemp())
@@ -51,8 +51,9 @@ class PrebuiltUkiKeymapTest(unittest.TestCase):
         if recorded is not None:
             (root / "var/lib/omarchy-iso/prebuilt-uki.keymap").write_text(recorded)
         if chosen is not None:
+            variant = f"XKBVARIANT={xkbvariant}\n" if xkbvariant else ""
             (root / "etc/vconsole.conf").write_text(
-                f"KEYMAP={chosen}\nXKBLAYOUT=gb\nFONT=default8x16\n"
+                f"KEYMAP={chosen}\nXKBLAYOUT={xkblayout}\n{variant}FONT=default8x16\n"
             )
         return root
 
@@ -72,6 +73,17 @@ class PrebuiltUkiKeymapTest(unittest.TestCase):
 
     def test_no_keyboard_choice_uses_the_prebuilt_uki(self):
         self.assertEqual(self.stale(recorded="", chosen=None), "")
+
+    def test_nonlatin_layout_matches_a_us_prebuilt_uki(self):
+        """omarchy_hooks.conf keeps vconsole.conf out of the initramfs for
+        non-Latin layouts, so a us-baked UKI already matches."""
+        for keymap, xkb in (("ua", "ua,us"), ("bg-cp1251", "bg,us"), ("kyrgyz", "kg,us"), ("ru", "ru,us")):
+            with self.subTest(keymap=keymap):
+                self.assertEqual(self.stale(recorded="\n", chosen=keymap, xkblayout=xkb), "")
+                self.assertEqual(self.stale(recorded="de-latin1\n", chosen=keymap, xkblayout=xkb), keymap)
+
+    def test_serbian_latin_is_still_embedded_against_a_us_prebuilt_uki(self):
+        self.assertEqual(self.stale(recorded="\n", chosen="sr-latin", xkblayout="rs", xkbvariant="latin"), "sr-latin")
 
     # --- the lockout must be caught -----------------------------------------
 

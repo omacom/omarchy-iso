@@ -24,7 +24,29 @@ i18n_load() {
 }
 
 i18n_translated() {
-  [[ $1 =~ ^[a-z]{2,3}(-[A-Z]{2})?$ && -r $OMARCHY_ISO_I18N_DIR/$1.json ]]
+  [[ $1 =~ ^[a-z]{2,3}(-[A-Z]{2})?$ && -r $OMARCHY_ISO_I18N_DIR/$1.json ]] || return 1
+  # CJK is beyond any console font: its catalog only applies inside kmscon,
+  # which draws with real fonts. On the plain VT the language stays English.
+  i18n_needs_kmscon "$1" && [[ ${OMARCHY_KMSCON:-} != 1 ]] && return 1
+  return 0
+}
+
+# Languages whose script the Linux console cannot draw and that the ISO has a
+# catalog for: translated only inside kmscon, where the
+# installer normally runs. Without a catalog it would stay English there too.
+i18n_needs_kmscon() {
+  [[ ($1 == zh-* || $1 == ja || $1 == ko) && -r $OMARCHY_ISO_I18N_DIR/$1.json ]]
+}
+
+# Terminal columns a string takes: CJK and fullwidth characters take two.
+# ${#s} counts characters, which centers Chinese text half a string too far right.
+display_width() {
+  local text=$1 narrow wide
+  # Escapes, not literal characters: editors may normalize a literal U+F900
+  # into U+8C48, which would double everything up to U+FAFF.
+  printf -v narrow '[^\u1100-\u115F\u2E80-\u3029\u3030-\u303E\u3040-\u3098\u309B-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6\U0001F300-\U0001F64F\U0001F900-\U0001F9FF\U00020000-\U0003FFFD]'
+  wide=${text//$narrow/}
+  printf '%s' $((${#text} + ${#wide}))
 }
 
 # The kernel's console fonts carry only the IBM PC character set, so a Linux VT
@@ -33,6 +55,14 @@ i18n_translated() {
 i18n_console_font() {
   local tty=$1 height terminus font=${OMARCHY_ISO_CONSOLE_FONT:-/run/omarchy-iso/console.psf}
   [[ $tty == /dev/tty[0-9]* ]] || return 0
+
+  # The bundled runtime's own routine, when it ships one: first-boot setup
+  # draws with the same file.
+  if [[ -r $OMARCHY_ISO_SHARE/console-font.sh ]]; then
+    source "$OMARCHY_ISO_SHARE/console-font.sh"
+    omarchy_console_font "$tty" || true
+    return 0
+  fi
 
   if [[ ! -s $font ]]; then
     height=$(showconsolefont -i -C "$tty" 2>/dev/null | sed -n 's/^[0-9]*x\([0-9]*\)x[0-9]*$/\1/p') || height=16

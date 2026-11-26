@@ -24,27 +24,14 @@ ROOT_CMDLINE = (
 )
 PLAIN_ROOT_CMDLINE = "root=PARTUUID=f073914b-b386-4b56-b181-61ea375509ee zswap.enabled=0 rootflags=subvol=@ rw rootfstype=btrfs"
 KERNEL = "linux-omarchy"
-RESCUE_CMDLINE = (
-    f"{ROOT_CMDLINE} console=tty0 acpi=nospcr plymouth.enable=0 nomodeset "
-    "systemd.unit=multi-user.target fbcon=map:0 loglevel=7"
-)
 NORMAL_CMDLINE = (
     " quiet splash loglevel=0 console=tty0 acpi=nospcr loglevel=7 systemd.show_status=1 "
     f"initramfs_async=0 {ROOT_CMDLINE}"
 )
 
 
-# Shaped like the limine.conf limine-entry-tool writes for linux-omarchy with
-# its fallback UKI as the rescue entry.
-def limine_conf(rescue_cmdline=RESCUE_CMDLINE, normal_cmdline=NORMAL_CMDLINE, rescue=True):
-    rescue_entry = f"""\
-  //linux-omarchy-fallback
-  comment: Kernel version: 7.2.8-8-omarchy
-  comment: kernel-id=linux-omarchy-fallback
-  protocol: efi
-  path: boot():/EFI/Linux/omarchy_linux-omarchy-fallback.efi#5187fcdd
-  cmdline: {rescue_cmdline}
-""" if rescue else ""
+# Shaped like the limine.conf limine-entry-tool writes for linux-omarchy.
+def limine_conf(normal_cmdline=NORMAL_CMDLINE):
     return f"""\
 timeout: 3
 default_entry: 2
@@ -57,7 +44,7 @@ comment: Omarchy
   protocol: efi
   path: boot():/EFI/Linux/omarchy_linux-omarchy.efi#1ebecba8
   cmdline: {normal_cmdline}
-{rescue_entry}
+
 /EFI fallback
 comment: Default EFI loader
 protocol: efi
@@ -146,23 +133,53 @@ class N1xLimineContractTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "lacks console=tty0"):
             self.validate(limine_conf(normal_cmdline=f"console=tty0,115200 acpi=nospcr {ROOT_CMDLINE}"), "n1x")
 
-    def test_missing_rescue_entry_fails(self):
-        with self.assertRaisesRegex(RuntimeError, "no linux-omarchy-fallback rescue entry"):
-            self.validate(limine_conf(rescue=False), "n1x")
-
-    # The 2026-09-03 failure: the rescue entry carried the normal cmdline, so
-    # it booted the graphical target like the normal entry.
-    def test_rescue_with_the_normal_cmdline_fails(self):
-        with self.assertRaisesRegex(RuntimeError, "does not boot to a text login"):
-            self.validate(limine_conf(rescue_cmdline=NORMAL_CMDLINE), "n1x")
-
-    def test_rescue_with_plymouth_fails(self):
-        with self.assertRaisesRegex(RuntimeError, "does not boot to a text login"):
-            self.validate(limine_conf(rescue_cmdline=RESCUE_CMDLINE.replace(" plymouth.enable=0", "")), "n1x")
-
     def test_no_kernel_entries_fails(self):
         with self.assertRaisesRegex(RuntimeError, "no kernel entries"):
             self.validate("timeout: 3\n/EFI fallback\nprotocol: efi\npath: boot():/EFI/BOOT/BOOTAA64.EFI\n", "n1x")
+
+
+class N1xPrebuiltUkiTest(unittest.TestCase):
+    # build-root-image.sh records the image's MODULES lines plus n1x.sh's next
+    # to the N1x UKI; an N1x install whose lines are exactly those copies it.
+    IMAGE = ["MODULES+=(thunderbolt)"]
+    N1X = ["MODULES+=(i2c_mt65xx i2c_hid_acpi)", "MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)"]
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.target = Path(tmp.name)
+        self.state = self.target / "var/lib/omarchy-iso"
+        self.state.mkdir(parents=True)
+        (self.state / "prebuilt-uki-n1x.efi").write_bytes(b"MZ")
+        (self.state / "prebuilt-uki-n1x.modules").write_text("\n".join(sorted(self.IMAGE + self.N1X)) + "\n")
+        self.confd = self.target / "etc/mkinitcpio.conf.d"
+        self.confd.mkdir(parents=True)
+
+    def write_lines(self, lines):
+        for i, line in enumerate(lines):
+            (self.confd / f"{i:02}.conf").write_text(f"# drop-in\n{line}\n")
+
+    def test_an_n1x_with_its_modules_takes_the_n1x_uki(self):
+        self.write_lines(self.IMAGE + self.N1X)
+        self.assertEqual(phases_impl._n1x_prebuilt_uki(self.target, "n1x"), self.state / "prebuilt-uki-n1x.efi")
+
+    # Pre-release firmware keeps the GPU off: no nvidia.conf.
+    def test_an_n1x_without_the_gpu_builds_its_own(self):
+        self.write_lines(self.IMAGE + self.N1X[:1])
+        self.assertIsNone(phases_impl._n1x_prebuilt_uki(self.target, "n1x"))
+
+    def test_an_n1x_adding_anything_else_builds_its_own(self):
+        self.write_lines(self.IMAGE + self.N1X + ["MODULES+=(apple_bce)"])
+        self.assertIsNone(phases_impl._n1x_prebuilt_uki(self.target, "n1x"))
+
+    def test_other_machines_never_take_it(self):
+        self.write_lines(self.IMAGE + self.N1X)
+        self.assertIsNone(phases_impl._n1x_prebuilt_uki(self.target, ""))
+
+    def test_an_image_without_it_builds_its_own(self):
+        self.write_lines(self.IMAGE + self.N1X)
+        (self.state / "prebuilt-uki-n1x.efi").unlink()
+        self.assertIsNone(phases_impl._n1x_prebuilt_uki(self.target, "n1x"))
 
 
 class Aarch64ConsoleTest(unittest.TestCase):
@@ -239,8 +256,8 @@ class PlatformPackageListTest(unittest.TestCase):
             (share / "omarchy-base.packages").write_text("hyprland\n")
             (share / "omarchy-base.aarch64-n1x.packages").write_text(platform_set)
             with mock.patch.object(phases_impl, "hw_platform", return_value=detected), \
-                    mock.patch.object(phases_impl.arch, "target_has_package",
-                                      side_effect=lambda _target, name: name in in_image, create=True):
+                    mock.patch.object(phases_impl.arch, "target_missing_packages", create=True,
+                                      side_effect=lambda _target, names: [n for n in names if n not in in_image]):
                 return phases_impl._platform_delta_packages(Path("/mnt"), share)
 
     def test_a_platform_gets_what_its_set_adds_to_the_image(self):
@@ -296,6 +313,62 @@ class N1xHardwareGateTest(unittest.TestCase):
         platform, run = self.installed_platform(0, machine="x86_64")
         self.assertEqual(platform, "")
         run.assert_not_called()
+
+
+class PlatformLayerTest(unittest.TestCase):
+    """The N1x layer replaces the install-time pacstrap of its NVIDIA stack."""
+
+    def test_layer_is_found_by_the_machines_platform(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "omarchy-layer.aarch64-n1x.tar.zst").write_bytes(b"")
+            for detected, expected in [
+                ("aarch64-n1x", directory / "omarchy-layer.aarch64-n1x.tar.zst"),
+                ("aarch64-qualcomm", None),
+                ("aarch64", None),
+                ("", None),
+            ]:
+                with mock.patch.object(phases_impl, "hw_platform", return_value=detected):
+                    self.assertEqual(phases_impl._platform_layer(directory), expected, detected)
+
+    def test_no_layer_extracts_nothing(self):
+        ctx = types.SimpleNamespace(target=Path("/mnt"))
+        with mock.patch.object(phases_impl, "_platform_layer", return_value=None), \
+                mock.patch.object(phases_impl.subprocess, "run") as run:
+            phases_impl._apply_platform_layer(ctx)
+        run.assert_not_called()
+
+    def test_layer_lands_over_the_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            built = tmp / "upper"
+            (built / "var/lib/pacman/local/nvidia-utils-615.78.08-3").mkdir(parents=True)
+            (built / "var/lib/pacman/local/nvidia-utils-615.78.08-3/desc").write_text(
+                "%NAME%\nnvidia-utils\n\n%VERSION%\n615.78.08-3\n")
+            (built / "usr/lib").mkdir(parents=True)
+            (built / "usr/lib/libnvidia-glcore.so.615.78.08").write_text("lib")
+            layer = tmp / "omarchy-layer.aarch64-n1x.tar.zst"
+            subprocess.run(["tar", "--zstd", "-cf", str(layer), "-C", str(built), "."], check=True)
+
+            target = tmp / "target"
+            (target / "usr/lib").mkdir(parents=True)
+            (target / "lib").symlink_to("usr/lib")
+            ctx = types.SimpleNamespace(target=target)
+            with mock.patch.object(phases_impl, "info"):
+                phases_impl._apply_platform_layer(ctx, layer)
+
+            self.assertTrue((target / "lib").is_symlink())
+            self.assertEqual((target / "usr/lib/libnvidia-glcore.so.615.78.08").read_text(), "lib")
+            self.assertTrue((target / "var/lib/pacman/local/nvidia-utils-615.78.08-3/desc").is_file())
+
+    def test_layer_follows_the_image_write_and_precedes_the_package_delta(self):
+        source = Path(phases_impl.__file__).read_text()
+        body = source[source.index("def arch_install_system("):]
+        image = body.index("_install_root_image(ctx)")
+        layer = body.index("_apply_platform_layer(ctx)")
+        delta = body.index("arch.install_base_delta(")
+        self.assertLess(image, layer)
+        self.assertLess(layer, delta)
 
 
 if __name__ == "__main__":

@@ -47,10 +47,27 @@ check "the factory snapshot has no SSH host keys" sh -c "[ -z \"\$(printf '%s\n'
 check "no snapshots besides the current system" [ -z "$(root ls /.snapshots)" ]
 
 # Any kernel or mkinitcpio update rebuilds the initramfs, and on a clone that
-# rebuild runs under a machine ID the image was not built with. It has to
-# update the image's boot entry, not add one beside it, or the entry Limine
-# boots by default loads files the rebuild deleted or replaced. vm-boot skips
-# the firmware, so this rebuild takes the path that deletes the UKI.
+# rebuild runs under a machine ID the image was not built with.
+#
+# On systemd-boot (an Omarchy without omarchy-boot-backend can only be on
+# Limine) the rebuild publishes boot images named for this machine, and the
+# default systemd-boot boots has to be one of them, on the ESP.
+if [ "$(omarchy-boot-backend 2>/dev/null)" = systemd-boot ]; then
+  loader_default() { root sed -n 's/^default //p' /boot/loader/loader.conf | tail -1; }
+  ns=$(head -c 8 /etc/machine-id)
+  check "an initramfs rebuild succeeds" root omarchy-boot-rebuild
+  after=$(loader_default)
+  check "systemd-boot's default is a boot image of this machine's ($after)" sh -c 'case "$1" in omarchy-"$2"-*.efi) ;; *) exit 1 ;; esac' - "$after" "$ns"
+  check "systemd-boot's default boot image is on the ESP" root test -s "/boot/EFI/Linux/$after"
+  check "the boot images match the installed kernels" root omarchy-boot-sync verify
+  echo "omarchy $(pacman -Q omarchy 2>/dev/null | cut -d' ' -f2), kernel $(uname -r), $(systemd-analyze | head -1)"
+  exit $fail
+fi
+
+# On Limine the rebuild has to update the image's boot entry, not add one
+# beside it, or the entry Limine boots by default loads files the rebuild
+# deleted or replaced. vm-boot skips the firmware, so this rebuild takes the
+# path that deletes the UKI.
 menu() { root cat /boot/limine.conf; }
 unkeyed() { local m; m=$(menu) && [ -n "$m" ] && ! grep -q 'machine-id=' <<<"$m"; }
 # The files of the entry Limine boots by default, as "path hash" lines. As in

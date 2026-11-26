@@ -64,7 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          iso=omarchy-$VERSION.iso
+          iso=$(./test/vm-image/release-iso-name "$VERSION")
           curl -fSL --retry 3 -o "release/$iso" "https://iso.omarchy.org/$iso"
           curl -fsSL --retry 3 -o "release/$iso.sig" "https://iso.omarchy.org/$iso.sig"
           home=$(mktemp -d)

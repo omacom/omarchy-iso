@@ -75,4 +75,29 @@ reads=$(warm_reads finished)
 [[ $reads == $'finished omarchy-root.img.zst\nfinished linux-firmware-1-1-any.pkg.tar.zst' ]] \
   || fail "the warm-up does not read the medium once the checks are done: $(paste -sd, <<<"$reads")"
 
+# An 8 GiB machine (~7.3 GiB MemAvailable) must still cache a ~3.9 GiB image
+# (leaving 2 GiB headroom), while a 4 GiB machine (~3.5 GiB MemAvailable) must
+# skip it so it does not evict what verify just cached.
+cat >"$fixture/bin/du" <<'EOF'
+#!/bin/bash
+while [[ ${1:-} == -* ]]; do shift; done
+for path in "$@"; do
+  case "$path" in
+    *omarchy-root.img.zst) printf '3962000\t%s\n' "$path" ;;
+    *) printf '64\t%s\n' "$path" ;;
+  esac
+done
+EOF
+chmod +x "$fixture/bin/du"
+
+echo "MemAvailable:    7654604 kB" >"$fixture/meminfo"
+reads=$(warm_reads finished)
+[[ $reads == $'finished omarchy-root.img.zst\nfinished linux-firmware-1-1-any.pkg.tar.zst' ]] \
+  || fail "8 GiB machine failed to warm a 3.8 GiB root image: $(paste -sd, <<<"$reads")"
+
+echo "MemAvailable:    3670016 kB" >"$fixture/meminfo"
+reads=$(warm_reads finished)
+[[ -z $reads ]] \
+  || fail "4 GiB machine warmed an image larger than its budget: $(paste -sd, <<<"$reads")"
+
 echo "warm offline mirror tests passed"

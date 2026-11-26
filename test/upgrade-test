@@ -111,7 +111,12 @@ facts() { # file
     echo "migrations_skipped=$(find ~/.local/state/omarchy/migrations/skipped -name "*.sh" 2>/dev/null | wc -l)"
     echo "wallpaper=${target##*/}"
     echo "wallpaper_exists=$([[ -n $target && -e $target ]] && echo yes || echo no)"
+    # An Omarchy without omarchy-boot-backend can only be on Limine.
+    echo "boot_loader=$(omarchy-boot-backend 2>/dev/null || echo limine)"
     echo "boot_entry_groups=$(sudo grep -c "^/+" /boot/limine.conf 2>/dev/null)"
+    default=$(sudo sed -n "s/^default //p" /boot/loader/loader.conf 2>/dev/null | tail -1)
+    echo "boot_default=$default"
+    echo "boot_default_on_esp=$([[ -n $default ]] && sudo test -s "/boot/EFI/Linux/$default" && echo yes || echo no)"
     echo "boot_id=$(cut -c1-8 /proc/sys/kernel/random/boot_id)"
   ' 2>/dev/null | grep -E '^[a-z_]+=' >"$1"
 }
@@ -282,7 +287,11 @@ picture() { local name=${1%.*}; [[ $name =~ ^[0-9]+-(.+)$ ]] && name=${BASH_REMA
 before_wallpaper=$(b wallpaper) after_wallpaper=$(a wallpaper)
 check "The wallpaper is the one the user had, and exists ($before_wallpaper → $after_wallpaper)" \
   test "$(a wallpaper_exists)" = yes -a -n "$after_wallpaper" -a "$(picture "$after_wallpaper")" = "$(picture "$before_wallpaper")"
-check "The boot menu has one Omarchy group ($(a boot_entry_groups))" test "$(a boot_entry_groups)" = 1
+if [[ $(a boot_loader) == systemd-boot ]]; then
+  check "systemd-boot's default boot image is on the ESP ($(a boot_default))" test "$(a boot_default_on_esp)" = yes
+else
+  check "The boot menu has one Omarchy group ($(a boot_entry_groups))" test "$(a boot_entry_groups)" = 1
+fi
 
 row() { printf '| %s | %s | %s |\n' "$1" "$(b "$2")" "$(a "$2")"; }
 {

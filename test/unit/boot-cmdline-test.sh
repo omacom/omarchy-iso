@@ -32,17 +32,17 @@ cd "$ROOT"
 # chainloader: the Snapdragon entry boots a live UKI and hands it the cmdline.
 entries=$(grep -rhE '^\s*(APPEND|linux|options|chainloader)\s.*archisobasedir=' \
   configs/syslinux/archiso_sys-linux.cfg configs/syslinux/archiso_pxe-linux.cfg \
-  configs/grub/grub.cfg configs/grub/loopback.cfg configs/efiboot/loader/entries)
+  configs/grub/grub.cfg configs/grub/loopback.cfg)
 
 count=$(printf '%s\n' "$entries" | wc -l)
-[ "$count" -ge 9 ] || { echo "expected at least 9 boot entries, found $count"; exit 1; }
+[ "$count" -ge 8 ] || { echo "expected at least 8 boot entries, found $count"; exit 1; }
 
-if grep -rq archiso_http_srv configs/syslinux configs/grub configs/efiboot; then
+if grep -rq archiso_http_srv configs/syslinux configs/grub; then
   echo "HTTP PXE entry found: that path copies only the airootfs to RAM, so the root image is never on the medium and an install can never succeed"
   exit 1
 fi
 
-if grep -rqE '^[^#]*cms_verify' configs/syslinux configs/grub configs/efiboot; then
+if grep -rqE '^[^#]*cms_verify' configs/syslinux configs/grub; then
   echo "cms_verify found: the ISO is not codesigned, so any boot entry carrying it aborts into an emergency shell"
   exit 1
 fi

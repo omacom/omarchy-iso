@@ -17,9 +17,26 @@ while [[ $# -gt 0 ]]; do
     --authorized-keys-file) export OMARCHY_INSTALL_AUTHORIZED_KEYS_FILE="$2"; shift 2 ;;
     --tailscale-authkey-file) export OMARCHY_INSTALL_TAILSCALE_AUTHKEY_FILE="$2"; shift 2 ;;
     --defer-provisioning-file)             export OMARCHY_INSTALL_DEFER_PROVISIONING_FILE="$2"; shift 2 ;;
+    --oem-dir)              export OMARCHY_INSTALL_OEM_DIR="$2"; shift 2 ;;
     *)                      echo "omarchy-iso-install: unknown arg $1" >&2; exit 2 ;;
   esac
 done
+
+# On a hybrid CPU, run the installer and everything it starts on the
+# performance cores (omarchy-installer-cpus says which, and why). Not when
+# something already narrowed where this may run, and only if the move gives it
+# exactly those cores: a cpuset may hold fewer of them. The CPUs it had go on
+# to the one job that must keep them all, the LUKS keyslot enrollment
+# (orchestrator luks_calibration).
+all_cpus=$(taskset -pc $$ 2>/dev/null | sed 's/.*: //') || all_cpus=
+if [[ -n $all_cpus && $all_cpus == "$(cat /sys/devices/system/cpu/online 2>/dev/null)" ]] &&
+  cpus=$(omarchy-installer-cpus) && [[ -n $cpus ]]; then
+  if taskset -pc "$cpus" $$ &>/dev/null && [[ $(taskset -pc $$ | sed 's/.*: //') == "$cpus" ]]; then
+    export OMARCHY_INSTALLER_ALL_CPUS=$all_cpus
+  else
+    taskset -pc "$all_cpus" $$ &>/dev/null || true
+  fi
+fi
 
 cd /usr/share/omarchy-iso
 exec python -m orchestrator.main

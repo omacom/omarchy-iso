@@ -1,0 +1,34 @@
+#!/bin/bash
+#
+# Print the CPUs the installer should run on, or nothing to leave it on all.
+#
+# The installer is a chain of about a thousand short processes. On a hybrid
+# Intel CPU the scheduler starts each wherever a CPU is idle, which is mostly
+# an efficiency core, and only moves a task to a performance core once it has
+# run for a while. On a Dell XPS 16 (4 P-cores, 12 E-cores) bash spent 2% of
+# its CPU time on P-cores and cp 22%, while the one long-running gpg spent
+# 70%. Kept on the P-cores, the install took 3.28 s against 3.49 s.
+#
+# Only with at least four performance cores: fewer would crowd the image
+# writer's threads. Any other machine prints nothing.
+
+sys=${OMARCHY_SYS_ROOT:-/sys}
+core_cpus=$sys/devices/cpu_core/cpus
+[[ -r $core_cpus && -r $sys/devices/cpu_atom/cpus ]] || exit 0
+
+list=$(<"$core_cpus")
+declare -A cores=()
+IFS=, read -ra ranges <<<"$list"
+for range in "${ranges[@]}"; do
+  first=${range%-*} last=${range#*-}
+  [[ $first =~ ^[0-9]+$ && $last =~ ^[0-9]+$ ]] || exit 0
+  for ((cpu = first; cpu <= last; cpu++)); do
+    core_id=$sys/devices/system/cpu/cpu$cpu/topology/core_id
+    [[ -r $core_id ]] || exit 0
+    cores[$(<"$core_id")]=1
+  done
+done
+
+if ((${#cores[@]} >= 4)); then
+  printf '%s\n' "$list"
+fi

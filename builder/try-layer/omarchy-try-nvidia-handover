@@ -1,0 +1,22 @@
+#!/bin/bash
+#
+# Try Omarchy: hand the NVIDIA card from nouveau to the NVIDIA driver.
+# omarchy-try-nvidia-handover.service runs it once, early in a Try session
+# with the NVIDIA layer, while nouveau is loaded.
+#
+# Try starts from the live installer by a soft reboot, which keeps the
+# kernel's drivers: on an NVIDIA machine the installer ran on nouveau, which
+# holds the card and the console, and the NVIDIA driver can only take a card
+# nobody holds. So the console first, then nouveau. Should either refuse, the
+# session runs on nouveau, and Hyprland's guard (build-try-layer.sh) gives it
+# no NVIDIA settings.
+
+sysfs=${OMARCHY_SYSFS:-/sys}
+
+for console in "$sysfs"/class/vtconsole/vtcon*; do
+  [[ -r $console/name ]] || continue
+  if [[ $(<"$console/name") == *"frame buffer"* ]]; then
+    echo 0 >"$console/bind"
+  fi
+done
+modprobe -r nouveau

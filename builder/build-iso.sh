@@ -18,6 +18,8 @@ source /builder/node-release.sh
 source /builder/arm64-kernel-image.sh
 source /builder/archiso-aarch64-mkinitcpio.sh
 source /builder/grub-platform.sh
+source /builder/try-kernel.sh
+source /builder/boot-menu-theme.sh
 source /builder/required-packages.sh
 
 # The online pacman configuration drives every package download below: one per
@@ -196,7 +198,7 @@ else
   # Full upgrade, not just -Sy: the pinned container can fall behind the mirror
   # it installs from. A plain -Sy install is then a partial upgrade — new packages
   # can link against a glibc the container doesn't have yet.
-  pacman --noconfirm -Syu archiso gcc jq grub btrfs-progs python "${local_build_packages[@]}"
+  pacman --noconfirm -Syu archiso gcc jq grub imagemagick terminus-font btrfs-progs python "${local_build_packages[@]}"
   mkarchiso_command=mkarchiso
 fi
 
@@ -259,7 +261,6 @@ echo "$OMARCHY_ISO_REF" > "$build_cache_dir/airootfs/root/omarchy_iso_ref"
 echo "$OMARCHY_ARCH" > "$build_cache_dir/airootfs/root/omarchy_arch"
 if [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]]; then
   touch "$build_cache_dir/airootfs/usr/share/omarchy-iso/oem-install"
-  sed -i 's/^TIMEOUT .*/TIMEOUT 1/' "$build_cache_dir/syslinux/archiso_sys.cfg"
 fi
 # A preset ISO (--preset): the configurator takes the answers presets/<code>.json
 # gives instead of asking, and the orchestrator hands its region to the target.
@@ -336,6 +337,12 @@ else
   # mkinitcpio does not error out looking for /boot/vmlinuz-linux.
   rm -f "$build_cache_dir/airootfs/etc/mkinitcpio.d/linux.preset"
   boot_splash_kernel_options="quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 disablehooks=plymouth plymouth.enable=0 "
+  # The boot menu offers Install only, so nothing starts releng's
+  # memory test or UEFI shell, which mkarchiso copies onto the medium
+  # whenever their packages are in the live system.
+  for excluded_package in memtest86+ memtest86+-efi edk2-shell; do
+    sed -i "\\|^${excluded_package//+/[+]}$|d" "$build_cache_dir/packages.x86_64"
+  done
   kernel_options="xe.enable_panel_replay=0 initramfs_async=0 intel_idle.states_off=0x3fc"
 fi
 # The live boot is black until the installer draws its first screen: no
@@ -1094,7 +1101,14 @@ sed "/^\[options\]/a CacheDir = /var/cache/omarchy/mirror/offline/" \
 iso_subdir="$(sed -n 's/^install_dir="\(.*\)"$/\1/p' "$build_cache_dir/profiledef.sh")/$OMARCHY_ARCH"
 [[ $iso_subdir == ?*/"$OMARCHY_ARCH" ]] || { echo "ERROR: could not read install_dir from profiledef.sh: '$iso_subdir'" >&2; exit 1; }
 root_image_dir="$build_cache_dir/work/iso/$iso_subdir"
-root_image="$root_image_dir/omarchy-root.img.zst"
+root_image="$root_image_dir/omarchy-root.sfs"
+# The Try Omarchy layer (builder/build-try-layer.sh) beside it, which the
+# installer mounts over the image when Try is picked (omarchy-try). x86_64
+# consumer media only: the installer asks only where the layer is, aarch64
+# images are not tested with it, and OEM factory-flashing media install
+# directly.
+try_layer=""
+[[ $OMARCHY_ARCH == x86_64 && ${OMARCHY_OEM_INSTALL:-} != "1" ]] && try_layer="$root_image_dir/omarchy-try.sfs"
 mkdir -p "$root_image_dir"
 # Builds from before the raw image left a send stream (and, briefly, its
 # checksum) in the persistent build cache, where they would ship inside the
@@ -1239,6 +1253,8 @@ image_localdb=/tmp/omarchy-root-image-localdb
 run_root_image_build() {
   echo "[timing] root image start $(date +%s)"
   OMARCHY_IMAGE_LOCALDB_COPY="$image_localdb" OMARCHY_IMAGE_SYNC_DBS=/tmp/offlinedb/sync \
+    OMARCHY_TRY_LAYER="$try_layer" OMARCHY_TRY_CHANNEL="$OMARCHY_MIRROR" \
+    OMARCHY_TRY_NODE_DIR="$build_cache_dir/airootfs/opt/packages" \
     OMARCHY_RENAMED_PACKAGES="$renamed_list" OMARCHY_UNRESOLVED_PACKAGES="$unresolved_list" \
     OMARCHY_SNAPDRAGON="${OMARCHY_SNAPDRAGON:-}" \
     OMARCHY_HARDWARE_LAYERS="$build_cache_dir/airootfs/usr/share/omarchy-iso/hardware-layers" \
@@ -1406,6 +1422,21 @@ EOF
   done
 }
 
+# The boot menus' theme (builder/boot-menu-theme.sh). x86_64's BIOS menu
+# draws on its splash. GRUB boots Install at once and shows its menu only when
+# that boot fails. aarch64 carries no theme.
+if [[ $OMARCHY_ARCH == aarch64 ]]; then
+  rm -rf "$build_cache_dir/grub/themes"
+else
+  settings_archive=$(find "$offline_mirror_dir" -maxdepth 1 -name "$OMARCHY_SETTINGS_PACKAGE-[0-9]*.pkg.tar.*" ! -name '*.sig' | head -1)
+  if [[ -z $settings_archive ]]; then
+    echo "ERROR: $OMARCHY_SETTINGS_PACKAGE is not in the offline mirror, so the boot menu has no logo" >&2
+    exit 1
+  fi
+  build_grub_theme "$build_cache_dir/grub/themes/omarchy" "$settings_archive" || exit 1
+  build_syslinux_splash "$build_cache_dir/syslinux/splash.png" "$settings_archive" || exit 1
+fi
+
 # Overlap build-root-image.sh with mkarchiso's live root pacstrap, initramfs,
 # customize_airootfs and bootmodes. Pre-stamping mkarchiso's _run_once markers
 # for mksquashfs and xorriso lets pass 1 build the live root while the root
@@ -1419,6 +1450,12 @@ if grep -Fq '_run_once _prepare_airootfs_image' "$mkarchiso_path" &&
   overlap_mkarchiso=1
 fi
 
+# Build the ISO into a fresh staging directory on /out/ (same filesystem, so
+# mv is an instant rename) so the size gate checks only the ISO this build
+# produced, never pre-existing foreign-arch ISOs sharing /out/
+# (bin/omarchy-iso-make mounts release/ there).
+iso_staging=$(mktemp -d /out/.omarchy-iso-out.XXXXXX)
+trap 'rm -rf "$iso_staging"' EXIT
 if (( overlap_mkarchiso )); then
   root_image_log=/tmp/omarchy-root-image.log
   run_root_image_build >"$root_image_log" 2>&1 &
@@ -1430,7 +1467,7 @@ if (( overlap_mkarchiso )); then
         "$build_cache_dir/work/iso._build_iso_image"
   echo "[timing] mkarchiso start $(date +%s)"
   mkarchiso_prep_status=0
-  "$mkarchiso_command" -v -w "$build_cache_dir/work/" -o /out/ "$build_cache_dir/" || mkarchiso_prep_status=$?
+  "$mkarchiso_command" -v -w "$build_cache_dir/work/" -o "$iso_staging/" "$build_cache_dir/" || mkarchiso_prep_status=$?
   echo "[timing] mkarchiso prep end $(date +%s)"
 
   root_image_status=0
@@ -1449,15 +1486,37 @@ if (( overlap_mkarchiso )); then
         "$build_cache_dir/work/iso._build_iso_image" \
         "$build_cache_dir/work/build._build_buildmode_iso"
   echo "[timing] mkarchiso pack start $(date +%s)"
-  "$mkarchiso_command" -v -w "$build_cache_dir/work/" -o /out/ "$build_cache_dir/"
+  # The live system goes in as a layer over the root image, which then carries
+  # what both hold (builder/mksquashfs-shim, builder/dedup-airootfs.sh).
+  OMARCHY_ROOT_IMAGE="$root_image" PATH="/builder/mksquashfs-shim:$PATH" \
+    "$mkarchiso_command" -v -w "$build_cache_dir/work/" -o "$iso_staging/" "$build_cache_dir/"
   echo "[timing] mkarchiso end $(date +%s)"
 else
   stage_shipped_mirror
   run_root_image_build
   finalize_root_image_metadata "$build_cache_dir/airootfs"
   echo "[timing] mkarchiso start $(date +%s)"
-  "$mkarchiso_command" -v -w "$build_cache_dir/work/" -o /out/ "$build_cache_dir/"
+  # The live system goes in as a layer over the root image, which then carries
+  # what both hold (builder/mksquashfs-shim, builder/dedup-airootfs.sh).
+  OMARCHY_ROOT_IMAGE="$root_image" PATH="/builder/mksquashfs-shim:$PATH" \
+    "$mkarchiso_command" -v -w "$build_cache_dir/work/" -o "$iso_staging/" "$build_cache_dir/"
   echo "[timing] mkarchiso end $(date +%s)"
+fi
+
+built_isos=()
+for iso in "$iso_staging"/*.iso; do
+  [[ -f $iso ]] || continue
+  dest="/out/$(basename "$iso")"
+  mv -f "$iso" "$dest"
+  built_isos+=("$dest")
+done
+rm -rf "$iso_staging"
+trap - EXIT
+
+# Match host UID/GID on the output before any post-build gate can exit, so a
+# failed size check still leaves the produced ISO owned by the host user.
+if [[ -n $HOST_UID && -n $HOST_GID ]]; then
+  chown -R "$HOST_UID:$HOST_GID" /out/
 fi
 
 # The live initramfs must stay small enough for GRUB and the kernel to place
@@ -1477,7 +1536,34 @@ for live_initramfs in "$build_cache_dir/work/iso/${iso_subdir%/*}/boot/$OMARCHY_
   fi
 done
 
-# Match host UID/GID on output.
-if [[ -n $HOST_UID && -n $HOST_GID ]]; then
-  chown -R "$HOST_UID:$HOST_GID" /out/
+# Try Omarchy runs the live kernel with the root image's modules
+# (builder/try-kernel.sh).
+if [[ -n $try_layer ]]; then
+  check_try_kernel "$build_cache_dir/work/$OMARCHY_ARCH/airootfs" "$image_localdb" "$OMARCHY_KERNEL" || exit 1
 fi
+
+# The x86_64 ISO has to fit an 8 GB stick. Fail over 7.7 GB and warn over
+# 7.5 GB, so an image or mirror that grows shows up in the build that grew it.
+# ARM images are not limited to an 8 GB stick. A fast build (--fast, which
+# pull-request CI makes) compresses the root image at zstd 1, not the shipped
+# 15: the same ISO measured 7.76 GB fast and 7.03 GB as shipped. So a fast
+# build only reports its size, and the nightly and release builds, at the
+# shipped compression, hold the limit.
+check_iso_size() {
+  local iso=$1 iso_bytes iso_fail_bytes=7700000000 iso_warn_bytes=7500000000
+  iso_bytes=$(stat -c %s "$iso") || return 1
+  echo "ISO ${iso##*/}: $iso_bytes bytes"
+  [[ $OMARCHY_ARCH == "x86_64" ]] || return 0
+  if [[ ${OMARCHY_FAST_COMPRESSION:-} == 1 ]]; then
+    echo "${iso##*/} is a fast build, larger than the shipped one; builds at the shipped compression hold the $iso_fail_bytes limit for an 8 GB stick"
+  elif (( iso_bytes > iso_fail_bytes )); then
+    echo "ERROR: ${iso##*/} is $iso_bytes bytes, over the $iso_fail_bytes limit for an 8 GB stick" >&2
+    return 1
+  elif (( iso_bytes > iso_warn_bytes )); then
+    echo "WARNING: ${iso##*/} is $iso_bytes bytes, over $iso_warn_bytes; $iso_fail_bytes fails the build" >&2
+  fi
+}
+for iso in "${built_isos[@]}"; do
+  [[ -f $iso ]] || continue
+  check_iso_size "$iso" || exit 1
+done

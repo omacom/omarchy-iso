@@ -37,6 +37,7 @@ LOGO_WIDTH=10
 gum() {{ echo "LOGO-PADDED-$PADDING_LEFT"; }}
 ttfx() {{ sleep 30; }}
 {function('measure_terminal')}
+{function('greeter_choices')}
 {function('greeter')}
 greeter
 echo GREETER-DONE

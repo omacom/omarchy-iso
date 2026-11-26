@@ -27,9 +27,9 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 CORRUPT_ISO="${OMARCHY_INTEGRATION_SCRATCH_DIR:-$BASE_DIR}/corrupt.iso"
 # The root image's file name, resolved from the ISO instead of assumed: with
 # a wrong hardcoded name this scenario would silently test nothing.
-IMAGE_PATH=$(xorriso -indev "$ISO" -find /arch/x86_64 -name 'omarchy-root.*.zst' 2>/dev/null |
+IMAGE_PATH=$(xorriso -indev "$ISO" -find /arch/x86_64 \( -name 'omarchy-root.sfs' -o -name 'omarchy-root.*.zst' \) 2>/dev/null |
   tr -d "'" | sed 's|^/||' | head -n1)
-IMAGE_PATH=${IMAGE_PATH:-arch/x86_64/omarchy-root.img.zst}
+IMAGE_PATH=${IMAGE_PATH:-arch/x86_64/omarchy-root.sfs}
 VERIFY_UNIT=omarchy-root-image-verify.service
 STATE=/run/omarchy-install/state.json
 

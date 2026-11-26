@@ -112,17 +112,20 @@ class LayerScriptletsTest(unittest.TestCase):
         self.assertEqual(calls[0][:3], ["arch-chroot", str(self.target), "/bin/sh"])
         self.assertIn("post_install", calls[0][4])
         self.assertEqual(run.call_args.kwargs["env"]["OMARCHY_INSTALL_USER"], "emir")
+        # Like pacman's, the scriptlets' output reaches the install log.
+        self.assertNotIn("capture_output", run.call_args.kwargs)
+        self.assertIsNone(run.call_args.kwargs.get("stdout"))
         self.assertFalse(self.listing.exists())
 
     def test_a_failed_scriptlet_does_not_stop_the_install(self):
         self.listing.parent.mkdir(parents=True)
         self.listing.write_text("broken 1-1\nfine 1-1\n")
-        results = [subprocess.CompletedProcess([], 1, "", "boom"), subprocess.CompletedProcess([], 0, "", "")]
+        results = [subprocess.CompletedProcess([], 1), subprocess.CompletedProcess([], 0)]
         with mock.patch.object(phases_impl.subprocess, "run", side_effect=results) as run, \
                 mock.patch.object(phases_impl, "info") as info:
             phases_impl._run_layer_scriptlets(self.ctx)
         self.assertEqual(run.call_count, 2)
-        self.assertIn("broken post_install failed", info.call_args_list[0].args[0])
+        self.assertIn("broken post_install failed (exit 1)", info.call_args_list[0].args[0])
 
     def test_they_run_once_the_user_exists(self):
         source = Path(phases_impl.__file__).read_text()

@@ -1282,8 +1282,9 @@ def _run_layer_scriptlets(ctx: InstallContext) -> None:
     that the user exists, as pacman would have when Omarchy's hardware scripts
     installed them: in pacman's order, with OMARCHY_INSTALL_USER set, as for
     Omarchy's own setup. The layer was packed with --noscriptlet
-    (build-root-image.sh record_layer_scriptlets). Like pacman, a failed
-    scriptlet is logged and the install goes on."""
+    (build-root-image.sh record_layer_scriptlets). As with pacman, their
+    output goes to the install log, and a failed scriptlet is reported and
+    the install goes on."""
     listing = ctx.target / LAYER_SCRIPTLETS
     if not listing.is_file():
         return
@@ -1295,11 +1296,10 @@ def _run_layer_scriptlets(ctx: InstallContext) -> None:
                 ["arch-chroot", str(ctx.target), "/bin/sh", "-c",
                  '. "$1" && if command -v post_install >/dev/null; then post_install "$2"; fi',
                  "sh", f"/var/lib/pacman/local/{name}-{version}/install", version],
-                env=env, capture_output=True, text=True,
+                env=env, check=False,
             )
             if result.returncode != 0:
-                detail = (result.stderr or result.stdout).strip().splitlines()[-1:] or [""]
-                info(f"› {name} post_install failed (exit {result.returncode}): {detail[0]}")
+                info(f"› {name} post_install failed (exit {result.returncode}); its output is above")
     listing.unlink()
 
 

@@ -1,4 +1,5 @@
 #!/usr/bin/ash
+# shellcheck shell=dash # busybox ash, which shellcheck checks as dash
 # The root image under the new root, after archiso has found the medium and
 # mounted its live environment there:
 #

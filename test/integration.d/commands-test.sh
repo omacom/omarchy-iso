@@ -11,7 +11,8 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 base_image_ready || { echo "No base image; run this through ./test/integration" >&2; exit 1; }
 
 verify_required_commands() {
-  local list="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/required-commands.txt" missing
+  local list missing
+  list="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/required-commands.txt"
   log "Booting the installed base image to check the command contract"
   start_vm_from_base
   wait_for_ssh "$BOOT_TIMEOUT"

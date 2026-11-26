@@ -8,6 +8,7 @@
 # with its own omarchy-quiet-efivars hook.
 
 build() {
+    # shellcheck disable=SC2154 # mkinitcpio sets it for every install hook
     local init_functions="$BUILDROOT/init_functions"
 
     [[ -f $init_functions ]] || return 0

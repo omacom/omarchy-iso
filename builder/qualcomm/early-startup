@@ -1,4 +1,5 @@
 #!/usr/bin/ash
+# shellcheck shell=dash # busybox ash, which shellcheck checks as dash
 # Opt-in live-image candidate, not a USB-ready ABI. Start the firmware before
 # normal udev coldplug when firmware is present. Otherwise keep legacy startup;
 # a failure after starting still prevents all Archiso disk searches.

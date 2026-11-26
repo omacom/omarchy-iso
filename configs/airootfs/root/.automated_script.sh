@@ -26,12 +26,14 @@ if grep -qw 'omarchy.n1x_recovery=1' /proc/cmdline; then
   exit 0
 fi
 
+# shellcheck disable=SC2155 # kept: under set -e, a split would end the install on a failed read
 export OMARCHY_MIRROR="$(cat /root/omarchy_mirror)"
 if [[ -f /root/omarchy_iso_ref ]]; then
+  # shellcheck disable=SC2155 # as above
   export OMARCHY_ISO_REF="$(cat /root/omarchy_iso_ref)"
 fi
 if [[ -f /usr/share/omarchy-iso/package-targets ]]; then
-  # shellcheck disable=SC1091
+  # shellcheck source=/dev/null # build-iso.sh writes it into the ISO
   source /usr/share/omarchy-iso/package-targets
   export OMARCHY_RUNTIME_PACKAGE OMARCHY_SETTINGS_PACKAGE OMARCHY_NVIM_PACKAGE
 fi
@@ -63,7 +65,9 @@ set_tokyo_night_colors() {
 mkdir -p /var/log
 touch "$OMARCHY_INSTALL_LOG_FILE"
 
+# shellcheck disable=SC2155 # kept: under set -e, a split would end the install where tput fails
 export COLUMNS=$(tput cols)
+# shellcheck disable=SC2155 # as above
 export LINES=$(tput lines)
 exec > >(tee >(sed -u -E 's/\x1b(\[[0-9;?]*[A-Za-z]|[78])//g' >>"$OMARCHY_INSTALL_LOG_FILE") 2>/dev/null) 2>/dev/tty
 export CLICOLOR_FORCE=1
@@ -214,11 +218,11 @@ else
   # machine, where the console has one bitmap font and cannot draw Chinese,
   # Japanese or Korean at all. The launcher is the runtime's own, the one
   # first-boot owner setup is drawn with.
-  # shellcheck disable=SC1091
+  # shellcheck source=/dev/null # vendored from Omarchy at build time
   source /usr/share/omarchy-iso/setup-form.sh
-  # shellcheck disable=SC1091
+  # shellcheck source=/dev/null # as above
   source /usr/share/omarchy-iso/kmscon.sh
-  # shellcheck disable=SC1091
+  # shellcheck source=SCRIPTDIR/../usr/share/omarchy-iso/kmscon-session.sh
   source /usr/share/omarchy-iso/kmscon-session.sh
 
   # The answers a relaunch carries hold the password: however this run ends,
@@ -250,6 +254,7 @@ export OMARCHY_ISO_LANGUAGE
 # The foreground dashboard is now the sole visible install UI owner. It starts
 # the actual installer as a non-interactive child, logs child output, waits for
 # completion, then renders the final installed-time/reboot prompt itself.
+# shellcheck disable=SC2155 # kept: under set -e, a split would end the install where tty fails
 export OMARCHY_DASHBOARD_TTY="$(tty)"
 rm -f /run/omarchy-install/state.json
 /usr/local/bin/omarchy-install-dashboard \

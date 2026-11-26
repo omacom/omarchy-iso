@@ -25,7 +25,7 @@ for tool in parted blkid; do
   fi
 done
 
-# shellcheck source=../configs/airootfs/usr/share/omarchy-iso/disk-partitioning.sh
+# shellcheck source=SCRIPTDIR/../../configs/airootfs/usr/share/omarchy-iso/disk-partitioning.sh
 source "$LIB"
 
 WORK=$(mktemp -d)

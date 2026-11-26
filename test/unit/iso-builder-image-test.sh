@@ -94,3 +94,10 @@ assert_pinned_run
 grep -qxF -- '--pull=always' "$TEST_DOCKER_LOG" || fail "failed cold build lost pull behavior"
 [[ ! -e $TEST_RELEASE/omarchy-test-x86_64-quattro.iso ]] || fail "failed cold launch produced an ISO"
 printf 'ok - failed cold pull stops without image fallback\n'
+
+# --quattro names a ref, as --edge and --rc do, and wins over one the
+# environment already holds.
+OMARCHY_ISO_REF=rc run_builder --quattro || fail "quattro builder launch failed"
+grep -qxF 'OMARCHY_ISO_REF=quattro' "$TEST_DOCKER_LOG" ||
+  fail "--quattro left the builder with $(grep '^OMARCHY_ISO_REF=' "$TEST_DOCKER_LOG")"
+printf 'ok - --quattro builds from the quattro ref\n'

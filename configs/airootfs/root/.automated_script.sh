@@ -19,15 +19,6 @@ set -euo pipefail
 # here after this script needs it back.
 [[ ${OMARCHY_KMSCON:-} == 1 ]] || trap 'printf "\e[?25h" >/dev/tty1 2>/dev/null' EXIT
 
-# Try Omarchy never installs. Its initramfs hook boots the root image instead of
-# this live system; if this script runs under omarchy.try=1 at all, that hook
-# failed, and an install (an unattended one, with a cidata drive present) is the
-# last thing the person who picked Try wants.
-if grep -qw 'omarchy.try=1' /proc/cmdline; then
-  echo "Try Omarchy could not start, so nothing is installed. Reboot and pick Install to install."
-  exit 0
-fi
-
 # The N1x recovery boot entry is a diagnostic shell, never the installer: record
 # the hardware probe, show how to reach the machine, and leave tty1 at a prompt.
 if grep -qw 'omarchy.n1x_recovery=1' /proc/cmdline; then

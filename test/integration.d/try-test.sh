@@ -1,10 +1,12 @@
 #!/bin/bash
 #
-# Try Omarchy: the boot menu's Try entry must bring up the real desktop from
-# the medium, with pacman usable, and leave the machine's disk untouched.
+# Try Omarchy: the installer's first question must bring up the real desktop
+# from the medium, with pacman usable, and leave the machine's disk untouched.
 #
-# The ISO boots alone with a disk of random bytes for the machine's own; Try
-# is picked in GRUB and the desktop waited for. A terminal there fetches a
+# The ISO boots alone with a disk of random bytes for the machine's own. No
+# key goes to GRUB, which reads keys through the firmware: it boots the
+# installer by itself, and the installer asks whether to install or try. Try
+# is picked there and the desktop waited for. A terminal there fetches a
 # bootstrap that authorizes the harness's key and starts sshd, and the rest
 # is checked over SSH. Runs on the default variant only: Try boots the ISO,
 # which no install variant changes.
@@ -16,37 +18,32 @@ if [[ ${VARIANT:-default} != default ]]; then
   exit 0
 fi
 
-# GRUB waits 3 s; wait_for_screen polls every 3 s and can miss it, and OCR
-# misreads its menu. GRUB draws the menu on the serial console too, with each
-# entry's title as it is written.
-pick_try() {
-  local tries=0
-  until grep -aq "Just try" "$SERIAL_LOG" 2>/dev/null; do
-    vm_running && ((tries++ < 1200)) || return 1
-    sleep 0.1
-  done
-  press down
-  capture_console "success-try-menu"
-  press ret
+# The installer's welcome, reached with no key pressed since the VM started.
+# GRUB draws a menu it shows on the serial console too, under a "GNU GRUB"
+# header; it must have drawn none, so a keyboard the firmware cannot read
+# misses no choice there.
+installer_greets_without_a_key() {
+  OCR_KMSCON=1 wait_for_screen "Linux by DHH" 300 || return 1
+  capture_console "success-try-greeter"
+  ! grep -aq "GNU GRUB" "$SERIAL_LOG"
 }
 
-# After a pick GRUB's last frame stays on screen until Plymouth draws. Its
-# terminal window must be the theme's background then, not a black box
-# (configs/grub/grub.cfg). The menu itself has no pure black pixel, nor does
-# Plymouth's splash, so the blackest of the frames in the first 3 s counts.
-no_black_box_after_pick() {
-  local shot="$RUN_DIR/.after-pick.ppm" black worst=0 i
-  for i in $(seq 1 10); do
-    sleep 0.3
-    screendump "$shot" || return 1
-    black=$(magick "$shot" -fill white +opaque '#000000' -format '%[fx:1-mean]' info:) || return 1
-    if awk -v black="$black" -v worst="$worst" 'BEGIN { exit !(black > worst) }'; then
-      worst=$black
-      magick "$shot" "$RUN_DIR/after-pick.png" 2>/dev/null || true
-    fi
-  done
-  log "Pure black after the pick, at most: $worst of the screen"
-  awk -v worst="$worst" 'BEGIN { exit !(worst < 0.05) }'
+# Return on the welcome, as any install begins, then the first question. Left
+# alone, it waits: nothing picks Try, or Install, by itself.
+first_question_waits() {
+  press ret
+  OCR_KMSCON=1 wait_for_screen "try it first" 120 || return 1
+  capture_console "success-try-question"
+  sleep 15
+  OCR_KMSCON=1 ocr_screen | grep -qi "try it first"
+}
+
+# Try is the second entry.
+pick_try() {
+  press down
+  sleep 1
+  capture_console "success-try-question-try"
+  press ret
 }
 
 # Omarchy's first-login notifications: any of them is the desktop. They are
@@ -103,6 +100,14 @@ try_ssh() {
     HYPRLAND_INSTANCE_SIGNATURE=\$(ls -t /run/user/\$(id -u)/hypr | head -1); $1" </dev/null
 }
 
+# The units that failed, and why, are kept for a run that has any.
+no_unit_failed() {
+  try_ssh 'systemctl is-system-running --wait >/dev/null; ! systemctl --failed --no-legend | grep -q .' && return 0
+  try_ssh 'systemctl --failed; for u in $(systemctl --failed --no-legend --plain | cut -d" " -f1); do journalctl -b -u "$u" -o short-monotonic --no-pager | tail -30; done' \
+    >"$RUN_DIR/failure-try-units.txt" 2>&1 || true
+  return 1
+}
+
 [[ -f $SSH_KEY ]] || ssh-keygen -t ed25519 -N "" -q -C "omarchy-integration" -f "$SSH_KEY"
 disk="$RUN_DIR/machine.qcow2"
 head -c $((64 << 20)) /dev/urandom >"$RUN_DIR/machine.raw"
@@ -114,12 +119,14 @@ if [[ $FIRMWARE == uefi ]]; then
   ACTIVE_OVMF="$RUN_DIR/OVMF_VARS.4m.fd"
 fi
 
-log "Booting the ISO alone and picking Just try"
+log "Booting the ISO alone and picking Try in the installer"
 start_vm "$disk" "$RUN_DIR/serial.log" \
   -drive "file=$ISO,media=cdrom,if=none,format=raw,id=cdrom0" \
-  -device ide-cd,drive=cdrom0,bootindex=2
-check "GRUB offers Just try within its countdown" pick_try
-check "the pick leaves no black box on screen" no_black_box_after_pick
+  -device ide-cd,drive=cdrom0,bootindex=2 \
+  -device intel-hda -device hda-duplex,audiodev=noaudio -audiodev none,id=noaudio
+check "GRUB shows no menu, and the installer greets with no key pressed" installer_greets_without_a_key
+check "the installer asks install or try, and waits for an answer" first_question_waits
+pick_try
 check "Try Omarchy reaches the desktop" wait_for_desktop
 capture_console "success-try-desktop"
 
@@ -138,7 +145,25 @@ press ret
 check "the Try session answers SSH" wait_for_ssh 120 failure-try-ssh
 
 check "the root is the Try overlay" try_ssh '[ "$(findmnt -no FSTYPE,SOURCE /)" = "overlay omarchy-try" ]'
-check "no unit failed" try_ssh 'systemctl is-system-running --wait >/dev/null; ! systemctl --failed --no-legend | grep -q .'
+# Started from the installer without the firmware, the boot loader or kexec:
+# one soft reboot of the kernel the ISO booted.
+check "Try started by a soft reboot of the installer" try_ssh \
+  '[ "$(systemctl show -p SoftRebootsCount --value)" = 1 ] && grep -q "archisobasedir=" /proc/cmdline'
+# The installer lets its Wi-Fi and audio controllers go, and the session
+# probes driverless devices again (omarchy-try, omarchy-try-reprobe). The
+# VM's HDA controller went through that; the tablet's HID interface, released
+# by hand, shows the probe itself.
+check "the audio controller the installer let go has a driver again" try_ssh \
+  'for d in /sys/bus/pci/devices/*; do case $(cat "$d/class") in 0x0403*) [ -e "$d/driver" ] || exit 1; found=1 ;; esac; done; [ -n "$found" ] && [ -e /proc/asound/card0 ]'
+check "the session probed again the devices left without a driver" try_ssh \
+  '[ "$(systemctl show -p ExecMainExitTimestampMonotonic --value omarchy-try-reprobe.service)" != 0 ] &&
+    [ "$(systemctl show -p Result --value omarchy-try-reprobe.service)" = success ] &&
+    i=$(ls /sys/bus/usb/drivers/usbhid | grep : | head -1) && [ -n "$i" ] &&
+    echo "$i" | sudo tee /sys/bus/usb/drivers/usbhid/unbind >/dev/null && [ ! -e "/sys/bus/usb/devices/$i/driver" ] &&
+    sudo /usr/local/lib/omarchy-try/omarchy-try-reprobe && [ -e "/sys/bus/usb/devices/$i/driver" ]'
+check "systemd-gpt-auto-generator is off" try_ssh \
+  '[ "$(readlink /etc/systemd/system-generators/systemd-gpt-auto-generator)" = /dev/null ]'
+check "no unit failed" no_unit_failed
 # The layers are stamped as updated (build-try-layer.sh), so the boot redid
 # none of pacman's work: ldconfig alone is seconds from a USB stick.
 check "the boot skipped the ConditionNeedsUpdate= units" try_ssh \
@@ -158,8 +183,10 @@ check "nothing on the machine's disk is mounted" try_ssh '! lsblk -nro MOUNTPOIN
 # machine's RTC: timesyncd keeps the kernel's STA_UNSYNC set, which turns off
 # the kernel's 11-minute RTC write (kernel/time/ntp.c). NTPSynchronized
 # ignores that bit; it reads the kernel's maximum error.
+# Try's own timesyncd got an answer, not only the kernel state the
+# installer's left.
 check "the clock synchronizes over NTP" try_ssh \
-  'timeout 90 bash -c "until [ \"\$(timedatectl show -p NTPSynchronized --value)\" = yes ]; do sleep 2; done"'
+  'timeout 90 bash -c "until [ \"\$(timedatectl show -p NTPSynchronized --value)\" = yes ] && [ -n \"\$(timedatectl show-timesync -p NTPMessage --value)\" ]; do sleep 2; done"'
 check "NTP never writes the machine's RTC" try_ssh \
   '[ "$(timedatectl show -p LocalRTC --value)" = yes ] && python3 -c "import ctypes; t = ctypes.create_string_buffer(256); ctypes.CDLL(None).adjtimex(t); raise SystemExit(0 if int.from_bytes(t[40:44], \"little\") & 0x40 else 1)"'
 check "the timezone is the one geo.omarchy.org gives" try_ssh \

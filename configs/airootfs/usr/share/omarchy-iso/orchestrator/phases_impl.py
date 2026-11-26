@@ -172,7 +172,7 @@ def _time_step(label: str):
 # (build-root-image.sh), shipped as omarchy-root.sfs: a squashfs holding the raw
 # image as omarchy-root.img, which the kernel can mount. The install mounts it
 # and writes the image onto the target partition in place of pacstrapping it;
-# the boot menu's Try Omarchy boots the same image (hooks/omarchy_try).
+# Try Omarchy boots the same image (/usr/local/bin/omarchy-try).
 # build-iso.sh ships it as a plain file on the ISO, read straight off the boot
 # medium, with its sha256 next to it. Its one subvolume becomes @.
 # archiso names the directory after the architecture, which is what

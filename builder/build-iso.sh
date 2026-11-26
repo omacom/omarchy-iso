@@ -248,9 +248,6 @@ echo "$OMARCHY_ISO_REF" > "$build_cache_dir/airootfs/root/omarchy_iso_ref"
 echo "$OMARCHY_ARCH" > "$build_cache_dir/airootfs/root/omarchy_arch"
 if [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]]; then
   touch "$build_cache_dir/airootfs/usr/share/omarchy-iso/oem-install"
-  sed -i 's/^TIMEOUT .*/TIMEOUT 1/' "$build_cache_dir/syslinux/archiso_sys.cfg"
-  # OEM factory-flashing media boot straight into the installer with no Try entry.
-  sed -i '/^# Just try:/,$d' "$build_cache_dir/syslinux/archiso_sys-linux.cfg"
 fi
 # A preset ISO (--preset): the configurator takes the answers presets/<code>.json
 # gives instead of asking, and the orchestrator hands its region to the target.
@@ -327,7 +324,7 @@ else
   # mkinitcpio does not error out looking for /boot/vmlinuz-linux.
   rm -f "$build_cache_dir/airootfs/etc/mkinitcpio.d/linux.preset"
   boot_splash_kernel_options="quiet loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 disablehooks=plymouth plymouth.enable=0 "
-  # The boot menu offers Install and Try only, so nothing starts releng's
+  # The boot menu offers Install only, so nothing starts releng's
   # memory test or UEFI shell, which mkarchiso copies onto the medium
   # whenever their packages are in the live system.
   for excluded_package in memtest86+ memtest86+-efi edk2-shell; do
@@ -339,21 +336,11 @@ fi
 # splash, whose logo would only be replaced by the installer's a moment later
 # (and without one Plymouth would show the boot log, so it is off), no boot
 # messages, and no console cursor blinking in the corner.
-# Try keeps the logo: its desktop takes about 11 s to draw. The live initramfs
-# carries no GPU driver, so Plymouth draws on the firmware's framebuffer
-# through simpledrm, which it otherwise leaves alone until its 8 s
-# DeviceTimeout: the logo showed 7.8 s after the menu pick on an MSI Z690 from
-# USB.
-try_splash_kernel_options="quiet splash plymouth.use-simpledrm "
 for grub_config in "$build_cache_dir/grub/grub.cfg" "$build_cache_dir/grub/loopback.cfg"; do
   configure_grub_platform "$grub_config" "$OMARCHY_ARCH"
-  if [[ ${OMARCHY_OEM_INSTALL:-} == "1" ]]; then
-    sed -i -e 's/^timeout=.*/timeout=0/' -e 's/^timeout_style=.*/timeout_style=hidden/' "$grub_config"
-  fi
   sed -i \
     -e "s|%KERNEL%|$OMARCHY_KERNEL|g" \
     -e "s|%BOOT_SPLASH_KERNEL_OPTIONS%|$boot_splash_kernel_options|g" \
-    -e "s|%TRY_SPLASH_KERNEL_OPTIONS%|$try_splash_kernel_options|g" \
     -e "s|%KERNEL_OPTIONS%|$kernel_options|g" \
     "$grub_config"
 done
@@ -1077,10 +1064,11 @@ iso_subdir="$(sed -n 's/^install_dir="\(.*\)"$/\1/p' "$build_cache_dir/profilede
 [[ $iso_subdir == ?*/"$OMARCHY_ARCH" ]] || { echo "ERROR: could not read install_dir from profiledef.sh: '$iso_subdir'" >&2; exit 1; }
 root_image_dir="$build_cache_dir/work/iso/$iso_subdir"
 root_image="$root_image_dir/omarchy-root.sfs"
-# The Try Omarchy layer (builder/build-try-layer.sh) beside it, which the boot
-# menu's Try entry mounts over the image. x86_64 consumer media only: aarch64
-# boards boot through device-tree UKIs that do not take the Try entry, and OEM
-# factory-flashing media install directly.
+# The Try Omarchy layer (builder/build-try-layer.sh) beside it, which the
+# installer mounts over the image when Try is picked (omarchy-try). x86_64
+# consumer media only: the installer asks only where the layer is, aarch64
+# images are not tested with it, and OEM factory-flashing media install
+# directly.
 try_layer=""
 [[ $OMARCHY_ARCH == x86_64 && ${OMARCHY_OEM_INSTALL:-} != "1" ]] && try_layer="$root_image_dir/omarchy-try.sfs"
 mkdir -p "$root_image_dir"
@@ -1374,8 +1362,9 @@ EOF
   done
 }
 
-# The boot menus' theme (builder/boot-menu-theme.sh). Only x86_64 shows a
-# menu; aarch64 boots its default at once, so it carries no theme.
+# The boot menus' theme (builder/boot-menu-theme.sh). x86_64's BIOS menu
+# draws on its splash. GRUB boots Install at once and shows its menu only when
+# that boot fails. aarch64 carries no theme.
 if [[ $OMARCHY_ARCH == aarch64 ]]; then
   rm -rf "$build_cache_dir/grub/themes"
 else
@@ -1487,7 +1476,7 @@ for live_initramfs in "$build_cache_dir/work/iso/${iso_subdir%/*}/boot/$OMARCHY_
   fi
 done
 
-# Just try runs the live kernel with the root image's modules
+# Try Omarchy runs the live kernel with the root image's modules
 # (builder/try-kernel.sh).
 if [[ -n $try_layer ]]; then
   check_try_kernel "$build_cache_dir/work/$OMARCHY_ARCH/airootfs" "$image_localdb" "$OMARCHY_KERNEL" || exit 1

@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Just try boots the live kernel over the root image, so the two must carry
+# Try Omarchy runs the live kernel over the root image, so the two must carry
 # the same kernel package (builder/try-kernel.sh). This runs check_try_kernel
 # against pacman databases made for each case, and checks that build-iso.sh
 # runs it for every build with a Try layer.

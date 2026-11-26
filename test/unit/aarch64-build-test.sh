@@ -120,7 +120,7 @@ for cfg in grub.cfg loopback.cfg; do
         fail "$cfg ($platform) has $placeholder, which build-iso.sh does not fill"
     done
     sed -i -e 's|%KERNEL%|linux-omarchy|g' -e 's|%BOOT_SPLASH_KERNEL_OPTIONS%|quiet |g' \
-      -e 's|%TRY_SPLASH_KERNEL_OPTIONS%|quiet splash |g' -e 's|%KERNEL_OPTIONS%|console=tty0|g' \
+      -e 's|%KERNEL_OPTIONS%|console=tty0|g' \
       -e 's|%INSTALL_DIR%|arch|g' -e "s|%ARCH%|$platform|g" -e 's|%ARCHISO_UUID%|x|g' "$fixture/$platform-$cfg"
     grep -Eo '%[A-Z_]+%' "$fixture/$platform-$cfg" && fail "$cfg ($platform) keeps a placeholder the fixture does not fill"
     if command -v grub-script-check >/dev/null; then
@@ -154,15 +154,11 @@ for cfg in grub.cfg loopback.cfg; do
       done
     fi
     grep -Eq '^%(N1X|X86)_ONLY|%LIVE_(KERNEL|INITRD)%' "$fixture/$platform-$cfg" && fail "template markers remain in $cfg"
-    if [[ $platform == x86_64 ]]; then
-      # Try Omarchy is an x86_64 entry, so that menu shows for 3 s.
-      grep -Fqx 'timeout_style=menu' "$fixture/$platform-$cfg" || fail "$cfg ($platform) hides the menu with Try Omarchy"
-      grep -Fqx 'timeout=3' "$fixture/$platform-$cfg" || fail "$cfg ($platform) does not show the menu for 3 s"
-      grep -Fq -- "--id 'try'" "$fixture/$platform-$cfg" || fail "$cfg ($platform) lacks the Try Omarchy entry"
-    else
-      grep -Fqx 'timeout_style=hidden' "$fixture/$platform-$cfg" || fail "$cfg ($platform) shows the boot menu"
-      grep -Fqx 'timeout=0' "$fixture/$platform-$cfg" || fail "$cfg ($platform) waits at the boot menu"
-    fi
+    # Every platform boots its default at once: the installer asks whether to
+    # install or try Omarchy, where Linux drives the keyboard.
+    grep -Fqx 'timeout_style=hidden' "$fixture/$platform-$cfg" || fail "$cfg ($platform) shows the boot menu"
+    grep -Fqx 'timeout=0' "$fixture/$platform-$cfg" || fail "$cfg ($platform) waits at the boot menu"
+    grep -Fq 'omarchy.try' "$fixture/$platform-$cfg" && fail "$cfg ($platform) still has a Try Omarchy entry"
   done
 done
 

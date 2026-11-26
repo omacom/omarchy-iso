@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Just try boots the ISO's live kernel over the root image, so the session
+# Try Omarchy runs the ISO's live kernel over the root image, so the session
 # loads its modules from the root image's /usr/lib/modules. With any other
 # version of the kernel there, nothing that is a module loads: no Wi-Fi, no
 # touchpad, no USB network, and binfmt_misc fails to mount. A build takes both
@@ -16,9 +16,9 @@ check_try_kernel() {
   image=$(pacman -Q --dbpath "$image_db" "$kernel" 2>/dev/null | cut -d' ' -f2) || true
 
   if [[ -n $live && $live == "$image" ]]; then
-    echo "Just try: $kernel $live in both the live system and the root image"
+    echo "Try Omarchy: $kernel $live in both the live system and the root image"
   else
-    echo "ERROR: Just try boots $kernel ${live:-(none)} over a root image with $kernel ${image:-(none)}; no kernel module would load in the session" >&2
+    echo "ERROR: Try Omarchy runs $kernel ${live:-(none)} over a root image with $kernel ${image:-(none)}; no kernel module would load in the session" >&2
     return 1
   fi
 }

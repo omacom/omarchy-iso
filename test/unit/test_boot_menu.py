@@ -1,8 +1,10 @@
 """Unit tests for the boot menus: what they offer and how they look.
 
-The x86_64 menus offer Install and Just try and nothing else, in GRUB (UEFI,
-and an ISO file booted through loopback.cfg) and in syslinux (BIOS), with the
-same countdown. The GRUB theme refers only to files builder/boot-menu-theme.sh
+The x86_64 menus offer Install and nothing else, in GRUB (UEFI, and an ISO
+file booted through loopback.cfg) and in syslinux (BIOS), and boot it without
+a key. They read keys through the firmware, which does not drive every
+keyboard, so the installer asks whether to install or try Omarchy. The GRUB
+theme refers only to files builder/boot-menu-theme.sh
 makes and fonts grub.cfg loads, and its entries keep enough contrast for a
 person to read them and for test/integration.d's OCR to find them.
 """
@@ -51,16 +53,25 @@ def contrast(a, b):
 
 
 class MenuEntries(unittest.TestCase):
-    def test_uefi_menu_offers_install_and_try(self):
+    def test_uefi_menu_offers_install_only(self):
         config = configured("grub.cfg", "x86_64")
         # The device-tree entry is inside `if grub_cpu == arm64`.
-        self.assertEqual(
-            [e for e in entries(config) if "device tree" not in e],
-            ["Install", "Just try"],
-        )
+        self.assertEqual([e for e in entries(config) if "device tree" not in e], ["Install"])
 
-    def test_iso_file_menu_offers_install_and_try(self):
-        self.assertEqual(entries(configured("loopback.cfg", "x86_64")), ["Install", "Just try"])
+    def test_iso_file_menu_offers_install_only(self):
+        self.assertEqual(entries(configured("loopback.cfg", "x86_64")), ["Install"])
+
+    def test_grub_boots_install_without_a_key(self):
+        # A wired Apple Magic Keyboard reaches no firmware menu: a menu that
+        # waited, or offered Try, would boot whatever its countdown chose.
+        for name in ("grub.cfg", "loopback.cfg"):
+            for arch in ("x86_64", "aarch64"):
+                with self.subTest(cfg=name, arch=arch):
+                    config = configured(name, arch)
+                    self.assertRegex(config, r"(?m)^default=archlinux$")
+                    self.assertRegex(config, r"(?m)^timeout=0$")
+                    self.assertRegex(config, r"(?m)^timeout_style=hidden$")
+                    self.assertNotIn("omarchy.try", config)
 
     def test_aarch64_keeps_its_own_entries(self):
         config = configured("grub.cfg", "aarch64")
@@ -68,13 +79,13 @@ class MenuEntries(unittest.TestCase):
         self.assertIn("Omarchy (aarch64, ${archiso_platform}, device tree)",
                       [e.replace("%ARCH%", "aarch64") for e in entries(config)])
 
-    def test_bios_menu_offers_install_and_try(self):
+    def test_bios_menu_offers_install_only(self):
         labels = []
         for cfg in ("archiso_sys.cfg", "archiso_sys-linux.cfg", "archiso_head.cfg"):
             labels += re.findall(r"^MENU LABEL (.+)$", (SYSLINUX / cfg).read_text(), re.M)
-        # A caret marks an entry's hotkey: J for Just try.
-        self.assertEqual(labels, ["Install", "^Just try"])
+        self.assertEqual(labels, ["Install"])
         self.assertFalse((SYSLINUX / "archiso_tail.cfg").exists())
+        self.assertNotIn("omarchy.try", (SYSLINUX / "archiso_sys-linux.cfg").read_text())
 
     def test_bios_entries_fit_the_menu(self):
         head = (SYSLINUX / "archiso_head.cfg").read_text()
@@ -99,20 +110,17 @@ class MenuEntries(unittest.TestCase):
         self.assertLess(row["HELPMSGENDROW"], 30)
         self.assertGreaterEqual(row["HELPMSGENDROW"], row["HELPMSGROW"] + row["VSHIFT"])
 
-    def test_bios_and_uefi_count_down_alike(self):
+    def test_bios_and_uefi_boot_at_once(self):
         grub_timeout = re.search(r"^timeout=(\d+)$", configured("grub.cfg", "x86_64"), re.M)
         bios_timeout = re.search(r"^TIMEOUT (\d+)$", (SYSLINUX / "archiso_sys.cfg").read_text(), re.M)
-        # syslinux counts tenths of a second.
-        self.assertEqual(int(bios_timeout.group(1)), int(grub_timeout.group(1)) * 10)
+        self.assertEqual(int(grub_timeout.group(1)), 0)
+        # syslinux counts tenths of a second, and TIMEOUT 0 waits forever.
+        self.assertEqual(int(bios_timeout.group(1)), 1)
 
-    def test_bios_try_uses_simpledrm_and_matches_x86_kernel_options(self):
+    def test_bios_install_matches_x86_kernel_options(self):
         sys_cfg = (SYSLINUX / "archiso_sys-linux.cfg").read_text()
         install_append = re.search(r"LABEL arch64\b.*?^APPEND (.+)$", sys_cfg, re.M | re.S).group(1)
-        try_append = re.search(r"LABEL arch64try\b.*?^APPEND (.+)$", sys_cfg, re.M | re.S).group(1)
         self.assertIn("intel_idle.states_off=0x3fc", install_append)
-        self.assertIn("plymouth.use-simpledrm", try_append)
-        self.assertIn("intel_idle.states_off=0x3fc", try_append)
-        self.assertIn("systemd.gpt_auto=0", try_append)
 
 
 class Theme(unittest.TestCase):
@@ -162,7 +170,7 @@ class Theme(unittest.TestCase):
     def test_the_menu_holds_its_entries(self):
         menu = self.theme[self.theme.index("+ boot_menu"):]
         value = lambda key: int(re.search(rf"\b{key} = (\d+)\b", menu).group(1))
-        # Install and Just try, with no scrolling at any resolution. GRUB's
+        # Two entries, with no scrolling at any resolution. GRUB's
         # list takes the selection box's edges (select_n/select_s, 1 px each,
         # built by builder/boot-menu-theme.sh) off its height before it counts
         # rows.

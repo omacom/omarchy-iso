@@ -2,7 +2,7 @@
 #
 # Make the live system a layer over the root image: delete from the live
 # system's tree every file the image holds byte for byte, so the ISO stores it
-# once. The omarchy_try hook boots the live system as that layer over the
+# once. The omarchy_try hook mounts the live system as that layer over the
 # image (configs/airootfs/etc/initcpio/hooks/omarchy_try).
 #
 # Usage: dedup-airootfs.sh <omarchy-root.sfs> <airootfs dir> <pseudo file>

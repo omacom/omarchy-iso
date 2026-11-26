@@ -202,6 +202,22 @@ EOF
 # reporting the zone it read at start. It runs from no-wait.d, so its retries
 # hold up no other dispatcher script.
 in_try systemctl enable systemd-timesyncd.service >/dev/null
+# Try runs no systemd-networkd, but it starts by a soft reboot from the live
+# system, which does, and /run comes along. The live system's networkd state
+# (/run/systemd/netif) then tells what the network was before Try: off, on a
+# laptop whose Wi-Fi the live system has no firmware for. timesyncd reads it
+# (sd_network) and waits for that network, which never comes, so the clock
+# never synchronized on a Dell XPS 16. None of it is Try's: removed at boot,
+# and systemd's own tmpfiles make the directory again, empty. timesyncd waits
+# for that: it starts before tmpfiles otherwise, reads the old state, and
+# notices its removal only through an inotify watch the removal itself drops.
+install -Dm644 /dev/stdin "$merged/etc/tmpfiles.d/omarchy-try-netif.conf" <<'EOF'
+R /run/systemd/netif
+EOF
+install -Dm644 /dev/stdin "$merged/etc/systemd/system/systemd-timesyncd.service.d/10-omarchy-try.conf" <<'EOF'
+[Unit]
+After=systemd-tmpfiles-setup.service
+EOF
 printf '0.0 0 0\n0\nLOCAL\n' >"$merged/etc/adjtime"
 install -Dm755 /dev/stdin "$merged/etc/NetworkManager/dispatcher.d/no-wait.d/50-omarchy-try-timezone" <<'EOF'
 #!/bin/bash
@@ -251,6 +267,48 @@ ExecStart=/usr/local/lib/omarchy-try/omarchy-try-reprobe
 WantedBy=sysinit.target
 EOF
 in_try systemctl enable omarchy-try-reprobe.service >/dev/null
+
+# The installer's starting screen, on a console of its own while the live
+# system stops (the configurator's try_console). The soft reboot ends on tty1
+# with every other console freed (systemd's reduce_vt()), so it is drawn there
+# first thing, from what the installer left in /run, and stays until SDDM
+# takes the screen.
+install -Dm755 "$scripts/omarchy-try-console" "$merged/usr/local/lib/omarchy-try/omarchy-try-console"
+install -Dm644 /dev/stdin "$merged/etc/systemd/system/omarchy-try-console.service" <<'EOF'
+[Unit]
+Description=Try Omarchy: the installer's starting screen until the desktop
+DefaultDependencies=no
+ConditionPathExists=/run/omarchy-try/console
+After=systemd-vconsole-setup.service
+Before=sysinit.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/omarchy-try/omarchy-try-console
+
+[Install]
+WantedBy=sysinit.target
+EOF
+in_try systemctl enable omarchy-try-console.service >/dev/null
+
+# The soft reboot carries the installer's units over, and one it stopped
+# mid-run (a keyring, a hash) comes over failed. Those units do not exist in
+# this system, so their state is the installer's, not Try's: cleared at boot.
+install -Dm755 "$scripts/omarchy-try-forget-installer" "$merged/usr/local/lib/omarchy-try/omarchy-try-forget-installer"
+install -Dm644 /dev/stdin "$merged/etc/systemd/system/omarchy-try-forget-installer.service" <<'EOF'
+[Unit]
+Description=Try Omarchy: forget the installer's failed units
+DefaultDependencies=no
+Before=sysinit.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/omarchy-try/omarchy-try-forget-installer
+
+[Install]
+WantedBy=sysinit.target
+EOF
+in_try systemctl enable omarchy-try-forget-installer.service >/dev/null
 
 # The hardware setup an install runs for this machine, run in the session on
 # the machine itself (omarchy-try-hardware), with packages from the stick's

@@ -144,6 +144,17 @@ class BuildTryLayerTest(unittest.TestCase):
         ):
             self.assertIn(unit, self.text, f"{unit} should be masked in Try")
 
+    def test_the_live_systems_network_state_does_not_reach_try(self):
+        # A soft reboot keeps /run; timesyncd read the live system's stale
+        # networkd state and never synchronized.
+        m = re.search(r"/etc/tmpfiles.d/omarchy-try-netif.conf\" <<'EOF'\n(.*?)\nEOF", self.text, re.S)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1).split(), ["R", "/run/systemd/netif"])
+        # ... before timesyncd starts, which reads it at start.
+        m = re.search(r"/etc/systemd/system/systemd-timesyncd.service.d/10-omarchy-try.conf\" <<'EOF'\n(.*?)\nEOF", self.text, re.S)
+        self.assertIsNotNone(m, "timesyncd is not ordered after the removal")
+        self.assertIn("After=systemd-tmpfiles-setup.service", m.group(1).splitlines())
+
     def test_keyring_service_does_not_run_pacman_sy(self):
         m = re.search(
             r"omarchy-try-keyring\.service\" <<'EOF'\n(.*?)\nEOF",

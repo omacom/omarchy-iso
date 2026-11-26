@@ -1,0 +1,51 @@
+# shellcheck shell=bash disable=SC2034
+#
+# Intel Panther Lake laptops with the IPU7 camera, such as the 2026 Dell XPS
+# 13, 14 and 16: what Omarchy's hardware scripts install on them. The ISO
+# build packs these packages as a layer over the root image
+# (builder/build-root-image.sh), and the installer extracts it after the image
+# write where layer_matches passes (phases_impl._hardware_layer). The scripts
+# then find the packages installed and run no pacman. On a Dell XPS 16 that
+# pacman run took 2.86s of a 5.95s install.
+#
+# layer_matches passes only where every script named below installs its
+# packages, so a machine never gets one its scripts would not install. It runs
+# in the target, as the scripts do. Change it with the scripts it follows.
+
+layer_arch=x86_64
+
+layer_packages=(
+  intel-media-driver libvpl vpl-gpu-rt                             # intel/video-acceleration.sh
+  vulkan-intel                                                     # vulkan.sh
+  intel-lpmd                                                       # intel/lpmd.sh
+  thermald                                                         # intel/thermald.sh
+  sof-firmware                                                     # intel/sof-firmware.sh
+  linux-omarchy-ipu7 linux-omarchy-v4l2loopback intel-ipu7-camera  # intel/ipu7-camera.sh
+)
+
+# The installer sets OMARCHY_INSTALL_KERNELS to the kernels the install
+# selects. OMARCHY_PROC_ROOT and OMARCHY_SYS_ROOT let tests stand in for /proc
+# and /sys, as for Omarchy's own detectors.
+layer_matches() {
+  local proc=${OMARCHY_PROC_ROOT:-/proc} sys=${OMARCHY_SYS_ROOT:-/sys} model
+
+  # video-acceleration.sh and vulkan.sh: an Intel GPU, here Panther Lake's.
+  omarchy-hw-intel-ptl || return 1
+
+  # lpmd.sh: an Intel CPU, a battery and a CPU model in its list, where
+  # Panther Lake is 204. thermald.sh: the same, and not a ThinkPad, whose
+  # firmware manages it.
+  omarchy-hw-intel || return 1
+  omarchy-battery-present || return 1
+  model=$(grep -m1 '^model\s*:' "$proc/cpuinfo" | cut -d: -f2 | tr -d ' ')
+  [[ $model == 204 ]] || return 1
+  [[ ! -e $sys/devices/platform/thinkpad_acpi/dytc_lapmode ]] || return 1
+
+  # sof-firmware.sh: Intel audio that needs SOF firmware.
+  omarchy-hw-intel-sof || return 1
+
+  # ipu7-camera.sh: the OmniVision OV08F4 sensor, with linux-omarchy as the
+  # only kernel. With any other it installs the DKMS drivers instead.
+  [[ ${OMARCHY_INSTALL_KERNELS:-} == linux-omarchy ]] || return 1
+  grep -qs OVTI08F4 "$sys"/bus/acpi/devices/*/hid
+}

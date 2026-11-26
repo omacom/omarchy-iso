@@ -175,6 +175,8 @@ def _time_step(label: str):
 # archiso names the directory after the architecture, which is what
 # platform.machine() says on the live system: arch/x86_64 or arch/aarch64.
 ROOT_IMAGE_DIR = Path("/run/archiso/bootmnt/arch") / platform.machine()
+HARDWARE_LAYERS_DIR = Path("/usr/share/omarchy-iso/hardware-layers")
+LAYER_SCRIPTLETS = Path("var/lib/omarchy-iso/layer-scriptlets")
 ROOT_IMAGE = ROOT_IMAGE_DIR / "omarchy-root.img.zst"
 ROOT_IMAGE_SUBVOLUME = "omarchy-root"
 # Writes ROOT_IMAGE in parallel; compiled and installed by build-iso.sh.
@@ -742,6 +744,7 @@ def arch_install_system(ctx: InstallContext) -> None:
             if config.auth_config and config.auth_config.users:
                 with _time_step("STEP.create_users"):
                     _create_users_with_reflink_skel(ctx, installer, config.auth_config.users)
+            _run_layer_scriptlets(ctx)
 
             if config.app_config:
                 # The image carries the PipeWire packages; this adds any audio
@@ -1253,21 +1256,75 @@ def _platform_layer(directory: Path = ROOT_IMAGE_DIR) -> Path | None:
     return layer if layer.is_file() else None
 
 
+def _hardware_layer(ctx: InstallContext, directory: Path = ROOT_IMAGE_DIR,
+                    definitions: Path = HARDWARE_LAYERS_DIR) -> Path | None:
+    """The first hardware layer packed next to the root image whose file's
+    layer_matches passes on this machine, or None. The check runs in the
+    target, where Omarchy's hardware scripts run later, with their detectors,
+    and is told the kernels the install selects."""
+    kernels = (getattr(ctx, "user_configuration", None) or {}).get("kernels") or []
+    env = {**os.environ, "OMARCHY_INSTALL_KERNELS": " ".join(kernels)}
+    for definition in sorted(definitions.glob("*.layer")):
+        layer = directory / f"omarchy-layer.{definition.stem}.tar.zst"
+        if not layer.is_file():
+            continue
+        check = subprocess.run(
+            ["arch-chroot", str(ctx.target), "bash", "-s"],
+            input=definition.read_text() + "\nlayer_matches\n", text=True, env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if check.returncode == 0:
+            return layer
+    return None
+
+
+def _run_layer_scriptlets(ctx: InstallContext) -> None:
+    """Run the post_install scriptlets of the hardware layer's packages now
+    that the user exists, as pacman would have when Omarchy's hardware scripts
+    installed them: in pacman's order, with OMARCHY_INSTALL_USER set, as for
+    Omarchy's own setup. The layer was packed with --noscriptlet
+    (build-root-image.sh record_layer_scriptlets). As with pacman, their
+    output goes to the install log, and a failed scriptlet is reported and
+    the install goes on."""
+    listing = ctx.target / LAYER_SCRIPTLETS
+    if not listing.is_file():
+        return
+    entries = [line.split() for line in listing.read_text().splitlines() if line.strip()]
+    env = {**os.environ, "OMARCHY_INSTALL_USER": getattr(ctx, "username", "") or ""}
+    with _time_step(f"STEP.layer_scriptlets ({len(entries)})"):
+        for name, version in entries:
+            result = subprocess.run(
+                ["arch-chroot", str(ctx.target), "/bin/sh", "-c",
+                 '. "$1" && if command -v post_install >/dev/null; then post_install "$2"; fi',
+                 "sh", f"/var/lib/pacman/local/{name}-{version}/install", version],
+                env=env, check=False,
+            )
+            if result.returncode != 0:
+                info(f"› {name} post_install failed (exit {result.returncode}); its output is above")
+    listing.unlink()
+
+
 def _apply_platform_layer(ctx: InstallContext, layer: Path | None = None) -> None:
-    """Extract the platform layer over the freshly written image: the packages
-    the platform's list adds, their pacman database entries, and the module
-    index, linker cache and system users their hooks left, all made against
-    this same image at build time. _platform_delta_packages then finds nothing
-    missing, so no pacstrap runs: on an N1x that pacstrap took 22.6s, most of
-    it depmod and ldconfig reading the new disk cold.
+    """Extract this machine's layer over the freshly written image: the
+    packages its platform's list or its hardware layer adds, their pacman
+    database entries, and the module index, linker cache and system users their
+    hooks left, all made against this same image at build time. Nothing then
+    installs them again: _platform_delta_packages finds them present, and so
+    does omarchy-pkg-add when Omarchy's hardware scripts queue them. On an N1x
+    that pacstrap took 22.6s, most of it depmod and ldconfig reading the new
+    disk cold.
+
+    One layer at most, as each carries the image's module index and linker
+    cache plus its own: a platform's, or else the first hardware layer whose
+    check passes.
 
     Right after the image write, before anything else changes the target, as
     the layer's /etc/passwd and friends are the image's plus the packages'
     system users."""
-    layer = layer or _platform_layer()
+    layer = layer or _platform_layer() or _hardware_layer(ctx)
     if layer is None:
         return
-    info(f"› extracting platform layer ({layer.stat().st_size >> 20} MiB from {layer.name})")
+    info(f"› extracting layer ({layer.stat().st_size >> 20} MiB from {layer.name})")
     with _time_step(f"STEP.platform_layer ({layer.name})"):
         subprocess.run(
             ["tar", "--zstd", "-xpf", str(layer), "-C", str(ctx.target),

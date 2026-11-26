@@ -95,7 +95,13 @@ mark_updated() {
 in_try useradd -m -G wheel -s /bin/bash "$TRY_USER"
 in_try passwd -d "$TRY_USER" >/dev/null
 install -d -m 0750 "$merged/etc/sudoers.d"
-printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "$TRY_USER" >"$merged/etc/sudoers.d/10-omarchy-try"
+# Omarchy's bar shows passwordless sudo as a warning (omarchy-sudo-passwordless
+# --active asks sudo whether its own __status runs without authentication),
+# and it is no warning here: the user has no password. sudo takes the last
+# rule that matches, so that one command needs a password; every other runs
+# without one.
+printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\n%s ALL=(ALL:ALL) PASSWD: /usr/bin/omarchy-sudo-passwordless\n' \
+  "$TRY_USER" "$TRY_USER" >"$merged/etc/sudoers.d/10-omarchy-try"
 chmod 0440 "$merged/etc/sudoers.d/10-omarchy-try"
 
 # The user's desktop, as the installer's run_chroot_finalizer makes it
@@ -263,8 +269,11 @@ echo "Try Omarchy: ${0##*/} left out: Try keeps the kernel and boot image it sta
 EOF
 done
 install -d "$merged/usr/local/lib/omarchy-try/pacman-hooks"
+# 30-systemd-daemon-reload-user.hook reloads user@*.service, which re-executes
+# the user manager: under a session that is starting it stopped Hyprland on a
+# Dell XPS 16. The run reloads the user manager itself, once the session is up.
 for hook in 60-mkinitcpio-remove.hook 60-limine-mkinitcpio-remove-pre.hook 80-limine-efi-deploy.hook \
-  90-limine-mkinitcpio-remove-post.hook 90-mkinitcpio-install.hook; do
+  90-limine-mkinitcpio-remove-post.hook 90-mkinitcpio-install.hook 30-systemd-daemon-reload-user.hook; do
   ln -sf /dev/null "$merged/usr/local/lib/omarchy-try/pacman-hooks/$hook"
 done
 install -Dm644 /dev/stdin "$merged/etc/systemd/system/omarchy-try-hardware.service" <<'EOF'

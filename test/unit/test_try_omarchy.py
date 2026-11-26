@@ -173,6 +173,14 @@ class BuildTryLayerTest(unittest.TestCase):
         self.assertIn('printf \'#!/bin/sh\\nexit 0\\n\' >"$stubs/systemctl"', self.text)
         self.assertIn('rm -f "$stubs/systemctl"', self.text)
 
+    def test_the_bar_does_not_read_trys_sudo_as_a_warning(self):
+        # omarchy-sudo-passwordless --active asks sudo for its own __status;
+        # the last matching rule needs a password, every other command none.
+        self.assertIn(
+            "printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\\n%s ALL=(ALL:ALL) PASSWD: /usr/bin/omarchy-sudo-passwordless\\n'",
+            self.text,
+        )
+
     def test_idles_as_an_install_does(self):
         # Stay awake was on in every Try session; Omarchy's idle lock turns
         # itself down without the lock screen's PAM file, which Try lacks.
@@ -202,8 +210,10 @@ class BuildTryLayerTest(unittest.TestCase):
         self.assertIn('omarchy-apply-hardware --install-user "$user"', script)
         for name in ("mkinitcpio", "dkms", "limine-entry-tool", "limine-update", "ukify"):
             self.assertIn(name, self.text.split("for tool in ", 1)[1].split(";", 1)[0])
+        # The user manager's reload hook re-executed it under a starting session.
         for hook in ("60-mkinitcpio-remove.hook", "60-limine-mkinitcpio-remove-pre.hook", "80-limine-efi-deploy.hook",
-                     "90-limine-mkinitcpio-remove-post.hook", "90-mkinitcpio-install.hook"):
+                     "90-limine-mkinitcpio-remove-post.hook", "90-mkinitcpio-install.hook",
+                     "30-systemd-daemon-reload-user.hook"):
             self.assertIn(hook, self.text)
 
     def test_says_once_what_the_session_is(self):

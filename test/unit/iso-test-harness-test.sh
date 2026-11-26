@@ -243,7 +243,8 @@ echo "ok - an OEM install is sent no keys, and is not asked for a free-space ins
   # As offline_install above: an `||` around the driver would switch set -e
   # off inside it and hide a step that failed.
   drive() {
-    : >"$work/actions" >"$work/captured-progress"
+    : >"$work/actions"
+    : >"$work/captured-progress"
     screens "$@"
     set +e
     (set -e; drive_provision_owner) 2>"$work/err"

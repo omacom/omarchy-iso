@@ -30,42 +30,27 @@ def _entries(path: Path) -> list[str]:
     return [line for line in lines if line and not line.startswith("#")]
 
 
-def _validate(region: object, regions_dir: Path) -> str:
+def _validate(region: object) -> str:
     # Profiles are named by ISO 3166-1 alpha-2 code; checking the shape first
     # keeps a path like ".." from passing the directory test.
     if not isinstance(region, str) or (
-        region != GLOBAL and not (re.fullmatch(r"[a-z]{2}", region) and (regions_dir / region).is_dir())
+        region != GLOBAL and not (re.fullmatch(r"[a-z]{2}", region) and (REGIONS_DIR / region).is_dir())
     ):
         raise RuntimeError(f"Unsupported region: {region!r}")
     return region
 
 
-def media_region(preset: Path | None = None, regions_dir: Path | None = None) -> str:
-    preset = preset or PRESET
-    region = json.loads(preset.read_text()).get("region") if preset.is_file() else None
-    return _validate(region, regions_dir or REGIONS_DIR) if region else GLOBAL
-
-
-def region_for_timezone(timezone: str | None, fallback: str = GLOBAL, regions_dir: Path | None = None) -> str:
-    regions_dir = regions_dir or REGIONS_DIR
-    if timezone and regions_dir.is_dir():
-        for profile in sorted(regions_dir.iterdir()):
+def resolve_region(omarchy_install: dict, timezone: str | None) -> str:
+    region = omarchy_install.get("region")
+    if region not in (None, ""):
+        return _validate(region)
+    media = json.loads(PRESET.read_text()).get("region") if PRESET.is_file() else None
+    fallback = _validate(media) if media else GLOBAL
+    if timezone and REGIONS_DIR.is_dir():
+        for profile in sorted(REGIONS_DIR.iterdir()):
             if timezone in _entries(profile / "timezones"):
                 return profile.name
     return fallback
-
-
-def resolve_region(
-    omarchy_install: dict,
-    timezone: str | None,
-    regions_dir: Path | None = None,
-    preset: Path | None = None,
-) -> str:
-    regions_dir = regions_dir or REGIONS_DIR
-    region = omarchy_install.get("region")
-    if region in (None, ""):
-        return region_for_timezone(timezone, media_region(preset, regions_dir), regions_dir)
-    return _validate(region, regions_dir)
 
 
 if __name__ == "__main__":

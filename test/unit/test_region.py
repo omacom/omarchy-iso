@@ -62,7 +62,7 @@ class RegionSelectionTest(unittest.TestCase):
             (None, "global"),
         ]:
             with self.subTest(timezone=timezone):
-                self.assertEqual(region.region_for_timezone(timezone), expected)
+                self.assertEqual(region.resolve_region({}, timezone), expected)
 
     def test_media_region_holds_where_no_profile_claims_the_timezone(self):
         # A China ISO used abroad stays China, but Hong Kong, Macau and Taiwan
@@ -94,8 +94,8 @@ class RegionSelectionTest(unittest.TestCase):
                 self.assertEqual(region.resolve_region({"language": language}, "America/New_York"), "global")
 
     def test_iso_without_profiles_is_global(self):
-        self.assertEqual(region.region_for_timezone("Asia/Shanghai", regions_dir=self.root / "missing"), "global")
-        self.assertEqual(region.resolve_region({}, "Asia/Shanghai", self.root / "missing"), "global")
+        with mock.patch.object(region, "REGIONS_DIR", self.root / "missing"):
+            self.assertEqual(region.resolve_region({}, "Asia/Shanghai"), "global")
 
     def test_autoinstall_region_overrides_timezone(self):
         self.assertEqual(region.resolve_region({"region": "cn"}, "UTC"), "cn")

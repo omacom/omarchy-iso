@@ -1,11 +1,11 @@
 #!/bin/bash
 #
 # The ISO must carry a GPT that UEFI firmware accepts: a GPT behind a
-# protective MBR. The build finds the ISO it wrote with iso_written_since and
-# checks it with iso_has_valid_gpt (builder/iso-partition-table.sh). The
-# layout it guards against is the one archiso gives an ISO that also boots
-# through BIOS: a GPT, and an MBR with real entries in place of the protective
-# one. An MSI Z690 did not offer a stick with that layout in its boot menu.
+# protective MBR. The build checks each ISO it wrote with iso_has_valid_gpt
+# (builder/iso-partition-table.sh). The layout it guards against is the one
+# archiso gives an ISO that also boots through BIOS: a GPT, and an MBR with
+# real entries in place of the protective one. An MSI Z690 did not offer a
+# stick with that layout in its boot menu.
 
 set -uo pipefail
 
@@ -58,20 +58,8 @@ check "an MBR partition table alone is not" no "$(valid mbr)"
 
 check "a file that cannot be read is not" no "$(valid missing)"
 
-# The release directory on a second build: the launcher renamed the first
-# build's ISO, and this build has written its own.
-mkdir "$WORK/release"
-touch -d "2 hours ago" "$WORK/release/omarchy-2026.11.25-x86_64-quattro.iso"
-touch -d "1 hour ago" "$WORK/started"
-touch "$WORK/release/omarchy-2026.11.26-x86_64.iso"
-check "only the ISO written after the build started is the build's own" \
-  "$WORK/release/omarchy-2026.11.26-x86_64.iso" "$(iso_written_since "$WORK/release" "$WORK/started")"
-
-rm "$WORK/release/omarchy-2026.11.26-x86_64.iso"
-check "an ISO from an earlier build is not" "" "$(iso_written_since "$WORK/release" "$WORK/started")"
-
 if ((failures)); then
   echo "FAIL: $failures check(s) failed"
   exit 1
 fi
-echo "ok: the build checks its own ISO, and tells a valid GPT from the isohybrid one"
+echo "ok: the build tells a valid GPT from the isohybrid one"

@@ -14,10 +14,3 @@
 iso_has_valid_gpt() {
   [[ $(blkid --probe --match-tag PTTYPE --output value "$1" 2>/dev/null) == "gpt" ]]
 }
-
-# The ISO in directory $1 that was written after file $2. The build's output
-# directory is the launcher's release directory, which keeps the ISOs of
-# earlier builds, so the build checks only the one it wrote itself.
-iso_written_since() {
-  find "$1" -maxdepth 1 -name '*.iso' -newer "$2"
-}

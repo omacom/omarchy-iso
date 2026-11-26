@@ -1,7 +1,7 @@
 {
   "greeter.tagline": "Beautiful, Fun & Agentic Linux by DHH",
   "greeter.hint": "Press Return to Start Install",
-  "greeter.try": "Just try",
+  "greeter.try": "Or press Space to just try",
   "common.yes": "Yes",
   "common.back": "Back",
   "common.change": "No, change it",

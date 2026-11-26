@@ -1,12 +1,10 @@
-"""Just try is a choice on the welcome screen, under Start Install.
+"""Just try is a key on the welcome screen: Return installs, Space tries.
 
 The boot menus read keys through the firmware, which drives only keyboards
 that speak the USB boot protocol: a wired Apple Magic Keyboard reached nothing
-in GRUB. So the welcome, where Linux reads the keyboard, offers it: Down and Up
-move the highlight, Return starts the highlighted one, and Return alone still
-installs. Arrows come as escape sequences, ESC [ B on the console and in
-kmscon, ESC O B in application cursor mode. Tested by running the
-configurator's own greeter in a pseudo-terminal and typing the keys' bytes.
+in GRUB. So the welcome, where Linux reads the keyboard, offers it, in a faded
+line under Start Install. Tested by running the configurator's own greeter in
+a pseudo-terminal and typing the keys' bytes.
 """
 
 import os
@@ -25,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CONFIGURATOR = ROOT / "configs/airootfs/root/configurator"
 SHARE = ROOT / "configs/airootfs/usr/share/omarchy-iso"
 
-DOWN, UP, DOWN_APP = b"\x1b[B", b"\x1b[A", b"\x1bOB"
+DOWN, UP = b"\x1b[B", b"\x1b[A"
 
 
 def function(name: str) -> str:
@@ -91,39 +89,26 @@ class GreeterChoiceTest(unittest.TestCase):
                 break
         return seen
 
-    def test_return_alone_installs(self):
+    def test_return_installs(self):
         choice, seen = self.run_greeter([b"\n"])
         self.assertEqual(choice, "install")
-        # Start Install keeps the look it had, and Just try sits under it, dimmer.
+        # Start Install keeps the look it had; the Space line sits under it, fainter.
         self.assertIn(b"\x1b[2mPress Return to Start Install", seen)
-        self.assertIn(b"\x1b[90mJust try", seen)
+        self.assertIn(b"\x1b[90mOr press Space to just try", seen)
 
     def test_a_raw_return_installs_too(self):
         self.assertEqual(self.run_greeter([b"\r"])[0], "install")
 
-    def test_down_then_return_tries(self):
-        choice, seen = self.run_greeter([DOWN, b"\n"])
-        self.assertEqual(choice, "try")
-        # The highlight moved: Just try in Start Install's style, and back.
-        self.assertIn(b"\x1b[90mPress Return to Start Install", seen)
-        self.assertIn(b"\x1b[2mJust try", seen)
-
-    def test_application_cursor_mode_down_tries(self):
-        self.assertEqual(self.run_greeter([DOWN_APP, b"\n"])[0], "try")
-
-    def test_up_goes_back_to_install(self):
-        self.assertEqual(self.run_greeter([DOWN, UP, b"\n"])[0], "install")
-
-    def test_down_stops_at_just_try(self):
-        self.assertEqual(self.run_greeter([DOWN, DOWN, DOWN, b"\n"])[0], "try")
+    def test_space_tries(self):
+        self.assertEqual(self.run_greeter([b" "])[0], "try")
 
     def test_other_keys_choose_nothing(self):
-        self.assertEqual(self.run_greeter([b"x", b"\x1b", b" ", b"\n"])[0], "install")
+        self.assertEqual(self.run_greeter([b"x", DOWN, UP, b"\x1b", b"\n"])[0], "install")
 
     def test_media_without_try_offer_only_install(self):
-        choice, seen = self.run_greeter([DOWN, b"\n"], layer=False)
+        choice, seen = self.run_greeter([b" ", b"\n"], layer=False)
         self.assertEqual(choice, "install")
-        self.assertNotIn(b"Just try", seen)
+        self.assertNotIn(b"Space", seen)
 
 
 if __name__ == "__main__":

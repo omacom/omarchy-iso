@@ -6,8 +6,8 @@
 #
 # The ISO boots alone with a disk of random bytes for the machine's own. No
 # key goes to GRUB, which reads keys through the firmware: it boots the
-# installer by itself, whose welcome offers Just try under Start Install. Try
-# is picked there and the desktop waited for. A terminal there fetches a
+# installer by itself, whose welcome takes Space for Just try and Return for
+# Start Install. Space is pressed there and the desktop waited for. A terminal there fetches a
 # bootstrap that authorizes the harness's key and starts sshd, and the rest
 # is checked over SSH. Runs on the default variant only: Try boots the ISO,
 # which no install variant changes.
@@ -36,13 +36,11 @@ welcome_waits() {
   OCR_KMSCON=1 ocr_screen | grep -qi "Linux by DHH"
 }
 
-# Down to Just try, then Return, as keys through QEMU: the arrow reaches the
-# welcome as an escape sequence once Linux drives the keyboard.
+# Space on the welcome, as a key through QEMU: Linux reads it, where the
+# firmware could not read every keyboard.
 pick_try() {
-  press down
-  sleep 1
-  capture_console "success-try-welcome-just-try"
-  press ret
+  capture_console "success-try-welcome"
+  press spc
 }
 
 # Omarchy's first-login notifications: any of them is the desktop. They are

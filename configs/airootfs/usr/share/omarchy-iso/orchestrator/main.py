@@ -91,6 +91,7 @@ def main() -> int:
         cleanup_protected_state,
         cleanup_target_hook_masks,
         restore_cpu_governors,
+        stop_library_warmup,
         stop_luks_keyslot_enroll,
         stop_target_keyring_init,
     )
@@ -117,6 +118,7 @@ def main() -> int:
         # on a failure it ends the unit before the target is torn down.
         stop_target_keyring_init(ctx)
         stop_luks_keyslot_enroll(ctx)
+        stop_library_warmup(ctx)
         cleanup_bind_mounts(ctx)
         cleanup_target_hook_masks(ctx)
         if not success:

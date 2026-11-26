@@ -163,6 +163,10 @@ check "the session probed again the devices left without a driver" try_ssh \
 check "systemd-gpt-auto-generator is off" try_ssh \
   '[ "$(readlink /etc/systemd/system-generators/systemd-gpt-auto-generator)" = /dev/null ]'
 check "no unit failed" no_unit_failed
+# The soft reboot ends on tty1 (systemd's reduce_vt()), and the starting screen
+# is drawn there until SDDM takes the screen.
+check "Try drew the starting screen again on tty1" try_ssh \
+  'sudo journalctl -b -u omarchy-try-console -o cat | grep -qx "Drew the starting screen on tty1"'
 # The layers are stamped as updated (build-try-layer.sh), so the boot redid
 # none of pacman's work: ldconfig alone is seconds from a USB stick.
 check "the boot skipped the ConditionNeedsUpdate= units" try_ssh \

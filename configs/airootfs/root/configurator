@@ -312,13 +312,79 @@ notice() {
 
 # JUST TRY
 #
+# The screen while Try starts. The soft reboot ends kmscon, and with it what it
+# drew, and getty@tty1 clears its console as it stops: the screen stayed black
+# until the session drew (7 s in QEMU before SDDM alone). So the logo and the
+# message go on a console of their own, $TRY_VT, which no getty owns (logind
+# starts them on 1 to 6), and the screen switches to it while the live system
+# stops. At the end, systemd switches back to tty1 and frees every other
+# console (reduce_vt() in its src/core/main.c). So the screen is also kept in
+# /run, which the soft reboot keeps, and the Try system draws it on tty1 first
+# thing (builder/try-layer/omarchy-try-console). It stays there until SDDM
+# takes the screen.
+TRY_VT="${TRY_VT:-7}"
+TRY_CONSOLE="${TRY_CONSOLE:-/dev/tty$TRY_VT}"
+TRY_SCREEN="${TRY_SCREEN:-/run/omarchy-try/console}"
+
+try_console() {
+  local size drawn="" rows cols logo_h top pad text tpad line screen i tries=0
+
+  [[ -w $TRY_CONSOLE ]] || return 1
+  i18n_console_font "$TRY_CONSOLE"
+  size=$(stty size 2>/dev/null <"$TRY_CONSOLE") || return 1
+  logo_h=$(wc -l <"$LOGO_PATH")
+  text=$(t start.starting)
+  # The kernel's framebuffer console takes a console over only once the screen
+  # shows it in text mode, which is this switch (fbcon's deferred takeover),
+  # and sets its own grid then. The size read before can be the placeholder
+  # console's, which put the logo in the top left corner in QEMU. So the screen
+  # is drawn again, once, if the size changes in the half second after.
+  while true; do
+    rows=${size% *} cols=${size#* }
+    [[ $rows =~ ^[0-9]+$ && $cols =~ ^[0-9]+$ ]] || return 1
+    top=$(((rows - logo_h - 2) / 2)); (( top < 0 )) && top=0
+    pad=$(((cols - LOGO_WIDTH) / 2)); (( pad < 0 )) && pad=0
+    tpad=$(((cols - $(display_width "$text")) / 2)); (( tpad < 0 )) && tpad=0
+    # Tokyo Night's background, green and text, as kmscon draws them.
+    screen=$(
+      i=0
+      printf '\033]P01a1b26\033]P29ece6a\033]P7a9b1d6'
+      printf '\033[0m\033[?25l\033[H\033[2J'
+      while IFS= read -r line; do
+        printf '\033[%d;%dH\033[32m%s' "$((top + 1 + i))" "$((pad + 1))" "$line"
+        (( ++i ))
+      done <"$LOGO_PATH"
+      printf '\033[%d;%dH\033[0m%s' "$((top + logo_h + 2))" "$((tpad + 1))" "$text"
+    )
+    # Once switched, the screen is on its console whatever this draw does.
+    if ! printf '%s' "$screen" >"$TRY_CONSOLE"; then
+      [[ -n $drawn ]]
+      return
+    fi
+    mkdir -p "${TRY_SCREEN%/*}" && printf '%s' "$screen" >"$TRY_SCREEN"
+    [[ -n $drawn ]] && return 0
+    drawn=$size
+    # The console the installer runs on, tty1 or one it was started on by
+    # hand, for a Try that cannot start to go back to.
+    TRY_BACK_VT=$(fgconsole 2>/dev/null) || TRY_BACK_VT=1
+    chvt "$TRY_VT"
+    while (( tries++ < 10 )); do
+      sleep 0.05
+      size=$(stty size 2>/dev/null <"$TRY_CONSOLE") || return 0
+      [[ $size != "$drawn" ]] && continue 2
+    done
+    return 0
+  done
+}
+
 # Picked on the welcome: Try Omarchy from the medium (omarchy-try), by a soft
 # reboot that ends this installer. Returns only when Try could not start,
 # after saying why, for the welcome to be shown again.
 start_try() {
-  local error
+  local error on_console=false
 
   step "$(t start.starting)"
+  try_console 2>/dev/null && on_console=true
   if error=$(omarchy-try 2>&1 >/dev/null); then
     # The soft reboot is under way, and it ends this installer with the
     # rest of the live system. Returning would start an install. Wait in
@@ -329,6 +395,8 @@ start_try() {
     coproc { read -r _; }
     while true; do wait; done
   fi
+  # Back to the console the installer runs on.
+  $on_console && chvt "${TRY_BACK_VT:-1}"
   step "$(t start.failed)"
   say "$error"
   echo

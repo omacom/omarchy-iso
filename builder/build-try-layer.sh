@@ -246,6 +246,29 @@ WantedBy=sysinit.target
 EOF
 in_try systemctl enable omarchy-try-reprobe.service >/dev/null
 
+# The installer's starting screen, on a console of its own while the live
+# system stops (the configurator's try_console). The soft reboot ends on tty1
+# with every other console freed (systemd's reduce_vt()), so it is drawn there
+# first thing, from what the installer left in /run, and stays until SDDM
+# takes the screen.
+install -Dm755 "$scripts/omarchy-try-console" "$merged/usr/local/lib/omarchy-try/omarchy-try-console"
+install -Dm644 /dev/stdin "$merged/etc/systemd/system/omarchy-try-console.service" <<'EOF'
+[Unit]
+Description=Try Omarchy: the installer's starting screen until the desktop
+DefaultDependencies=no
+ConditionPathExists=/run/omarchy-try/console
+After=systemd-vconsole-setup.service
+Before=sysinit.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/omarchy-try/omarchy-try-console
+
+[Install]
+WantedBy=sysinit.target
+EOF
+in_try systemctl enable omarchy-try-console.service >/dev/null
+
 # The NVIDIA layer's driver can only take a card no driver holds. Try starts
 # from the live installer by a soft reboot, and the kernel keeps what the
 # installer loaded: nouveau, bound to the card and to the console. Before udev

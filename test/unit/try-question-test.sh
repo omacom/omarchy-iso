@@ -48,6 +48,14 @@ chmod +x "$work/bin/omarchy-try"
 printf '#!/bin/bash\necho "gum $1" >>"$WORK/screens"\n' >"$work/bin/gum"
 chmod +x "$work/bin/gum"
 
+try_console_source=$(awk '/^try_console\(\) \{/,/^\}/' "$CONFIGURATOR")
+[[ -n $try_console_source ]] || fail "the configurator has no try_console"
+printf '#!/bin/bash\necho "chvt $*" >>"$WORK/screens"\n' >"$work/bin/chvt"
+chmod +x "$work/bin/chvt"
+# The installer runs on tty3 here, as when started by hand there.
+printf '#!/bin/bash\necho 3\n' >"$work/bin/fgconsole"
+chmod +x "$work/bin/fgconsole"
+
 # start_try as the configurator defines it, with the screens it draws
 # stubbed. A soft reboot that is under way leaves start_try waiting until
 # systemd stops it: timeout stands in for that and ends the run with 124.
@@ -59,6 +67,7 @@ run_start_try() {
     t() { printf '%s' "$1"; }
     say() { echo "say $*" >>"$WORK/screens"; }
     step() { echo "step $1" >>"$WORK/screens"; }
+    try_console() { echo "console" >>"$WORK/screens"; TRY_BACK_VT=3; chvt 7; }
     eval "$start_try_source"
     start_try
   ) </dev/null >/dev/null 2>&1 &
@@ -81,7 +90,9 @@ run_start_try
 status=$?
 ((status == 124)) || fail "start_try returned $status after Try started, so the install would run"
 [[ $(wc -l <"$work/try-calls") == 1 ]] || fail "omarchy-try ran $(wc -l <"$work/try-calls") times"
-pass "Just try starts Try and never returns to the install"
+[[ $(paste -sd'|' "$work/screens") == "step start.starting|console|chvt 7" ]] ||
+  fail "the starting screen did not move to its own console before Try: $(paste -sd'|' "$work/screens")"
+pass "Just try starts Try from a console of its own and never returns to the install"
 
 # Nothing it waits with is a program: one loading from the stick when the soft
 # reboot's SIGTERM comes held the installer's session up 5 s and failed it.
@@ -94,8 +105,65 @@ run_start_try
 status=$?
 ((status == 0)) || fail "a Try that could not start returned $status"
 grep -qx "step start.failed" "$work/screens" || fail "a Try that could not start said nothing"
+[[ $(grep -n "chvt" "$work/screens" | tail -1) == *"chvt 3" ]] || fail "a Try that could not start did not go back to the installer's console: $(paste -sd'|' "$work/screens")"
 grep -q "say the root image is not mounted" "$work/screens" || fail "a Try that could not start did not say why"
 pass "a Try that cannot start says why and returns"
+
+# The starting screen as it is drawn on its console: Tokyo Night's colours,
+# the logo centered, the message under it, then the switch to that console.
+# The console's grid changes as the screen switches to it (fbcon takes it over
+# then): the screen is drawn again for the new one.
+console="$work/tty7"
+: >"$console"
+: >"$work/screens"
+(
+  export WORK=$work PATH="$work/bin:$PATH"
+  # shellcheck disable=SC2034 # used by the try_console under test
+  LOGO_PATH="$work/logo.txt" LOGO_WIDTH=4 TRY_VT=7 TRY_CONSOLE=$console TRY_SCREEN="$work/run/console"
+  printf 'AAAA\nBBBB\n' >"$LOGO_PATH"
+  t() { printf '%s' "Starting"; }
+  display_width() { printf '%s' "${#1}"; }
+  i18n_console_font() { :; }
+  stty() {
+    local n
+    n=$(($(cat "$WORK/stty-calls" 2>/dev/null || echo 0) + 1))
+    echo "$n" >"$WORK/stty-calls"
+    if ((n == 1)); then echo "24 80"; else echo "50 160"; fi
+  }
+  sleep() { :; }
+  eval "$try_console_source"
+  try_console && echo "back $TRY_BACK_VT" >>"$WORK/screens"
+) || fail "try_console failed"
+grep -q $'\e]P01a1b26' "$console" || fail "the starting console is not on Tokyo Night's background"
+grep -q $'\e\[24;79H\e\[32mAAAA' "$console" || fail "the logo is not centered in green on the console's grid after the switch: $(od -c "$console" | head -5)"
+grep -q $'\e\[27;77H\e\[0mStarting' "$console" || fail "the message is not centered under the logo"
+[[ $(paste -sd'|' "$work/screens") == "chvt 7|back 3" ]] || fail "the screen did not switch to the starting console once, from the installer's: $(paste -sd'|' "$work/screens")"
+cmp -s "$console" "$work/run/console" || fail "the starting screen kept in /run is not the one drawn"
+pass "the starting screen is drawn on a console of its own, kept in /run, and the screen switches to it"
+
+# A draw that fails after the switch still leaves the screen on that console:
+# a Try that cannot start must switch back to tty1.
+console="$work/tty7-ro"
+: >"$console"
+rm -f "$work/stty-calls"
+(
+  export WORK=$work PATH="$work/bin:$PATH"
+  # shellcheck disable=SC2034 # used by the try_console under test
+  LOGO_PATH="$work/logo.txt" LOGO_WIDTH=4 TRY_VT=7 TRY_CONSOLE=$console TRY_SCREEN="$work/run-ro/console"
+  t() { printf '%s' "Starting"; }
+  display_width() { printf '%s' "${#1}"; }
+  i18n_console_font() { :; }
+  stty() {
+    local n
+    n=$(($(cat "$WORK/stty-calls" 2>/dev/null || echo 0) + 1))
+    echo "$n" >"$WORK/stty-calls"
+    if ((n == 1)); then echo "24 80"; else chmod 444 "$TRY_CONSOLE"; echo "50 160"; fi
+  }
+  sleep() { :; }
+  eval "$try_console_source"
+  try_console
+) 2>/dev/null || fail "try_console said the screen did not switch after it had"
+pass "a draw that fails after the switch still counts as on the starting console"
 
 # The welcome comes back after a Try that could not start, and only Install
 # carries on to the language. OEM media skip the welcome, and a cidata drive
@@ -313,10 +381,29 @@ PATH="$work/handover-bin:$PATH" OMARCHY_SYSFS=$sys bash "$LAYER_SCRIPTS/omarchy-
 [[ $(<"$work/handover-modprobe") == "modprobe -r nouveau after bind=0" ]] || fail "nouveau was unloaded before the console let go: $(<"$work/handover-modprobe")"
 pass "the NVIDIA handover unbinds the framebuffer console, then unloads nouveau"
 
+# The Try system draws the installer's starting screen again on the console
+# shown: the soft reboot ends on tty1, with tty7 freed (systemd's reduce_vt()).
+sys="$work/sys3"
+mkdir -p "$sys/class/tty/tty0" "$work/run3" "$work/dev3"
+printf 'SCREEN' >"$work/run3/console"
+: >"$work/dev3/tty1"
+echo tty1 >"$sys/class/tty/tty0/active"
+said=$(OMARCHY_SYSFS=$sys OMARCHY_TRY_SCREENS="$work/run3" OMARCHY_DEV="$work/dev3" bash "$LAYER_SCRIPTS/omarchy-try-console") ||
+  fail "omarchy-try-console failed"
+[[ $(<"$work/dev3/tty1") == "SCREEN" ]] || fail "the starting screen was not drawn again on tty1, where the soft reboot ends"
+[[ $said == "Drew the starting screen on tty1" ]] || fail "omarchy-try-console did not say where it drew: $said"
+rm "$work/run3/console"
+: >"$work/dev3/tty1"
+said=$(OMARCHY_SYSFS=$sys OMARCHY_TRY_SCREENS="$work/run3" OMARCHY_DEV="$work/dev3" bash "$LAYER_SCRIPTS/omarchy-try-console") ||
+  fail "omarchy-try-console failed with no screen kept"
+[[ ! -s $work/dev3/tty1 && -z $said ]] || fail "omarchy-try-console drew with no screen kept"
+pass "the Try system draws the starting screen again on the console shown, and only one the installer kept"
+
 # systemd expands $ in ExecStart= itself: the units run these scripts, with no
 # shell code of their own.
 layer="$ROOT/builder/build-try-layer.sh"
 grep -qx 'ExecStart=/usr/local/lib/omarchy-try/omarchy-try-reprobe' "$layer" || fail "the reprobe unit does not run its script"
 grep -qx 'ExecStart=/usr/local/lib/omarchy-try/omarchy-try-nvidia-handover' "$layer" || fail "the handover unit does not run its script"
+grep -qx 'ExecStart=/usr/local/lib/omarchy-try/omarchy-try-console' "$layer" || fail "the console unit does not run its script"
 grep -E '^ExecStart=.*\$' "$layer" | grep -v '\$\$' && fail "a unit in the Try layer has a \$ systemd would expand"
 pass "the layer's units run their scripts, with nothing for systemd to expand"

@@ -1,0 +1,20 @@
+#!/bin/bash
+#
+# Try Omarchy: draw the installer's starting screen again on the console the
+# screen shows. omarchy-try-console.service runs it first thing in a Try
+# session.
+#
+# The installer draws its starting screen on a console of its own and keeps a
+# copy in /run (the configurator's try_console), which the soft reboot keeps.
+# The soft reboot ends on tty1, with every other console freed (reduce_vt() in
+# systemd's src/core/main.c), so without this the screen stays black until
+# SDDM takes it.
+
+sysfs=${OMARCHY_SYSFS:-/sys}
+screens=${OMARCHY_TRY_SCREENS:-/run/omarchy-try}
+dev=${OMARCHY_DEV:-/dev}
+
+active=$(<"$sysfs/class/tty/tty0/active") || exit 0
+[[ $active =~ ^tty[0-9]+$ && -r $screens/console ]] || exit 0
+cat -- "$screens/console" >"$dev/$active" || exit 0
+echo "Drew the starting screen on $active"

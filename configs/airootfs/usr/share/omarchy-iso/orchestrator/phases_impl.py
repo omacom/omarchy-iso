@@ -5390,6 +5390,68 @@ def restore_cpu_governors(saved: dict[Path, str]) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# trim_target: invoked from main() once run() has stopped the install timer.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Seconds the trim may take before it is stopped. A drive that discards
+# slowly (SATA without queued TRIM, eMMC) must not hold the finish screen for
+# minutes. What it did not reach stays as it was.
+TRIM_BUDGET = 120
+
+
+def trim_target(ctx: InstallContext) -> None:
+    """Tell the drive which blocks of the new root are free: fstrim on the
+    mounted target, once the install is done and its timer has stopped.
+
+    Nothing else ever does. mkfs.btrfs runs with -K on both paths, the root
+    image fills only the start of the partition, and btrfs's discard=async
+    trims only what it frees after mount. archinstall leaves fstrim.timer
+    disabled on btrfs, so a full-disk install never trims the space btrfs has
+    not allocated. Whatever that space held (an earlier install, Windows)
+    stays live data to the drive's flash translation layer: on a Samsung 990
+    PRO, the installer's LUKS2 mapping wrote 40 GiB at 2.07 GB/s onto such
+    space, and at 6.57 GB/s after a discard.
+
+    btrfs's FITRIM trims the free space in its block groups and then the
+    unallocated space on the device (btrfs_trim_fs), so one call covers the
+    whole partition, through dm-crypt, which the installer opens with
+    allow-discards. It holds the chunk mutex for each range it discards, so
+    it runs after the install instead of alongside it: main() calls it once
+    run() has written finished_at, while the target is still mounted (the
+    dashboard releases it before the finish screen). It runs in the
+    installer's process group, so cancelling the install stops it too.
+
+    Best effort: it never fails the install, which is complete by now. A
+    failed, unsupported or interrupted trim is logged. A slow one is killed
+    after TRIM_BUDGET seconds: btrfs sends at most 1 GiB per discard request
+    (BTRFS_MAX_DISCARD_CHUNK_SIZE) and checks for a fatal signal after each,
+    so it stops within one request."""
+    target = str(ctx.target)
+    started = time.monotonic()
+    try:
+        result = subprocess.run(["fstrim", "--verbose", target], stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=TRIM_BUDGET)
+    except subprocess.TimeoutExpired:
+        info(f"› trim: WARNING: fstrim {target} was still running after {TRIM_BUDGET}s; "
+             "stopped it, the rest of the free space is left as it was")
+        return
+    except OSError as exc:
+        info(f"› trim: WARNING: could not run fstrim on {target} ({exc}); continuing without it")
+        return
+    except KeyboardInterrupt:
+        # subprocess.run has killed fstrim and waited for it.
+        info(f"› trim: WARNING: fstrim {target} was interrupted; the install itself is complete")
+        return
+    elapsed = time.monotonic() - started
+    output = " ".join((result.stdout + result.stderr).split())
+    if result.returncode == 0:
+        info(f"› trim: {output} in {elapsed:.2f}s")
+    else:
+        info(f"› trim: WARNING: fstrim {target} exited {result.returncode} after {elapsed:.2f}s "
+             f"({output}); continuing without it")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # cleanup_bind_mounts: invoked from main()'s finally so bind mounts get
 # unwound on success, failure, or interrupt. Idempotent.
 # ─────────────────────────────────────────────────────────────────────────────

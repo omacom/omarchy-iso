@@ -1151,8 +1151,9 @@ run_partition_execute() {
     # partition by default, which through dm-crypt takes seconds on a 1 TB
     # SSD (and much longer on a DRAM-less one), before the install timer even
     # starts. The root image is written over this filesystem anyway, and the
-    # installed system's fstrim.timer discards free space on its own; the
-    # full-disk path does the same through archinstall (archinstall_adapter).
+    # orchestrator trims the filesystem's free space once the install timer
+    # has stopped (phases_impl.trim_target). The full-disk path passes -K too
+    # (archinstall_adapter).
     disk_step "creating the Btrfs filesystem on $root_mapper" \
       mkfs.btrfs -K -f -L OMARCHY "$root_mapper"
     wait_for_device "$root_mapper" || disk_abort_hook "$(t partitions.deviceMissing "$root_mapper")"

@@ -184,9 +184,9 @@ def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
     to skip). On a virtual disk that is instant; on a 1 TB laptop SSD behind
     dm-crypt it takes seconds, and much longer on a DRAM-less drive. When a
     root image is about to be written over that filesystem the TRIM only
-    delays the install: the image lands two seconds later, the installed
-    system keeps fstrim.timer enabled, and btrfs discards freed space on its
-    own. Nothing else about the step changes.
+    delays the install: the image lands two seconds later, and the
+    orchestrator trims the filesystem's free space once the install timer has
+    stopped (phases_impl.trim_target). Nothing else about the step changes.
 
     archinstall's partition() runs wipefs on each new partition the moment
     parted's commit returns. parted closing the disk after writing the table

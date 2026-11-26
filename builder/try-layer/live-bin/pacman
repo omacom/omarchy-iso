@@ -1,0 +1,55 @@
+#!/bin/bash
+#
+# Try Omarchy: pacman for the hardware setup (omarchy-try-hardware). Try runs
+# the kernel it booted, so a kernel, its headers or a DKMS module could take
+# effect only after a reboot, which leaves Try. Those an install step asks for
+# are recorded as installed, without their files, so the step goes on as it
+# would on an install; everything else installs. Which is which comes from the
+# package's files, not its name: a kernel's vmlinuz, its headers' build tree,
+# or a DKMS source tree.
+
+real=${OMARCHY_TRY_PACMAN:-/usr/bin/pacman}
+
+[[ ${1:-} == -S ]] || exec "$real" "$@"
+
+options=()
+targets=()
+shift
+while (($#)); do
+  case $1 in
+  --) shift; targets+=("$@"); break ;;
+  -*) options+=("$1") ;;
+  *) targets+=("$1") ;;
+  esac
+  shift
+done
+
+reboot_only() {
+  local file
+  # --nodeps twice: the package alone, not the dependencies it would pull.
+  file=$("$real" -Sp --nodeps --nodeps --print-format '%l' -- "$1" 2>/dev/null) || return 1
+  file=${file#file://}
+  [[ -f $file ]] || return 1
+  bsdtar -tf "$file" 2>/dev/null |
+    grep -Eq '^usr/lib/modules/[^/]+/(vmlinuz|build/)|^usr/src/[^/]+/dkms\.conf$'
+}
+
+live=()
+recorded=()
+for target in "${targets[@]}"; do
+  if reboot_only "$target"; then
+    recorded+=("$target")
+  else
+    live+=("$target")
+  fi
+done
+
+status=0
+if ((${#recorded[@]})); then
+  echo "Try Omarchy: ${recorded[*]} recorded, not installed: they take effect only after a reboot" >&2
+  "$real" -S --dbonly --nodeps --nodeps "${options[@]}" -- "${recorded[@]}" || status=$?
+fi
+if ((${#live[@]})) || ((${#targets[@]} == 0)); then
+  "$real" -S "${options[@]}" -- "${live[@]}" || status=$?
+fi
+exit "$status"

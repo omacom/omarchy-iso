@@ -246,6 +246,58 @@ WantedBy=sysinit.target
 EOF
 in_try systemctl enable omarchy-try-reprobe.service >/dev/null
 
+# The hardware setup an install runs for this machine, run in the session on
+# the machine itself (omarchy-try-hardware), with packages from the stick's
+# offline repository, which omarchy-try hands over with a pacman.conf for it.
+# The system unit alone reads that pacman.conf: the session's own stays the
+# channel's. For the run, the tools that build boot images and kernel modules
+# do nothing, and pacman records kernels, headers and DKMS modules without
+# their files: they could only take effect after a reboot. The system part
+# runs beside the desktop's start; the per-user part, before it.
+install -Dm755 "$scripts/omarchy-try-hardware" "$merged/usr/local/lib/omarchy-try/omarchy-try-hardware"
+install -Dm755 "$scripts/live-bin/pacman" "$merged/usr/local/lib/omarchy-try/live-bin/pacman"
+for tool in mkinitcpio dkms limine-entry-tool limine-update ukify; do
+  install -Dm755 /dev/stdin "$merged/usr/local/lib/omarchy-try/live-bin/$tool" <<'EOF'
+#!/bin/sh
+echo "Try Omarchy: ${0##*/} left out: Try keeps the kernel and boot image it started with" >&2
+EOF
+done
+install -d "$merged/usr/local/lib/omarchy-try/pacman-hooks"
+for hook in 60-mkinitcpio-remove.hook 60-limine-mkinitcpio-remove-pre.hook 80-limine-efi-deploy.hook \
+  90-limine-mkinitcpio-remove-post.hook 90-mkinitcpio-install.hook; do
+  ln -sf /dev/null "$merged/usr/local/lib/omarchy-try/pacman-hooks/$hook"
+done
+install -Dm644 /dev/stdin "$merged/etc/systemd/system/omarchy-try-hardware.service" <<'EOF'
+[Unit]
+Description=Try Omarchy: this machine's hardware setup, as an install runs it
+ConditionPathExists=/run/omarchy-try/pacman-offline.conf
+
+# exec, not oneshot: a target waits for a oneshot it wants to finish, and
+# graphical.target and what follows it would wait out the whole run.
+[Service]
+Type=exec
+BindReadOnlyPaths=/run/omarchy-try/pacman-offline.conf:/etc/pacman.conf
+ExecStart=/usr/local/lib/omarchy-try/omarchy-try-hardware --system
+RuntimeMaxSec=10min
+
+[Install]
+WantedBy=multi-user.target
+EOF
+install -Dm644 /dev/stdin "$merged/etc/systemd/system/omarchy-try-hardware-user.service" <<'EOF'
+[Unit]
+Description=Try Omarchy: this machine's hardware setup for the session's user
+ConditionPathExists=/run/omarchy-try/pacman-offline.conf
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/omarchy-try/omarchy-try-hardware --user
+
+[Install]
+WantedBy=multi-user.target
+EOF
+in_try systemctl enable omarchy-try-hardware.service omarchy-try-hardware-user.service >/dev/null
+
 # What this session is, said once when the desktop first shows.
 install -Dm755 "$scripts/omarchy-try-welcome" "$merged/usr/local/lib/omarchy-try/omarchy-try-welcome"
 install -Dm644 /dev/stdin "$merged/etc/systemd/user/omarchy-try-welcome.service" <<'EOF'

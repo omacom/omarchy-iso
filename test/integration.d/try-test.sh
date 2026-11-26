@@ -163,6 +163,14 @@ check "the session probed again the devices left without a driver" try_ssh \
 check "systemd-gpt-auto-generator is off" try_ssh \
   '[ "$(readlink /etc/systemd/system-generators/systemd-gpt-auto-generator)" = /dev/null ]'
 check "no unit failed" no_unit_failed
+# The hardware setup an install runs for this machine ran in the session
+# (omarchy-try-hardware), from the stick's offline repository.
+# The system part runs beside the desktop's start, so it may still run here.
+check "Try ran this machine's hardware setup" try_ssh \
+  'for u in omarchy-try-hardware.service omarchy-try-hardware-user.service; do
+     timeout 600 bash -c "until [ \"\$(systemctl show -p ExecMainExitTimestampMonotonic --value $u)\" != 0 ]; do sleep 2; done" &&
+       [ "$(systemctl show -p Result --value "$u")" = success ] || exit 1
+   done'
 check "Try idles as an install does" try_ssh '[ "$(omarchy-toggle-idle status | jq -r .enabled)" = false ]'
 check "a reboot from Try arms no watchdog" try_ssh '[ "$(systemctl show -p RebootWatchdogUSec --value)" = 0 ]'
 check "Try says once what the session is" try_ssh \

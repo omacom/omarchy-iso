@@ -96,6 +96,14 @@ elif "--bootnext" in args:
         sys.exit(5)
     nvram["next"] = num
 json.dump(nvram, open(path, "w"))
+# FAKE_VERBOSE_CREATE: mimic real efibootmgr 18, which reads NVRAM back and
+# prints the updated boot list on --create --verbose.
+if "--create" in args and os.environ.get("FAKE_VERBOSE_CREATE"):
+    print("BootCurrent: 0001")
+    print("BootOrder: " + ",".join(nvram["order"]))
+    for num, (label, dp, *flags) in sorted(nvram["entries"].items()):
+        star = " " if "inactive" in flags else "*"
+        print(f"Boot{num}{star} {label}" if os.environ.get("FAKE_NO_PATHS") else f"Boot{num}{star} {label}\t{dp}")
 # FAKE_NON_UTF8: firmware whose legacy entries carry raw bytes. efibootmgr
 # prints the boot list after every write (test_command_capture.py has the
 # bytes from a real machine), and its own messages come through stderr.
@@ -519,6 +527,21 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
             nvram = self.register()
         self.assertEqual(self.writes(), ["--create", "--bootnext"])
         self.assertEqual(nvram.get("next"), nvram["order"][0])
+
+    def test_verbose_create_output_avoids_second_efibootmgr_read(self):
+        # Real efibootmgr --create --verbose prints the updated boot list;
+        # parsing it directly skips a second full NVRAM listing read.
+        self.nvram_with(
+            {"0000": self.entry("Windows Boot Manager", WINDOWS, loader="\\EFI\\Microsoft\\Boot\\bootmgfw.efi")},
+            ["0000"],
+        )
+        with mock.patch.dict(os.environ, {"FAKE_VERBOSE_CREATE": "1"}):
+            nvram = self.register()
+        reads = [args for args in self.calls() if args in ([], ["--verbose"], ["-v"])]
+        self.assertEqual(len(reads), 1, self.calls())
+        self.assertEqual(self.writes(), ["--create", "--bootnext"])
+        self.assertEqual(nvram["order"], ["0001", "0000"])
+        self.assertEqual(nvram.get("next"), "0001")
 
     def test_an_unreadable_variable_store_skips_registration(self):
         # Every NVRAM write would fail the same way, so none is tried, and

@@ -48,6 +48,7 @@ import textwrap
 import threading
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -168,8 +169,10 @@ def _time_step(label: str):
 
 
 # The root image: the invariant target system as a btrfs filesystem image
-# (build-root-image.sh), packed as independent 256 KiB zstd frames with a seek
-# table and written onto the target partition in place of pacstrapping it.
+# (build-root-image.sh), shipped as omarchy-root.sfs: a squashfs holding the raw
+# image as omarchy-root.img, which the kernel can mount. The install mounts it
+# and writes the image onto the target partition in place of pacstrapping it;
+# Try Omarchy boots the same image (/usr/local/bin/omarchy-try).
 # build-iso.sh ships it as a plain file on the ISO, read straight off the boot
 # medium, with its sha256 next to it. Its one subvolume becomes @.
 # archiso names the directory after the architecture, which is what
@@ -177,9 +180,12 @@ def _time_step(label: str):
 ROOT_IMAGE_DIR = Path("/run/archiso/bootmnt/arch") / platform.machine()
 HARDWARE_LAYERS_DIR = Path("/usr/share/omarchy-iso/hardware-layers")
 LAYER_SCRIPTLETS = Path("var/lib/omarchy-iso/layer-scriptlets")
-ROOT_IMAGE = ROOT_IMAGE_DIR / "omarchy-root.img.zst"
+ROOT_IMAGE = ROOT_IMAGE_DIR / "omarchy-root.sfs"
+# Where the installer mounts ROOT_IMAGE, and the image file inside it.
+ROOT_IMAGE_MOUNT = Path("/run/omarchy-iso/root-image")
+ROOT_IMAGE_FILE = "omarchy-root.img"
 ROOT_IMAGE_SUBVOLUME = "omarchy-root"
-# Writes ROOT_IMAGE in parallel; compiled and installed by build-iso.sh.
+# Writes the image in parallel; compiled and installed by build-iso.sh.
 IMAGE_WRITE = Path("/usr/local/bin/omarchy-image-write")
 
 
@@ -1042,97 +1048,134 @@ def _medium_bytes_read() -> int | None:
         return None
 
 
-def _write_root_image_frames(image: Path, device: str,
-                              on_progress: Callable[[float], None] | None = None) -> bool:
-    """Write the image with omarchy-image-write (builder/omarchy-image-write.c):
-    the ISO packs it as independent 256 KiB zstd frames with a seek table,
-    which N threads decode and pwrite with O_DIRECT, so the drive sees N
-    requests in flight where zstdcat | dd gives it one (2.5 s -> 0.9 s on a
-    990 PRO, stream in RAM). False when the tool is not on the ISO or the
-    image is not one it writes (exit 2, nothing written), so the caller can
-    use the pipe instead. Exit 1 is an error: the target could not be used
-    (in use, too small) or the write failed partway."""
+def _mount_root_image(container: Path) -> Path:
+    """Mount ROOT_IMAGE read-only and return the raw image inside it, for dd
+    when omarchy-image-write cannot write it. threads=multi lets squashfs
+    decompress on every core instead of one (linux-omarchy builds the multi
+    decompressor; without the option a mount uses one thread). A kernel that
+    refuses the option still mounts it, single-threaded."""
+    image = ROOT_IMAGE_MOUNT / ROOT_IMAGE_FILE
+    if not os.path.ismount(ROOT_IMAGE_MOUNT):
+        ROOT_IMAGE_MOUNT.mkdir(parents=True, exist_ok=True)
+        base = ["mount", "-t", "squashfs", "-o"]
+        mounted = subprocess.run([*base, "ro,loop,threads=multi", str(container), str(ROOT_IMAGE_MOUNT)],
+                                 capture_output=True, text=True, check=False)
+        if mounted.returncode != 0:
+            info("› squashfs refused threads=multi; mounting the root image single-threaded")
+            subprocess.run([*base, "ro,loop", str(container), str(ROOT_IMAGE_MOUNT)],
+                           capture_output=True, text=True, check=True)
+    if not image.is_file():
+        raise RuntimeError(f"{container} holds no {ROOT_IMAGE_FILE}")
+    return image
+
+
+def _umount_root_image() -> None:
+    if os.path.ismount(ROOT_IMAGE_MOUNT):
+        subprocess.run(["umount", str(ROOT_IMAGE_MOUNT)], capture_output=True, check=False)
+
+
+def _write_root_image_parallel(container: Path, device: str,
+                               on_progress: Callable[[float], None] | None = None) -> bool:
+    """Write the image with omarchy-image-write write-squashfs
+    (builder/omarchy-image-write.c), straight from the squashfs without
+    mounting it: N threads each decode the next 256 KiB block with libzstd and
+    pwrite it with O_DIRECT, skipping zero blocks, so the drive sees N
+    requests in flight where dd gives it one. False when the tool is not on
+    the ISO or refuses the image (exit 2, nothing written), so the caller can
+    use dd instead. Exit 1 is an error: the target could not be used (in use,
+    too small) or the write failed partway."""
     if not IMAGE_WRITE.is_file():
         return False
-    # The tool reports the frames it has taken to a file while it writes,
+    # The tool reports the blocks it has taken to a file while it writes,
     # which goes on to the progress bar: from a slow USB stick the write is
     # minutes of the install.
     progress = Path(tempfile.mkdtemp(prefix="omarchy-image-write-")) / "progress"
     env = {**os.environ, "OMARCHY_IMAGE_WRITE_PROGRESS": str(progress)}
-    with _time_step("F1.image_write (parallel frames, O_DIRECT)"):
-        proc = subprocess.Popen([str(IMAGE_WRITE), "write", str(image), device],
-                                stderr=subprocess.PIPE, text=True, env=env)
-        while True:
-            try:
-                _, stderr = proc.communicate(timeout=0.5)
-                break
-            except subprocess.TimeoutExpired:
-                if on_progress:
-                    try:
-                        done, total = (int(n) for n in progress.read_text().split())
-                        on_progress(done / total)
-                    except (OSError, ValueError, ZeroDivisionError):
-                        pass  # not written yet, or caught between two samples
-    shutil.rmtree(progress.parent, ignore_errors=True)
+    proc = None
+    try:
+        with _time_step("F1.image_write (parallel, O_DIRECT)"):
+            proc = subprocess.Popen([str(IMAGE_WRITE), "write-squashfs", str(container), device],
+                                    stderr=subprocess.PIPE, text=True, env=env)
+            while True:
+                try:
+                    _, stderr = proc.communicate(timeout=0.5)
+                    break
+                except subprocess.TimeoutExpired:
+                    if on_progress:
+                        try:
+                            done, total = (int(n) for n in progress.read_text().split())
+                            on_progress(done / total)
+                        except (OSError, ValueError, ZeroDivisionError):
+                            pass  # not written yet, or caught between two samples
+    finally:
+        # An interrupt or an error in the progress callback ends this
+        # function, never the writer: stop it before anything cleans up
+        # the target it is still writing.
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        shutil.rmtree(progress.parent, ignore_errors=True)
     for line in stderr.splitlines():
         info(f"› {line}")
     if proc.returncode == 2:
-        info("› image-write refused the image; writing it through zstdcat | dd")
+        info("› image-write refused the image; writing it with dd")
         return False
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, proc.args, stderr=stderr)
     return True
 
 
-def _write_root_image_pipe(image: Path, device: str) -> None:
-    with _time_step("F1.dd (zstdcat | dd oflag=direct)"):
-        # dd blocks on its writes, so the pipe paces zstd to the disk,
-        # and the decoding runs on another core.
-        #
-        # iflag=fullblock is what makes oflag=direct true. A read from a
-        # pipe returns at most one pipe buffer (64 KiB), dd treats that
-        # as a partial block, and for a partial block it silently drops
-        # O_DIRECT, so without fullblock every write is buffered. On a
-        # LUKS mapper with 512-byte sectors the block device's writeback
-        # then goes out 512 bytes at a time: 2 million NVMe requests per
-        # GiB, 87 s for this image on a 980 PRO against 2.7 s
-        # with full blocks. QEMU hides it (4.9 s there), real disks do
-        # not. bs: 1M-4M measure the same within noise, 2M best, 16M and
-        # 64M slower (on the same drive, stream in RAM).
-        # status=noxfer keeps dd's record counts for the check below.
-        #
-        # The pipe is ours, not the shell's, for two reasons. Size: with
-        # the default 64 KiB pipe zstd stalls on every dd write and dd on
-        # every read; 4 MiB lets zstd stay two blocks ahead (2.5 s -> 2.1 s
-        # on a 990 PRO, stream in RAM; 1-16 MiB measure the same, 64 MiB
-        # and up slower). Above 1 MiB, F_SETPIPE_SZ needs
-        # CAP_SYS_RESOURCE, which the orchestrator has as root. Status:
-        # a shell pipeline reports dd's alone, so a zstd that died on a
-        # bad frame read as a short image written successfully.
-        read_end, write_end = os.pipe()
-        try:
-            fcntl.fcntl(write_end, fcntl.F_SETPIPE_SZ, 4 << 20)
-        except OSError:
-            pass  # a smaller pipe is slower, not wrong
-        # zstd's stderr is captured so its reason ("premature end", a bad
-        # frame) travels with the failure; it only writes there on an error.
-        zstd = subprocess.Popen(["zstdcat", str(image)], stdout=write_end,
-                                stderr=subprocess.PIPE, text=True)
-        dd = subprocess.Popen(
-            ["dd", f"of={device}", "bs=2M", "iflag=fullblock",
+def _write_root_image_dd(image: Path, device: str) -> None:
+    with _time_step("F1.dd (oflag=direct)"):
+        # oflag=direct so the writeback is the drive's full blocks, not 512
+        # bytes at a time on a LUKS mapper with 512-byte sectors (87 s for
+        # this image on a 980 PRO against 2.7 s); iflag=fullblock so a short
+        # read never makes dd drop O_DIRECT for that block. bs: 1M-4M measure
+        # the same within noise, 2M best. conv=sparse leaves zero blocks
+        # unwritten; status=noxfer keeps dd's record counts for the check.
+        dd = subprocess.run(
+            ["dd", f"if={image}", f"of={device}", "bs=2M", "iflag=fullblock",
              "conv=sparse,fsync", "oflag=direct", "status=noxfer"],
-            stdin=read_end, stderr=subprocess.PIPE, text=True,
+            stderr=subprocess.PIPE, text=True, check=False,
         )
-        os.close(read_end)
-        os.close(write_end)
-        _, dd_stderr = dd.communicate()
-        _, zstd_stderr = zstd.communicate()
-        # dd first: when dd dies, zstd dies of the broken pipe after it.
         if dd.returncode != 0:
-            raise subprocess.CalledProcessError(dd.returncode, dd.args, stderr=dd_stderr)
-        if zstd.returncode != 0:
-            raise subprocess.CalledProcessError(zstd.returncode, zstd.args, stderr=zstd_stderr)
-        _check_dd_full_blocks(dd_stderr)
+            raise subprocess.CalledProcessError(dd.returncode, dd.args, stderr=dd.stderr)
+        _check_dd_full_blocks(dd.stderr)
+
+
+@contextmanager
+def _flock_whole_disk(device: str):
+    """Hold an exclusive BSD lock on `device`'s whole-disk block node so
+    systemd-udevd defers probing across the raw image write and `btrfstune -m`.
+    Otherwise udev reacts to the write's IN_CLOSE_WRITE and scans the target
+    while it still carries the mounted live root image's FSID."""
+    try:
+        resolved = Path(device).resolve()
+        if not stat.S_ISBLK(resolved.stat().st_mode):
+            yield
+            return
+        lock_target = resolved
+        sys_block = Path("/sys/class/block") / resolved.name
+        if (sys_block / "partition").exists():
+            parent = Path("/dev") / sys_block.resolve().parent.name
+            if parent.exists() and stat.S_ISBLK(parent.stat().st_mode):
+                lock_target = parent
+        fd = os.open(str(lock_target), os.O_RDONLY | os.O_CLOEXEC)
+    except OSError:
+        yield
+        return
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError:
+            pass
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
 
 
 def _place_root_image(ctx: InstallContext) -> None:
@@ -1141,10 +1184,10 @@ def _place_root_image(ctx: InstallContext) -> None:
     the same ~940 packages a pacstrap would install, at the speed of the
     drive."""
     target = ctx.target
-    raw_image = _root_image()
+    container = _root_image()
     mounts, device = _root_image_target_mounts(target)
 
-    info(f"› writing root image ({raw_image.stat().st_size >> 20} MiB from {raw_image})")
+    info(f"› writing root image from {container} ({container.stat().st_size >> 20} MiB)")
 
     with _time_step("F1.umount_target_tree"):
         _umount_tree(target)
@@ -1153,23 +1196,27 @@ def _place_root_image(ctx: InstallContext) -> None:
     # the page cache: near zero when the verify left it all cached, up to the
     # whole image on a machine whose RAM could not hold it.
     medium_before = _medium_bytes_read()
-    # The rest of the placement after the write takes moments; it gets the
-    # last few percent.
-    if not _write_root_image_frames(raw_image, device,
-                                    lambda done: _write_phase_progress(ctx, 0.95 * done)):
-        _write_root_image_pipe(raw_image, device)
-    medium_after = _medium_bytes_read()
-    if medium_before is not None and medium_after is not None:
-        info(f"› read {(medium_after - medium_before) / 1048576:.0f} MiB of the "
-             f"{raw_image.stat().st_size / 1048576:.0f} MiB image off the install medium while writing it")
+    with _flock_whole_disk(device):
+        # The rest of the placement after the write takes moments; it gets the
+        # last few percent.
+        if not _write_root_image_parallel(container, device,
+                                          lambda done: _write_phase_progress(ctx, 0.95 * done)):
+            try:
+                _write_root_image_dd(_mount_root_image(container), device)
+            finally:
+                _umount_root_image()
+        medium_after = _medium_bytes_read()
+        if medium_before is not None and medium_after is not None:
+            info(f"› read {(medium_after - medium_before) / 1048576:.0f} MiB of the "
+                 f"{container.stat().st_size / 1048576:.0f} MiB image off the install medium while writing it")
 
-    # -m sets a fresh fsid via the METADATA_UUID feature (kernel 5.0+) by
-    # writing the superblocks only; -u rewrites every metadata block of the
-    # 4.5 GB image, which takes 0.8-2.0 s. The visible UUID (blkid, fstab,
-    # snapper) is the new one either way; two installs from the same image
-    # are distinct filesystems to the kernel because they differ in fsid.
-    with _time_step("F1.btrfstune -m (new fsid via metadata_uuid)"):
-        subprocess.run(["btrfstune", "-f", "-m", device], check=True)
+        # -m sets a fresh fsid via the METADATA_UUID feature (kernel 5.0+) by
+        # writing the superblocks only; -u rewrites every metadata block of the
+        # 4.5 GB image, which takes 0.8-2.0 s. The visible UUID (blkid, fstab,
+        # snapper) is the new one either way; two installs from the same image
+        # are distinct filesystems to the kernel because they differ in fsid.
+        with _time_step("F1.btrfstune -m (new fsid via metadata_uuid)"):
+            subprocess.run(["btrfstune", "-f", "-m", device], check=True)
     # genfstab and the Limine cmdline read the UUID through libblkid, whose
     # cache only refreshes once udev has re-probed the device. On a slow
     # machine genfstab can run first and record the image's old fsid, and the
@@ -2261,6 +2308,9 @@ def _register_limine_efi_entry(
             reason = f"efibootmgr --create exited {created.returncode}"
             _warn_boot_entry_refused(f"{reason}: {detail}" if detail else reason, label)
             return
+        if created.stdout:
+            sys.stdout.write(created.stdout)
+            sys.stdout.flush()
         if detail:
             error(f"efibootmgr: {detail}")
 
@@ -2270,7 +2320,14 @@ def _register_limine_efi_entry(
         # The first such entry may be another install's, so one that starts
         # this loader on this ESP comes first; a listing without device paths
         # keeps list order.
-        post_state = _read_efibootmgr()
+        # efibootmgr --create --verbose reads NVRAM back and prints the updated
+        # listing itself; parse it directly when complete to avoid a redundant
+        # EFI variable read pass, falling back to _read_efibootmgr() otherwise.
+        parsed_created = _parse_efibootmgr(created.stdout or "")
+        if parsed_created["entries"] and parsed_created["order"]:
+            post_state = parsed_created
+        else:
+            post_state = _read_efibootmgr()
         if post_state.get("unreadable"):
             _warn_boot_entry_refused(
                 "efibootmgr --create exited 0 but the boot entries cannot be read back "
@@ -2354,22 +2411,16 @@ def _register_limine_efi_entry(
 
 
 def _create_limine_efi_entry(disk: Path, part: int, loader: str, label: str = "Limine") -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [
-            "efibootmgr",
-            "--create",
-            "--disk", str(disk),
-            "--part", str(part),
-            "--label", label,
-            "--loader", loader,
-            "--unicode",
-            "--verbose",
-        ],
-        check=False,
-        stderr=subprocess.PIPE,
-        text=True,
-        errors="replace",
-    )
+    return capture([
+        "efibootmgr",
+        "--create",
+        "--disk", str(disk),
+        "--part", str(part),
+        "--label", label,
+        "--loader", loader,
+        "--unicode",
+        "--verbose",
+    ])
 
 
 def _warn_boot_entry_refused(reason: str, label: str = "Limine") -> None:
@@ -2903,6 +2954,24 @@ _BOOT_ENTRY_RE = re.compile(r"^Boot([0-9A-Fa-f]{4})(\*?)\s+(.*)$")
 _BOOT_ORDER_RE = re.compile(r"^BootOrder:\s*(.*)$")
 
 
+def _parse_efibootmgr(raw: str) -> dict:
+    entries: dict[str, str] = {}
+    inactive: set[str] = set()
+    order: list[str] = []
+    for line in raw.splitlines():
+        m = _BOOT_ENTRY_RE.match(line)
+        if m:
+            num = m.group(1).upper()
+            entries[num] = m.group(3).strip()
+            if not m.group(2):
+                inactive.add(num)
+            continue
+        m = _BOOT_ORDER_RE.match(line)
+        if m:
+            order = [n.strip().upper() for n in m.group(1).split(",") if n.strip()]
+    return {"entries": entries, "inactive": inactive, "order": order, "raw": raw}
+
+
 def _read_efibootmgr() -> dict:
     """The boot entries and BootOrder, as `efibootmgr --verbose` lists them,
     and under "inactive" the entries listed without the "*" that marks
@@ -2916,24 +2985,10 @@ def _read_efibootmgr() -> dict:
     the phase dying before the removable loader is written.
     """
     res = capture(["efibootmgr", "--verbose"])
-    entries: dict[str, str] = {}
-    inactive: set[str] = set()
-    order: list[str] = []
     if res.returncode != 0:
         reason = (res.stderr or "").strip() or f"efibootmgr exited {res.returncode}"
-        return {"entries": entries, "inactive": inactive, "order": order, "raw": res.stdout, "unreadable": reason}
-    for line in res.stdout.splitlines():
-        m = _BOOT_ENTRY_RE.match(line)
-        if m:
-            num = m.group(1).upper()
-            entries[num] = m.group(3).strip()
-            if not m.group(2):
-                inactive.add(num)
-            continue
-        m = _BOOT_ORDER_RE.match(line)
-        if m:
-            order = [n.strip().upper() for n in m.group(1).split(",") if n.strip()]
-    return {"entries": entries, "inactive": inactive, "order": order, "raw": res.stdout}
+        return {"entries": {}, "inactive": set(), "order": [], "raw": res.stdout, "unreadable": reason}
+    return _parse_efibootmgr(res.stdout)
 
 
 def _find_label_entries(entries: dict[str, str], needle: str) -> list[str]:

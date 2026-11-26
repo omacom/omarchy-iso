@@ -2,10 +2,11 @@
 #
 # Installing over a disk that has had a life: the base install always starts
 # from a blank disk, and a machine people actually install on rarely has one.
-# The live ISO's udev assembles an old RAID member and activates an old LVM
-# volume group the moment it sees the disk, and anything left holding a
-# partition keeps the kernel on the old partition table, so archinstall cannot
-# partition the disk it was given.
+# The live ISO starts no RAID array of its own (a started one can write to its
+# members before anyone chose to install), but a disk can still carry old md
+# and LVM signatures, and anything left holding a partition keeps the kernel on
+# the old partition table, so archinstall cannot partition the disk it was
+# given.
 #
 # Boots the live ISO once to leave an old disk behind (an ESP, then a RAID1
 # member whose array has its own partition carrying LVM with swap and an ext4
@@ -88,7 +89,7 @@ ssh_guest "lsblk -o NAME,TYPE,FSTYPE,MOUNTPOINTS" >"$RUN_DIR/lsblk.txt" 2>/dev/n
 
 # An empty answer is a failed query, not a clean disk.
 types=$(ssh_guest "lsblk -rno TYPE" 2>/dev/null | tr -d '\r' || true)
-check "the installer stopped the old RAID array" grep -q "Stopping /dev/md" "$RUN_DIR/omarchy-install.log"
+check "the live system started no RAID array before the install" bash -c '[ -s "$1" ] && ! grep -q "Stopping /dev/md" "$1"' _ "$RUN_DIR/omarchy-install.log"
 check "the root filesystem is btrfs" test "$(ssh_guest "findmnt -no FSTYPE /" 2>/dev/null | tr -d '\r')" = btrfs
 check "the installed system lists its partitions" grep -qx part <<<"$types"
 check "no RAID array survived" bash -c '! grep -q "^raid" <<<"$1"' _ "$types"

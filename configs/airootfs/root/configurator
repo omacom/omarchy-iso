@@ -120,13 +120,43 @@ draw_screen() {
   printf '\033[H%s\033[K\n\033[J' "${screen//$'\n'/$'\033[K\n'}" >/dev/tty
 }
 
+# Where Just try starts from: media that carry the Try layer offer it.
+TRY_LAYER="${TRY_LAYER:-/run/archiso/bootmnt/arch/$(uname -m)/omarchy-try.sfs}"
+
+# The welcome's choices, centered from row $1 of a $2-column screen, with
+# choice $3 (0 Start Install, 1 Just try) highlighted: Start Install, and
+# under it, on media that carry the Try layer, Space for Just try. The
+# highlighted line is drawn in the text colour, as clear as the tagline, and
+# the other as subdued subtext: the welcome opens with Start Install plain to
+# see and Just try beneath it.
+greeter_choices() {
+  local row=$1 cols=$2 selected=${3:-0} text pad i
+  local -a texts=("$(t greeter.hint)") styles=('\033[0m' '\033[90m')
+  [[ -f $TRY_LAYER ]] && texts+=("$(t greeter.try)")
+  for i in "${!texts[@]}"; do
+    text=${texts[i]}
+    pad=$(((cols - $(display_width "$text")) / 2)); (( pad < 0 )) && pad=0
+    printf "\033[%d;%dH\033[2K%b%s\033[0m" "$((row + i))" "$((pad + 1))" "${styles[$((i == selected ? 0 : 1))]}" "$text"
+  done
+}
+
 # Vertically-centered welcome shown once before the keyboard step — the same
 # frame the deferred-provisioning first boot opens on, so install and first boot
-# bookend the setup identically. Logo, the Omarchy tagline, and a single button,
-# centered like the boot logo. No animation.
+# bookend the setup identically. Logo, the Omarchy tagline, and Start Install,
+# centered like the boot logo, with Just try under it where the medium carries
+# Try Omarchy: Space tries, Down and Up move the highlight between the two,
+# and Return starts the highlighted one, into greeter_choice (install or
+# try). Return alone installs.
+#
+# The choice is made here, once Linux drives the keyboard, and not in the boot
+# menu: GRUB and syslinux read keys through the firmware, which drives only
+# keyboards that speak the USB boot protocol. A wired Apple Magic Keyboard does
+# not, and reaches nothing before Linux runs.
 greeter() {
   local rows logo_h content_h top cols logo_row tagline_row hint_row
-  local tagline hint tpad hpad anim size status resized
+  local tagline anim size status resized key rest selected=0 last=0
+
+  [[ -f $TRY_LAYER ]] && last=1
 
   # Drawn again whenever the console changes size while it waits: the screen
   # is laid out for the size it had, and a console that grows afterwards (KMS
@@ -141,8 +171,8 @@ greeter() {
   [[ $rows =~ ^[0-9]+$ ]] || rows=${LINES:-24}
   logo_h=$(wc -l <"$LOGO_PATH")
 
-  # logo + blank + tagline + blank + hint
-  content_h=$((logo_h + 4))
+  # logo + blank + tagline + blank + hint, and Just try under it
+  content_h=$((logo_h + 4 + last))
   top=$(((rows - content_h) / 2))
   (( top < 0 )) && top=0
   logo_row=$((top + 1))
@@ -162,10 +192,8 @@ greeter() {
     printf '\033[%d;%dH%s' "$tagline_row" "$((tpad + 1))" "$tagline"
     (( tagline_row < rows )) && printf '\n'
 
-    hint=$(t greeter.hint)
-    hpad=$(((cols - $(display_width "$hint")) / 2)); (( hpad < 0 )) && hpad=0
-    printf '\033[%d;%dH\033[2m%s\033[0m' "$hint_row" "$((hpad + 1))" "$hint"
-    (( hint_row < rows )) && printf '\n'
+    greeter_choices "$hint_row" "$cols" "$selected"
+    (( hint_row + last < rows )) && printf '\n'
   } >/dev/tty
 
   # ColorShift the logo: a green base (indexed color 2) with a cyan accent (6)
@@ -208,14 +236,40 @@ greeter() {
     </dev/null >/dev/tty 2>/dev/null &
   anim=$!
 
-  # Return ends the wait, as does a tty that cannot be read; twice a second
-  # the size is looked at again.
+  # One key at a time, with no echo, since Space is a key of its own here.
+  # Return (a newline, or a carriage return on a raw terminal) starts the
+  # highlighted choice, as does a tty that cannot be read; Space tries where
+  # Just try is offered. An arrow comes as an escape sequence, ESC [ B, or
+  # ESC O B in application cursor mode, on the console and in kmscon alike.
+  # Twice a second the size is looked at again.
+  stty -icanon -echo </dev/tty 2>/dev/null || true
   resized=false
+  greeter_choice=install
   while true; do
-    status=0
-    IFS= read -r -t 0.5 _ </dev/tty || status=$?
-    (( status > 128 )) || break
-    [[ $(stty size 2>/dev/null </dev/tty) == "$size" ]] || { resized=true; break; }
+    status=0 key=""
+    IFS= read -rsN1 -t 0.5 key </dev/tty || status=$?
+    if (( status > 128 )); then
+      [[ $(stty size 2>/dev/null </dev/tty) == "$size" ]] || { resized=true; break; }
+      continue
+    fi
+    (( status == 0 )) || break
+    case $key in
+      $'\n' | $'\r')
+        (( selected == 1 )) && greeter_choice=try
+        break
+        ;;
+      ' ') (( last )) && { greeter_choice=try; break; } ;;
+      $'\e')
+        rest=""
+        IFS= read -rsN2 -t 0.1 rest </dev/tty || true
+        case $rest in
+          '[B' | 'OB') selected=$last ;;
+          '[A' | 'OA') selected=0 ;;
+          *) continue ;;
+        esac
+        greeter_choices "$hint_row" "$cols" "$selected" >/dev/tty
+        ;;
+    esac
   done
   # Tolerate ttfx's kill signal in `wait` so a future `set -e` here can't abort.
   kill "$anim" 2>/dev/null
@@ -228,6 +282,7 @@ greeter() {
   # Reset the screen so the leftover animation frame doesn't linger under the
   # keyboard step that follows.
   printf '\033[0m\033[H\033[2J\033[?25h' >/dev/tty
+  return 0
 }
 
 abort() {
@@ -253,6 +308,31 @@ notice() {
   echo
   gum spin --spinner "pulse" --title "$1" -- sleep "${2:-2}"
   echo
+}
+
+# JUST TRY
+#
+# Picked on the welcome: Try Omarchy from the medium (omarchy-try), by a soft
+# reboot that ends this installer. Returns only when Try could not start,
+# after saying why, for the welcome to be shown again.
+start_try() {
+  local error
+
+  step "$(t start.starting)"
+  if error=$(omarchy-try 2>&1 >/dev/null); then
+    # The soft reboot is under way, and it ends this installer with the
+    # rest of the live system. Returning would start an install. Wait in
+    # bash alone: a program started now loads from the stick while the live
+    # system shuts down and reads it, and one still loading when its SIGTERM
+    # comes holds the session up 5 s and fails it, which carries into Try.
+    # The coprocess is bash forked, and waits on a pipe nobody writes.
+    coproc { read -r _; }
+    while true; do wait; done
+  fi
+  step "$(t start.failed)"
+  say "$error"
+  echo
+  gum choose "$(t common.back)" >/dev/null || true
 }
 
 # STEP 0: LANGUAGE
@@ -319,8 +399,9 @@ language_rows() {
   ' "$LANGUAGES_JSON"
 }
 
-# The first screen, so it carries the intro and the hidden Ctrl+C entry into
-# deferred provisioning; before a language is picked they read in English.
+# The first screen of the install, so it carries the intro and the hidden
+# Ctrl+C entry into deferred provisioning; before a language is picked they
+# read in English.
 # Callers re-check defer_provisioning after this returns.
 language_form() {
   local choice status
@@ -1444,6 +1525,10 @@ if [[ -z $resume_stage ]]; then
 
   if ! $oem_install; then
     greeter
+    while [[ $greeter_choice == "try" ]]; do
+      start_try
+      greeter
+    done
     language_form
   fi
 

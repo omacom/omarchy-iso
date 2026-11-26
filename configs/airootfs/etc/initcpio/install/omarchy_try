@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# The live system over the root image (hooks/omarchy_try): what it needs in
+# the live initramfs beyond what archiso's hooks bring (losetup, squashfs,
+# loop and overlay).
+
+build() {
+    add_module btrfs
+    add_module overlay
+    add_module squashfs
+    add_module loop
+    add_runscript
+}
+
+help() {
+    cat <<HELPEOF
+Mounts the ISO's root image (omarchy-root.sfs) and stacks the live system on
+it. Try Omarchy uses the same mount (/usr/local/bin/omarchy-try).
+HELPEOF
+}

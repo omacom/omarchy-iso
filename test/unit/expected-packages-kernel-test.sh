@@ -33,6 +33,7 @@ mkdir -p "$build_cache_dir" "$image_localdb/local/base-3-3" "$image_localdb/loca
 
 fail=0
 for arch in x86_64 aarch64; do
+  # shellcheck disable=SC2034 # the resolver reads the kernel, and must not pick one by architecture
   OMARCHY_ARCH=$arch OMARCHY_KERNEL=linux-omarchy
   count=$(resolve_expected_packages)
   asked=$(<"$work/targets")

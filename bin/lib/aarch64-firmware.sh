@@ -15,6 +15,7 @@ aarch64_uefi_firmware() {
   for pair in AAVMF/AAVMF_CODE.fd:AAVMF/AAVMF_VARS.fd edk2/aarch64/QEMU_EFI.fd:edk2/aarch64/QEMU_VARS.fd; do
     code=$share/${pair%%:*} vars=$share/${pair##*:}
     if [[ -f $code && -f $vars ]]; then
+      # shellcheck disable=SC2034 # read by the scripts that source this file
       AARCH64_UEFI_CODE=$code AARCH64_UEFI_VARS=$vars
       return 0
     fi

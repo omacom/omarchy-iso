@@ -613,6 +613,7 @@ CMDLINE
 # The preset names the kernel version explicitly: mkinitcpio treats a glob in
 # ALL_kver as a literal path. It sets no ALL_microcode, which is deprecated;
 # the microcode hook in mkinitcpio.conf adds the microcode.
+# shellcheck disable=SC2010 # kernel version directories, named by pacman
 image_kver=$(ls -1 "$root/usr/lib/modules/" | grep -E '^[0-9]+\.' | head -1)
 # The output directory persists between builds: no layer from an older one.
 rm -f "${output%/*}"/omarchy-layer.*.tar.zst

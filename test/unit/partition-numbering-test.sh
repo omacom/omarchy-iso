@@ -113,6 +113,7 @@ check "rollback list cleared" "0" "${#created_parts[@]}"
 echo "==> numbering on a disk without holes"
 rm -f "$IMG"
 truncate -s 4G "$IMG"
+# shellcheck disable=SC2218 # the real parted: the stub further down replaces it for one case
 parted --script "$IMG" mklabel gpt
 mkpart_mib one ext4 1 200
 mkpart_mib two ext4 201 400
@@ -134,6 +135,7 @@ echo "==> a failed read of the table never makes an existing partition look new"
 # then accepts the old ESP as the one just made, and preparation formats it.
 rm -f "$IMG"
 truncate -s 8G "$IMG"
+# shellcheck disable=SC2218 # as above
 parted --script "$IMG" mklabel gpt
 mkpart_mib existing-esp fat32 1 2049
 created_parts=()

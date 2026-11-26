@@ -158,6 +158,7 @@ create_partition() {
   parted --script "$disk" name "$num" "$name" >>"${OMARCHY_INSTALL_LOG_FILE:-/dev/null}" 2>&1 || true
 
   created_parts+=("$num")
+  # shellcheck disable=SC2034 # the caller reads it once this returns
   created_partition_number="$num"
 }
 

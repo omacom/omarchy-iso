@@ -21,6 +21,7 @@ declare -F write_layer >/dev/null || fail "the builder has no write_layer"
 
 # The layer sits next to the root image, under the name the installer looks
 # for: omarchy-layer.<hw_platform>.tar.zst.
+# shellcheck disable=SC2034 # read by layer_path, taken out of the builder
 output="$work/iso/omarchy-root.img.zst"
 mkdir -p "$work/iso"
 [[ $(layer_path aarch64-n1x) == "$work/iso/omarchy-layer.aarch64-n1x.tar.zst" ]] || fail "layer path: $(layer_path aarch64-n1x)"

@@ -51,7 +51,9 @@ cleanup() {
 trap cleanup EXIT
 
 # --- answers ---------------------------------------------------------------
+# shellcheck disable=SC2034 # read by build_cidata, taken out of base-test.sh below
 GUEST_USER=omarchy GUEST_PASSWORD=omarchy GUEST_HOSTNAME=omarchy-arm64
+# shellcheck disable=SC2034 # as above
 BASE_DIR=$state SSH_KEY=$state/id_ed25519 CIDATA_IMG=$state/cidata.img
 ssh-keygen -q -t ed25519 -N '' -C arm64-install -f "$SSH_KEY"
 # The harness's own functions, so the two cannot drift apart: detect_packages

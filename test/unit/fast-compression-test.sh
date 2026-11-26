@@ -107,6 +107,7 @@ bash -n "$ROOT/builder/build-root-image.sh" || fail "build-root-image.sh has a s
 (
   eval "$(sed -n '/^layer_path() {$/,/^}$/p' "$ROOT/builder/build-root-image.sh")"
   eval "$(sed -n '/^write_layer() {$/,/^}$/p' "$ROOT/builder/build-root-image.sh")"
+  # shellcheck disable=SC2034 # read by layer_path, taken out of the builder
   output="$work/iso/omarchy-root.img.zst"
   mkdir -p "$work/iso" "$work/upper/etc"
   echo fast >"$work/upper/etc/test"

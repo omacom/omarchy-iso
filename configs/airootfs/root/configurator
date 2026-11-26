@@ -23,6 +23,7 @@ if [[ ! -r $SETUP_FORM ]]; then
   echo "ERROR: shared setup form not found at $SETUP_FORM" >&2
   exit 1
 fi
+# shellcheck disable=SC1090 # vendored from the Omarchy runtime package
 source "$SETUP_FORM"
 
 # Partition creation helpers, shared with test/partition-numbering-test.sh so

@@ -26,7 +26,9 @@ archinstall_packages_file=$ROOT/builder/archinstall.packages
 build_cache_dir=$work/cache
 mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
 printf '%s\n' hyprland snapper >"$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
+# shellcheck disable=SC2034 # read by image_package_list, taken out of the builder
 image_arch_packages=()
+# shellcheck disable=SC2034 # as above
 OMARCHY_RUNTIME_PACKAGE=omarchy OMARCHY_SETTINGS_PACKAGE=omarchy-settings OMARCHY_NVIM_PACKAGE=omarchy-nvim
 
 mapfile -t image < <(image_package_list)

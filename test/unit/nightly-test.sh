@@ -95,6 +95,7 @@ equal "edge: files published" "$(cd "$tmp/out" && find . -type f | sort | paste 
 equal "edge: the ISO and the image each have a checksum file" "$(cd "$dir" && ls ./*.sha256 | wc -l)" "2"
 equal "edge: the image is the sealed disk" "$(cat "$dir/omarchy-edge-2026.10.09.431.qcow2")" "base.qcow2 of sealed-edge"
 (cd "$dir/unpacked" && sha256sum -c --quiet SHA256SUMS) || fail "edge: SHA256SUMS does not match the unpacked files"
+# shellcheck disable=SC2010 # names nightly-layout wrote
 equal "edge: SHA256SUMS covers every file beside it" \
   "$(awk '{ print $2 }' "$dir/unpacked/SHA256SUMS" | sort | paste -sd' ')" "$(cd "$dir/unpacked" && ls | grep -v SHA256SUMS | sort | paste -sd' ')"
 cmp -s "$dir/unpacked/vm-boot" "$ROOT/test/vm-image/vm-boot" || fail "edge: the published vm-boot is not the repository's"
@@ -241,6 +242,7 @@ STUB
   fetched "$fetch" omacom/omarchy-iso 7 nightly-edge-7 "$tmp/fetched" >/dev/null
   equal "fetch: the files of the artifact" "$(cd "$tmp/fetched" && find . -type f | sort | paste -sd' ')" "./edge/1/omarchy-edge-1.qcow2 ./edge/latest.json"
   grep -q "/artifacts/12/zip" "$tmp/fetch.log" || fail "fetch: of two artifacts with one name, the newer was not the one fetched"
+  # shellcheck disable=SC2010 # names mktemp made
   equal "fetch: nothing left behind" "$(ls "$tmp" | grep -c 'nightly-fetch\.')" "0"
 
   : >"$tmp/fetch.log"; rm -f "$tmp/failed"
@@ -368,6 +370,7 @@ refused "cdn: nothing to check" env PATH="$cdn/bin:$PATH" CDN="$cdn" "$checker" 
 eval "$(sed -n '/^detect_packages() {$/,/^}$/p; /^installed_system_started() {$/,/^}$/p' "$harness")"
 declare -F detect_packages installed_system_started >/dev/null || fail "the harness no longer has detect_packages and installed_system_started"
 
+# shellcheck disable=SC2034 # detect_packages reads ISO
 packages_of() { ISO=$1; detect_packages; echo "$RUNTIME_PACKAGE $SETTINGS_PACKAGE"; }
 equal "an edge ISO installs the -dev packages" "$(packages_of release/omarchy-2026.10.09-x86_64-edge.iso)" "omarchy-dev omarchy-settings-dev"
 equal "a dev ISO installs the -dev packages" "$(packages_of release/omarchy-2026.10.09-x86_64-dev.iso)" "omarchy-dev omarchy-settings-dev"

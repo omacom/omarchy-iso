@@ -94,6 +94,7 @@ for platform in x86_64 aarch64; do
   (build_cache_dir="$fixture/gate-$platform" iso_subdir=arch/$platform OMARCHY_ARCH=$platform; eval "$initramfs_gate") >/dev/null 2>&1 \
     || fail "the live initramfs size gate does not find the $platform initramfs"
   truncate -s 129M "$live_img"
+  # shellcheck disable=SC2034 # read by the gate run through eval
   (build_cache_dir="$fixture/gate-$platform" iso_subdir=arch/$platform OMARCHY_ARCH=$platform; eval "$initramfs_gate") >/dev/null 2>&1 \
     && fail "a 129 MiB $platform live initramfs passes the 128 MiB gate"
 done
@@ -227,6 +228,7 @@ lookup=$(sed -n '/^if ! installable_files="\$($/,/^fi$/p' "$ROOT/builder/build-i
 [[ -n $lookup ]] || fail "the builder no longer looks up what an install can ask for"
 lookup=${lookup//\/tmp\/offlinedb/$fixture/offlinedb}
 lookup=${lookup//\/configs\//$ROOT/configs/}
+# shellcheck disable=SC2034,SC2154 # the lookup run through eval reads these and sets installable_files
 installable=$(
   online_pacman_conf=$ROOT/configs/pacman-online-aarch64-edge.conf
   target_packages=(bundle-only alarm-only)
@@ -252,6 +254,7 @@ for file in archlinuxarm-keyring-20240419-1-any.pkg.tar.xz{,.sig} linux-firmware
 done
 printf '%s\n' archlinuxarm-keyring-20240419-1-any.pkg.tar.xz linux-firmware-1-1-any.pkg.tar.zst \
   omarchy-local-1-1-any.pkg.tar.zst >"$fixture/shipped.list"
+# shellcheck disable=SC2034 # read by the block run through eval
 (
   offline_mirror_dir=$shipped_mirror shipped_list=$fixture/shipped.list build_cache_dir=$fixture/sums-cache
   eval "$sums_block"
@@ -331,6 +334,7 @@ first_exit=$(grep -nE '^[^#]*\bexit\b' "$live_customize" | head -1 | cut -d: -f1
 diff <(sed '/live UKI\.$/d; /qualcomm-live-uki\.sh/d' "$live_customize" | cat -s) <(cat -s "$ROOT/configs/airootfs/root/customize_airootfs.sh") >/dev/null \
   || fail "adding the live UKI step changed the rest of customize_airootfs.sh"
 printf '#!/bin/bash\necho no strict mode\n' >"$live_customize"
+# shellcheck disable=SC2034 # read by the step run through eval
 (build_cache_dir="$fixture/cache" OMARCHY_KERNEL=linux-omarchy; eval "$insert_uki") 2>/dev/null \
   && fail "the live UKI step was added to a customize_airootfs.sh without set -euo pipefail"
 grep -Fq -- '--devicetree-auto=$dtb' "$uki" || fail "the live UKI carries no device trees"
@@ -425,6 +429,7 @@ printf '%s\n' '# x86_64 only' gliff superwhisper-bin >"$fixture/lists/omarchy-x8
 printf '%s\n' '# n1x' linux-omarchy rtkit >"$fixture/lists/omarchy-aarch64-n1x.packages"
 printf '%s\n' '# qualcomm' vulkan-freedreno >"$fixture/lists/omarchy-aarch64-qualcomm.packages"
 printf '%s\n' '# apple' asahi-audio >"$fixture/lists/omarchy-aarch64-apple.packages"
+# shellcheck disable=SC2034,SC2154 # the builder lines run through eval read these and set platform_base_dir and platform_lists
 composed=$(
   base_pkg_lists=("$fixture/lists/omarchy-base.packages")
   OMARCHY_ARCH=aarch64 OMARCHY_SNAPDRAGON=1
@@ -453,6 +458,7 @@ composed=$(
 )
 [[ $composed == $'omarchy-base.aarch64-n1x.packages\n--\nomarchy-aarch64-n1x.packages' ]] \
   || fail "the plain aarch64 image carries the Snapdragon set: $composed"
+# shellcheck disable=SC2034 # read by the builder lines run through eval
 composed=$(
   rm "$fixture/lists"/omarchy-aarch64*.packages "$fixture/lists/omarchy-x86_64-only.packages"
   base_pkg_lists=("$fixture/lists/omarchy-base.packages")

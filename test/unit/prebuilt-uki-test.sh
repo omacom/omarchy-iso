@@ -81,6 +81,7 @@ run_uki_branch() {
   mkdir -p "$root/var/lib/omarchy-iso"
   printf 'stale' >"$root/var/lib/omarchy-iso/prebuilt-uki.efi"
   rm -f "$log"
+  # shellcheck disable=SC2034 # read by the builder branch run through eval
   (
     image_kver="7.3.6-2-omarchy"
     OMARCHY_SNAPDRAGON=$snapdragon

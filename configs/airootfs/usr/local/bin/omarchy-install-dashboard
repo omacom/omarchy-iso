@@ -28,6 +28,7 @@ LOGO_PATH="${OMARCHY_PATH:-/usr/share/omarchy}/logo.txt"
 INSTALLER_I18N="${INSTALLER_I18N:-/usr/share/omarchy-iso/i18n.sh}"
 [[ -r $INSTALLER_I18N ]] ||
   INSTALLER_I18N="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../share/omarchy-iso/i18n.sh"
+# shellcheck source=../../share/omarchy-iso/i18n.sh
 source "$INSTALLER_I18N"
 i18n_load "${OMARCHY_ISO_LANGUAGE:-en}"
 i18n_console_font "$TTY_PATH"

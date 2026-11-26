@@ -18,7 +18,7 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 LIB="$ROOT/configs/airootfs/usr/share/omarchy-iso/disk-partitioning.sh"
 CONFIGURATOR="$ROOT/configs/airootfs/root/configurator"
 
-# shellcheck source=../configs/airootfs/usr/share/omarchy-iso/disk-partitioning.sh
+# shellcheck source=../../configs/airootfs/usr/share/omarchy-iso/disk-partitioning.sh
 source "$LIB"
 
 failures=0

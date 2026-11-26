@@ -218,7 +218,7 @@ else
   source /usr/share/omarchy-iso/setup-form.sh
   # shellcheck disable=SC1091
   source /usr/share/omarchy-iso/kmscon.sh
-  # shellcheck disable=SC1091
+  # shellcheck source=../usr/share/omarchy-iso/kmscon-session.sh
   source /usr/share/omarchy-iso/kmscon-session.sh
 
   # The answers a relaunch carries hold the password: however this run ends,

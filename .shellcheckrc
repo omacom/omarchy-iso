@@ -1,0 +1,5 @@
+# Follow the files a script sources, so a variable that a scenario sets and
+# base-test.sh reads counts as used. source= directives and the paths of
+# source lines are looked up from the directory of the script that has them.
+external-sources=true
+source-path=SCRIPTDIR

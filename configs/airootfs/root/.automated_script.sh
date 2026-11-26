@@ -107,12 +107,17 @@ warm_offline_mirror() {
   # omarchy-mirror-verify.service and then omarchy-root-image-verify.service
   # (started at boot) read the shipped mirror and the whole image as they hash
   # them, and two readers on one USB stick seek against each other: let both
-  # finish first, whatever their verdict. Wait on their start jobs, not on
-  # is-active: while the mirror is hashed the image's job is queued behind it
-  # (Before=) and that unit still reads inactive. The image's pass is the
-  # warm-up for the image too; the read below then keeps it cached.
+  # finish first, whatever their verdict. Wait for omarchy-luks-calibrate.service
+  # as well: it starts right after the verify units, and streaming the root
+  # image beside it drives gigabytes of page-cache reclaim while cryptsetup
+  # benchmarks 1 GiB of Argon2id (causing the benchmark to measure low and
+  # weaken the disk passphrase's KDF cost). Running warm-up after calibration
+  # also restores any page cache calibration's 1 GiB allocation evicted. Wait
+  # on list-jobs while queued behind verify and on is-active while the Type=exec
+  # calibration unit is running.
   while [[ -n $(systemctl list-jobs --no-legend omarchy-mirror-verify.service \
-    omarchy-root-image-verify.service 2>/dev/null) ]]; do
+    omarchy-root-image-verify.service omarchy-luks-calibrate.service 2>/dev/null) ]] ||
+    systemctl is-active --quiet omarchy-luks-calibrate.service 2>/dev/null; do
     sleep 1
   done
 

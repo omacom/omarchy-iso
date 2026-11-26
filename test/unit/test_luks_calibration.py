@@ -25,6 +25,7 @@ class Calibration(unittest.TestCase):
         self.enterContext(mock.patch.object(luks, 'STATE', self.path))
         self.enterContext(mock.patch.object(luks, 'memory_total', return_value=8*1024*1024))
         self.enterContext(mock.patch.object(luks, 'memory_available', return_value=4*1024*1024))
+        self.enterContext(mock.patch.object(luks, 'memory_free', return_value=4*1024*1024))
         self.enterContext(mock.patch.object(luks.os, 'cpu_count', return_value=4))
         self.data = dict(schema=1, iter_time=2000, key_size=512, cpus=4,
                          iterations=13, memory=1048576, parallel=4)
@@ -107,6 +108,30 @@ class Calibration(unittest.TestCase):
                       ['--pbkdf-parallel','2'], ['--iter-time','2000']):
             command = COMMAND+extra
             self.assertEqual(luks.format_command(command), command)
+
+    def test_pretouch_runs_only_when_memfree_is_below_headroom(self):
+        with mock.patch.object(luks, 'memory_free', return_value=luks.FREE_HEADROOM), \
+                mock.patch.object(luks.mmap, 'mmap') as mm:
+            luks._pretouch_benchmark_memory(target_kib=64)
+            mm.assert_not_called()
+        with mock.patch.object(luks, 'memory_free', return_value=256 * 1024):
+            # Real anonymous mmap on a small buffer exercises the page-stride fault path.
+            luks._pretouch_benchmark_memory(target_kib=64)
+
+    def test_calibrate_pretouches_before_benchmark_and_skips_pretouch_on_low_memory(self):
+        events = []
+        with mock.patch.object(luks, '_pretouch_benchmark_memory', side_effect=lambda: events.append('pretouch')), \
+                mock.patch.object(luks.subprocess, 'run',
+                                  side_effect=lambda *a, **kw: (events.append('bench'), types.SimpleNamespace(stdout=LINE))[1]):
+            luks.calibrate()
+        self.assertEqual(events, ['pretouch', 'bench'])
+        events.clear()
+        with mock.patch.object(luks, 'memory_total', return_value=4*1024*1024-65536), \
+                mock.patch.object(luks, '_pretouch_benchmark_memory', side_effect=lambda: events.append('pretouch')), \
+                mock.patch.object(luks.subprocess, 'run') as run:
+            luks.calibrate()
+            run.assert_not_called()
+        self.assertEqual(events, [])
 
     def test_producer_publishes_complete_root_only_result(self):
         with mock.patch.object(luks.subprocess, 'run', return_value=types.SimpleNamespace(stdout=LINE)) as run:

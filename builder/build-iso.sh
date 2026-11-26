@@ -532,9 +532,10 @@ else
   console_font=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/console-font
   bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/user/mise-work.sh 2>/dev/null || true
   mise_work=/tmp/omarchy-pkglists/usr/share/omarchy/install/user/mise-work.sh
-  # The aarch64 list, each platform's own and the x86_64-only one. Runtimes
-  # from before the platform lists ship none, so each is optional.
-  for platform_list in 'omarchy-aarch64*.packages' omarchy-x86_64-only.packages; do
+  # The aarch64 list, each platform's own, the aarch64-only optional list, and
+  # the x86_64-only one. Runtimes from before the platform lists ship none, so
+  # each is optional.
+  for platform_list in 'omarchy-aarch64*.packages' omarchy-other-aarch64.packages omarchy-x86_64-only.packages; do
     bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists "usr/share/omarchy/install/$platform_list" 2>/dev/null || true
   done
   # The package installs its commands to /usr/bin and links them from
@@ -606,6 +607,9 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   aarch64_base_list=/tmp/omarchy-aarch64-base.packages
   aarch64_default_set "${aarch64_lists[@]}" >"$aarch64_base_list"
   base_pkg_lists[0]=$aarch64_base_list
+  if [[ -f $pkglist_dir/omarchy-other-aarch64.packages ]]; then
+    base_pkg_lists+=("$pkglist_dir/omarchy-other-aarch64.packages")
+  fi
 fi
 
 mkdir -p "$build_cache_dir/airootfs/usr/share/omarchy-iso"
@@ -616,6 +620,10 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # The runtime's own detector, which stands alone wherever a copy of it is
   # shipped, and the default set of each platform it can name.
   install -Dm0644 "$hw_platform" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-hw-platform"
+  if [[ -f $pkglist_dir/omarchy-other-aarch64.packages ]]; then
+    cp "$pkglist_dir/omarchy-other-aarch64.packages" "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-other-aarch64.packages"
+    shipped_lists+=(omarchy-other-aarch64.packages)
+  fi
   for platform_base in "$platform_base_dir"/omarchy-base.*.packages; do
     [[ -f $platform_base ]] || continue
     cp "$platform_base" "$build_cache_dir/airootfs/usr/share/omarchy-iso/"

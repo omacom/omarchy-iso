@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import mmap
 import os
 from pathlib import Path
 import re
@@ -20,6 +21,8 @@ ITER_TIME = 2000
 KEY_SIZE = 512
 MIN_MEMORY = 65536
 MAX_MEMORY = 1048576
+PRETOUCH_MEMORY = MAX_MEMORY + 128 * 1024  # 1152 MiB: clears 1 GiB + kswapd watermark headroom
+FREE_HEADROOM = MAX_MEMORY + 384 * 1024    # 1408 MiB: skip pretouch when MemFree already exceeds this
 SECTOR_SIZE = 4096
 VOLUME_KEY_DIR = Path("/run")
 ASYNC_MIN_CPUS = 4
@@ -76,6 +79,38 @@ def memory_available() -> int:
     return int(re.search(r"^MemAvailable:\s+(\d+)", Path("/proc/meminfo").read_text(), re.M)[1])
 
 
+def memory_free() -> int:
+    return int(re.search(r"^MemFree:\s+(\d+)", Path("/proc/meminfo").read_text(), re.M)[1])
+
+
+def _pretouch_benchmark_memory(target_kib: int = PRETOUCH_MEMORY) -> None:
+    """Reclaim clean page cache before cryptsetup starts its wall-clock timer.
+
+    The verify units fill RAM with clean page cache right before this service
+    runs, leaving MemFree around 200-300 MiB on an 8 GiB machine. Without free
+    pages ready, cryptsetup's first 1 GiB Argon2id trial pays 1-2 s of kswapd
+    reclaim and THP compaction inside clock_gettime(), which can push a low
+    iteration count into cryptsetup's [1900, 2200] ms acceptance window or end
+    Phase 1 early at 4 iterations. Allocating and faulting ~1.1 GiB once
+    beforehand moves that reclaim outside the benchmark window; on machines
+    that already have enough MemFree it is a no-op, and unlike drop_caches it
+    only evicts the oldest LRU pages that cryptsetup itself is about to evict.
+    """
+    if memory_free() >= FREE_HEADROOM:
+        return
+    size = target_kib * 1024
+    page = os.sysconf("SC_PAGESIZE")
+    try:
+        with mmap.mmap(-1, size, flags=mmap.MAP_PRIVATE) as buf:
+            view = memoryview(buf)
+            try:
+                view[::page] = b"\x01" * (size // page)
+            finally:
+                view.release()
+    except (MemoryError, OSError):
+        pass
+
+
 def parse_benchmark(output: str) -> dict:
     lines = [line for line in output.splitlines() if line.startswith("argon2id")]
     if len(lines) != 1:
@@ -108,6 +143,7 @@ def calibrate() -> None:
     if memory_total() < 4 * 1024 * 1024 or memory_available() < 1536 * 1024:
         print("Skipping background LUKS calibration: insufficient memory headroom")
         return
+    _pretouch_benchmark_memory()
     output = subprocess.run(
         ["cryptsetup", "benchmark", "--pbkdf", "argon2id", "--iter-time", str(ITER_TIME),
          "--key-size", str(KEY_SIZE)], check=True, capture_output=True, text=True,

@@ -29,10 +29,11 @@ echo "MemAvailable:    8388608 kB" >"$fixture/meminfo"
 
 # Each systemctl call answers for the next phase of the boot (the last one
 # repeats), the way systemd reports it in that phase:
-#   mirror    omarchy-mirror-verify.service hashing; the image's start job
-#             queued behind it (Before=), so that unit is still inactive
-#   image     the mirror check finished, the image hashing
-#   finished  both checks finished, no jobs left
+#   mirror           omarchy-mirror-verify.service hashing; image & calibrate queued
+#   image            the mirror check finished, the image hashing; calibrate queued
+#   calibrate-queued verify finished, omarchy-luks-calibrate start job still queued
+#   calibrate        omarchy-luks-calibrate.service running (Type=exec: no job, active)
+#   finished         verify and LUKS calibration finished
 cat >"$fixture/bin/systemctl" <<EOF
 #!/bin/bash
 mapfile -t phases <"$fixture/phases"
@@ -40,14 +41,20 @@ phase=\${phases[0]}
 ((\${#phases[@]} == 1)) || printf '%s\n' "\${phases[@]:1}" >"$fixture/phases"
 echo "\$phase" >"$fixture/now"
 case "\$1 \$phase" in
-  "is-active mirror")   [[ \$* == *omarchy-mirror-verify* ]] && echo activating || echo inactive ;;
-  "is-active image")    [[ \$* == *omarchy-mirror-verify* ]] && echo active || echo activating ;;
-  "is-active finished") echo active ;;
+  "is-active calibrate")
+    [[ \$* == *omarchy-luks-calibrate* ]] && exit 0
+    exit 3 ;;
+  "is-active "*)
+    exit 3 ;;
   "list-jobs mirror")
     echo "1 omarchy-mirror-verify.service     start running"
-    echo "2 omarchy-root-image-verify.service start waiting" ;;
-  "list-jobs image")  echo "2 omarchy-root-image-verify.service start running" ;;
-  "list-jobs luks")   echo "3 omarchy-luks-calibrate.service start running" ;;
+    echo "2 omarchy-root-image-verify.service start waiting"
+    echo "3 omarchy-luks-calibrate.service    start waiting" ;;
+  "list-jobs image")
+    echo "2 omarchy-root-image-verify.service start running"
+    echo "3 omarchy-luks-calibrate.service    start waiting" ;;
+  "list-jobs calibrate-queued")
+    echo "3 omarchy-luks-calibrate.service    start waiting" ;;
 esac
 exit 0
 EOF
@@ -68,9 +75,10 @@ warm_reads() { # the boot's phases, one per systemctl call -> the reads, one per
   command cat "$fixture/reads" 2>/dev/null || true
 }
 
-reads=$(warm_reads mirror mirror image image luks finished)
+# Each calibrate phase calls list-jobs (empty) and then is-active (0 = active).
+reads=$(warm_reads mirror mirror image image calibrate-queued calibrate calibrate calibrate calibrate finished finished)
 [[ $reads == $'finished omarchy-root.sfs\nfinished linux-firmware-1-1-any.pkg.tar.zst' ]] \
-  || fail "the warm-up read the medium before both checks had finished: $(paste -sd, <<<"$reads")"
+  || fail "the warm-up read the medium before verify and LUKS calibration finished: $(paste -sd, <<<"$reads")"
 
 reads=$(warm_reads finished)
 [[ $reads == $'finished omarchy-root.sfs\nfinished linux-firmware-1-1-any.pkg.tar.zst' ]] \

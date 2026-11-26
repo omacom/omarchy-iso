@@ -465,6 +465,28 @@ composed=$(
 [[ $composed == $'base-one\ngliff\nsuperwhisper-bin\nbase-two' ]] \
   || fail "a runtime without the platform lists keeps its base list: $composed"
 
+# aarch64-only optional hardware packages (install/omarchy-other-aarch64.packages)
+# join the offline mirror on aarch64 builds and stay out of x86_64 builds.
+grep -Fq 'omarchy-other-aarch64.packages' "$ROOT/builder/build-iso.sh" \
+  || fail "build-iso.sh does not extract omarchy-other-aarch64.packages"
+printf '%s\n' '# aarch64 optional' anduril-bluechip-support >"$fixture/lists/omarchy-other-aarch64.packages"
+other_aarch64=$(
+  base_pkg_lists=("$fixture/lists/omarchy-base.packages" "$fixture/lists/omarchy-other.packages")
+  OMARCHY_ARCH=aarch64
+  eval "$(sed -n '/^# aarch64 takes the runtime/,/^fi$/p' "$ROOT/builder/build-iso.sh")" 2>/dev/null
+  printf '%s\n' "${base_pkg_lists[@]##*/}"
+)
+[[ $other_aarch64 == $'omarchy-aarch64-base.packages\nomarchy-other.packages\nomarchy-other-aarch64.packages' ]] \
+  || fail "aarch64 does not include omarchy-other-aarch64.packages: $other_aarch64"
+other_x86=$(
+  base_pkg_lists=("$fixture/lists/omarchy-base.packages" "$fixture/lists/omarchy-other.packages")
+  OMARCHY_ARCH=x86_64
+  eval "$(sed -n '/^# aarch64 takes the runtime/,/^fi$/p' "$ROOT/builder/build-iso.sh")" 2>/dev/null
+  printf '%s\n' "${base_pkg_lists[@]##*/}"
+)
+[[ $other_x86 == $'omarchy-base.packages\nomarchy-other.packages' ]] \
+  || fail "x86_64 should not include omarchy-other-aarch64.packages: $other_x86"
+
 # --- live initramfs overlay -------------------------------------------------
 source "$ROOT/builder/archiso-aarch64-mkinitcpio.sh"
 cp "$ROOT/configs/airootfs/etc/mkinitcpio.conf.d/archiso.conf" "$fixture/archiso.conf"

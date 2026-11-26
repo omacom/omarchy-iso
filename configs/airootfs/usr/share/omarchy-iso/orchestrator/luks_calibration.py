@@ -113,14 +113,31 @@ def _pretouch_benchmark_memory(target_kib: int = PRETOUCH_MEMORY) -> None:
         pass
 
 
+def _has_fixed_iterations(command: list[str]) -> bool:
+    return any(arg == "--pbkdf-force-iterations" or arg.startswith("--pbkdf-force-iterations=")
+               for arg in command)
+
+
+def stop_early_keyring() -> None:
+    """Stop omarchy-target-keyring-early.service so gpg does not share CPUs
+    with a live Argon2id benchmark. A finished keyring stays in place."""
+    try:
+        subprocess.run(["systemctl", "stop", EARLY_KEYRING_UNIT], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 def pretouch_for_format(command: list[str]) -> None:
-    """Clear clean page cache before an uncached Argon2id luksFormat
-    benchmark, matching calibrate() so fallback formats do not pay
-    kswapd reclaim inside cryptsetup's wall-clock timer."""
+    """Prepare the live system before an uncached Argon2id luksFormat
+    benchmark: stop any in-flight early keyring (including for custom
+    --iter-time/--key-size policies that bypass the standard cache) and
+    reclaim clean page cache outside cryptsetup's wall-clock timer."""
     if "luksFormat" not in command:
         return
-    if any(arg == "--pbkdf-force-iterations" or arg.startswith("--pbkdf-force-iterations=") for arg in command):
+    if _has_fixed_iterations(command):
         return
+    stop_early_keyring()
     if memory_total() < 4 * 1024 * 1024 or memory_available() < 1536 * 1024:
         return
     _pretouch_benchmark_memory()
@@ -223,11 +240,7 @@ def stop_calibration(wait: float = 20) -> None:
         except (OSError, subprocess.TimeoutExpired):
             pass
     if not cached_options(ITER_TIME, KEY_SIZE):
-        try:
-            subprocess.run(["systemctl", "stop", EARLY_KEYRING_UNIT], check=False,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+        stop_early_keyring()
 
 
 def cached_options(iter_time: int, key_size: int) -> list[str]:

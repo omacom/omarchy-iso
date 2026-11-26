@@ -244,21 +244,28 @@ class Calibration(unittest.TestCase):
         default_time = [arg for arg in COMMAND if arg not in ('--iter-time', '2000')]
         cached_separate = list(COMMAND) + ['--pbkdf-force-iterations', '13']
         cached_eq = list(COMMAND) + ['--pbkdf-force-iterations=13']
+        custom_time = [arg if arg != '2000' else '10000' for arg in COMMAND]
         with mock.patch.object(luks, '_pretouch_benchmark_memory') as pretouch, \
+                mock.patch.object(luks, 'stop_early_keyring') as stop_keyring, \
                 mock.patch.object(luks, 'memory_total', return_value=8*1024*1024), \
                 mock.patch.object(luks, 'memory_available', return_value=4*1024*1024):
             luks.pretouch_for_format(cached_separate)
             luks.pretouch_for_format(cached_eq)
             luks.pretouch_for_format(['cryptsetup', 'open', '/dev/vda2', 'root'])
             pretouch.assert_not_called()
+            stop_keyring.assert_not_called()
             luks.pretouch_for_format(uncached)
             luks.pretouch_for_format(default_time)
-            self.assertEqual(pretouch.call_count, 2)
+            luks.pretouch_for_format(custom_time)
+            self.assertEqual(pretouch.call_count, 3)
+            self.assertEqual(stop_keyring.call_count, 3)
         with mock.patch.object(luks, '_pretouch_benchmark_memory') as pretouch, \
+                mock.patch.object(luks, 'stop_early_keyring') as stop_keyring, \
                 mock.patch.object(luks, 'memory_total', return_value=3*1024*1024), \
                 mock.patch.object(luks, 'memory_available', return_value=2*1024*1024):
             luks.pretouch_for_format(uncached)
             pretouch.assert_not_called()
+            stop_keyring.assert_called_once_with()
 
 
 class ArchinstallBoundary(unittest.TestCase):

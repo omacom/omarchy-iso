@@ -139,6 +139,7 @@ base_name() { # [VAR=value | VAR+=(value)]...
   local setting
   for setting; do eval "$setting"; done
   eval "$naming"
+  # shellcheck disable=SC2154 # set by the naming lines run through eval
   echo "$BASE_NAME"
 }
 

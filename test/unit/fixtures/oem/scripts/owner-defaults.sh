@@ -5,4 +5,5 @@ set -euo pipefail
 
 source /etc/acme-release
 mkdir -p /etc/skel/Documents
+# shellcheck disable=SC2154 # both come from /etc/acme-release
 printf 'Welcome to your %s.\nSupport: %s\n' "$MODEL" "$SUPPORT_URL" >/etc/skel/Documents/Welcome.txt

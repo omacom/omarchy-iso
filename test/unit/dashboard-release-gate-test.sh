@@ -114,6 +114,7 @@ scenario() { # function-to-call, release_rc  ->  sets TTY_OUT, LOG_OUT, CALLS
       PROGRESS_ICON="$ROOT/test/unit/fixtures/progress-icon.sh" \
       source "$BOX/dashboard-defs.sh" "$BOX/install.log" "$BOX/state.json" -- true
     release_target
+    # shellcheck disable=SC2154 # set by the dashboard lines sourced above
     echo "$TARGET_RELEASED" >"$BOX/released"
     [[ $fn == release_target ]] || "$fn"
   )

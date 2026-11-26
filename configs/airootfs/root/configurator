@@ -420,6 +420,7 @@ language_form() {
         --selected "$(language_label "$language")" --header "$(t language.header)") && status=0 || status=$?
       ((status == 0)) && [[ -n $choice ]] && break
 
+      # shellcheck disable=SC2154 # set by setup-form.sh, which comes from Omarchy
       if ((status == OMARCHY_FORM_SIGNAL)) && confirm_prepare_for_another_owner; then
         defer_provisioning=true
         return 0
@@ -442,6 +443,7 @@ keyboard_form() {
     # A preset keyboard is the setup form's row of that label, loaded below
     # like a picked one, so the disk password is typed under it.
     if [[ -n $preset_keyboard ]]; then
+      # shellcheck disable=SC2154 # set by setup-form.sh, which comes from Omarchy
       IFS='|' read -r keyboard_label keyboard keyboard_input_method keyboard_xkb_layout < <(
         printf '%s\n' "$OMARCHY_KEYBOARD_LAYOUTS" | awk -F'|' -v c="$preset_keyboard" '$1==c{print; exit}')
       keyboard_input_method=${keyboard_input_method:-none}
@@ -461,6 +463,7 @@ keyboard_form() {
     ((status == 0)) && break
 
     # Esc means "back", to the language picker, which can arm deferred provisioning.
+    # shellcheck disable=SC2154 # set by setup-form.sh, which comes from Omarchy
     if ((status == OMARCHY_FORM_BACK)); then
       language_form
       $defer_provisioning && return 0

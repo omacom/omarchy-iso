@@ -364,7 +364,7 @@ refused "cdn: nothing to check" env PATH="$cdn/bin:$PATH" CDN="$cdn" "$checker" 
 eval "$(sed -n '/^detect_packages() {$/,/^}$/p; /^installed_system_started() {$/,/^}$/p' "$harness")"
 declare -F detect_packages installed_system_started >/dev/null || fail "the harness no longer has detect_packages and installed_system_started"
 
-# shellcheck disable=SC2034 # detect_packages reads ISO
+# shellcheck disable=SC2034,SC2154 # detect_packages reads ISO and sets the package names
 packages_of() { ISO=$1; detect_packages; echo "$RUNTIME_PACKAGE $SETTINGS_PACKAGE"; }
 equal "an edge ISO installs the -dev packages" "$(packages_of release/omarchy-2026.10.09-x86_64-edge.iso)" "omarchy-dev omarchy-settings-dev"
 equal "a dev ISO installs the -dev packages" "$(packages_of release/omarchy-2026.10.09-x86_64-dev.iso)" "omarchy-dev omarchy-settings-dev"

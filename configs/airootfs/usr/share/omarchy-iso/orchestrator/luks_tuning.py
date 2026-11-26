@@ -275,17 +275,27 @@ def with_cmdline_options(cmdline: str) -> str:
     and ignores rd.luks.*, so one cmdline serves both initramfs flavours."""
     out = []
     extra = []
-    for param in cmdline.split():
+    tokens = cmdline.split()
+    existing_rd_names = {
+        token.rsplit("=", 1)[1]
+        for token in tokens
+        if token.startswith("rd.luks.name=") and token.count("=") >= 2
+    }
+    for param in tokens:
         if param.startswith("cryptdevice=") and param.count(":") == 1:
             param = f"{param}:{CMDLINE_OPTIONS}"
         if param.startswith("cryptdevice="):
             spec, _, rest = param[len("cryptdevice="):].partition(":")
             name = rest.split(":")[0] or "root"
-            uuid = _luks_uuid_of(spec)
             # Idempotent: every cmdline passes through here once at the
             # writer, and the archinstall-derived one has been here before.
-            if uuid and f"rd.luks.name={uuid}=" not in cmdline:
-                extra += [f"rd.luks.name={uuid}={name}",
-                          f"rd.luks.options={uuid}={CMDLINE_OPTIONS.replace('allow-discards', 'discard')}"]
+            # Skip shelling out to blkid once this mapper already has an
+            # rd.luks.name= parameter on the cmdline.
+            if name not in existing_rd_names:
+                uuid = _luks_uuid_of(spec)
+                if uuid and f"rd.luks.name={uuid}=" not in cmdline:
+                    extra += [f"rd.luks.name={uuid}={name}",
+                              f"rd.luks.options={uuid}={CMDLINE_OPTIONS.replace('allow-discards', 'discard')}"]
+                    existing_rd_names.add(name)
         out.append(param)
     return " ".join(out + extra)

@@ -34,20 +34,38 @@ if [[ ! -f $sfs || ! -d $airootfs || -z $pseudo ]]; then
   exit 1
 fi
 
+# Docker fills the container's /dev once, at start. A loop device the kernel
+# creates afterwards (such as the second loop dedup needs while the squashfs is
+# mounted) exists on the host but has no node in here, so make the node before
+# attaching it.
+attach_ro_loop() {
+  local backing="$1" dev
+  [[ -e /dev/loop-control ]] || mknod /dev/loop-control c 10 237
+  # losetup reports a device whose node is missing as "/dev/loopN (lost)".
+  dev=$(losetup --find | awk '{ print $1 }')
+  [[ $dev == /dev/loop[0-9]* ]] || { echo "ERROR: no free loop device: $dev" >&2; return 1; }
+  [[ -b $dev ]] || mknod "$dev" b 7 "${dev#/dev/loop}"
+  losetup --read-only "$dev" "$backing"
+  printf '%s\n' "$dev"
+}
+
 work=$(mktemp -d /tmp/omarchy-dedup.XXXXXX)
-loop=""
+sfs_loop=""
+img_loop=""
 cleanup() {
   set +e
   mountpoint -q "$work/image" && umount "$work/image"
-  [[ -n $loop ]] && losetup -d "$loop"
+  [[ -n $img_loop ]] && losetup -d "$img_loop"
   mountpoint -q "$work/sfs" && umount "$work/sfs"
+  [[ -n $sfs_loop ]] && losetup -d "$sfs_loop"
   rmdir "$work/image" "$work/sfs" "$work"
 }
 trap cleanup EXIT
 mkdir -p "$work/sfs" "$work/image"
-mount -t squashfs -o ro,loop "$sfs" "$work/sfs"
-loop=$(losetup --find --show --read-only "$work/sfs/omarchy-root.img")
-mount -t btrfs -o ro,subvol=omarchy-root "$loop" "$work/image"
+sfs_loop=$(attach_ro_loop "$sfs")
+mount -t squashfs -o ro "$sfs_loop" "$work/sfs"
+img_loop=$(attach_ro_loop "$work/sfs/omarchy-root.img")
+mount -t btrfs -o ro,subvol=omarchy-root "$img_loop" "$work/image"
 
 python3 - "$airootfs" "$work/image" "$pseudo" <<'PY'
 import filecmp, os, stat, sys

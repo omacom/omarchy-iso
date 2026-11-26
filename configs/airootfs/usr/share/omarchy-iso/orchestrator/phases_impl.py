@@ -1508,26 +1508,32 @@ def _start_library_warmup(ctx: InstallContext) -> None:
     from writing the cache or any link, and -i from reading the auxiliary
     cache, so it only reads: it can't race a later ldconfig over a file. It
     runs from after the image and any layer are in place to the factory
-    snapshot, and nothing waits for it before then."""
+    snapshot, and nothing waits for it before then. It is only a speedup, so
+    an install goes on without it when it cannot start."""
     state = getattr(ctx, "state", None)
     if state is None:
         return
-    state["library_warmup_proc"] = subprocess.Popen(
-        ["ldconfig", "-r", str(ctx.target), "-N", "-X", "-i"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    try:
+        state["library_warmup_proc"] = subprocess.Popen(
+            ["ldconfig", "-r", str(ctx.target), "-N", "-X", "-i"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        info(f"› library warm-up did not start ({exc}); pacman reads the libraries itself")
 
 
 def _join_library_warmup(ctx: InstallContext) -> None:
     """Wait for the scan before the target is snapshotted or unmounted. It
     only warms the page cache, so a failed scan is noted and the install goes
-    on."""
+    on. The handle stays in ctx.state until the wait returns, so an
+    interrupted wait still leaves stop_library_warmup a process to end."""
     state = getattr(ctx, "state", None)
-    proc = state.pop("library_warmup_proc", None) if state else None
+    proc = state.get("library_warmup_proc") if state else None
     if proc is None:
         return
     with _time_step("STEP.join_library_warmup"):
         status = proc.wait()
+    state.pop("library_warmup_proc", None)
     if status != 0:
         info(f"› library warm-up exited {status}; nothing depends on it")
 

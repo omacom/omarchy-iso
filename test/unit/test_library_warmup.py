@@ -32,6 +32,27 @@ class LibraryWarmupTest(unittest.TestCase):
         self.assertEqual(set(argv[3:]), {"-N", "-X", "-i"})
         self.assertIs(ctx.state["library_warmup_proc"], popen.return_value)
 
+    def test_a_scan_that_cannot_start_does_not_stop_the_install(self):
+        ctx = self.ctx()
+        with mock.patch.object(phases_impl.subprocess, "Popen", side_effect=FileNotFoundError("ldconfig")), \
+                mock.patch.object(phases_impl, "info") as info:
+            phases_impl._start_library_warmup(ctx)
+        self.assertNotIn("library_warmup_proc", ctx.state)
+        self.assertIn("did not start", info.call_args.args[0])
+
+    def test_an_interrupted_join_leaves_the_scan_for_the_exit_path(self):
+        ctx = self.ctx()
+        proc = mock.Mock()
+        proc.wait.side_effect = [KeyboardInterrupt, 0]
+        proc.poll.return_value = None
+        ctx.state["library_warmup_proc"] = proc
+        with self.assertRaises(KeyboardInterrupt):
+            phases_impl._join_library_warmup(ctx)
+        self.assertIs(ctx.state["library_warmup_proc"], proc)
+        phases_impl.stop_library_warmup(ctx)
+        proc.kill.assert_called_once()
+        self.assertNotIn("library_warmup_proc", ctx.state)
+
     def test_the_join_waits_and_a_failed_scan_does_not_stop_the_install(self):
         ctx = self.ctx()
         proc = mock.Mock()

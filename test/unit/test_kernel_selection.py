@@ -122,7 +122,7 @@ class KernelSelectionTest(unittest.TestCase):
                     # unjoined (ResourceWarning: subprocess is still running).
                     for name in ("_mount_offline_package_cache", "_mask_mkinitcpio_pacman_hooks",
                                  "_configure_limine_boot", "_write_pre_mounted_fstab", "_install_root_image",
-                                 "_start_target_keyring_init"):
+                                 "_start_target_keyring_init", "_start_library_warmup"):
                         stack.enter_context(mock.patch.object(phases_impl, name))
                     unmask = stack.enter_context(mock.patch.object(phases_impl, "_unmask_mkinitcpio_pacman_hooks"))
                     unmount = stack.enter_context(mock.patch.object(phases_impl, "_unmount_offline_package_cache"))

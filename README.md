@@ -463,7 +463,7 @@ The runtime an aarch64 image installs must have the platform detector, and for t
 
 Run `./bin/omarchy-iso-boot [release/omarchy.iso]`.
 
-Run `./test/all` for the fast, VM-free tests under `test/unit/`, which cover cidata autoinstall loading and the orchestrator's phases without needing a built ISO.
+Run `./test/all` for the fast, VM-free tests under `test/unit/`, which cover cidata autoinstall loading and the orchestrator's phases without needing a built ISO. They need `shellcheck`, which checks the nightly's scripts in `test/vm-image/`.
 
 To exercise installation alongside existing Windows-style partitions, run
 `./bin/omarchy-iso-test-windows-disk [release/omarchy.iso]`. It creates a

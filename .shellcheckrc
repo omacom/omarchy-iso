@@ -3,3 +3,6 @@
 # source lines are looked up from the directory of the script that has them.
 external-sources=true
 source-path=SCRIPTDIR
+# Also report an uppercase variable that nothing assigns. A scenario reads the
+# harness's BOOT_TIMEOUT that way, and the default checks miss it if it goes.
+enable=check-unassigned-uppercase

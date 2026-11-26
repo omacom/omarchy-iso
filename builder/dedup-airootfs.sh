@@ -40,12 +40,12 @@ fi
 # attaching it.
 attach_ro_loop() {
   local backing="$1" dev
-  [[ -e /dev/loop-control ]] || mknod /dev/loop-control c 10 237
+  [[ -e /dev/loop-control ]] || mknod /dev/loop-control c 10 237 || return 1
   # losetup reports a device whose node is missing as "/dev/loopN (lost)".
   dev=$(losetup --find | awk '{ print $1 }')
   [[ $dev == /dev/loop[0-9]* ]] || { echo "ERROR: no free loop device: $dev" >&2; return 1; }
-  [[ -b $dev ]] || mknod "$dev" b 7 "${dev#/dev/loop}"
-  losetup --read-only "$dev" "$backing"
+  [[ -b $dev ]] || mknod "$dev" b 7 "${dev#/dev/loop}" || return 1
+  losetup --read-only "$dev" "$backing" || return 1
   printf '%s\n' "$dev"
 }
 

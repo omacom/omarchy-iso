@@ -243,6 +243,8 @@ class DedupAndBuildIsoTest(unittest.TestCase):
         self.assertNotIn("-o ro,loop", text)
         self.assertNotIn("losetup --find --show", text)
         fn = re.search(r"attach_ro_loop\(\) \{.*?\n\}", text, re.S).group(0)
+        minor = next(n for n in range(99, 10000) if not Path(f"/dev/loop{n}").exists())
+        dev = f"/dev/loop{minor}"
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             stub_bin = tmp / "bin"
@@ -251,22 +253,35 @@ class DedupAndBuildIsoTest(unittest.TestCase):
             (stub_bin / "losetup").write_text(
                 '#!/bin/sh\n'
                 'echo "losetup $*" >>"$LOG"\n'
-                'if [ "$1" = "--find" ]; then echo "/dev/loop99 (lost)"; fi\n'
+                f'if [ "$1" = "--find" ]; then echo "{dev} (lost)"; exit 0; fi\n'
+                'exit "${LOSETUP_ATTACH_RC:-0}"\n'
             )
             (stub_bin / "mknod").write_text('#!/bin/sh\necho "mknod $*" >>"$LOG"\n')
             for name in ("losetup", "mknod"):
                 (stub_bin / name).chmod(0o755)
+            env = {"PATH": f"{stub_bin}:/usr/bin:/bin", "LOG": str(log)}
             res = subprocess.run(
-                ["bash", "-c", f"{fn}\nattach_ro_loop /tmp/backing.img"],
-                env={"PATH": f"{stub_bin}:/usr/bin:/bin", "LOG": str(log)},
+                ["bash", "-euo", "pipefail", "-c", f'{fn}\ndev=$(attach_ro_loop /tmp/backing.img)\nprintf "%s\\n" "$dev"'],
+                env=env,
                 capture_output=True,
                 text=True,
                 check=True,
             )
-            self.assertEqual(res.stdout.strip(), "/dev/loop99")
+            self.assertEqual(res.stdout.strip(), dev)
             calls = log.read_text().splitlines()
-            self.assertIn("mknod /dev/loop99 b 7 99", calls)
-            self.assertIn("losetup --read-only /dev/loop99 /tmp/backing.img", calls)
+            self.assertIn(f"mknod {dev} b 7 {minor}", calls)
+            self.assertIn(f"losetup --read-only {dev} /tmp/backing.img", calls)
+
+            # Command substitution drops errexit in Bash: a failed attach must
+            # still fail attach_ro_loop without printing a device path.
+            fail_res = subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", f'{fn}\ndev=$(attach_ro_loop /tmp/backing.img)\nprintf "%s\\n" "$dev"'],
+                env={**env, "LOSETUP_ATTACH_RC": "1"},
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(fail_res.returncode, 0)
+            self.assertEqual(fail_res.stdout.strip(), "")
 
     def test_mksquashfs_shim_cleans_up_pseudo_file(self):
         shim_text = SHIM.read_text()

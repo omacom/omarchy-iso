@@ -95,9 +95,10 @@ class GreeterChoiceTest(unittest.TestCase):
     def test_return_installs(self):
         choice, seen = self.run_greeter([b"\n"])
         self.assertEqual(choice, "install")
-        # Start Install keeps the look it had; the Space line sits under it, fainter.
-        self.assertIn(b"\x1b[2mPress Return to Start Install", seen)
-        self.assertIn(b"\x1b[90mOr press Space to just try", seen)
+        # Start Install in the text colour, plain to see; the Space line under
+        # it as subdued subtext.
+        self.assertIn(b"\x1b[0mPress Return to Start Install", seen)
+        self.assertIn(b"\x1b[90m...or press Space just to try", seen)
 
     def test_a_raw_return_installs_too(self):
         self.assertEqual(self.run_greeter([b"\r"])[0], "install")
@@ -110,7 +111,7 @@ class GreeterChoiceTest(unittest.TestCase):
         self.assertEqual(choice, "try")
         # The highlight moved: the Space line in Start Install's style.
         self.assertIn(b"\x1b[90mPress Return to Start Install", seen)
-        self.assertIn(b"\x1b[2mOr press Space to just try", seen)
+        self.assertIn(b"\x1b[0m...or press Space just to try", seen)
 
     def test_application_cursor_mode_down_tries(self):
         self.assertEqual(self.run_greeter([DOWN_APP, b"\n"])[0], "try")

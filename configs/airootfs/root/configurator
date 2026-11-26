@@ -126,11 +126,12 @@ TRY_LAYER="${TRY_LAYER:-/run/archiso/bootmnt/arch/$(uname -m)/omarchy-try.sfs}"
 # The welcome's choices, centered from row $1 of a $2-column screen, with
 # choice $3 (0 Start Install, 1 Just try) highlighted: Start Install, and
 # under it, on media that carry the Try layer, Space for Just try. The
-# highlighted line is dim, as Start Install always was, and the other fainter
-# still, so the welcome opens looking as it did.
+# highlighted line is drawn in the text colour, as clear as the tagline, and
+# the other as subdued subtext: the welcome opens with Start Install plain to
+# see and Just try beneath it.
 greeter_choices() {
   local row=$1 cols=$2 selected=${3:-0} text pad i
-  local -a texts=("$(t greeter.hint)") styles=('\033[2m' '\033[90m')
+  local -a texts=("$(t greeter.hint)") styles=('\033[0m' '\033[90m')
   [[ -f $TRY_LAYER ]] && texts+=("$(t greeter.try)")
   for i in "${!texts[@]}"; do
     text=${texts[i]}

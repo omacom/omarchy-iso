@@ -1,9 +1,10 @@
 #!/bin/bash
 #
-# The installer tells the drive that the new root partition is free before it
-# writes to it (omarchy-discard-partition). Nothing else would: mkfs.btrfs
-# runs with -K, the root image fills only the start of the partition, and the
-# installed btrfs only discards what it frees after mount.
+# The installer tells the drive which blocks of the new root are free, with an
+# fstrim of the target once the install timer has stopped
+# (phases_impl.trim_target). Nothing else would: mkfs.btrfs runs with -K, the
+# root image fills only the start of the partition, the installed btrfs only
+# discards what it frees after mount, and archinstall leaves fstrim.timer off.
 #
 # Boots the live ISO once to fill the last 8 GiB of the disk with random data,
 # as a previous install would have left it, then installs unattended over it
@@ -76,9 +77,9 @@ stop_vm
 
 after=$(allocated_in "$DISCARD_DISK" $((fill_start_gib * gib)) $((fill_gib * gib)))
 log "After the install: $((after / 1024 / 1024)) MiB of the last ${fill_gib} GiB hold data"
-grep -a 'omarchy-discard-partition' "$RUN_DIR/omarchy-install.log" >"$RUN_DIR/discard.txt" || true
-check "the installer discarded the new root partition ($(head -n 1 "$RUN_DIR/discard.txt"))" \
-  grep -q 'omarchy-discard-partition: discarded ' "$RUN_DIR/discard.txt"
+grep -a '› trim: ' "$RUN_DIR/omarchy-install.log" >"$RUN_DIR/discard.txt" || true
+check "the installer trimmed the new root ($(head -n 1 "$RUN_DIR/discard.txt"))" \
+  grep -q 'trimmed in ' "$RUN_DIR/discard.txt"
 check "the old data at the end of the disk is gone from the disk image ($((before / 1024 / 1024)) MiB before, $((after / 1024 / 1024)) MiB after)" \
   test "$after" -lt $((64 * 1024 * 1024))
 

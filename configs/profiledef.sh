@@ -56,7 +56,6 @@ file_permissions=(
   ["/usr/local/bin/omarchy-install-dashboard"]="0:0:755"
   ["/usr/local/bin/omarchy-install-diagnose-media"]="0:0:755"
   ["/usr/local/bin/omarchy-luks-calibrate"]="0:0:755"
-  ["/usr/local/bin/omarchy-discard-partition"]="0:0:755"
   ["/usr/local/bin/omarchy-installer-cpus"]="0:0:755"
   ["/usr/local/bin/omarchy-iso-install"]="0:0:755"
   ["/usr/local/bin/omarchy-target-keyring-early"]="0:0:755"

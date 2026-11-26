@@ -72,5 +72,29 @@ class OpenInstallerTest(unittest.TestCase):
             self.assertIsInstance(installer, Installer)
 
 
+
+    def test_success_skips_mid_install_os_sync(self):
+        synced = []
+        orig_exit = Installer.__exit__
+        import os as _os
+
+        def exit_with_sync(self, exc_type, exc_value, traceback):
+            if exc_type is None:
+                _os.sync()
+            return orig_exit(self, exc_type, exc_value, traceback)
+
+        real_sync = _os.sync
+        _os.sync = lambda: synced.append(1)
+        Installer.__exit__ = exit_with_sync
+        try:
+            with self.arch.open_installer(Config(), Path("/mnt")) as installer:
+                pass
+        finally:
+            Installer.__exit__ = orig_exit
+            _os.sync = real_sync
+        self.assertEqual(installer.calls, ["success"])
+        self.assertEqual(synced, [])
+
+
 if __name__ == "__main__":
     unittest.main()

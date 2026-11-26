@@ -132,9 +132,9 @@ release_and_wipe() {
 # before --rereadpt runs. On a clean disk, skip the lock so udevd does not hit
 # EAGAIN and stall udevadm settle.
 release_disk() {
-  local attempt lock
+  local lock
   released=false
-  for attempt in $(seq 1 20); do
+  for _ in $(seq 1 20); do
     udevadm settle 2>/dev/null || true
     if disk_has_state; then
       # Read-write, so the close that drops the lock is an IN_CLOSE_WRITE,

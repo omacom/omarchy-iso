@@ -63,8 +63,7 @@ partition_table_type() {
 # Fail loudly. The former version looped over sleep and returned its status,
 # so a device that never appeared was indistinguishable from one that did.
 wait_for_device() {
-  local i
-  for i in $(seq 1 10); do
+  for _ in $(seq 1 10); do
     [[ -b "$1" ]] && return 0
     udevadm settle 2>/dev/null || true
     sleep 1

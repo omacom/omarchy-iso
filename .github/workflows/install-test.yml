@@ -249,7 +249,7 @@ jobs:
         # once, as the variant changes nothing it does before it stops.
         include:
           - variant: default
-            except: &elsewhere used-disk full-nvram live-lowmem pxe slow-medium corrupt-image luks-calibration
+            except: &elsewhere used-disk full-nvram live-lowmem pxe slow-medium corrupt-image luks-calibration live-fontconfig
           - variant: encrypted
             except: *elsewhere
             env: OMARCHY_INTEGRATION_ENCRYPT=true
@@ -275,7 +275,7 @@ jobs:
             scenarios: slow-medium corrupt-image
             live: true
           - variant: live-misc
-            scenarios: luks-calibration
+            scenarios: luks-calibration live-fontconfig
             live: true
           # One keyboard variant, the harder case: encrypted, and de, not uk:
           # its y and z are swapped, so the passphrase omarchy only unlocks at

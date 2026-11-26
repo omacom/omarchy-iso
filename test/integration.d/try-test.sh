@@ -1,11 +1,12 @@
 #!/bin/bash
 #
-# Try Omarchy: the installer's first question must bring up the real desktop
-# from the medium, with pacman usable, and leave the machine's disk untouched.
+# Try Omarchy: Just try on the installer's welcome must bring up the real
+# desktop from the medium, with pacman usable, and leave the machine's disk
+# untouched.
 #
 # The ISO boots alone with a disk of random bytes for the machine's own. No
 # key goes to GRUB, which reads keys through the firmware: it boots the
-# installer by itself, and the installer asks whether to install or try. Try
+# installer by itself, whose welcome offers Just try under Start Install. Try
 # is picked there and the desktop waited for. A terminal there fetches a
 # bootstrap that authorizes the harness's key and starts sshd, and the rest
 # is checked over SSH. Runs on the default variant only: Try boots the ISO,
@@ -28,21 +29,19 @@ installer_greets_without_a_key() {
   ! grep -aq "GNU GRUB" "$SERIAL_LOG"
 }
 
-# Return on the welcome, as any install begins, then the first question. Left
-# alone, it waits: nothing picks Try, or Install, by itself.
-first_question_waits() {
-  press ret
-  OCR_KMSCON=1 wait_for_screen "try it first" 120 || return 1
-  capture_console "success-try-question"
+# The welcome offers Just try under Start Install, and left alone it waits:
+# nothing picks Try, or Install, by itself.
+welcome_waits() {
   sleep 15
-  OCR_KMSCON=1 ocr_screen | grep -qi "try it first"
+  OCR_KMSCON=1 ocr_screen | grep -qi "Linux by DHH"
 }
 
-# Try is the second entry.
+# Down to Just try, then Return, as keys through QEMU: the arrow reaches the
+# welcome as an escape sequence once Linux drives the keyboard.
 pick_try() {
   press down
   sleep 1
-  capture_console "success-try-question-try"
+  capture_console "success-try-welcome-just-try"
   press ret
 }
 
@@ -125,7 +124,7 @@ start_vm "$disk" "$RUN_DIR/serial.log" \
   -device ide-cd,drive=cdrom0,bootindex=2 \
   -device intel-hda -device hda-duplex,audiodev=noaudio -audiodev none,id=noaudio
 check "GRUB shows no menu, and the installer greets with no key pressed" installer_greets_without_a_key
-check "the installer asks install or try, and waits for an answer" first_question_waits
+check "the welcome waits for a key" welcome_waits
 pick_try
 check "Try Omarchy reaches the desktop" wait_for_desktop
 capture_console "success-try-desktop"

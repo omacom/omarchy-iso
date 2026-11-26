@@ -884,14 +884,6 @@ drive_configurator() {
   capture_console "success-installer-00-greeter"
   press ret
 
-  # Media that carry Try Omarchy (x86_64) ask first whether to install or
-  # try it. Return takes Install, the first entry.
-  wait_for_screen_any "try it first\|Just try" "Language\|keyboard layout" 300
-  if [[ $SCREEN_MATCHED == "try it first\|Just try" ]]; then
-    capture_console "success-installer-00-install-or-try"
-    press ret
-  fi
-
   # The language picker is first only when the live system's omarchy package
   # carries default/i18n/locales.json (quattro and edge). A stable ISO has no
   # such file, so the configurator opens on the keyboard layout instead.

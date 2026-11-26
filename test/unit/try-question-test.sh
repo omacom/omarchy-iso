@@ -1,19 +1,20 @@
 #!/bin/bash
 #
-# Install or try: the installer's first question, and the soft reboot into
-# Try Omarchy behind it.
+# Just try, picked on the installer's welcome, and the soft reboot into Try
+# Omarchy behind it.
 #
 # The boot menus read keys through the firmware, which drives only keyboards
 # that speak the USB boot protocol. A wired Apple Magic Keyboard does not: on
 # an MSI Z690 no key reached GRUB, and its countdown booted the default entry.
-# So the menus boot Install at once, and the installer asks, where Linux
-# drives every keyboard. Return installs, as before. Try never falls through
-# to an install, and it starts without kexec, which the signed kernel lacks.
+# So the menus boot Install at once, and the welcome offers Just try under
+# Start Install, where Linux drives every keyboard. Return installs, as
+# before. Try never falls through to an install, and it starts without kexec,
+# which the signed kernel lacks.
 
-# The screens start_form draws are stubbed as functions the eval'd
-# start_form calls, the stub commands are written with their variables
-# unexpanded, for them to expand when they run, and the stubs go first on a
-# PATH each run sets for itself.
+# The screens start_try draws are stubbed as functions the eval'd start_try
+# calls, the stub commands are written with their variables unexpanded, for
+# them to expand when they run, and the stubs go first on a PATH each run sets
+# for itself.
 # shellcheck disable=SC2329,SC2016,SC2030,SC2031
 
 set -uo pipefail
@@ -29,40 +30,11 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin"
 
-# --- the first question --------------------------------------------------------
+# --- Just try, from the welcome ---------------------------------------------------
 
-start_form_source=$(awk '/^start_form\(\) \{/,/^\}/' "$CONFIGURATOR")
-[[ -n $start_form_source ]] || fail "the configurator has no start_form"
-
-# gum answers from a queue, one line per call: "<status> <row>", the row's
-# number in what it was offered. It records the rows, and prints the row as
-# the real gum does: with --label-delimiter, the value after the label.
-gum_stub() {
-  cat >"$work/bin/gum" <<'EOF'
-#!/bin/bash
-[[ $1 == "choose" ]] || exit 0
-rows=$(cat)
-printf '%s\n' "--" "$rows" >>"$WORK/offered"
-read -r status row <"$WORK/answers"
-sed -i 1d "$WORK/answers"
-if [[ -n $row ]]; then
-  line=$(sed -n "${row}p" <<<"$rows")
-  delimiter=""
-  while (($#)); do
-    [[ $1 == "--label-delimiter" ]] && delimiter=$2
-    shift
-  done
-  if [[ -n $delimiter ]]; then
-    printf '%s\n' "${line#*"$delimiter"}"
-  else
-    printf '%s\n' "$line"
-  fi
-fi
-exit "$status"
-EOF
-  chmod +x "$work/bin/gum"
-}
-gum_stub
+# The choice itself, on the welcome, is test/unit/test_greeter_choice.py.
+start_try_source=$(awk '/^start_try\(\) \{/,/^\}/' "$CONFIGURATOR")
+[[ -n $start_try_source ]] || fail "the configurator has no start_try"
 
 # omarchy-try succeeds or fails as $WORK/try-status says.
 cat >"$work/bin/omarchy-try" <<'EOF'
@@ -72,79 +44,50 @@ echo "the root image is not mounted at /run/omarchy-root/image" >&2
 exit "$(<"$WORK/try-status")"
 EOF
 chmod +x "$work/bin/omarchy-try"
+# gum is only the Back button of a Try that could not start.
+printf '#!/bin/bash\necho "gum $1" >>"$WORK/screens"\n' >"$work/bin/gum"
+chmod +x "$work/bin/gum"
 
-# start_form as the configurator defines it, with the screens it draws
-# stubbed. A soft reboot that is under way leaves start_form sleeping until
+# start_try as the configurator defines it, with the screens it draws
+# stubbed. A soft reboot that is under way leaves start_try sleeping until
 # systemd stops it: the sleep stands in for that and ends the run with 42.
-run_start_form() {
-  local layer=$1
-  : >"$work/offered"
+run_start_try() {
   : >"$work/try-calls"
+  : >"$work/screens"
   (
     export WORK=$work PATH="$work/bin:$PATH"
-    # shellcheck disable=SC2034 # used by the start_form under test
-    TRY_LAYER=$layer
     t() { printf '%s' "$1"; }
-    clear_logo() { :; }
-    say() { :; }
-    step() { echo "step $1" >>"$WORK/steps"; }
+    say() { echo "say $*" >>"$WORK/screens"; }
+    step() { echo "step $1" >>"$WORK/screens"; }
     sleep() { exit 42; }
-    eval "$start_form_source"
-    start_form
+    eval "$start_try_source"
+    start_try
   ) </dev/null >/dev/null 2>&1
 }
 
-touch "$work/omarchy-try.sfs"
-
-printf '0 1\n' >"$work/answers"
-run_start_form "$work/no-layer.sfs"
-status=$?
-((status == 0)) || fail "start_form without a Try layer returned $status"
-[[ ! -s $work/offered ]] || fail "media without a Try layer asked the question"
-pass "media without the Try layer (aarch64, OEM) never ask"
-
-printf '0 1\n' >"$work/answers"
-run_start_form "$work/omarchy-try.sfs"
-status=$?
-((status == 0)) || fail "picking Install returned $status"
-[[ $(sed -n 2p "$work/offered") == $'start.install\tinstall' ]] ||
-  fail "Install is not the first entry, so Return would not install: $(paste -sd'|' "$work/offered")"
-[[ $(sed -n 3p "$work/offered") == $'start.try\ttry' ]] || fail "Try is not offered: $(paste -sd'|' "$work/offered")"
-[[ ! -s $work/try-calls ]] || fail "picking Install started Try"
-pass "Install is the first entry, and picking it carries on to the install"
-
-printf '1\n130\n0 1\n' >"$work/answers"
-run_start_form "$work/omarchy-try.sfs"
-status=$?
-((status == 0)) || fail "Esc then Install returned $status"
-[[ $(grep -cx -- -- "$work/offered") == 3 ]] || fail "Esc or Ctrl+C did not ask again"
-[[ ! -s $work/try-calls ]] || fail "Esc or Ctrl+C started Try"
-pass "Esc and Ctrl+C ask again instead of picking anything"
-
 echo 0 >"$work/try-status"
-printf '0 2\n' >"$work/answers"
-run_start_form "$work/omarchy-try.sfs"
+run_start_try
 status=$?
-((status == 42)) || fail "start_form returned $status after Try started, so the install would run"
+((status == 42)) || fail "start_try returned $status after Try started, so the install would run"
 [[ $(wc -l <"$work/try-calls") == 1 ]] || fail "omarchy-try ran $(wc -l <"$work/try-calls") times"
-pass "picking Try starts it and never returns to the install"
+pass "Just try starts Try and never returns to the install"
 
 echo 1 >"$work/try-status"
-printf '0 2\n0 1\n0 1\n' >"$work/answers"
-rm -f "$work/steps"
-run_start_form "$work/omarchy-try.sfs"
+run_start_try
 status=$?
-((status == 0)) || fail "Try failing, then Install, returned $status"
-grep -qx "step start.failed" "$work/steps" || fail "a Try that could not start said nothing"
-[[ $(grep -cx -- -- "$work/offered") == 3 ]] || fail "a Try that could not start did not ask again"
-pass "a Try that cannot start says so and asks again"
+((status == 0)) || fail "a Try that could not start returned $status"
+grep -qx "step start.failed" "$work/screens" || fail "a Try that could not start said nothing"
+grep -q "say the root image is not mounted" "$work/screens" || fail "a Try that could not start did not say why"
+pass "a Try that cannot start says why and returns"
 
-# The configurator asks it after the greeter, before the language, and only
-# on media that boot to the wizard: OEM media skip the greeter, and a cidata
-# drive or a kmscon relaunch never reach this block.
-grep -Pzq '(?s)if \[\[ -z \$resume_stage \]\]; then.*?if ! \$oem_install; then\n    greeter\n    start_form\n    language_form\n  fi' "$CONFIGURATOR" ||
-  fail "the configurator does not ask between the greeter and the language screen"
-pass "the configurator asks after the greeter and before the language"
+# The welcome comes back after a Try that could not start, and only Install
+# carries on to the language. OEM media skip the welcome, and a cidata drive
+# or a kmscon relaunch never reach this block.
+# shellcheck disable=SC2016 # the configurator's text, not this shell's
+grep -Pzq '(?s)if \[\[ -z \$resume_stage \]\]; then.*?if ! \$oem_install; then\n    greeter\n    while \[\[ \$greeter_choice == "try" \]\]; do\n      start_try\n      greeter\n    done\n    language_form\n  fi' "$CONFIGURATOR" ||
+  fail "the configurator does not go from the welcome to Just try, or on to the language"
+grep -q "start_form\|start\.header" "$CONFIGURATOR" && fail "the separate Install or Just try question is still there"
+pass "the welcome leads to Just try or the install, and asks nothing else first"
 
 # --- the soft reboot -----------------------------------------------------------
 

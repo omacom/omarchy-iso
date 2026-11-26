@@ -1,12 +1,10 @@
 {
   "greeter.tagline": "Beautiful, Fun & Agentic Linux by DHH",
   "greeter.hint": "Press Return to Start Install",
+  "greeter.try": "Just try",
   "common.yes": "Yes",
   "common.back": "Back",
   "common.change": "No, change it",
-  "start.header": "Install Omarchy, or try it first?",
-  "start.install": "Install",
-  "start.try": "Just try",
   "start.starting": "Starting Omarchy from this drive...",
   "start.failed": "Try Omarchy could not start. Nothing has been installed.",
   "language.header": "Language",

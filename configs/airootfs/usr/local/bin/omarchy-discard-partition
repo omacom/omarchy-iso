@@ -59,7 +59,10 @@ started=$EPOCHREALTIME
 # the middle of one ioctl), so --step 4G bounds what is in flight when the
 # budget runs out. On a 990 PRO it cost 0.34-0.40 s for 327 GB against 0.33 s
 # in one ioctl (3 runs each). timeout waits for blkdiscard to exit.
-timeout --signal=TERM "$budget" blkdiscard --step 4G "$part" </dev/null
+# --foreground keeps blkdiscard in the caller's process group, which the
+# dashboard kills when the install is cancelled. Without it timeout moves
+# into a group of its own, and the discard outlives the cancel.
+timeout --foreground --signal=TERM "$budget" blkdiscard --step 4G "$part" </dev/null
 status=$?
 elapsed=$(awk -v a="$started" -v b="$EPOCHREALTIME" 'BEGIN { printf "%.2f", b - a }')
 

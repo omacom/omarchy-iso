@@ -34,7 +34,9 @@ STUB
 cat >"$tmp/bin/blkdiscard" <<'STUB'
 #!/bin/bash
 echo "blkdiscard $*" >>"$CALLS"
-[[ -z ${FAKE_SLEEP:-} ]] || sleep "$FAKE_SLEEP"
+# One process, like blkdiscard: a slow discard is this process, named as
+# the stub, not a child sleep that a signal to the stub would orphan.
+[[ -z ${FAKE_SLEEP:-} ]] || exec -a "$0" sleep "$FAKE_SLEEP"
 exit "${FAKE_STATUS:-0}"
 STUB
 chmod +x "$tmp/bin"/*
@@ -69,6 +71,24 @@ run "was still running after 1s; stopped it" FAKE_SLEEP=30 OMARCHY_DISCARD_BUDGE
 (( SECONDS - started < 10 )) || fail "a slow discard was not stopped at its budget"
 pgrep -f "$tmp/bin/blkdiscard" >/dev/null && fail "the stopped discard is still running"
 echo "ok: a slow discard is stopped at its budget and waited for"
+
+# Cancelling the install stops the discard too. The dashboard stops the
+# installer by killing its process group (omarchy-install-dashboard,
+# stop_child); a blkdiscard outside that group would keep the partition open
+# and make an immediate retry fail with the partition busy.
+: >"$tmp/calls"
+setsid env CALLS="$tmp/calls" PATH="$tmp/bin:$PATH" FAKE_SLEEP=30 "$helper" /dev/fake1 >/dev/null &
+caller=$!
+for _ in {1..50}; do [[ -s $tmp/calls ]] && break; sleep 0.1; done
+[[ -s $tmp/calls ]] || fail "the cancel case never started blkdiscard"
+kill -TERM -- "-$caller" 2>/dev/null || true
+wait "$caller" 2>/dev/null || true
+for _ in {1..20}; do pgrep -f "$tmp/bin/blkdiscard" >/dev/null || break; sleep 0.1; done
+if pgrep -f "$tmp/bin/blkdiscard" >/dev/null; then
+  pkill -f "$tmp/bin/blkdiscard" || true
+  fail "blkdiscard kept running after the caller's process group was killed"
+fi
+echo "ok: killing the caller's process group stops the discard"
 
 if (( EUID != 0 )) || ! command -v losetup >/dev/null || ! command -v sfdisk >/dev/null; then
   echo "skip: a real discard on a loop device needs root, losetup and sfdisk"

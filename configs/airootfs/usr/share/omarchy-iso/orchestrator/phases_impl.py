@@ -3987,7 +3987,7 @@ def run_chroot_finalizer(ctx: InstallContext, *, private_mounts: bool = False) -
 
     # Reused unattended answers can request this even on an older target.
     choice = ctx.omarchy_install.get("fingerprint_setup")
-    helper = Path("usr/share/omarchy/bin/omarchy-provision-fingerprint-choice")
+    helper = Path("usr/bin/omarchy-provision-fingerprint-choice")
     if choice in ("requested", "skipped") and (ctx.target / helper).is_file():
         _run_target_setup_command(
             ctx, [f"/{helper}", choice], user=ctx.username, private_mounts=private_mounts,

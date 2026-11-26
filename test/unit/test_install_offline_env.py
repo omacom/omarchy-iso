@@ -25,13 +25,17 @@ from orchestrator import phases_impl  # noqa: E402
 
 class MiseOfflineTest(unittest.TestCase):
     def test_installer_records_fingerprint_preference_for_the_owner(self):
-        helper = "usr/share/omarchy/bin/omarchy-provision-fingerprint-choice"
+        helper = "usr/bin/omarchy-provision-fingerprint-choice"
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp)
             for supported in (False, True):
                 if supported:
                     (target / helper).parent.mkdir(parents=True)
                     (target / helper).touch()
+                    # The packaged checkout links back to the installed command inside the target.
+                    alias = target / "usr/share/omarchy/bin" / Path(helper).name
+                    alias.parent.mkdir(parents=True)
+                    alias.symlink_to(f"/{helper}")
                 for choice in ("requested", "skipped", ""):
                     with self.subTest(choice=choice, supported=supported):
                         ctx = types.SimpleNamespace(username="owner", defer_provisioning=False, target=target,

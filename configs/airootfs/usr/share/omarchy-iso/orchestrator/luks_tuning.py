@@ -283,37 +283,46 @@ def _luks_uuid_of(spec: str) -> str | None:
         return fallback
 
 
-def _in_vm() -> bool:
+def _in_vm() -> bool | None:
     try:
         return run(["systemd-detect-virt", "--vm"]).stdout.decode().strip() not in ("", "none")
-    except CalledProcessError:
-        return False  # exit status 1 and "none": not virtualized
+    except CalledProcessError as exc:
+        output = exc.stdout if exc.stdout is not None else exc.output
+        if isinstance(output, bytes):
+            output = output.decode(errors="ignore")
+        if (output or "").strip() == "none":
+            return False  # exit status 1 and "none": not virtualized
+        return None       # unexpected error: keep the default queue, do not cache
     except OSError:
-        return True   # cannot tell: keep the default queue
+        return None       # cannot tell: keep the default queue, do not cache
 
 
-def _cpu_has_aes(cpuinfo: Path = Path("/proc/cpuinfo")) -> bool:
-    """AES instructions: x86 lists `aes` in flags, arm64 in Features."""
+def _cpu_has_aes(cpuinfo: Path = Path("/proc/cpuinfo")) -> bool | None:
+    """AES instructions: x86 lists `aes` in flags, arm64 in Features;
+    None when /proc/cpuinfo cannot be read."""
     try:
         for line in cpuinfo.read_text().splitlines():
             key, _, values = line.partition(":")
             if key.strip() in ("flags", "Features") and "aes" in values.split():
                 return True
     except OSError:
-        pass
+        return None
     return False
 
 
-def _is_nvme_ssd(dev: Path) -> bool:
+def _is_nvme_ssd(dev: Path) -> bool | None:
     """True when the disk under dev (a partition or a whole disk) is a
-    non-rotational NVMe device."""
+    non-rotational NVMe device; None when probing fails."""
     try:
         parent = run(["lsblk", "-ndo", "PKNAME", str(dev)]).stdout.decode().strip()
         disk = f"/dev/{parent}" if parent else str(dev)
         fields = run(["lsblk", "-ndo", "TRAN,ROTA", disk]).stdout.decode().split()
     except (CalledProcessError, OSError):
-        return False
+        return None
     return fields == ["nvme", "0"]
+
+
+_write_workqueue_cache: dict[str, bool] = {}
 
 
 def bypass_write_workqueue(spec: str) -> bool:
@@ -325,7 +334,26 @@ def bypass_write_workqueue(spec: str) -> bool:
     dev = _spec_device(spec)
     if not dev.exists():
         return False
-    return not _in_vm() and _cpu_has_aes() and _is_nvme_ssd(dev)
+    key = str(dev.resolve())
+    if key in _write_workqueue_cache:
+        return _write_workqueue_cache[key]
+    in_vm = _in_vm()
+    if in_vm is None:
+        return False
+    if in_vm:
+        _write_workqueue_cache[key] = False
+        return False
+    has_aes = _cpu_has_aes()
+    if has_aes is None:
+        return False
+    if not has_aes:
+        _write_workqueue_cache[key] = False
+        return False
+    is_nvme = _is_nvme_ssd(dev)
+    if is_nvme is None:
+        return False
+    _write_workqueue_cache[key] = is_nvme
+    return is_nvme
 
 
 def cmdline_options(spec: str) -> str:

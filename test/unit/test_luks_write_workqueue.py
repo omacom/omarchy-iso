@@ -48,6 +48,7 @@ class WriteWorkqueueTest(unittest.TestCase):
         os.environ.pop(self.t.WRITE_WORKQUEUE_ENV, None)
 
     def decide(self, aes=True, **answers):
+        self.t._write_workqueue_cache.clear()
         with mock.patch.object(self.t, "run", fake_run(**answers)), \
              mock.patch.object(self.t, "_cpu_has_aes", lambda: aes):
             return self.t.bypass_write_workqueue(str(self.dev))
@@ -117,6 +118,84 @@ class WriteWorkqueueTest(unittest.TestCase):
                       cmdline)
         self.assertIn(f"rd.luks.options={uuid}=discard,no-read-workqueue", cmdline)
         self.assertNotIn("no-write-workqueue", cmdline)
+
+    def test_decision_is_cached_per_resolved_device_and_override_still_wins(self):
+        calls = []
+        base = fake_run()
+
+        def counting_run(cmd):
+            calls.append(cmd)
+            return base(cmd)
+
+        alias = self.dev.with_name("by-uuid-alias")
+        alias.symlink_to(self.dev)
+        with mock.patch.object(self.t, "run", counting_run), \
+             mock.patch.object(self.t, "_cpu_has_aes", lambda: True):
+            self.assertTrue(self.t.bypass_write_workqueue(str(self.dev)))
+            self.assertEqual(len(calls), 3)
+            self.assertTrue(self.t.bypass_write_workqueue(str(alias)))
+            self.assertEqual(len(calls), 3)
+            os.environ[self.t.WRITE_WORKQUEUE_ENV] = "keep"
+            self.assertFalse(self.t.bypass_write_workqueue(str(self.dev)))
+            self.assertEqual(len(calls), 3)
+
+    def test_repeated_with_cmdline_options_is_idempotent_without_blkid(self):
+        uuid = "00000000-1111-2222-3333-444444444444"
+        os.environ[self.t.WRITE_WORKQUEUE_ENV] = "bypass"
+        once = self.t.with_cmdline_options(
+            f"cryptdevice=UUID={uuid}:omarchy_root root=/dev/mapper/omarchy_root rw")
+        with mock.patch.object(self.t, "_luks_uuid_of", side_effect=AssertionError("unexpected lookup")):
+            twice = self.t.with_cmdline_options(once)
+        self.assertEqual(twice, once)
+
+    def test_probe_errors_keep_queue_without_caching(self):
+        base = fake_run()
+
+        def bad_virt(cmd):
+            if cmd[0] == "systemd-detect-virt":
+                raise subprocess.CalledProcessError(1, cmd, output=b"")
+            return base(cmd)
+
+        def bad_lsblk(cmd):
+            if cmd[0] == "lsblk":
+                raise subprocess.CalledProcessError(1, cmd, output=b"")
+            return base(cmd)
+
+        with mock.patch.object(self.t, "_cpu_has_aes", lambda: True):
+            with mock.patch.object(self.t, "run", bad_virt):
+                self.assertFalse(self.t.bypass_write_workqueue(str(self.dev)))
+            with mock.patch.object(self.t, "run", bad_lsblk):
+                self.assertFalse(self.t.bypass_write_workqueue(str(self.dev)))
+            with mock.patch.object(self.t, "run", base):
+                self.assertTrue(self.t.bypass_write_workqueue(str(self.dev)))
+
+    def test_pre_mounted_writers_carry_write_workqueue_option(self):
+        uuid = "00000000-1111-2222-3333-444444444444"
+        btrfs_uuid = "11111111-2222-3333-4444-555555555555"
+        os.environ[self.t.WRITE_WORKQUEUE_ENV] = "bypass"
+        with orchestrator_module("phases_impl", {"archinstall.lib.command": {"run": run}}) as phases:
+            target = Path(self.enterContext(tempfile.TemporaryDirectory()))
+            (target / "etc").mkdir()
+            import types
+            ctx = types.SimpleNamespace(
+                target=target,
+                omarchy_install={"storage": {"luks_uuid": uuid, "root_mapper": "/dev/mapper/omarchy_root"}},
+            )
+            phases._write_pre_mounted_crypttab(ctx)
+            crypttab = (target / "etc" / "crypttab.initramfs").read_text()
+            self.assertIn(f"UUID={uuid}", crypttab)
+            self.assertIn("luks,discard,no-read-workqueue,no-write-workqueue", crypttab)
+
+            cmdline = phases._build_pre_mounted_cmdline(ctx, btrfs_uuid)
+            self.assertIn(
+                f"cryptdevice=UUID={uuid}:omarchy_root:allow-discards,no-read-workqueue,no-write-workqueue",
+                cmdline,
+            )
+            expanded = sys.modules["orchestrator.luks_tuning"].with_cmdline_options(cmdline)
+            self.assertIn(
+                f"rd.luks.options={uuid}=discard,no-read-workqueue,no-write-workqueue",
+                expanded,
+            )
 
 
 if __name__ == "__main__":

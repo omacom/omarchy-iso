@@ -400,23 +400,6 @@ class ConsoleFontLoadTest(unittest.TestCase):
         self.assertFalse(own_path)
 
 
-class RegionMarkerTest(unittest.TestCase):
-    def marker(self, preset):
-        with tempfile.TemporaryDirectory() as target, tempfile.TemporaryDirectory() as share:
-            path = Path(share) / "preset.json"
-            if preset is not None:
-                path.write_text(json.dumps(preset))
-            ctx = types.SimpleNamespace(target=Path(target), omarchy_install={})
-            phases_impl._write_region_marker(ctx, path)
-            marker = Path(target) / "etc/omarchy/region"
-            return (marker.read_text(), oct(marker.stat().st_mode & 0o777)) if marker.exists() else None
-
-    def test_a_presets_region_reaches_the_target_and_nothing_else_writes_one(self):
-        self.assertEqual(self.marker({"language": "zh-CN", "region": "cn"}), ("cn\n", "0o644"))
-        self.assertIsNone(self.marker({"language": "da", "timezone": "Europe/Copenhagen"}))
-        self.assertIsNone(self.marker(None))
-
-
 class PresetTest(unittest.TestCase):
     """Every presets/<code>.json answers only what the installer can take: a
     language of the registry, a keyboard of the setup form's list, a timezone

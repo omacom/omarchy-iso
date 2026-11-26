@@ -57,6 +57,7 @@ from .command import capture, capture_identifier, require_text
 from .context import InstallContext, hw_platform, iso_kernel
 from .keyboard import configure_keyboard
 from .phases import write_state
+from .region import GLOBAL
 from .ui import error, info
 
 
@@ -768,6 +769,9 @@ def arch_install_system(ctx: InstallContext) -> None:
                     )
 
             _write_language_marker(ctx)
+            # The root image is shared by every region. Write the machine's
+            # selection only after it has been unpacked, before the runtime's
+            # system finalizer restores the online pacman configuration.
             _write_region_marker(ctx)
 
             # Tailscale is bundled in the offline mirror but only installed
@@ -2754,6 +2758,25 @@ def _unmask_mkinitcpio_pacman_hooks(
             info(f"warning: failed to restore pacman hook mask for {name}: {exc}")
 
 
+def _write_region_marker(ctx: InstallContext) -> None:
+    """Tell the runtime's pacman finalizer (omarchy-apply-pacman) which
+    profile to apply. Global installs write no marker, so the shared root
+    image stays unchanged. A deferred install has no owner timezone yet, so
+    unless the config named a region it also leaves the media's as REGION in
+    the form defaults, where first-boot setup (configure_region) settles it
+    against the owner's timezone."""
+    etc = ctx.target / "etc/omarchy"
+    if ctx.defer_provisioning and not ctx.omarchy_install.get("region"):
+        etc.mkdir(parents=True, exist_ok=True)
+        (etc / "form-defaults").write_text(f"REGION={ctx.region}\n")
+        (etc / "form-defaults").chmod(0o644)
+    if ctx.region == GLOBAL:
+        return
+    etc.mkdir(parents=True, exist_ok=True)
+    (etc / "region").write_text(ctx.region + "\n")
+    (etc / "region").chmod(0o644)
+
+
 def _write_language_marker(ctx: InstallContext) -> None:
     """Hand the installer's language to the runtime's finalizers, which
     generate its locale and set it per user. English writes nothing, so an
@@ -2764,20 +2787,6 @@ def _write_language_marker(ctx: InstallContext) -> None:
     marker = ctx.target / "etc/omarchy/language"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(language + "\n")
-    marker.chmod(0o644)
-
-
-def _write_region_marker(ctx: InstallContext, preset: Path = Path("/usr/share/omarchy-iso/preset.json")) -> None:
-    """A preset ISO (--preset) that names an Omarchy region, such as cn, hands
-    it to the target's /etc/omarchy/region, where the runtime's pacman
-    finalizer (omarchy-apply-pacman) puts that region's mirrors first. Every
-    other ISO writes nothing, which means global."""
-    region = json.loads(preset.read_text()).get("region") if preset.is_file() else None
-    if not region:
-        return
-    marker = ctx.target / "etc/omarchy/region"
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(region + "\n")
     marker.chmod(0o644)
 
 

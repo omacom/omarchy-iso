@@ -17,6 +17,7 @@
   "summary.username": "用户名",
   "summary.password": "密码",
   "summary.timezone": "时区",
+  "summary.region": "地区",
   "summary.keyboard": "键盘",
   "summary.language": "语言",
   "summary.prompt": "以上信息正确吗？",

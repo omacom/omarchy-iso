@@ -263,8 +263,11 @@ echo "Try Omarchy: ${0##*/} left out: Try keeps the kernel and boot image it sta
 EOF
 done
 install -d "$merged/usr/local/lib/omarchy-try/pacman-hooks"
+# 30-systemd-daemon-reload-user.hook reloads user@*.service, which re-executes
+# the user manager: under a session that is starting it stopped Hyprland on a
+# Dell XPS 16. The run reloads the user manager itself, once the session is up.
 for hook in 60-mkinitcpio-remove.hook 60-limine-mkinitcpio-remove-pre.hook 80-limine-efi-deploy.hook \
-  90-limine-mkinitcpio-remove-post.hook 90-mkinitcpio-install.hook; do
+  90-limine-mkinitcpio-remove-post.hook 90-mkinitcpio-install.hook 30-systemd-daemon-reload-user.hook; do
   ln -sf /dev/null "$merged/usr/local/lib/omarchy-try/pacman-hooks/$hook"
 done
 install -Dm644 /dev/stdin "$merged/etc/systemd/system/omarchy-try-hardware.service" <<'EOF'

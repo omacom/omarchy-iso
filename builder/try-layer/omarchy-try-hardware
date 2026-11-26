@@ -23,20 +23,22 @@
 # boot image or a kernel module, or installs a kernel, could take effect only
 # after a reboot, which leaves Try. Those tools do nothing here, and those
 # packages are recorded without their files (live-bin/). What can take effect
-# now is applied as a boot would apply it: udev rules the setup brought, by
+# now is applied as a boot would apply it. Udev rules the setup brought get
 # an add event for the devices each of their lines names (a boot's coldplug,
 # systemd-udev-trigger, narrowed to those, as an add event runs every rule's
-# RUN+= again; a line that names no device waits for the next boot), modules
-# and sysctl settings again if the setup changed them, the units it enabled
-# for the
-# boot's targets started (not those it enabled for sleep or shutdown), and
-# devices still without a driver probed again, for firmware or board data the
-# setup brought (omarchy-try-reprobe). A Wi-Fi or audio controller whose
+# RUN+= again; a line that names no device waits for the next boot). Modules
+# and sysctl settings load again if the setup changed them. The units it
+# enabled for the boot's targets start (not those for sleep or shutdown).
+# Devices still without a driver are probed again, for firmware or board data
+# the setup brought (omarchy-try-reprobe). A Wi-Fi or audio controller whose
 # driver bound without it (ath12k, short of its board data) is bound again
-# when anything under /usr/lib/firmware changed, a package's file or what its
-# hook wrote: omarchy-try released those classes for the session to probe,
-# before this ran. Module options for a driver already loaded take effect only
-# when it loads again, at the next boot.
+# when firmware its own module names came, a package's file or what its hook
+# wrote, once udev has settled and only while the driver still holds it:
+# omarchy-try released those classes for the session to probe, before this
+# ran. User units the setup brought reach the user manager by a reload once
+# the session is up; pacman's hook would re-execute it under a session that is
+# starting. Module options for a driver already loaded take effect only when
+# it loads again, at the next boot.
 
 set -uo pipefail
 
@@ -91,15 +93,54 @@ replay_add() {
   return "$status"
 }
 
+# The firmware a module names (modinfo, whose names can be globs), and the
+# modules it builds on name: ath12k's PCI driver (ath12k_wifi7) names none
+# itself, its core module ath12k does.
+module_firmware() {
+  local dep
+  modinfo -F firmware "$1" 2>/dev/null
+  for dep in $(modinfo -F depends "$1" 2>/dev/null | tr ',' ' '); do
+    modinfo -F firmware "$dep" 2>/dev/null
+  done
+}
+
+# Bind a device's driver again when firmware its module names is among what
+# came, and only while the driver holds it.
+rebind_for_firmware() {
+  local device=$1 module wanted path driver
+  shift
+  [[ -e $device/driver/module ]] || return 0
+  driver=$(readlink -f "$device/driver")
+  module=$(basename "$(readlink -f "$driver/module")")
+  while IFS= read -r wanted; do
+    [[ -n $wanted ]] || continue
+    for path in "$@"; do
+      # shellcheck disable=SC2053 # the module's names are globs
+      [[ $path == $wanted ]] || continue
+      # Only while the driver whose firmware this is still holds it.
+      [[ $(readlink -f "$device/driver") == "$driver" ]] || return 0
+      printf '%s' "${device##*/}" >"$driver/unbind" && printf '%s' "${device##*/}" >"$driver/bind"
+      return
+    done
+  done < <(module_firmware "$module")
+}
+
+# The names and contents of everything under each directory, to tell what the
+# setup changed there: a file it added counts even when empty, and so does a
+# drop-in.
 digest() {
-  local dir
+  local dir file
   for dir in "$@"; do
-    cat "$root$dir"/* 2>/dev/null
+    while IFS= read -r -d '' file; do
+      printf '%s\n' "${file#"$root"}"
+      [[ -f $file ]] && cat "$file"
+    done < <(find "$root$dir" -mindepth 1 -print0 2>/dev/null | sort -z)
   done | cksum
 }
 
 system_setup() {
-  local status=0 units_before rules_before modules_before sysctl_before started device driver stamp file
+  local status=0 units_before rules_before modules_before sysctl_before user_units_before started device stamp file waited up release i name
+  local -a firmware=()
   local -a rules_added=()
 
   stamp=$(mktemp)
@@ -107,6 +148,7 @@ system_setup() {
   rules_before=$(rules_files)
   modules_before=$(digest /etc/modules-load.d /usr/lib/modules-load.d)
   sysctl_before=$(digest /etc/sysctl.d /usr/lib/sysctl.d)
+  user_units_before=$(digest /etc/systemd/user /usr/lib/systemd/user)
 
   # The offline repository's database, for the pacman.conf this unit reads.
   pacman -Sy --noconfirm >/dev/null || status=1
@@ -133,18 +175,48 @@ system_setup() {
   fi
   "$lib/omarchy-try-reprobe" || status=1
 
-  if find "$root/usr/lib/firmware" -newer "$stamp" -print -quit 2>/dev/null | grep -q .; then
-    for device in "$sysfs"/bus/pci/devices/*; do
-      [[ -e $device/driver && -r $device/class ]] || continue
-      case $(<"$device/class") in
-        0x0280* | 0x0401* | 0x0403*)
-          driver=$(readlink -f "$device/driver")
-          { printf '%s' "${device##*/}" >"$driver/unbind" && printf '%s' "${device##*/}" >"$driver/bind"; } || status=1
-          ;;
-      esac
-    done
+  # What came under /usr/lib/firmware, by the name a module asks for: the
+  # kernel looks in updates/ and in its release's folder first, and takes a
+  # compressed file too. By ctime, as pacman keeps each file's archive mtime.
+  release=$(uname -r)
+  mapfile -t firmware < <(cd "$root/usr/lib/firmware" 2>/dev/null &&
+    find . -cnewer "$stamp" \( -type f -o -type l \) -printf '%P\n')
+  for i in "${!firmware[@]}"; do
+    name=${firmware[i]#updates/}
+    name=${name#"$release"/}
+    name=${name%.zst}
+    firmware[i]=${name%.xz}
+  done
+  if ((${#firmware[@]})); then
+    # A controller taken away while udev still works on it can fail its probe.
+    if udevadm settle --timeout=30; then
+      for device in "$sysfs"/bus/pci/devices/*; do
+        [[ -e $device/driver && -r $device/class ]] || continue
+        case $(<"$device/class") in
+          0x0280* | 0x0401* | 0x0403*) rebind_for_firmware "$device" "${firmware[@]}" || status=1 ;;
+        esac
+      done
+    else
+      status=1
+    fi
   fi
   rm -f "$stamp"
+
+  if [[ $(digest /etc/systemd/user /usr/lib/systemd/user) != "$user_units_before" ]]; then
+    up=false
+    for ((waited = 0; waited <= 300; waited += 2)); do
+      if systemctl --user -M "$user@" is-active -q graphical-session.target; then
+        up=true
+        break
+      fi
+      sleep 2
+    done
+    if $up; then
+      systemctl --user -M "$user@" daemon-reload || status=1
+    else
+      echo "Try Omarchy: no session for $user yet; its user manager reads the new user units when it starts"
+    fi
+  fi
   return "$status"
 }
 

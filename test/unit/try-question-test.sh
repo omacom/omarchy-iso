@@ -390,7 +390,16 @@ run_logged "$OMARCHY_INSTALL/user/theme.sh"
 run_logged "$OMARCHY_INSTALL/user/hardware/asus/fix-mic.sh"
 run_logged "$OMARCHY_INSTALL/user/hardware/dell/xps13-text-scaling.sh"
 EOF
-printf '#!/bin/bash\necho "systemctl $*" >>"$HW/calls"\n' >"$hw/omarchy/bin/systemctl"
+cat >"$hw/omarchy/bin/systemctl" <<'EOF'
+#!/bin/bash
+echo "systemctl $*" >>"$HW/calls"
+# The session is up from the check after SESSION_AFTER of them.
+if [[ " $* " == *" is-active -q graphical-session.target "* ]]; then
+  echo >>"$HW/session-checks"
+  (($(wc -l <"$HW/session-checks") > ${SESSION_AFTER:-0}))
+fi
+EOF
+chmod +x "$hw/omarchy/bin/systemctl"
 cat >"$hw/omarchy/bin/omarchy-apply-hardware" <<'EOF'
 #!/bin/bash
 echo "omarchy-apply-hardware $*" >>"$HW/calls"
@@ -400,8 +409,18 @@ if [[ -n ${CHANGE:-} ]]; then
   ln -sfn /usr/lib/systemd/system/new-haptics.service "$HW/root/etc/systemd/system/multi-user.target.wants/new-haptics.service"
   ln -sfn /usr/lib/systemd/system/pre-hibernate.service "$HW/root/etc/systemd/system/hibernate.target.wants/pre-hibernate.service"
   if [[ -n ${FIRMWARE:-} ]]; then
-    mkdir -p "$HW/root/usr/lib/firmware/ath12k"
-    : >"$HW/root/usr/lib/firmware/ath12k/board-2.bin"
+    # Under updates/, as ath12k-board-fallback puts board data, in a folder
+    # that was there, with an old mtime, as pacman keeps a packaged file's.
+    : >"$HW/root/usr/lib/firmware/updates/ath12k/WCN7850/hw2.0/board-2.bin.zst"
+    touch -d 2020-01-01 "$HW/root/usr/lib/firmware/updates/ath12k/WCN7850/hw2.0/board-2.bin.zst"
+  fi
+  if [[ -n ${IPU:-} ]]; then
+    mkdir -p "$HW/root/usr/lib/firmware/intel/ipu"
+    : >"$HW/root/usr/lib/firmware/intel/ipu/ipu7ptl_fw.bin"
+  fi
+  if [[ -n ${USERUNIT:-} ]]; then
+    # A drop-in in a folder that was there before.
+    : >"$HW/root/usr/lib/systemd/user/pipewire.service.d/10-camera.conf"
   fi
   # As dell-xps-touchpad-haptics ships it, as gb10/cpuidle.sh writes it, and
   # lines an add event does not reach.
@@ -418,13 +437,25 @@ EOF
 printf '#!/bin/bash\necho "runuser ${*: -1}" >>"$HW/calls"\n' >"$hw/omarchy/bin/runuser"
 printf '#!/bin/bash\necho "udevadm $*" >>"$HW/calls"\n' >"$hw/omarchy/bin/udevadm"
 printf '#!/bin/bash\necho "pacman $*" >>"$HW/calls"\n' >"$hw/omarchy/bin/pacman"
+# The firmware each module names and the modules it needs, as Linux 7.3's
+# modules carry them: ath12k's PCI driver, ath12k_wifi7, names none itself.
+cat >"$hw/omarchy/bin/modinfo" <<'EOF'
+#!/bin/bash
+case "$2 ${*: -1}" in
+"firmware ath12k") printf '%s\n' 'ath12k/WCN7850/hw2.0/*' 'ath12k/QCN9274/hw2.0/*' ;;
+"depends ath12k_wifi7") echo ath12k,mac80211,mhi,cfg80211 ;;
+"firmware snd_sof_pci_intel_ptl") printf '%s\n' 'intel/sof-ipc4/ptl/sof-ptl.ri' ;;
+esac
+EOF
 chmod +x "$hw/omarchy/bin/"*
 run_hardware() {
   : >"$hw/calls"
+  rm -f "$hw/session-checks"
   HW=$hw OMARCHY_TRY_USER=$(id -un) OMARCHY_TRY_ROOT="$hw/root" OMARCHY_PATH="$hw/omarchy" \
     OMARCHY_TRY_LIB="$hw/lib" OMARCHY_SYSFS="$hw/no-sys" "$@"
 }
-mkdir -p "$hw/root/etc/systemd/system/graphical.target.wants" "$hw/root/usr/lib/firmware"
+mkdir -p "$hw/root/etc/systemd/system/graphical.target.wants" "$hw/root/usr/lib/firmware/updates/ath12k/WCN7850/hw2.0" \
+  "$hw/root/usr/lib/systemd/user/pipewire.service.d"
 ln -sfn /usr/lib/systemd/system/sddm.service "$hw/root/etc/systemd/system/graphical.target.wants/sddm.service"
 run_hardware env CHANGE=1 bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system || fail "the session's hardware setup failed"
 [[ $(<"$hw/calls") == "pacman -Sy --noconfirm
@@ -450,25 +481,48 @@ run_hardware bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system || fail "the se
 omarchy-apply-hardware --install-user $(id -un)
 systemctl daemon-reload
 omarchy-try-reprobe" ]] || fail "a hardware setup that changed nothing still reloaded or started: $(cat "$hw/calls")"
-# Firmware the setup brought, a package's or what its hook wrote, binds the
-# Wi-Fi and audio controllers again, whose drivers bound before it came;
-# others are left alone.
+# Firmware the setup brought, a package's or what its hook wrote, binds a
+# Wi-Fi or audio controller again when its own module names it; others, and
+# a controller whose module names other firmware, are left alone. On a Dell
+# XPS 16 the IPU7 camera's firmware unbound the SOF audio mid-probe.
 sys="$hw/sys"
-mkdir -p "$sys/drivers/ath12k_pci" "$sys/bus/pci/devices/0000:01:00.0" "$sys/bus/pci/devices/0000:00:02.0"
-: >"$sys/drivers/ath12k_pci/unbind"
-: >"$sys/drivers/ath12k_pci/bind"
-ln -sfn "$sys/drivers/ath12k_pci" "$sys/bus/pci/devices/0000:01:00.0/driver"
-ln -sfn "$sys/drivers/ath12k_pci" "$sys/bus/pci/devices/0000:00:02.0/driver"
+mkdir -p "$sys/drivers/ath12k_wifi7_pci" "$sys/drivers/sof-audio-pci-intel-ptl" "$sys/module/ath12k_wifi7" \
+  "$sys/module/snd_sof_pci_intel_ptl" "$sys/bus/pci/devices/0000:01:00.0" "$sys/bus/pci/devices/0000:00:1f.3" \
+  "$sys/bus/pci/devices/0000:00:02.0"
+for driver in ath12k_wifi7_pci sof-audio-pci-intel-ptl; do
+  : >"$sys/drivers/$driver/unbind"
+  : >"$sys/drivers/$driver/bind"
+done
+ln -sfn "$sys/module/ath12k_wifi7" "$sys/drivers/ath12k_wifi7_pci/module"
+ln -sfn "$sys/module/snd_sof_pci_intel_ptl" "$sys/drivers/sof-audio-pci-intel-ptl/module"
+ln -sfn "$sys/drivers/ath12k_wifi7_pci" "$sys/bus/pci/devices/0000:01:00.0/driver"
+ln -sfn "$sys/drivers/sof-audio-pci-intel-ptl" "$sys/bus/pci/devices/0000:00:1f.3/driver"
+ln -sfn "$sys/drivers/ath12k_wifi7_pci" "$sys/bus/pci/devices/0000:00:02.0/driver"
 echo 0x028000 >"$sys/bus/pci/devices/0000:01:00.0/class"
+echo 0x040100 >"$sys/bus/pci/devices/0000:00:1f.3/class"
 echo 0x030000 >"$sys/bus/pci/devices/0000:00:02.0/class"
 run_hardware env OMARCHY_SYSFS="$sys" CHANGE=1 FIRMWARE=1 bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system ||
   fail "the session's hardware setup failed with firmware"
-[[ $(<"$sys/drivers/ath12k_pci/unbind") == "0000:01:00.0" && $(<"$sys/drivers/ath12k_pci/bind") == "0000:01:00.0" ]] ||
-  fail "the Wi-Fi controller was not bound again after firmware came: '$(<"$sys/drivers/ath12k_pci/unbind")'"
-: >"$sys/drivers/ath12k_pci/unbind"
+[[ $(<"$sys/drivers/ath12k_wifi7_pci/unbind") == "0000:01:00.0" && $(<"$sys/drivers/ath12k_wifi7_pci/bind") == "0000:01:00.0" ]] ||
+  fail "the Wi-Fi controller was not bound again after its board data came: '$(<"$sys/drivers/ath12k_wifi7_pci/unbind")'"
+[[ ! -s $sys/drivers/sof-audio-pci-intel-ptl/unbind ]] || fail "the audio controller was unbound for firmware that is not its own"
+grep -qx 'udevadm settle --timeout=30' "$hw/calls" || fail "a controller was bound again before udev settled: $(cat "$hw/calls")"
+: >"$sys/drivers/ath12k_wifi7_pci/unbind"
+: >"$sys/drivers/ath12k_wifi7_pci/bind"
+run_hardware env OMARCHY_SYSFS="$sys" CHANGE=1 IPU=1 bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system ||
+  fail "the session's hardware setup failed with the camera's firmware"
+[[ ! -s $sys/drivers/ath12k_wifi7_pci/unbind && ! -s $sys/drivers/sof-audio-pci-intel-ptl/unbind ]] ||
+  fail "a controller was bound again for the camera's firmware"
 run_hardware env OMARCHY_SYSFS="$sys" CHANGE=1 bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system ||
   fail "the session's hardware setup failed without firmware"
-[[ ! -s $sys/drivers/ath12k_pci/unbind ]] || fail "a controller was bound again though no firmware came"
+[[ ! -s $sys/drivers/ath12k_wifi7_pci/unbind ]] || fail "a controller was bound again though no firmware came"
+# User units the setup brought reach the user manager by a reload once the
+# session is up, never pacman's hook's re-execution (masked for the run).
+run_hardware env CHANGE=1 USERUNIT=1 SESSION_AFTER=1 bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system ||
+  fail "the session's hardware setup failed with a user unit"
+[[ $(grep -c "^systemctl --user -M $(id -un)@ " "$hw/calls") == 3 &&
+  $(grep "^systemctl --user -M $(id -un)@ " "$hw/calls" | tail -1) == "systemctl --user -M $(id -un)@ daemon-reload" ]] ||
+  fail "the user manager was not reloaded after the session came up: $(cat "$hw/calls")"
 run_hardware bash "$LAYER_SCRIPTS/omarchy-try-hardware" --user || fail "the session's user hardware setup failed"
 [[ $(<"$hw/calls") == "runuser $hw/omarchy/install/user/hardware/asus/fix-mic.sh
 runuser $hw/omarchy/install/user/hardware/dell/xps13-text-scaling.sh" ]] ||

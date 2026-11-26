@@ -202,8 +202,10 @@ class BuildTryLayerTest(unittest.TestCase):
         self.assertIn('omarchy-apply-hardware --install-user "$user"', script)
         for name in ("mkinitcpio", "dkms", "limine-entry-tool", "limine-update", "ukify"):
             self.assertIn(name, self.text.split("for tool in ", 1)[1].split(";", 1)[0])
+        # The user manager's reload hook re-executed it under a starting session.
         for hook in ("60-mkinitcpio-remove.hook", "60-limine-mkinitcpio-remove-pre.hook", "80-limine-efi-deploy.hook",
-                     "90-limine-mkinitcpio-remove-post.hook", "90-mkinitcpio-install.hook"):
+                     "90-limine-mkinitcpio-remove-post.hook", "90-mkinitcpio-install.hook",
+                     "30-systemd-daemon-reload-user.hook"):
             self.assertIn(hook, self.text)
 
     def test_says_once_what_the_session_is(self):

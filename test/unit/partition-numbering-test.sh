@@ -21,7 +21,7 @@ if ! command -v parted >/dev/null 2>&1; then
   exit 0
 fi
 
-# shellcheck source=../../configs/airootfs/usr/share/omarchy-iso/disk-partitioning.sh
+# shellcheck source=SCRIPTDIR/../../configs/airootfs/usr/share/omarchy-iso/disk-partitioning.sh
 source "$LIB"
 
 WORK=$(mktemp -d)

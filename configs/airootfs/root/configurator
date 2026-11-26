@@ -35,7 +35,7 @@ if [[ ! -r $DISK_PARTITIONING ]]; then
   echo "ERROR: disk partitioning helpers not found at $DISK_PARTITIONING" >&2
   exit 1
 fi
-# shellcheck source=../usr/share/omarchy-iso/disk-partitioning.sh
+# shellcheck source=SCRIPTDIR/../usr/share/omarchy-iso/disk-partitioning.sh
 source "$DISK_PARTITIONING"
 
 # Installer strings in the language picked on the first screen; t <key> [args].
@@ -46,7 +46,7 @@ if [[ ! -r $INSTALLER_I18N ]]; then
   echo "ERROR: installer strings not found at $INSTALLER_I18N" >&2
   exit 1
 fi
-# shellcheck source=../usr/share/omarchy-iso/i18n.sh
+# shellcheck source=SCRIPTDIR/../usr/share/omarchy-iso/i18n.sh
 source "$INSTALLER_I18N"
 i18n_load en
 
@@ -504,7 +504,7 @@ KMSCON_LIB="${KMSCON_LIB:-/usr/share/omarchy-iso/kmscon.sh}"
 [[ -r $KMSCON_LIB ]] || KMSCON_LIB="$OMARCHY_PATH/install/provisioning/kmscon.sh"
 # shellcheck disable=SC1090
 source "$KMSCON_LIB"
-# shellcheck source=../usr/share/omarchy-iso/kmscon-session.sh
+# shellcheck source=SCRIPTDIR/../usr/share/omarchy-iso/kmscon-session.sh
 source "$OMARCHY_ISO_SHARE/kmscon-session.sh"
 
 switch_to_kmscon() {

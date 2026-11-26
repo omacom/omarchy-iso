@@ -8,7 +8,7 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 export KMSCON_RETRY_PAUSE=0 KMSCON_RUN_DIR="$work/run" WORK="$work" SESSION="$ROOT/configs/airootfs/usr/share/omarchy-iso/kmscon-session.sh"
-# shellcheck source=../../configs/airootfs/usr/share/omarchy-iso/kmscon-session.sh
+# shellcheck source=SCRIPTDIR/../../configs/airootfs/usr/share/omarchy-iso/kmscon-session.sh
 source "$SESSION"
 
 fail() { echo "not ok - $*" >&2; exit 1; }

@@ -33,7 +33,7 @@ if [[ -f /root/omarchy_iso_ref ]]; then
   export OMARCHY_ISO_REF="$(cat /root/omarchy_iso_ref)"
 fi
 if [[ -f /usr/share/omarchy-iso/package-targets ]]; then
-  # shellcheck disable=SC1091
+  # shellcheck source=/dev/null # build-iso.sh writes it into the ISO
   source /usr/share/omarchy-iso/package-targets
   export OMARCHY_RUNTIME_PACKAGE OMARCHY_SETTINGS_PACKAGE OMARCHY_NVIM_PACKAGE
 fi
@@ -218,11 +218,11 @@ else
   # machine, where the console has one bitmap font and cannot draw Chinese,
   # Japanese or Korean at all. The launcher is the runtime's own, the one
   # first-boot owner setup is drawn with.
-  # shellcheck disable=SC1091
+  # shellcheck source=/dev/null # vendored from Omarchy at build time
   source /usr/share/omarchy-iso/setup-form.sh
-  # shellcheck disable=SC1091
+  # shellcheck source=/dev/null # as above
   source /usr/share/omarchy-iso/kmscon.sh
-  # shellcheck source=../usr/share/omarchy-iso/kmscon-session.sh
+  # shellcheck source=SCRIPTDIR/../usr/share/omarchy-iso/kmscon-session.sh
   source /usr/share/omarchy-iso/kmscon-session.sh
 
   # The answers a relaunch carries hold the password: however this run ends,

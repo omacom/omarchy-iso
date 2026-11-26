@@ -109,6 +109,7 @@ scenario() { # function-to-call, release_rc  ->  sets TTY_OUT, LOG_OUT, CALLS
     PATH="$BOX/bin:$PATH"
     exec 9>"$BOX/tty.fifo"
     # The definitions run from $BOX, so the catalog is not next to them.
+    # shellcheck source=/dev/null # the definitions this test wrote out of the dashboard
     INSTALLER_I18N="$ROOT/configs/airootfs/usr/share/omarchy-iso/i18n.sh" \
       OMARCHY_DASHBOARD_TTY="$BOX/tty.fifo" OMARCHY_PATH="$BOX/omarchy" \
       PROGRESS_ICON="$ROOT/test/unit/fixtures/progress-icon.sh" \

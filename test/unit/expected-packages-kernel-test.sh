@@ -16,6 +16,7 @@ trap 'rm -rf "$work" /tmp/omarchy-expected-packages' EXIT
 # The function alone, not the rest of the build.
 awk '/^resolve_expected_packages\(\) \{$/,/^\}$/' "$ROOT/builder/build-iso.sh" >"$work/fn.sh"
 [[ -s $work/fn.sh ]] || { echo "resolve_expected_packages not found in builder/build-iso.sh"; exit 1; }
+# shellcheck source=/dev/null # the function this test just took out of the builder
 source "$work/fn.sh"
 
 # pacman resolves nothing new beyond what it is asked for, and records the ask.

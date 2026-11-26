@@ -60,6 +60,7 @@ i18n_console_font() {
   # The bundled runtime's own routine, when it ships one: first-boot setup
   # draws with the same file.
   if [[ -r $OMARCHY_ISO_SHARE/console-font.sh ]]; then
+    # shellcheck source=/dev/null # vendored from Omarchy when the runtime ships it
     source "$OMARCHY_ISO_SHARE/console-font.sh"
     omarchy_console_font "$tty" || true
     return 0

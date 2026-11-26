@@ -20,6 +20,7 @@ trap 'rm -rf "$work"' EXIT
   awk '/^image_package_list\(\) \{$/,/^\}$/' "$ROOT/builder/build-iso.sh"
 } | sed "s#/builder/#$ROOT/builder/#g" >"$work/fn.sh"
 grep -q '^image_package_list() {' "$work/fn.sh" || { echo "image_package_list not found in builder/build-iso.sh"; exit 1; }
+# shellcheck source=/dev/null # the function this test just took out of the builder
 source "$work/fn.sh"
 
 archinstall_packages_file=$ROOT/builder/archinstall.packages

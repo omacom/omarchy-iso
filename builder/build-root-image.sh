@@ -138,6 +138,7 @@ build_prebuilt_initramfs() {
   printf '%s\n' "$image_kver" >"$root$dir/prebuilt-initramfs.kver"
   # The console keymap the keymap hook compiled in, which the hashed inputs
   # below don't cover (vconsole.conf).
+  # shellcheck source=/dev/null # the image's own vconsole.conf
   ( [ -f "$root/etc/vconsole.conf" ] && . "$root/etc/vconsole.conf"; printf '%s\n' "${KEYMAP:-}" ) \
     >"$root$dir/prebuilt-initramfs.keymap"
   initramfs_inputs "$root" >"$root$dir/prebuilt-initramfs.inputs"
@@ -643,6 +644,7 @@ else
   # The LUKS passphrase prompt runs from this initramfs, so a stale `us` makes
   # a passphrase enrolled under another layout untypeable and locks the owner
   # out of a fresh install (upstream omarchy#8196).
+  # shellcheck source=/dev/null # the image's own vconsole.conf
   ( [ -f "$root/etc/vconsole.conf" ] && . "$root/etc/vconsole.conf"; printf '%s\n' "${KEYMAP:-}" ) \
     >"$root/var/lib/omarchy-iso/prebuilt-uki.keymap"
   cat >"$root/etc/mkinitcpio.d/${image_kernel}.preset" <<PRESET

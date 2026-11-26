@@ -10,7 +10,7 @@
 set -uo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-# shellcheck source=../../configs/airootfs/usr/share/omarchy-iso/disk-partitioning.sh
+# shellcheck source=SCRIPTDIR/../../configs/airootfs/usr/share/omarchy-iso/disk-partitioning.sh
 source "$ROOT/configs/airootfs/usr/share/omarchy-iso/disk-partitioning.sh"
 
 WORK=$(mktemp -d)

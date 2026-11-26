@@ -137,8 +137,17 @@ release_disk() {
   for attempt in $(seq 1 20); do
     udevadm settle 2>/dev/null || true
     if disk_has_state; then
-      exec {lock}<"$disk"
-      flock -x "$lock"
+      # Read-write, so the close that drops the lock is an IN_CLOSE_WRITE,
+      # on which udevd requeues the events it postponed for the locked disk
+      # (systemd docs/BLOCK_DEVICE_LOCKING.md). A read-only close leaves
+      # them to its retry timer, armed 200 ms out with 1 s of slack, and
+      # udevadm settle waits with them. Nothing is written here. A disk
+      # that cannot be opened for writing cannot be installed on either,
+      # and -e keeps <> from creating a file where a device has gone.
+      if ! [[ -e $disk ]] || ! { exec {lock}<>"$disk"; } 2>/dev/null || ! flock -x "$lock"; then
+        echo "$disk cannot be opened for writing and locked. Reboot the installer and try again."
+        exit 1
+      fi
       release_and_wipe
       blockdev --flushbufs "$disk" 2>/dev/null || true
       blockdev --rereadpt "$disk" 2>/dev/null && released=true

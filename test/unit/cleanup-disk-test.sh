@@ -32,18 +32,24 @@ run_case() {
     script=$3
     work=$4
     disk="$work/fake-disk"
+    rm -f "$disk"
     : >"$disk"
     disk_name="fake-disk"
 
     eval "$(awk "/^[a-z_]+\(\) \{$/ { p=1 } p { print } /^\}$/ { p=0 }" "$script")"
 
     partitions() {
-      [[ $mode == "used" ]] && echo "fake-disk1" || true
+      [[ $mode == "used" || $mode == "read-only" ]] && echo "fake-disk1" || true
     }
+    [[ $mode != "read-only" ]] || chmod 444 "$disk"
     udevadm() { echo "udevadm $*" >>"$log"; }
     findmnt() { return 1; }
     swapoff() { echo "swapoff $*" >>"$log"; }
-    flock() { echo "flock $*" >>"$log"; }
+    # The lock descriptor'"'"'s access mode, from fdinfo: 2 is O_RDWR.
+    flock() {
+      echo "flock $*" >>"$log"
+      echo "lock-mode $(( $(awk "/^flags:/ { print \$2 }" /proc/$$/fdinfo/$2) & 3 ))" >>"$log"
+    }
     blockdev() { echo "blockdev $*" >>"$log"; }
     wipefs() {
       echo "wipefs $*" >>"$log"
@@ -70,6 +76,23 @@ reread_line=$(grep -n '^blockdev --rereadpt ' "$work/used.log" | head -n1 | cut 
 [[ -n $flock_line && -n $wipe_line && -n $reread_line ]] || fail "a used disk locks, wipes, and re-reads" "$(cat "$work/used.log")"
 (( flock_line < wipe_line && wipe_line < reread_line )) || fail "a used disk wipes and re-reads after acquiring flock" "$(cat "$work/used.log")"
 echo "ok - used disk locks, wipes signatures, and re-reads the partition table"
+grep -qx 'lock-mode 2' "$work/used.log" || fail "a used disk takes its lock on a read-write descriptor, so udevd sees IN_CLOSE_WRITE when it closes" "$(cat "$work/used.log")"
+echo "ok - used disk holds its lock on a read-write descriptor"
+
+# A disk that cannot be opened for writing stops the cleanup before any
+# teardown, with the reason on the last line for the failure screen. Root
+# opens a mode 444 file anyway, so only an ordinary user can check this.
+if ((EUID != 0)); then
+  if out=$(run_case read-only); then
+    fail "a disk that cannot be opened for writing must stop the cleanup" "$out"
+  fi
+  [[ $(tail -n 1 <<<"$out") == *"cannot be opened for writing and locked"* ]] ||
+    fail "the last line says why the disk was not released" "$out"
+  ! grep -q '^wipefs --all ' "$work/read-only.log" || fail "nothing is wiped without the lock" "$(cat "$work/read-only.log")"
+  echo "ok - a disk that cannot be opened for writing stops before any wipe"
+else
+  echo "skip - the read-only disk case needs an ordinary user"
+fi
 
 run_case sig-only
 grep -q '^flock -x ' "$work/sig-only.log" || fail "a disk with a whole-disk signature takes flock -x" "$(cat "$work/sig-only.log")"

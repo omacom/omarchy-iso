@@ -1,0 +1,29 @@
+# Give the live ISO's internal disks the kernel's own I/O scheduler.
+#
+# omarchy-settings puts every disk on Kyber (60-omarchy-io-scheduler.rules),
+# to keep an installed desktop's reads flowing while a build or a copy floods
+# the disk with writes. The live ISO installs that package, so its rule runs
+# here too, and here it only costs. Kyber cuts a queue's depth when another
+# queue looks slow, and raises it again only when that queue's own requests
+# look slow. The image writer keeps 16 requests in flight, which never do. On
+# a Dell XPS 16 the NVMe's write depth fell from 128 to 1 within one live
+# session, and the image write then took 1.78 s where it takes 0.93 s (2.42
+# against 4.65 GiB/s).
+#
+# The kernel's own choice is none for a disk with more than one hardware
+# queue (mq/1 exists) and mq-deadline for a disk with one, which every SATA
+# disk has. Left as they are: optical drives and mmcblk nodes, anything on
+# USB, which the boot-medium rule puts on BFQ (71-), and zoned disks, which
+# 64-btrfs-zoned.rules and the kernel look after.
+# 72- so it runs after all of them.
+ACTION!="add|change", GOTO="omarchy_iso_internal_disk_scheduler_end"
+SUBSYSTEM!="block", GOTO="omarchy_iso_internal_disk_scheduler_end"
+ENV{DEVTYPE}!="disk", GOTO="omarchy_iso_internal_disk_scheduler_end"
+KERNEL!="nvme*|vd*|sd*", GOTO="omarchy_iso_internal_disk_scheduler_end"
+# Matched on a parent device, so a USB disk is skipped whatever it calls its
+# bus. A negated SUBSYSTEMS would pass on the disk itself.
+SUBSYSTEMS=="usb", GOTO="omarchy_iso_internal_disk_scheduler_end"
+ATTR{queue/zoned}!="none", GOTO="omarchy_iso_internal_disk_scheduler_end"
+TEST=="mq/1", ATTR{queue/scheduler}="none"
+TEST!="mq/1", ATTR{queue/scheduler}="mq-deadline"
+LABEL="omarchy_iso_internal_disk_scheduler_end"

@@ -579,10 +579,66 @@ class KeyslotEnrollmentCpusTest(unittest.TestCase):
 
     def test_the_enrollment_runs_on_the_cpus_the_installer_started_with(self):
         with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(luks, "ATOM_CPUS_PATH", Path(tmp) / "missing"), \
                 mock.patch.dict(os.environ, {"OMARCHY_INSTALLER_ALL_CPUS": "0-15"}):
             entry, steps = self.entry(tmp)
             entry._worker()
         self.assertEqual(steps, [["taskset", "-c", "0-15", "enroll"], ["kill"]])
+
+    def test_hybrid_cpu_with_enough_e_cores_pins_enrollment_to_e_cores(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"OMARCHY_INSTALLER_ALL_CPUS": "0-15"}):
+            atom = Path(tmp) / "cpu_atom"
+            online = Path(tmp) / "online"
+            atom.write_text("4-15\n")
+            online.write_text("0-15\n")
+            with mock.patch.object(luks, "ATOM_CPUS_PATH", atom), \
+                    mock.patch.object(luks, "ONLINE_CPUS_PATH", online):
+                entry, steps = self.entry(tmp)
+                entry.enroll_cmd = ["cryptsetup", "luksAddKey", "--pbkdf-parallel", "4"]
+                entry._worker()
+        self.assertEqual(steps[0], ["taskset", "-c", "4-15", "cryptsetup", "luksAddKey", "--pbkdf-parallel", "4"])
+
+    def test_hybrid_cpu_with_fewer_e_cores_than_threads_falls_back_to_all_cpus(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"OMARCHY_INSTALLER_ALL_CPUS": "0-5"}):
+            atom = Path(tmp) / "cpu_atom"
+            online = Path(tmp) / "online"
+            atom.write_text("4-5\n")
+            online.write_text("0-5\n")
+            with mock.patch.object(luks, "ATOM_CPUS_PATH", atom), \
+                    mock.patch.object(luks, "ONLINE_CPUS_PATH", online):
+                entry, steps = self.entry(tmp)
+                entry.enroll_cmd = ["cryptsetup", "luksAddKey", "--pbkdf-parallel", "4"]
+                entry._worker()
+        self.assertEqual(steps[0], ["taskset", "-c", "0-5", "cryptsetup", "luksAddKey", "--pbkdf-parallel", "4"])
+
+    def test_taskset_affinity_failure_on_e_cores_retries_on_all_cpus(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"OMARCHY_INSTALLER_ALL_CPUS": "0-15"}):
+            atom = Path(tmp) / "cpu_atom"
+            online = Path(tmp) / "online"
+            atom.write_text("4-15\n")
+            online.write_text("0-15\n")
+            with mock.patch.object(luks, "ATOM_CPUS_PATH", atom), \
+                    mock.patch.object(luks, "ONLINE_CPUS_PATH", online):
+                entry, steps = self.entry(tmp)
+                entry.enroll_cmd = ["cryptsetup", "luksAddKey", "--pbkdf-parallel", "4"]
+                def flaky(cmd, *, input_data=None):
+                    steps.append(list(cmd))
+                    if cmd[:3] == ["taskset", "-c", "4-15"]:
+                        return 1, "taskset: failed to set pid 123's affinity: Invalid argument"
+                    return 0, ""
+                entry._run_step = flaky
+                entry._worker()
+        self.assertIsNone(entry.error)
+        self.assertEqual(steps[0][:3], ["taskset", "-c", "4-15"])
+        self.assertEqual(steps[1][:3], ["taskset", "-c", "0-15"])
+
+    def test_enrollment_starts_before_root_image_write(self):
+        source = (ROOT / "configs/airootfs/usr/share/omarchy-iso/orchestrator/phases_impl.py").read_text()
+        body = source[source.index("def arch_install_system("):]
+        self.assertLess(body.index("_start_luks_keyslot_enroll(ctx)"), body.index("_install_root_image(ctx)"))
 
     def test_an_installer_that_was_not_moved_runs_it_as_before(self):
         env = {k: v for k, v in os.environ.items() if k != "OMARCHY_INSTALLER_ALL_CPUS"}

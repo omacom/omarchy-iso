@@ -671,14 +671,14 @@ def arch_install_system(ctx: InstallContext) -> None:
         with _time_step("STEP.sanity_check"):
             arch.sanity_check(installer)
 
+        # Start Argon2id slot-0 enrollment now, right after LUKS opens and on
+        # E-cores where available, so the 2 s KDF overlaps the O_DIRECT image
+        # write without slowing F1.image_write and finishes before the snapshot.
+        _start_luks_keyslot_enroll(ctx)
         with _time_step("STEP.install_root_image"):
             _install_root_image(ctx)
         if config.auth_config and config.auth_config.users:
             _start_skel_warmup(ctx)
-        # Start Argon2id slot-0 enrollment now, after the 8-thread image write
-        # finishes, so it overlaps single-threaded setup without contending for
-        # CPU or memory bandwidth with omarchy-image-write.
-        _start_luks_keyslot_enroll(ctx)
         _apply_platform_layer(ctx)
         _start_library_warmup(ctx)
         # Fallback if prepare_live did not already start the staged keyring

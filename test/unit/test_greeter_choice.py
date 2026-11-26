@@ -60,6 +60,7 @@ class GreeterChoiceTest(unittest.TestCase):
             fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
             os.environ["LOGO_PATH"] = str(self.dir / "logo.txt")
             os.environ["TRY_LAYER"] = str(self.layer)
+            os.environ["OMARCHY_GREETER_READY_FILE"] = str(self.dir / "greeter-ready")
             if extra_env:
                 os.environ.update(extra_env)
             os.execvp("bash", ["bash", "-c", SCRIPT])

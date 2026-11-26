@@ -48,6 +48,10 @@ cat >"$BOX/bin/systemctl" <<'STUB'
 #!/bin/bash
 exit 0
 STUB
+cat >"$BOX/bin/mountpoint" <<'STUB'
+#!/bin/bash
+exit 1
+STUB
 chmod +x "$BOX"/bin/*
 
 cat >"$BOX/progress-icon.sh" <<'STUB'

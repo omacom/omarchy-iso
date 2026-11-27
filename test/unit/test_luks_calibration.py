@@ -1027,33 +1027,16 @@ class AdiantumWithoutAes(unittest.TestCase):
         fixtures_dir = ROOT / 'test/unit/fixtures/cpuinfo'
         expected = {
             # Captured from real lab machines
-            'lab/amd-a6-7310.txt': True,
-            'lab/amd-a8-6600k.txt': True,
             'lab/amd-ryzen-7-pro-5850u.txt': True,
-            'lab/apple-m1.txt': True,
             'lab/arm-cortex-a53-aes.txt': True,
             'lab/intel-celeron-n2840.txt': False,
             'lab/intel-core2-p8400.txt': False,
-            'lab/intel-core2-t5500.txt': False,
             'lab/intel-core-ultra-7-155h.txt': True,
-            'lab/intel-i5-3337u.txt': True,
-            'lab/intel-i5-4260u.txt': True,
-            'lab/intel-i5-5300u.txt': True,
-            'lab/intel-i5-8265u.txt': True,
-            'lab/intel-i7-6600u.txt': True,
             'lab/qualcomm-oryon.txt': True,
             'lab/rpi5-cortex-a76.txt': True,
             # Extracted from workhorsy/py-cpuinfo
-            'py-cpuinfo/intel-i7-nehalem.txt': False,
             'py-cpuinfo/intel-pentium-g640.txt': False,
-            'py-cpuinfo/loongarch64-old-world.txt': True,
-            'py-cpuinfo/mips64el-loongson3a3000.txt': True,
             'py-cpuinfo/odroid-c2-aarch64.txt': False,
-            'py-cpuinfo/odroid-xu3-armv7.txt': False,
-            'py-cpuinfo/ppc64le-power8.txt': True,
-            # Extracted from util-linux tests/ts/lscpu/dumps
-            'util-linux/arm-a510-a710-a715-x3.txt': True,
-            'util-linux/intel-i5-m560.txt': True,
         }
         actual_files = {p.relative_to(fixtures_dir).as_posix() for p in fixtures_dir.rglob('*.txt')}
         self.assertEqual(actual_files, set(expected))

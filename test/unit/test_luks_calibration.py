@@ -997,8 +997,8 @@ class CancelCalibrationTest(unittest.TestCase):
         import types
         sys.path.insert(0, str(ROOT / "configs/airootfs/usr/share/omarchy-iso"))
         sys.modules.setdefault("orchestrator.archinstall_adapter", types.ModuleType("orchestrator.archinstall_adapter"))
-        from orchestrator import phases_impl
-        from orchestrator import luks_calibration as shared_luks
+        phases_impl = importlib.import_module("orchestrator.phases_impl")
+        shared_luks = importlib.import_module("orchestrator.luks_calibration")
 
         for label, encrypt, user_cfg, expect_cancel in (
             ("plain unencrypted", False, {"disk_config": {}}, True),

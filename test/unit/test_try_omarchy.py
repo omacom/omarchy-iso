@@ -249,6 +249,76 @@ class BuildTryLayerTest(unittest.TestCase):
         self.assertIn("omarchy-try-session", self.text)
         self.assertIn('sddm.login("$TRY_USER", "", root.sessionIndex)', self.text)
 
+    def test_strips_nvim_git_and_symlinks_duplicate_theme_backgrounds(self):
+        snippet = re.search(
+            r'(rm -rf "\$merged/home/\$TRY_USER"/\.local/share/nvim/lazy/\*/\.git'
+            r'.*?try_theme_bgs="\$merged/home/\$TRY_USER/\.local/state/omarchy/current/theme/backgrounds".*?\nfi)',
+            self.text,
+            re.S,
+        )
+        self.assertIsNotNone(snippet)
+        # Cleanup must run after user provisioning populates the Try home
+        # directory and before mksquashfs packs the layer.
+        provision_pos = self.text.index("omarchy-provision-user")
+        pack_pos = self.text.index("mksquashfs")
+        self.assertLess(provision_pos, snippet.start())
+        self.assertLess(snippet.end(), pack_pos)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            merged = Path(tmp) / "merged"
+            lazy = merged / "home/omarchy/.local/share/nvim/lazy"
+            for plugin, rel_file, content in (
+                ("lazy.nvim", "lua/lazy/init.lua", b"return {}"),
+                ("tokyonight.nvim", "colors/tokyonight.lua", b"vim.g.colors_name = 'tokyonight'"),
+            ):
+                (lazy / plugin / ".git/objects").mkdir(parents=True)
+                (lazy / plugin / ".git/HEAD").write_text("ref: refs/heads/main\n")
+                (lazy / plugin / ".git/objects/pack").write_bytes(b"pack-data")
+                plugin_file = lazy / plugin / rel_file
+                plugin_file.parent.mkdir(parents=True, exist_ok=True)
+                plugin_file.write_bytes(content)
+
+            unrelated_git = merged / "home/omarchy/.local/share/other/.git/HEAD"
+            unrelated_git.parent.mkdir(parents=True)
+            unrelated_git.write_text("ref: refs/heads/main\n")
+
+            bgs = merged / "home/omarchy/.local/state/omarchy/current/theme/backgrounds"
+            (bgs / "intros").mkdir(parents=True)
+            src_bgs = merged / "usr/share/omarchy/themes/tokyo-night/backgrounds"
+            (src_bgs / "intros").mkdir(parents=True)
+            (src_bgs / "0-liftoff.webp").write_bytes(b"wallpaper-bytes")
+            (src_bgs / "intros/0-liftoff.mp4").write_bytes(b"intro-video-bytes")
+            (bgs / "0-liftoff.webp").write_bytes(b"wallpaper-bytes")
+            (bgs / "intros/0-liftoff.mp4").write_bytes(b"intro-video-bytes")
+            (bgs / "custom.webp").write_bytes(b"custom-only")
+
+            subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", f'merged={merged}\nTRY_USER=omarchy\n{snippet.group(1)}'],
+                check=True,
+            )
+
+            self.assertFalse((lazy / "lazy.nvim/.git").exists())
+            self.assertFalse((lazy / "tokyonight.nvim/.git").exists())
+            self.assertEqual((lazy / "lazy.nvim/lua/lazy/init.lua").read_bytes(), b"return {}")
+            self.assertEqual(
+                (lazy / "tokyonight.nvim/colors/tokyonight.lua").read_bytes(),
+                b"vim.g.colors_name = 'tokyonight'",
+            )
+            self.assertTrue(unrelated_git.is_file())
+
+            self.assertTrue((bgs / "0-liftoff.webp").is_symlink())
+            self.assertEqual(
+                os.readlink(bgs / "0-liftoff.webp"),
+                "/usr/share/omarchy/themes/tokyo-night/backgrounds/0-liftoff.webp",
+            )
+            self.assertTrue((bgs / "intros/0-liftoff.mp4").is_symlink())
+            self.assertEqual(
+                os.readlink(bgs / "intros/0-liftoff.mp4"),
+                "/usr/share/omarchy/themes/tokyo-night/backgrounds/intros/0-liftoff.mp4",
+            )
+            self.assertFalse((bgs / "custom.webp").is_symlink())
+            self.assertEqual((bgs / "custom.webp").read_bytes(), b"custom-only")
+
 
 class LiveSystemLeavesTheMachineTest(unittest.TestCase):
     # Every boot runs the live installer first, Just try included.

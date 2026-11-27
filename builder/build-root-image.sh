@@ -693,7 +693,11 @@ mount_root_btrfs() {
   losetup "$loop" "$backing"
   mkfs.btrfs -q -L omarchy-root-image "$loop"
   mkdir -p "$mnt"
-  mount -o "$IMAGE_COMPRESS,noatime,commit=600" "$loop" "$mnt"
+  local btrfs_threads
+  btrfs_threads=$(nproc)
+  (( btrfs_threads > 64 )) && btrfs_threads=64
+  (( btrfs_threads < 1 )) && btrfs_threads=1
+  mount -o "$IMAGE_COMPRESS,noatime,commit=600,thread_pool=$btrfs_threads" "$loop" "$mnt"
   btrfs subvolume create "$mnt/$IMAGE_SUBVOLUME" >/dev/null
 }
 

@@ -19,7 +19,11 @@ import sys
 
 CHUNK_SIZE = 1024 * 1024
 SYNC_FILE_RANGE_WRITE = 2
-SYNC_THRESHOLD = 65536
+# Flush every non-inline file (> 2 KiB max btrfs inline extent) asynchronously
+# so btrfs compresses 2-64 KiB files across thread_pool workers instead of
+# accumulating uncommitted delalloc metadata reservations and stalling workers
+# in handle_reserve_ticket.
+SYNC_THRESHOLD = 2048
 
 _libc = ctypes.CDLL(None, use_errno=True)
 _sync_file_range = getattr(_libc, "sync_file_range", None)

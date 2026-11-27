@@ -82,7 +82,7 @@ stop_vm
 
 after=$(allocated_in "$DISCARD_DISK" $((fill_start_gib * gib)) $((fill_gib * gib)))
 log "After the install: $((after / 1024 / 1024)) MiB of the last ${fill_gib} GiB hold data"
-trim_line=$(grep -E '^/: .* trimmed$' "$RUN_DIR/discard.txt" | head -n 1 || true)
+trim_line=$(grep -E '^/: .* trimmed( |$)' "$RUN_DIR/discard.txt" | head -n 1 || true)
 check "fstrim.timer is enabled (got: ${timer_enabled:-nothing})" \
   test "$timer_enabled" = enabled
 check "fstrim.timer stamp file is staged for first-boot run" \

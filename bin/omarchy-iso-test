@@ -1492,11 +1492,11 @@ verify_root_trimmed() {
     systemctl start fstrim.service &&
     journalctl -u fstrim.service --no-pager -o cat'" \
     >"$report" 2>&1 || true
-  if ! grep -qE '^/: .* trimmed$' "$report"; then
+  if ! grep -qE '^/: .* trimmed( |$)' "$report"; then
     echo "The free-space install did not trim its new root via fstrim.service; see $report" >&2
     return 1
   fi
-  log "The new root was trimmed via fstrim.service: $(grep -E '^/: .* trimmed$' "$report" | head -n 1)"
+  log "The new root was trimmed via fstrim.service: $(grep -E '^/: .* trimmed( |$)' "$report" | head -n 1)"
 }
 
 # The installer encrypts in 4096-byte sectors, which cryptsetup refuses on a

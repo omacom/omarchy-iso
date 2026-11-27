@@ -1,6 +1,6 @@
 [Unit]
-Description=Wait for the installer greeter before hashing the install medium
-Before=omarchy-mirror-verify.service omarchy-root-image-verify.service
+Description=Wait for the installer greeter before starting live background warmup
+Before=omarchy-luks-calibrate.service omarchy-mirror-verify.service omarchy-root-image-verify.service
 
 [Service]
 Type=oneshot

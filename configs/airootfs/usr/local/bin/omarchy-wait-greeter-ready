@@ -1,6 +1,7 @@
 #!/bin/bash
-# Hold the medium-hashing chain (omarchy-mirror-verify -> omarchy-root-image-verify
-# -> omarchy-luks-calibrate -> omarchy-target-keyring-early / omarchy-cache-warm)
+# Hold the live background warmup chain (omarchy-luks-calibrate ->
+# (omarchy-mirror-verify -> omarchy-root-image-verify) || omarchy-target-keyring-early
+# -> omarchy-cache-warm)
 # until the live greeter has drawn its logo (or a non-interactive boot starts).
 # Hashing the offline mirror from multi-user.target at ~2.7 s saturates the USB
 # stick through loop0 (where BFQ loses the idle I/O class) while udev, GPU

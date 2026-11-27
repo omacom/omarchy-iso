@@ -3066,13 +3066,17 @@ def _write_pre_mounted_fstab(ctx: InstallContext) -> None:
     (ctx.target / "etc" / "fstab").write_text("\n".join(lines))
 
 
-def _write_pre_mounted_crypttab(ctx: InstallContext) -> None:
+def _write_pre_mounted_crypttab(ctx: InstallContext, *, luks_options: str | None = None) -> None:
     storage = _storage_intent(ctx)
     luks_uuid = storage.get("luks_uuid")
     if not luks_uuid:
         return
+    from .luks_tuning import cmdline_options, crypttab_options
+    if luks_options is None:
+        luks_options = cmdline_options(f"UUID={luks_uuid}")
+    options = crypttab_options(luks_options)
     crypttab = ctx.target / "etc" / "crypttab.initramfs"
-    crypttab.write_text(f"omarchy_root  UUID={luks_uuid}  none  luks,discard,no-read-workqueue\n")
+    crypttab.write_text(f"omarchy_root  UUID={luks_uuid}  none  luks,{options}\n")
 
 
 # systemd (257 and later) asks the console for its size with ANSI escape
@@ -3089,12 +3093,14 @@ def _write_pre_mounted_crypttab(ctx: InstallContext) -> None:
 CONSOLE_NO_ANSI_QUERY = "systemd.tty.term.console=dumb"
 
 
-def _build_pre_mounted_cmdline(ctx: InstallContext, btrfs_uuid: str) -> str:
+def _build_pre_mounted_cmdline(ctx: InstallContext, btrfs_uuid: str, *, luks_options: str | None = None) -> str:
     storage = _storage_intent(ctx)
     if storage.get("luks_uuid"):
+        from .luks_tuning import cmdline_options
         root_mapper = storage.get("root_mapper") or "/dev/mapper/omarchy_root"
+        options = luks_options if luks_options is not None else cmdline_options(f"UUID={storage['luks_uuid']}")
         return (
-            f"cryptdevice=UUID={storage['luks_uuid']}:omarchy_root:allow-discards,no-read-workqueue "
+            f"cryptdevice=UUID={storage['luks_uuid']}:omarchy_root:{options} "
             f"root={root_mapper} zswap.enabled=0 "
             "rootflags=subvol=@ rw rootfstype=btrfs"
         )
@@ -3107,9 +3113,14 @@ def _build_pre_mounted_cmdline(ctx: InstallContext, btrfs_uuid: str) -> str:
 def _write_pre_mounted_limine_defaults(ctx: InstallContext) -> None:
     boot = _boot_intent(ctx)
     btrfs_uuid = _blkid_uuid(_btrfs_root_device(ctx))
-    cmdline = _build_pre_mounted_cmdline(ctx, btrfs_uuid)
+    luks_uuid = _storage_intent(ctx).get("luks_uuid")
+    luks_options = None
+    if luks_uuid:
+        from .luks_tuning import cmdline_options
+        luks_options = cmdline_options(f"UUID={luks_uuid}")
+    cmdline = _build_pre_mounted_cmdline(ctx, btrfs_uuid, luks_options=luks_options)
 
-    _write_pre_mounted_crypttab(ctx)
+    _write_pre_mounted_crypttab(ctx, luks_options=luks_options)
     _write_limine_defaults(
         ctx,
         cmdline,

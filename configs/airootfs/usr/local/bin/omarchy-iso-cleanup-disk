@@ -185,7 +185,7 @@ release_disk() {
       # (udev-synth), and triggering a change uevent wakes postponed events
       # immediately.
       if ! [[ -e $disk && -w $disk ]] \
-        || { [[ -b $disk ]] && [[ $(blockdev --getro "$disk" 2>/dev/null || true) == 1 ]]; } \
+        || [[ $(blockdev --getro "$disk" 2>/dev/null || true) == 1 ]] \
         || ! { exec {lock}<"$disk"; } 2>/dev/null \
         || ! flock -x "$lock"; then
         echo "$disk cannot be opened for writing and locked. Reboot the installer and try again."

@@ -41,7 +41,7 @@ run_case() {
     eval "$(awk "/^[a-z_]+\(\) \{$/ { p=1 } p { print } /^\}$/ { p=0 }" "$script")"
 
     partitions() {
-      [[ $mode == "used" || $mode == "read-only" ]] && echo "fake-disk1" || true
+      [[ $mode == "used" || $mode == "read-only" || $mode == "kernel-ro" ]] && echo "fake-disk1" || true
     }
     [[ $mode != "read-only" ]] || chmod 444 "$disk"
     udevadm() { echo "udevadm $*" >>"$log"; }
@@ -53,7 +53,12 @@ run_case() {
       local fd="${!#}"
       echo "lock-mode $(( $(awk "/^flags:/ { print \$2 }" "/proc/$$/fdinfo/$fd") & 3 ))" >>"$log"
     }
-    blockdev() { echo "blockdev $*" >>"$log"; }
+    blockdev() {
+      echo "blockdev $*" >>"$log"
+      if [[ ${1:-} == --getro ]]; then
+        [[ $mode == "kernel-ro" ]] && echo 1 || echo 0
+      fi
+    }
     wipefs() {
       echo "wipefs $*" >>"$log"
       if [[ " $* " == *" --no-act "* ]]; then
@@ -102,6 +107,18 @@ if ((EUID != 0)); then
 else
   echo "skip - the read-only disk case needs an ordinary user"
 fi
+
+# A kernel-marked read-only disk (blockdev --getro == 1) stops before any
+# teardown or wipe, even when running as root on a writable-mode device node.
+if out=$(run_case kernel-ro); then
+  fail "a kernel read-only disk must stop the cleanup" "$out"
+fi
+[[ $(tail -n 1 <<<"$out") == *"cannot be opened for writing and locked"* ]] ||
+  fail "the last line says why the kernel read-only disk was not released" "$out"
+grep -q '^blockdev --getro ' "$work/kernel-ro.log" || fail "kernel read-only check queried blockdev --getro" "$(cat "$work/kernel-ro.log")"
+! grep -qE '^(flock |swapoff |wipefs --all |blockdev --rereadpt )' "$work/kernel-ro.log" ||
+  fail "nothing is locked, torn down, or wiped on a kernel read-only disk" "$(cat "$work/kernel-ro.log")"
+echo "ok - a kernel read-only disk stops before releasing holders or wiping signatures"
 
 run_case sig-only
 grep -q '^flock -x ' "$work/sig-only.log" || fail "a disk with a whole-disk signature takes flock -x" "$(cat "$work/sig-only.log")"

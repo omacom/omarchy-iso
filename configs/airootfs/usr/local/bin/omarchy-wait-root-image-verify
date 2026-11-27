@@ -4,8 +4,8 @@
 # per-machine packages from, then the root image.
 #
 # The root image is streamed from the boot medium (copytoram is off), so a bad
-# medium must be caught before the full-disk orchestrator hands off to
-# archinstall *and* before the free-space configurator partitions the target.
+# medium must be caught before the orchestrator partitions or formats the target
+# (full-disk or free-space).
 # omarchy-root-image-verify.service hashes the image in the background from boot
 # (idle-class, so it yields to the live system under the boot-medium BFQ rule);
 # this collects that verdict, waiting for the hash if it is still running and
@@ -70,31 +70,6 @@ hash_where() {
   return 1
 }
 
-# How far the hasher is, as an integer percent: of the bytes of the image and
-# the layers after it, or for the mirror (one package after another, in the sums file's order) the place
-# of the package it has open in that list.
-hash_pct() {
-  local where path pos size line total file done=0
-  where=$(hash_where) || return 1
-  path=${where%$'\t'*} pos=${where##*$'\t'}
-  if [[ $path != "$MIRROR_DIR"/* ]]; then
-    total=0
-    for file in "$IMAGE" $LAYER_GLOB; do
-      [[ -f $file ]] || continue
-      size=$(stat -c %s "$file" 2>/dev/null) || return 1
-      [[ $file == "$path" ]] && done=$((total + pos))
-      total=$((total + size))
-    done
-    ((total > 0)) || return 1
-    echo $((done * 100 / total))
-    return 0
-  fi
-  total=$(grep -c . "$MIRROR_SUMS" 2>/dev/null) || return 1
-  line=$(grep -n -F -- "  ${path##*/}" "$MIRROR_SUMS" | head -n1 | cut -d: -f1)
-  [[ -n $line ]] || return 1
-  echo $(((line - 1) * 100 / total))
-}
-
 # --- boot medium + scheduler (absorbed from omarchy-iso-boot-medium) ---
 src=$(findmnt -no SOURCE "$BOOT_MEDIUM_MOUNT" 2>/dev/null || true)
 if [[ -n $src ]]; then
@@ -114,26 +89,13 @@ if [[ ! -f $IMAGE ]]; then
 fi
 [[ -f $CHECKSUM ]] || fail "root image checksum missing: $CHECKSUM"
 
-# The \r progress line needs terminating before anything else writes to the
-# terminal. Only a verified image gets the cosmetic 100%; a failure (which
-# includes a timed-out, unfinished read) just ends the line. progress_drawn is
-# await_verdict's.
-finish_progress() {
-  [[ $progress_drawn == true ]] || return 0
-  [[ ${1:-} == full ]] &&
-    printf '\r%*s%s: 100%%' "${OMARCHY_VERIFY_PROGRESS_INDENT:-0}" '' "$label" >>"$OMARCHY_VERIFY_PROGRESS" 2>/dev/null
-  printf '\n' >>"$OMARCHY_VERIFY_PROGRESS" 2>/dev/null || true
-}
-
 # Wait for one verify unit's verdict: return when it passed, fail() otherwise.
-# $UNIT is global because unit_prop and hash_pct read it.
+# $UNIT is global because unit_prop and hash_where read it.
 await_verdict() {
   UNIT=$1
-  local what=$2 load_state state tail msg pct
-  local reported=false progress_drawn=false settling=0 unanswered=0
+  local what=$2 load_state state tail msg
+  local reported=false settling=0 unanswered=0
   local where last_where="" last_move=$SECONDS starting=""
-  local label="verifying the install medium"
-  [[ $UNIT == "$MIRROR_UNIT" ]] && label="verifying the install medium's packages"
   load_state=$(unit_prop LoadState)
   [[ -n $load_state ]] || fail "systemd is not answering about $UNIT; cannot verify $what"
   [[ $load_state == loaded ]] || fail "$UNIT is not on this live system; cannot verify $what"
@@ -159,17 +121,14 @@ await_verdict() {
         sleep 5
         continue
       fi
-      finish_progress
       fail "systemd is not answering about $UNIT; cannot verify $what"
     fi
     unanswered=0
     case "$state" in
       active)
-        finish_progress full
         return 0
         ;;
       failed)
-        finish_progress
         # Result=timeout: systemd killed the hash at the size-based
         # TimeoutStartSec the build wrote into the unit (2 MiB/s floor over the
         # image size). The medium is stalling reads, not returning bad data, so
@@ -204,16 +163,6 @@ await_verdict() {
           echo "waiting for $UNIT to finish hashing $what..."
           reported=true
         fi
-        # Opt-in live progress for interactive callers (the free-space
-        # configurator gate): a \r-updating percent line written to the path in
-        # OMARCHY_VERIFY_PROGRESS (normally /dev/tty). Kept out of stdout, which
-        # the orchestrator logs line by line, and stderr, whose first line
-        # headlines the dashboard on failure. OMARCHY_VERIFY_PROGRESS_INDENT
-        # spaces line it up with the caller's own text.
-        if [[ -n ${OMARCHY_VERIFY_PROGRESS:-} ]] && pct=$(hash_pct); then
-          printf '\r%*s%s: %3d%%' "${OMARCHY_VERIFY_PROGRESS_INDENT:-0}" '' "$label" "$pct" >>"$OMARCHY_VERIFY_PROGRESS" 2>/dev/null || true
-          progress_drawn=true
-        fi
         # A medium that stopped answering stalls the read without failing it,
         # and the size-based timeout behind it is minutes away: tens of them
         # for a 4 GB image. When the hasher's offset has not moved for a
@@ -225,7 +174,6 @@ await_verdict() {
           if [[ $where != "$last_where" ]]; then
             last_where=$where last_move=$SECONDS
           elif ((SECONDS - last_move >= ${OMARCHY_VERIFY_STALL_SECONDS:-60})); then
-            finish_progress
             fail "install medium stopped responding: try another USB stick or port"$'\n'"reading $what made no progress for $((SECONDS - last_move)) s"
           fi
         fi
@@ -243,7 +191,6 @@ await_verdict() {
           sleep 0.5
           continue
         fi
-        finish_progress
         fail "install medium is too slow: try another USB stick or port"$'\n'"$what read could not be stopped after its size-based timeout"
         ;;
       reloading|refreshing|maintenance)

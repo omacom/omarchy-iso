@@ -374,8 +374,6 @@ install_progress() {
     "Installing Arch + Omarchy")  lo=260 hi=760  tau=18  pkg_signal=1 ;;
     "Configuring system")         lo=760 hi=830  tau=3   ;;
     "Staging provisioning")       lo=830 hi=835  tau=2   ;;
-    "Finalizing Limine boot")     lo=835 hi=935  tau=3   ;;
-    "Finalizing user")            lo=935 hi=978  tau=2   ;;
     "Finalizing boot and user")   lo=835 hi=978  tau=3   ;;
     "Configuring login")          lo=978 hi=988  tau=5   ;;
     "Configuring DNS resolver")   lo=988 hi=994  tau=5   ;;

@@ -88,11 +88,6 @@ if [[ ${OMARCHY_INSTALL_DEBUG:-} == "1" ]]; then
   echo "================================"
 fi
 
-# Restore the cursor on exit if the wizard or installer left it hidden.
-if [[ ${OMARCHY_KMSCON:-} != 1 ]]; then
-  trap 'printf "\e[?25h" >/dev/tty1 2>/dev/null' EXIT
-fi
-
 cd /root
 # Autoinstall: a cidata drive carrying the configurator's own output files
 # stands in for the wizard. omarchy-cidata-load copies them into /root and

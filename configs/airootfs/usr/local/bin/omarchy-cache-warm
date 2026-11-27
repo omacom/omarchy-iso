@@ -21,9 +21,9 @@ meminfo=${OMARCHY_MEMINFO:-/proc/meminfo}
 orchestrator_dir=${OMARCHY_ORCHESTRATOR_DIR:-/usr/share/omarchy-iso/orchestrator}
 
 wait_for_boot_checks() {
-  # The service orders After= all three units, and omarchy-luks-calibrate.service
-  # is Type=exec so its start job completes before the benchmark exits: poll
-  # is-active as well, and list-jobs in case this script is invoked directly.
+  # The service orders After= all three units (all Type=oneshot, so systemd
+  # holds warm-up until each exits). Still check list-jobs and is-active in
+  # case this script is invoked directly while a boot check is running.
   while [[ -n $(systemctl list-jobs --no-legend omarchy-mirror-verify.service \
     omarchy-root-image-verify.service omarchy-luks-calibrate.service 2>/dev/null) ]] ||
     systemctl is-active --quiet omarchy-luks-calibrate.service 2>/dev/null; do

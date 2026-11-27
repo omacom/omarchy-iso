@@ -1,11 +1,11 @@
 #!/bin/bash
 #
-# omarchy-wait-root-image-verify is the single gate both disk-touching paths
-# clear before formatting: the orchestrator (full-disk) and the configurator
-# (free-space). It collects the boot-time hasher's verdict, waiting if it is
-# still running and starting it if it never did. This drives it with a stubbed
-# systemctl/findmnt/lsblk/journalctl and a fake boot medium on PATH, so the
-# wait/verdict logic is checked without an ISO.
+# omarchy-wait-root-image-verify is the single gate before the orchestrator
+# partitions or formats a disk (full-disk or free-space). It collects the
+# boot-time hasher's verdict, waiting if it is still running and starting it if
+# it never did. This drives it with a stubbed systemctl/findmnt/lsblk/journalctl
+# and a fake boot medium on PATH, so the wait/verdict logic is checked without
+# an ISO.
 
 set -euo pipefail
 
@@ -39,8 +39,8 @@ run_helper() { # loadstate, active_seq, start_rc, [result]  ->  sets RC and OUT
   : >"$box/medium/arch/x86_64/omarchy-root.sfs.sha256"
 
   # WITH_HASHER_PROC=1: a fake hasher (pid 4242) holds the image at pos 512
-  # of 1024 bytes, and the helper draws progress into $box/progress. The shim
-  # rewrites /proc to the sandbox, so hash_pct reads this fixture.
+  # of 1024 bytes. The shim rewrites /proc to the sandbox, so hash_where reads
+  # this fixture for stall detection.
   local mainpid=0
   if [[ -n ${WITH_HASHER_PROC:-} ]]; then
     mainpid=4242
@@ -50,7 +50,7 @@ run_helper() { # loadstate, active_seq, start_rc, [result]  ->  sets RC and OUT
     printf 'pos:\t512\nflags:\t0100000\n' >"$box/proc/4242/fdinfo/7"
   fi
   # WITH_LAYER_HASHER=1: past the 1024-byte image, the hasher holds the N1x's
-  # 1024-byte platform layer at pos 512: 1536 of 2048 bytes, 75%.
+  # 1024-byte platform layer at pos 512.
   if [[ -n ${WITH_LAYER_HASHER:-} ]]; then
     mainpid=4242
     head -c 1024 /dev/zero >"$box/medium/arch/x86_64/omarchy-root.sfs"
@@ -65,8 +65,8 @@ run_helper() { # loadstate, active_seq, start_rc, [result]  ->  sets RC and OUT
   printf '%s\n' "${MIRROR_SEQ:-inactive}" >"$box/mirror_seq"
   [[ -n ${MIRROR_SEQ:-} ]] && printf '%s\n' "0000  a.pkg.tar.zst" "0000  b.pkg.tar.zst" \
     "0000  linux-t2.pkg.tar.zst" "0000  offline.db.tar.gz" >"$box/sums"
-  # WITH_MIRROR_HASHER=1: the mirror hasher (pid 4343) has the third of the
-  # four files open, so the packages line reads 50%.
+  # WITH_MIRROR_HASHER=1: the mirror hasher (pid 4343) holds a mirror package
+  # open at pos 100.
   local mirror_pid=0
   if [[ -n ${WITH_MIRROR_HASHER:-} ]]; then
     mirror_pid=4343
@@ -153,16 +153,11 @@ EOF
       "$HELPER" >"$shim"
   chmod +x "$shim"
 
-  local progress_env=()
-  [[ -n ${WITH_HASHER_PROC:-}${WITH_LAYER_HASHER:-}${WITH_MIRROR_HASHER:-} ]] && progress_env=(OMARCHY_VERIFY_PROGRESS="$box/progress")
-  [[ -n ${INDENT:-} ]] && progress_env+=(OMARCHY_VERIFY_PROGRESS_INDENT="$INDENT")
-
   set +e
   OUT=$(PATH="$box/bin:$PATH" OMARCHY_VERIFY_RETRY_SECONDS=0 OMARCHY_VERIFY_STALL_SECONDS="${STALL:-60}" \
-    env "${progress_env[@]}" timeout 120 bash "$shim" 2>&1)
+    timeout 120 bash "$shim" 2>&1)
   RC=$?
   set -e
-  PROGRESS_OUT=$(cat "$box/progress" 2>/dev/null || true)
   rm -rf "$box"
 }
 
@@ -173,30 +168,6 @@ check "active unit passes" 0 "$RC" "scheduler: none mq-deadline kyber [bfq]" "$O
 # Still hashing, then completes: waits, then passes.
 run_helper loaded $'activating\nactivating\nactive' 0
 check "waits for a running unit then passes" 0 "$RC" "waiting for" "$OUT"
-
-# With OMARCHY_VERIFY_PROGRESS set and a hasher pid to read, the wait draws a
-# live percent (fixture: pos 512 of 1024 -> 50%) and finishes the line at 100%
-# on success. Progress goes to the given path, never into stdout/stderr.
-WITH_HASHER_PROC=1 run_helper loaded $'activating\nactivating\nactive' 0
-check "progress line drawn while hashing" 0 "$RC" "" "$OUT"
-[[ $PROGRESS_OUT == *" 50%"* && $PROGRESS_OUT == *"100%"* ]] &&
-  echo "ok: progress shows 50% then 100%" ||
-  { echo "FAIL: progress output wrong: $(printf '%q' "$PROGRESS_OUT")"; fails=1; }
-[[ $OUT == *"50%"* ]] && { echo "FAIL: percent leaked into stdout/stderr"; fails=1; } || true
-
-# The configurator passes its left padding, so the line starts under its own
-# text instead of at column 0.
-INDENT=4 WITH_HASHER_PROC=1 run_helper loaded $'activating\nactivating\nactive' 0
-[[ $PROGRESS_OUT == $'\r    verifying the install medium:  50%'* && $PROGRESS_OUT == *$'\r    verifying the install medium: 100%'* ]] &&
-  echo "ok: progress is indented by OMARCHY_VERIFY_PROGRESS_INDENT" ||
-  { echo "FAIL: indented progress wrong: $(printf '%q' "$PROGRESS_OUT")"; fails=1; }
-
-# A failed hash ends the progress line without the cosmetic 100%. (The first
-# ActiveState answer is consumed by the inactive check before the wait loop.)
-WITH_HASHER_PROC=1 run_helper loaded $'activating\nactivating\nfailed' 0
-[[ $PROGRESS_OUT == *" 50%"* && $PROGRESS_OUT != *"100%"* ]] &&
-  echo "ok: failed hash ends progress without 100%" ||
-  { echo "FAIL: failed-hash progress wrong: $(printf '%q' "$PROGRESS_OUT")"; fails=1; }
 
 # Hash failed: corrupt medium, re-flash message leads.
 run_helper loaded "failed" 0
@@ -282,25 +253,15 @@ check "a timed-out mirror hash is a slow medium" 1 "$RC" \
 MIRROR_SEQ=inactive run_helper loaded "active" 0
 check "a mirror unit that will not run fails" 1 "$RC" "cannot verify the package mirror" "$OUT"
 
-# The free-space gate's progress line names the packages stage on its own.
-WITH_MIRROR_HASHER=1 MIRROR_SEQ=$'activating\nactivating\nactive' run_helper loaded "active" 0
-check "mirror hash with a progress line passes" 0 "$RC" "" "$OUT"
-[[ $PROGRESS_OUT == *"packages:  50%"* && $PROGRESS_OUT == *"packages: 100%"* ]] &&
-  echo "ok: the packages progress shows 50% then 100%" ||
-  { echo "FAIL: packages progress wrong: $(printf '%q' "$PROGRESS_OUT")"; fails=1; }
-
 # A hasher whose offset stops moving while the install waits on it is a medium
 # that stopped answering: say so, rather than wait out the size-based timeout.
 # (The fixture's hasher sits at byte 512 for good.)
 STALL=1 WITH_HASHER_PROC=1 run_helper loaded "activating" 0
 check "a stalled hash is reported" 1 "$RC" "install medium stopped responding" "$OUT"
 
-# The platform layer is read in the same hash, after the image: its bytes
-# count in the progress, and a read that hangs in it is a stall too.
-WITH_LAYER_HASHER=1 run_helper loaded $'activating\nactivating\nactive' 0
-[[ $PROGRESS_OUT == *" 75%"* ]] &&
-  echo "ok: progress counts the platform layer after the image" ||
-  { echo "FAIL: layer progress wrong: $(printf '%q' "$PROGRESS_OUT")"; fails=1; }
+# A stalled read of the package mirror or platform layer is reported too.
+STALL=1 WITH_MIRROR_HASHER=1 MIRROR_SEQ="activating" run_helper loaded "active" 0
+check "a stalled read of the package mirror is reported" 1 "$RC" "install medium stopped responding" "$OUT"
 STALL=1 WITH_LAYER_HASHER=1 run_helper loaded "activating" 0
 check "a stalled read of the platform layer is reported" 1 "$RC" "install medium stopped responding" "$OUT"
 

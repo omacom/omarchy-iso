@@ -50,7 +50,9 @@ fi
 source "$INSTALLER_I18N"
 i18n_load en
 
-LOGO_WIDTH=$(awk '{ if (length > max) max = length } END { print max+0 }' "$LOGO_PATH")
+# Count UTF-8 codepoints in every locale: under C locale awk's length counts
+# bytes, which triples box-drawing glyphs and clamps left padding to zero.
+LOGO_WIDTH=$(LC_ALL=C awk '{ gsub(/[\200-\277]/, ""); if (length > max) max = length } END { print max+0 }' "$LOGO_PATH")
 
 export GUM_CONFIRM_PROMPT_FOREGROUND="6"
 export GUM_CONFIRM_SELECTED_FOREGROUND="0"
@@ -967,6 +969,69 @@ not_enough_space() {
   return 1
 }
 
+# Largest unallocated region on $1 as "<start_b> <end_b> <size_b>", or empty
+# if parted reports no free region with positive size.
+largest_free_region() {
+  local target_disk="$1"
+  # -s (script mode) keeps parted from prompting on stderr for warnings
+  # like a stale GPT backup; without it the configurator hangs invisibly.
+  parted -ms "$target_disk" unit B print free </dev/null 2>/dev/null | \
+    awk -F: '
+      $NF ~ /free/ {
+        start=$2; end=$3; size=$4;
+        gsub(/B/, "", start);
+        gsub(/B/, "", end);
+        gsub(/B/, "", size);
+        if (size+0 > max_size+0) {
+          max_size=size; max_start=start; max_end=end;
+        }
+      }
+      END {
+        if (max_size+0 > 0) printf "%s %s %s\n", max_start, max_end, max_size;
+      }'
+}
+
+# Confirm installation with LUKS encryption enabled by default and Ctrl+C
+# toggling between encrypted and unencrypted. Sets encrypt_installation and
+# returns 0 on confirm, 1 on decline, or aborts on unexpected gum exit codes.
+confirm_install_encryption() {
+  local heading="$1" prompt="$2"
+  local mode="encrypted" affirmative confirm_status
+
+  while true; do
+    clear_logo
+    echo
+    say "$heading"
+
+    if [[ $mode == "encrypted" ]]; then
+      say --foreground 8 "$(t encryption.hint)"
+      affirmative="$(t install.yes)"
+    else
+      affirmative="$(t install.yesUnencrypted)"
+    fi
+
+    echo
+    gum confirm --affirmative "$affirmative" --negative "$(t common.change)" "$prompt"
+    confirm_status=$?
+
+    case $confirm_status in
+      0)
+        [[ $mode == "encrypted" ]] && encrypt_installation=true || encrypt_installation=false
+        return 0
+        ;;
+      1)
+        return 1
+        ;;
+      130)
+        [[ $mode == "encrypted" ]] && mode="unencrypted" || mode="encrypted"
+        ;;
+      *)
+        abort
+        ;;
+    esac
+  done
+}
+
 # Plan half of the free-space install: checks, free-space analysis, and the
 # encryption confirm. Sets the globals write_free_space_config needs. Returns 1
 # to fall back to the install-mode picker.
@@ -1021,22 +1086,7 @@ run_partition_decide() {
       needs_mklabel=true
     fi
   else
-    # -s (script mode) keeps parted from prompting on stderr for warnings
-    # like a stale GPT backup; without it the configurator hangs invisibly.
-    FREE_SPACE_INFO=$(parted -ms "$disk" unit B print free </dev/null 2>/dev/null | \
-      awk -F: '
-        $NF ~ /free/ {
-          start=$2; end=$3; size=$4;
-          gsub(/B/, "", start);
-          gsub(/B/, "", end);
-          gsub(/B/, "", size);
-          if (size+0 > max_size+0) {
-            max_size=size; max_start=start; max_end=end;
-          }
-        }
-        END {
-          if (max_size+0 > 0) printf "%s %s %s\n", max_start, max_end, max_size;
-        }')
+    FREE_SPACE_INFO=$(largest_free_region "$disk")
   fi
 
   if [[ -z "$FREE_SPACE_INFO" ]]; then
@@ -1072,46 +1122,9 @@ run_partition_decide() {
   # Default to encrypted and hide the unencrypted path behind Ctrl+C,
   # matching the full-disk flow. The dedicated Omarchy ESP always supports
   # LUKS, so encryption is always on the table here.
-  local mode="encrypted" affirmative confirm_status
-
-  while true; do
-    clear_logo
-    echo
-    say "$(t freeSpace.title "$(to_gb $INSTALL_MAX_B)")"
-
-    case $mode in
-      encrypted)
-        say --foreground 8 "$(t encryption.hint)"
-        affirmative="$(t install.yes)"
-        ;;
-      unencrypted)
-        affirmative="$(t install.yesUnencrypted)"
-        ;;
-    esac
-    echo
-
-    gum confirm --affirmative "$affirmative" --negative "$(t common.change)" "$(t freeSpace.prompt "$disk")"
-    confirm_status=$?
-
-    case $confirm_status in
-      0)
-        [[ $mode == "encrypted" ]] && encrypt_installation=true || encrypt_installation=false
-        break
-        ;;
-      1)
-        return 1
-        ;;
-      130)
-        case $mode in
-          encrypted) mode="unencrypted" ;;
-          unencrypted) mode="encrypted" ;;
-        esac
-        ;;
-      *)
-        abort
-        ;;
-    esac
-  done
+  confirm_install_encryption \
+    "$(t freeSpace.title "$(to_gb "$INSTALL_MAX_B")")" \
+    "$(t freeSpace.prompt "$disk")" || return 1
 
   if [[ "$encrypt_installation" == "true" ]]; then
     esp_mount_in_target=/boot
@@ -1292,24 +1305,14 @@ open_partition_tool() {
 # If the disk has no partition table or no unallocated free space, the only
 # viable paths write the whole disk, so the free-space mode is not offered.
 requires_full_disk_install() {
-  local pt_type free_space_b
+  local pt_type
   pt_type=$(partition_table_type "$disk")
 
   # a) No partition table: disk is empty
   [[ -z "$pt_type" ]] && return 0
 
   # b) No usable free space
-  free_space_b=$(parted -ms "$disk" unit B print free </dev/null 2>/dev/null | \
-    awk -F: '
-      $NF ~ /free/ {
-        size=$4;
-        gsub(/B/, "", size);
-        if (size+0 > max+0) max=size;
-      }
-      END {
-        print max+0;
-      }')
-  [[ -z "$free_space_b" || "$free_space_b" -eq 0 ]]
+  [[ -z $(largest_free_region "$disk") ]]
 }
 
 # Returns gum's status: OMARCHY_FORM_BACK for Esc, OMARCHY_FORM_SIGNAL for
@@ -1341,53 +1344,19 @@ install_mode_form() {
 }
 
 confirm_disk_overwrite() {
-  local mode="encrypted"
-  local affirmative confirm_status disk_details
+  local disk_details
 
   # The disk as the disk list describes it (size, model, partitions), which a
   # machine with one disk now reaches without seeing that list. It is what the
   # confirmation names.
   disk_details=$(get_disk_info "$disk")
-
-  while true; do
-    clear_logo
-    echo
-    say "$(t overwrite.warning)"
-
-    if [[ $mode == "encrypted" ]]; then
-      say --foreground 8 "$(t encryption.hint)"
-      affirmative="$(t install.yes)"
-    else
-      affirmative="$(t install.yesUnencrypted)"
-    fi
-
-    echo
-    gum confirm --affirmative "$affirmative" --negative "$(t common.change)" "$(t overwrite.prompt "$disk_details")"
-    confirm_status=$?
-
-    case $confirm_status in
-      0)
-        [[ $mode == "encrypted" ]] && encrypt_installation=true || encrypt_installation=false
-        return 0
-        ;;
-      1)
-        return 1
-        ;;
-      130)
-        [[ $mode == "encrypted" ]] && mode="unencrypted" || mode="encrypted"
-        ;;
-      *)
-        abort
-        ;;
-    esac
-  done
+  confirm_install_encryption "$(t overwrite.warning)" "$(t overwrite.prompt "$disk_details")"
 }
 
-# Decide what and how to install: sets install_target (full_disk|free_space),
-# install_target and encrypt_installation. Nothing is written to disk yet —
-# the user step runs between this and the execution below. (deferred provisioning never
-# reaches here; it's armed by Ctrl+C on the keyboard screen and goes straight to
-# disk selection.)
+# Decide what and how to install: sets install_target (full_disk|free_space)
+# and encrypt_installation. Nothing is written to disk yet — the configurator
+# only emits user_configuration.json for the orchestrator. (Deferred
+# provisioning never reaches here; it is always a full-disk install.)
 select_installation() {
   local full_disk_only status
 
@@ -1703,6 +1672,6 @@ $archinstall_custom_servers
 }
 _EOF_
 
-if [[ $1 == "dry" ]]; then
+if [[ ${1:-} == "dry" ]]; then
   print_dry_run_files
 fi

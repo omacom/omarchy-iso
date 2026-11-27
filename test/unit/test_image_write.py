@@ -12,6 +12,7 @@ _write_root_image_dd is run for real, dd against temp files.
 """
 
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -152,9 +153,10 @@ class WriteRootImageParallelTest(unittest.TestCase):
 
     def test_killed_tool_is_an_error(self):
         self.stub(0)
-        self.tool.write_text("#!/bin/bash\nkill -BUS $$\n")
-        with self.assertRaises(subprocess.CalledProcessError):
+        self.tool.write_text("#!/bin/bash\nkill -TERM $$\n")
+        with self.assertRaises(subprocess.CalledProcessError) as caught:
             self.write()
+        self.assertEqual(caught.exception.returncode, -signal.SIGTERM)
 
 
 class WriteRootImageDdTest(unittest.TestCase):

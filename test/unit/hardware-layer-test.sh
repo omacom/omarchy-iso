@@ -93,7 +93,7 @@ echo "ok - intel-ptl-ipu7.layer sorts before intel-sof-laptop.layer"
 sof_matches() {
   # shellcheck disable=SC2016 # expanded by the inner shell
   OMARCHY_PROC_ROOT="$work/proc" OMARCHY_SYS_ROOT="$work/sys" bash -c '
-    omarchy-hw-pci() { [[ ${NO_INTEL_GPU:-} != 1 ]]; }
+    omarchy-hw-pci() { [[ $# == 3 && $1 == --class && $2 == 03 && $3 == "8086:*" && ${NO_INTEL_GPU:-} != 1 ]]; }
     omarchy-hw-intel() { [[ ${NO_INTEL:-} != 1 ]]; }
     omarchy-battery-present() { [[ ${NO_BATTERY:-} != 1 ]]; }
     omarchy-hw-intel-sof() { [[ ${NO_SOF:-} != 1 ]]; }

@@ -796,11 +796,9 @@ qualcomm_firmware_uncovered() {
 # overwrite confirmation renders it inline instead of flashing a transient
 # screen that confirm_disk_overwrite immediately clears.
 firmware_notice_lines=()
-firmware_notice_foreground=""
 
 stage_qualcomm_firmware() {
   firmware_notice_lines=()
-  firmware_notice_foreground=""
   command -v qcom-firmware-extract >/dev/null 2>&1 || return 0
   [[ -d /sys/firmware/devicetree/base ]] || return 0
 
@@ -833,14 +831,12 @@ stage_qualcomm_firmware() {
   if ((saved >= missing)); then
     return 0
   elif ((saved > 0)); then
-    firmware_notice_foreground=1
     firmware_notice_lines=(
       "$(t firmware.partial "$saved" "$missing")"
       "$(t firmware.degraded)"
       "$(t firmware.extract "\`sudo qcom-firmware-extract\`")"
     )
   else
-    firmware_notice_foreground=1
     firmware_notice_lines=("$(t firmware.none)")
     if grep -q BitLocker "$log" 2>/dev/null; then
       firmware_notice_lines+=(
@@ -853,14 +849,15 @@ stage_qualcomm_firmware() {
       "$(t firmware.extract "\`sudo qcom-firmware-extract\`")"
     )
   fi
+  printf '%s\n' "${firmware_notice_lines[@]}" >>"$log"
 }
 
 render_firmware_notice() {
   (( ${#firmware_notice_lines[@]} > 0 )) || return 0
   local i
   for i in "${!firmware_notice_lines[@]}"; do
-    if (( i == 0 )) && [[ -n ${firmware_notice_foreground:-} ]]; then
-      say --foreground "$firmware_notice_foreground" "${firmware_notice_lines[i]}"
+    if (( i == 0 )); then
+      say --foreground 1 "${firmware_notice_lines[i]}"
     else
       say "${firmware_notice_lines[i]}"
     fi

@@ -326,9 +326,14 @@ class ConfiguratorFirmwareTests(unittest.TestCase):
         # Two missing files: one in a folder a maker's package provides, one not.
         self.executable('qcom-firmware-extract','''#!/bin/bash
 if [[ $1 == --list-missing ]]; then
-  printf '%s\\n' qcom/x1p42100/ASUSTeK/zenbook-14-ux3480qa/qcadsp8380.mbn qcom/x1e80100/VENDOR/laptop/qcadsp8380.mbn
+  if [[ -n ${MISSING_LIST:-} ]]; then
+    printf '%s\\n' $MISSING_LIST
+  else
+    printf '%s\\n' qcom/x1p42100/ASUSTeK/zenbook-14-ux3480qa/qcadsp8380.mbn qcom/x1e80100/VENDOR/laptop/qcadsp8380.mbn
+  fi
 elif [[ $1 == --stage ]]; then
   mkdir -p "$2"; echo staged >"$TEST_ROOT/stage-ran"; : >"$2/manifest"
+  [[ -n ${STAGE_OUTPUT:-} ]] && printf '%s\\n' "$STAGE_OUTPUT"
   for name in ${STAGED:-}; do printf '%s windows\\n' "$name" >>"$2/manifest"; done
 fi
 ''')
@@ -338,7 +343,7 @@ fi
             tar.addfile(info,io.BytesIO(desc))
         code=(ROOT/'configs/airootfs/root/configurator').read_text()
         functions=''.join(re.search(r'^'+name+r'\(\) \{\n.*?^\}\n', code, re.S|re.M).group(0)
-                          for name in ('qualcomm_firmware_uncovered','stage_qualcomm_firmware','render_firmware_notice'))
+                          for name in ('qualcomm_firmware_uncovered','stage_qualcomm_firmware','render_firmware_notice','confirm_install_encryption'))
         for old,new in (('/var/cache/omarchy/mirror/offline',str(self.root/'mirror')),('/run/omarchy',str(self.root/'run/omarchy')),
                         ('/sys/firmware/devicetree/base',str(self.root/'dt'))):
             functions=functions.replace(old,new)
@@ -349,7 +354,7 @@ fi
         path=self.root/'bin'/name; path.write_text(text); path.chmod(0o755)
 
     def run_bash(self,call):
-        stubs='step() { echo "step $*"; }\nsay() { echo "say $*"; }\nt() { echo "$*"; }\n'
+        stubs='clear_logo() { echo "clear_logo"; }\nstep() { echo "step $*"; }\nsay() { echo "say $*"; }\nt() { echo "$*"; }\nabort() { exit 99; }\n'
         return subprocess.run(['bash','-c',stubs+self.functions+call],env=self.env,capture_output=True,text=True)
 
     def test_firmware_a_package_covers_is_not_missing(self):
@@ -364,7 +369,8 @@ fi
         self.assertNotIn('No such file',result.stderr)
         self.assertEqual(result.stdout,'','stage_qualcomm_firmware must not draw or flash a transient screen')
         self.assertTrue((self.root/'stage-ran').exists())
-        self.assertTrue((self.root/'run/omarchy/firmware-stage.log').exists())
+        log=(self.root/'run/omarchy/firmware-stage.log').read_text()
+        self.assertIn('firmware.none',log)
 
     def test_only_uncovered_firmware_from_windows_counts_as_saved(self):
         covered='qcom/x1p42100/ASUSTeK/zenbook-14-ux3480qa/qcadsp8380.mbn'
@@ -376,50 +382,110 @@ fi
         self.assertIn('say --foreground 1 firmware.none',result.stdout)
         self.assertIn('say firmware.degraded',result.stdout)
         self.assertIn('say firmware.extract',result.stdout)
-        # Windows supplied the uncovered file: no warning rendered.
-        (self.root/'run/omarchy/firmware/manifest').unlink()
-        self.env['STAGED']=uncovered
-        result=self.run_bash('stage_qualcomm_firmware; render_firmware_notice')
+        # Windows supplied the uncovered file: notice resets cleanly and renders nothing.
+        result=self.run_bash(
+            f'STAGED="{covered}" stage_qualcomm_firmware; '
+            f'STAGED="{uncovered}" stage_qualcomm_firmware; '
+            'render_firmware_notice'
+        )
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(result.stdout,'')
 
-    def test_confirm_disk_overwrite_renders_firmware_notice_inline(self):
-        code=(ROOT/'configs/airootfs/root/configurator').read_text()
-        overwrite_fn=re.search(r'^confirm_disk_overwrite\(\) \{\n.*?^\}\n', code, re.S|re.M).group(0)
-        self.assertRegex(
-            overwrite_fn,
-            r'confirm_install_encryption[^\n]*with-firmware-notice',
+    def test_partial_and_bitlocker_firmware_notices(self):
+        first='qcom/x1e80100/VENDOR/laptop/qcadsp8380.mbn'
+        second='qcom/x1e80100/VENDOR/laptop/qccdsp8380.mbn'
+        self.env['MISSING_LIST']=f'{first} {second}'
+        self.env['STAGED']=first
+        partial=self.run_bash('stage_qualcomm_firmware; render_firmware_notice')
+        self.assertEqual(partial.returncode,0,partial.stderr)
+        self.assertEqual(
+            partial.stdout.splitlines(),
+            [
+                'say --foreground 1 firmware.partial 1 2',
+                'say firmware.degraded',
+                'say firmware.extract `sudo qcom-firmware-extract`',
+                '',
+            ],
         )
-        confirm_fn=re.search(r'^confirm_install_encryption\(\) \{\n.*?^\}\n', code, re.S|re.M).group(0)
-        self.assertRegex(
-            confirm_fn,
-            r'clear_logo\n\s*echo\n\s*\[\[ \$notice == "with-firmware-notice" \]\] && render_firmware_notice',
+        self.env['STAGED']=''
+        self.env['STAGE_OUTPUT']='Skipping BitLocker-encrypted partition'
+        bitlocker=self.run_bash('stage_qualcomm_firmware; render_firmware_notice')
+        self.assertEqual(bitlocker.returncode,0,bitlocker.stderr)
+        self.assertEqual(
+            bitlocker.stdout.splitlines(),
+            [
+                'say --foreground 1 firmware.none',
+                'say firmware.bitlocker',
+                'say firmware.bitlockerHint',
+                'say firmware.degraded',
+                'say firmware.extract `sudo qcom-firmware-extract`',
+                '',
+            ],
         )
 
-    def test_stage_live_qcom_provided_lists_extracts_board_lists_into_live_airootfs(self):
+    def test_confirm_install_encryption_renders_firmware_notice_inline_and_on_toggle(self):
+        # confirm_disk_overwrite passes with-firmware-notice to confirm_install_encryption.
+        code=(ROOT/'configs/airootfs/root/configurator').read_text()
+        overwrite_fn=re.search(r'^confirm_disk_overwrite\(\) \{\n.*?^\}\n', code, re.S|re.M).group(0)
+        self.assertIn('with-firmware-notice',overwrite_fn)
+        # Ctrl+C (130) toggles encryption and redraws the firmware notice above the heading.
+        with_notice=self.run_bash('''
+          stage_qualcomm_firmware
+          gum_calls=0
+          gum() { gum_calls=$((gum_calls + 1)); (( gum_calls == 1 )) && return 130 || return 0; }
+          confirm_install_encryption "OVERWRITE_HEADING" "PROMPT" with-firmware-notice
+        ''')
+        self.assertEqual(with_notice.returncode,0,with_notice.stderr)
+        lines=with_notice.stdout.splitlines()
+        self.assertEqual(lines.count('say --foreground 1 firmware.none'),2)
+        self.assertLess(lines.index('say --foreground 1 firmware.none'),lines.index('say OVERWRITE_HEADING'))
+        # Without with-firmware-notice (e.g. free-space install), the notice is omitted.
+        without_notice=self.run_bash('''
+          stage_qualcomm_firmware
+          gum() { return 0; }
+          confirm_install_encryption "FREESPACE_HEADING" "PROMPT"
+        ''')
+        self.assertEqual(without_notice.returncode,0,without_notice.stderr)
+        self.assertNotIn('firmware.none',without_notice.stdout)
+        self.assertIn('say FREESPACE_HEADING',without_notice.stdout)
+
+    def test_stage_live_qcom_provided_lists_extracts_only_passed_packages(self):
         mirror=self.root/'pkg-mirror'; mirror.mkdir()
         airootfs=self.root/'live-airootfs'; airootfs.mkdir()
-        # Package with a provided.d board list (like asus-zenbook-a16-firmware).
-        with tarfile.open(mirror/'asus-zenbook-a16-firmware-1-2-aarch64.pkg.tar.gz','w:gz') as tar:
+        oem_pkg=mirror/'asus-zenbook-a16-firmware-1-3-aarch64.pkg.tar.gz'
+        with tarfile.open(oem_pkg,'w:gz') as tar:
             body=b'qcom/glymur/ASUSTeK/UX3607OA/qcadsp8480.mbn\n'
             info=tarfile.TarInfo('usr/share/qcom-firmware-extract/provided.d/asus,zenbook-a16-ux3607oa.list')
             info.size=len(body); tar.addfile(info,io.BytesIO(body))
             other=b'binary'
             info=tarfile.TarInfo('usr/lib/firmware/qcom/glymur/ASUSTeK/UX3607OA/qcadsp8480.mbn.xz')
             info.size=len(other); tar.addfile(info,io.BytesIO(other))
-        # Detached signature and a firmware package without provided.d must be ignored cleanly.
-        (mirror/'asus-zenbook-a16-firmware-1-2-aarch64.pkg.tar.gz.sig').write_bytes(b'sig')
-        with tarfile.open(mirror/'other-firmware-1-1-aarch64.pkg.tar.gz','w:gz') as tar:
+        # A second resolved OEM package without provided.d must succeed cleanly.
+        other_oem=mirror/'other-qcom-firmware-1-1-aarch64.pkg.tar.gz'
+        with tarfile.open(other_oem,'w:gz') as tar:
             other=b'fw'
             info=tarfile.TarInfo('usr/lib/firmware/other.bin'); info.size=len(other); tar.addfile(info,io.BytesIO(other))
+        # An unrelated linux-firmware-* package in the mirror must not be scanned.
+        with tarfile.open(mirror/'linux-firmware-qcom-1-1-any.pkg.tar.gz','w:gz') as tar:
+            body=b'should-not-be-extracted\n'
+            info=tarfile.TarInfo('usr/share/qcom-firmware-extract/provided.d/unrelated.list')
+            info.size=len(body); tar.addfile(info,io.BytesIO(body))
         script=(f'set -euo pipefail\nsource "{ROOT/"builder/qcom-oem-firmware.sh"}"\n'
-                f'stage_live_qcom_provided_lists "{mirror}" "{airootfs}"\n')
+                f'stage_live_qcom_provided_lists "{airootfs}" "{oem_pkg}" "{other_oem}"\n')
         result=subprocess.run(['bash','-c',script],capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)
         extracted=airootfs/'usr/share/qcom-firmware-extract/provided.d/asus,zenbook-a16-ux3607oa.list'
         self.assertTrue(extracted.is_file())
         self.assertEqual(extracted.read_text(),'qcom/glymur/ASUSTeK/UX3607OA/qcadsp8480.mbn\n')
+        self.assertFalse((airootfs/'usr/share/qcom-firmware-extract/provided.d/unrelated.list').exists())
         self.assertFalse((airootfs/'usr/lib/firmware').exists())
+        # A corrupt/unreadable package fails loudly instead of being silently ignored.
+        bad_pkg=mirror/'corrupt-firmware-1-1-aarch64.pkg.tar.gz'
+        bad_pkg.write_bytes(b'not-a-tarball')
+        bad_script=(f'set -euo pipefail\nsource "{ROOT/"builder/qcom-oem-firmware.sh"}"\n'
+                    f'stage_live_qcom_provided_lists "{airootfs}" "{bad_pkg}"\n')
+        bad_result=subprocess.run(['bash','-c',bad_script],capture_output=True,text=True)
+        self.assertNotEqual(bad_result.returncode,0)
 
 
 

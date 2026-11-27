@@ -333,19 +333,19 @@ def volume_key_size() -> int:
 
 
 def with_cipher(command: list[str]) -> list[str]:
-    """Format with Adiantum (256-bit key) on CPUs without AES instructions.
-    Leaves commands with an explicit cipher and non-format commands unchanged."""
+    """Format with Adiantum (256-bit key) on CPUs without AES instructions,
+    in place of any cipher and key size the command names, so the format
+    always matches volume_key_size(). Leaves other commands unchanged."""
     if (not command or command[0] != "cryptsetup" or "luksFormat" not in command
-            or any(arg in ("--cipher", "-c") or arg.startswith("--cipher=") for arg in command)
             or has_aes_acceleration()):
         return command
     print(f"No AES instructions on this CPU: formatting with {ADIANTUM_CIPHER}", file=sys.stderr)
     out = [command[0], "--cipher", ADIANTUM_CIPHER, "--key-size", str(ADIANTUM_KEY_SIZE)]
     args = iter(command[1:])
     for arg in args:
-        if arg in ("--key-size", "-s"):
+        if arg in ("--cipher", "-c", "--key-size", "-s"):
             next(args, None)
-        elif not arg.startswith("--key-size="):
+        elif not arg.startswith(("--cipher=", "--key-size=")):
             out.append(arg)
     return out
 

@@ -1086,11 +1086,16 @@ class AdiantumWithoutAes(unittest.TestCase):
         self.assertEqual(luks.with_cipher(bare), expected_bare)
         self.assertEqual(luks.with_cipher(bare[:1] + ['--key-size=512'] + bare[1:]), expected_bare)
 
-    def test_own_cipher_and_other_commands_are_left_alone(self):
+    def test_a_named_cipher_is_replaced_and_other_commands_are_left_alone(self):
+        # The volume key file is sized for this CPU's cipher, so a format
+        # that kept its own cipher and key size could not read it.
+        expected = luks.with_cipher(COMMAND)
         for command in (COMMAND[:1] + ['--cipher', 'aes-xts-plain64'] + COMMAND[1:],
-                        COMMAND[:1] + ['-c', 'serpent-xts-plain64'] + COMMAND[1:],
-                        COMMAND[:1] + ['--cipher=aes-xts-plain64'] + COMMAND[1:],
-                        ['cryptsetup', 'open', '/dev/vda2', 'root'],
+                        COMMAND[:1] + ['-c', 'serpent-xts-plain64', '-s', '512'] + COMMAND[1:],
+                        COMMAND[:1] + ['--cipher=aes-xts-plain64'] + COMMAND[1:]):
+            with self.subTest(command=command):
+                self.assertEqual(luks.with_cipher(command), expected)
+        for command in (['cryptsetup', 'open', '/dev/vda2', 'root'],
                         ['cryptsetup', '--batch-mode', 'luksAddKey', '--key-slot', '0', '/dev/vda2', '-']):
             with self.subTest(command=command):
                 self.assertEqual(luks.with_cipher(command), command)

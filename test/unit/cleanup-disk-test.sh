@@ -11,6 +11,7 @@ set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 SCRIPT="$ROOT/configs/airootfs/usr/local/bin/omarchy-iso-cleanup-disk"
+DISK_PARTITIONING="$ROOT/configs/airootfs/usr/share/omarchy-iso/disk-partitioning.sh"
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -33,11 +34,14 @@ run_case() {
     mode=$2
     script=$3
     work=$4
+    disk_partitioning=$5
     disk="$work/fake-disk"
     rm -f "$disk"
     : >"$disk"
     disk_name="fake-disk"
 
+    # shellcheck disable=SC1090
+    source "$disk_partitioning"
     eval "$(awk "/^[a-z_]+\(\) \{$/ { p=1 } p { print } /^\}$/ { p=0 }" "$script")"
 
     partitions() {
@@ -68,7 +72,7 @@ run_case() {
 
     release_disk
     $released
-  ' _ "$log" "$mode" "$SCRIPT" "$work"
+  ' _ "$log" "$mode" "$SCRIPT" "$work" "$DISK_PARTITIONING"
 }
 
 run_case clean
@@ -138,11 +142,15 @@ run_settle_case() {
     held=$2
     script=$3
     work=$4
+    disk_partitioning=$5
     disk="$work/settle-disk"
     flag="$work/nudged-$held"
     rm -f "$disk" "$flag"
     : >"$disk"
 
+    # shellcheck disable=SC1090
+    source "$disk_partitioning"
+    _is_block_device() { [[ -f "$1" ]]; }
     eval "$(awk "/^[a-z_]+\(\) \{$/ { p=1 } p { print } /^\}$/ { p=0 }" "$script")"
 
     udevadm() {
@@ -167,7 +175,7 @@ run_settle_case() {
     if [[ $held == locked ]]; then
       exec {holder}<&-
     fi
-  ' _ "$log" "$held" "$SCRIPT" "$work"
+  ' _ "$log" "$held" "$SCRIPT" "$work" "$DISK_PARTITIONING"
 }
 
 run_settle_case unlocked

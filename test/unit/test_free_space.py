@@ -3,13 +3,14 @@ udev settling, and scoped partition rollback."""
 
 from __future__ import annotations
 
-import errno
+import fcntl
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from unittest import mock
@@ -17,6 +18,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "configs/airootfs/usr/share/omarchy-iso"))
 
+from orchestrator import disk_udev  # noqa: E402
 from orchestrator import free_space as fs  # noqa: E402
 from orchestrator import luks_calibration as luks  # noqa: E402
 
@@ -255,42 +257,66 @@ class PartitionParsingAndCreationTests(unittest.TestCase):
 
 class SettleDiskDevicesTests(unittest.TestCase):
     def test_fast_settle_exits_without_poking(self):
-        fake_proc = mock.MagicMock()
-        fake_proc.poll.return_value = 0
-        with mock.patch.object(fs.subprocess, "Popen", return_value=fake_proc),                 mock.patch.object(fs.subprocess, "run") as run_mock:
-            fs.settle_disk_devices("/dev/null")
-        run_mock.assert_not_called()
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with mock.patch.object(fs.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(disk_udev, "nudge_if_disk_unlocked") as nudge:
+            fs.settle_disk_devices("/dev/null", timeout=15)
+        self.assertEqual(calls, [["udevadm", "settle", "--timeout=15"]])
+        nudge.assert_not_called()
 
     def test_stranded_settle_pokes_when_unlocked_and_skips_when_locked(self):
-        with tempfile.NamedTemporaryFile() as backing:
-            # First backoff window: locked (BlockingIOError -> no poke).
-            # Second backoff window: unlocked -> emits trigger -> proc finishes.
-            poll_state = {"calls": 0, "done": False}
-            def fake_poll():
-                poll_state["calls"] += 1
-                return 0 if poll_state["done"] else None
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            fake_dev = tmp / "nvme0n1"
+            fake_dev.write_bytes(b"")
+            sys_block = tmp / "sys_block"
+            (sys_block / "nvme0n1").mkdir(parents=True)
+            uevent = sys_block / "nvme0n1" / "uevent"
 
-            fake_proc = mock.MagicMock()
-            fake_proc.poll.side_effect = fake_poll
-            triggers = []
-            def fake_run(cmd, **kwargs):
-                triggers.append(list(cmd))
-                poll_state["done"] = True
-                return subprocess.CompletedProcess(cmd, 0)
+            holder = os.open(str(fake_dev), os.O_RDONLY)
+            try:
+                fcntl.flock(holder, fcntl.LOCK_SH)
+                nudge_results = []
+                real_nudge = disk_udev.nudge_if_disk_unlocked
 
-            flock_calls = {"n": 0}
-            def fake_flock(fd, op):
-                if op & fs.fcntl.LOCK_NB:
-                    flock_calls["n"] += 1
-                    if flock_calls["n"] == 1:
-                        raise BlockingIOError(errno.EAGAIN, "locked")
+                def tracked_nudge(disk_path, done=None):
+                    res = real_nudge(
+                        disk_path,
+                        done,
+                        whole_disk_fn=lambda _: fake_dev,
+                        sys_block=sys_block,
+                    )
+                    nudge_results.append(res)
+                    if len(nudge_results) == 1:
+                        fcntl.flock(holder, fcntl.LOCK_UN)
+                    return res
 
-            with mock.patch.object(fs, "SETTLE_BACKOFF_DELAYS", (0.01, 0.01, 0.01)),                     mock.patch.object(fs, "SETTLE_POLL_TICK", 0.005),                     mock.patch.object(fs.subprocess, "Popen", return_value=fake_proc),                     mock.patch.object(fs.subprocess, "run", side_effect=fake_run),                     mock.patch.object(fs.fcntl, "flock", side_effect=fake_flock):
-                fs.settle_disk_devices(backing.name)
-            self.assertEqual(len(triggers), 1)
-            self.assertIn("--action=change", triggers[0])
-            self.assertIn("--subsystem-match=block", triggers[0])
-            self.assertTrue(any(arg.startswith("--sysname-match=") for arg in triggers[0]))
+                ran_cmds = []
+
+                def stuck_settle(cmd, **kwargs):
+                    ran_cmds.append(list(cmd))
+                    wait = threading.Event()
+                    for _ in range(100):
+                        if uevent.exists() and uevent.read_text() == "change\n":
+                            return subprocess.CompletedProcess(cmd, 0)
+                        wait.wait(0.01)
+                    raise AssertionError("settle was never nudged")
+
+                with mock.patch.object(disk_udev, "SETTLE_NUDGE_DELAYS", (0.01, 0.01, 0.05)), \
+                     mock.patch.object(disk_udev, "nudge_if_disk_unlocked", side_effect=tracked_nudge), \
+                     mock.patch.object(fs.subprocess, "run", side_effect=stuck_settle):
+                    fs.settle_disk_devices(str(fake_dev))
+            finally:
+                os.close(holder)
+
+            self.assertEqual(ran_cmds, [["udevadm", "settle", "--timeout=30"]])
+            self.assertEqual(nudge_results, [False, True])
+            self.assertEqual(uevent.read_text(), "change\n")
 
 
 class InProcessLuksTests(unittest.TestCase):

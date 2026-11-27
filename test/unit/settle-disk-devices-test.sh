@@ -43,6 +43,10 @@ check "empty disk falls back to plain settle" "udevadm settle --timeout=7" "$(ca
 settle_disk_devices "$FAKE_DISK" 7
 check "non-block path falls back to plain settle" "udevadm settle --timeout=7" "$(cat "$LOG")"
 
+: >"$LOG"
+settle_disk_devices "$FAKE_DISK"
+check "omitted timeout runs udevadm settle without --timeout" "udevadm settle" "$(cat "$LOG")"
+
 # Override _is_block_device for the remaining settle cases.
 _is_block_device() { [[ -f "$1" ]]; }
 

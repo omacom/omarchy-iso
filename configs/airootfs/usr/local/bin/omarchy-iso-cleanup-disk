@@ -33,6 +33,16 @@ disk="${1:-}"
 disk=$(realpath "$disk")
 disk_name=$(basename "$disk")
 
+DISK_PARTITIONING="${DISK_PARTITIONING:-/usr/share/omarchy-iso/disk-partitioning.sh}"
+[[ -r $DISK_PARTITIONING ]] ||
+  DISK_PARTITIONING="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/../../share/omarchy-iso/disk-partitioning.sh"
+if [[ ! -r $DISK_PARTITIONING ]]; then
+  echo "ERROR: disk partitioning helpers not found at $DISK_PARTITIONING" >&2
+  exit 1
+fi
+# shellcheck source=SCRIPTDIR/../../share/omarchy-iso/disk-partitioning.sh
+source "$DISK_PARTITIONING"
+
 echo "Cleaning up existing holders on install disk: $disk"
 findmnt -R /mnt >/dev/null && umount -R /mnt || true
 
@@ -126,39 +136,10 @@ release_and_wipe() {
   fi
 }
 
-# Wait for udevd to drain its queue after dropping our lock. If an event was
-# stranded on systemd-udevd's 200 ms + 1 s EVENT_LOCKED retry timer (e.g. a
-# late TRY_AGAIN=1 or a (udev-synth) collision), a bounded change uevent once
-# no lock is held on the disk wakes it immediately without triggering
-# IN_CLOSE_WRITE or forking (udev-synth).
+# Wait for udevd to drain its queue after dropping our lock, delegating to the
+# shared EVENT_LOCKED settle watchdog in disk-partitioning.sh.
 settle_disk() {
-  local settle_pid watchdog_pid
-  udevadm settle 2>/dev/null &
-  settle_pid=$!
-  (
-    local delay sleep_pid probe
-    trap '[[ -n ${sleep_pid:-} ]] && kill "$sleep_pid" 2>/dev/null || true; exit 0' TERM INT
-    for delay in 0.04 0.1 0.25; do
-      sleep "$delay" &
-      sleep_pid=$!
-      wait "$sleep_pid" 2>/dev/null || exit 0
-      sleep_pid=""
-      kill -0 "$settle_pid" 2>/dev/null || exit 0
-      if [[ -e $disk ]] && { exec {probe}<"$disk"; } 2>/dev/null; then
-        if flock -x -n "$probe" 2>/dev/null; then
-          exec {probe}<&-
-          kill -0 "$settle_pid" 2>/dev/null || exit 0
-          udevadm trigger --action=change "$disk" 2>/dev/null || true
-        else
-          exec {probe}<&-
-        fi
-      fi
-    done
-  ) &
-  watchdog_pid=$!
-  wait "$settle_pid" 2>/dev/null || true
-  kill "$watchdog_pid" 2>/dev/null || true
-  wait "$watchdog_pid" 2>/dev/null || true
+  settle_disk_devices "$disk"
 }
 
 # Each attempt first waits out any activation udev already began. On a used

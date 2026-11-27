@@ -65,13 +65,18 @@ _wait_pid_ticks() {
 # `udevadm trigger --action=change "$disk"` runs a whole-disk worker whose
 # completion immediately requeues the locked partition events.
 settle_disk_devices() {
-  local disk="${1:-}" timeout="${2:-10}"
+  local disk="${1:-}" timeout="${2:-}"
+  local settle_args=(settle)
+  if [[ -n $timeout ]]; then
+    settle_args+=("--timeout=$timeout")
+  fi
+
   if [[ -z $disk ]] || ! _is_block_device "$disk"; then
-    udevadm settle --timeout="$timeout" 2>/dev/null || true
+    udevadm "${settle_args[@]}" 2>/dev/null || true
     return 0
   fi
 
-  udevadm settle --timeout="$timeout" 2>/dev/null &
+  udevadm "${settle_args[@]}" 2>/dev/null &
   local settle_pid=$!
   local ticks probe_fd
 
@@ -79,7 +84,9 @@ settle_disk_devices() {
   # drains finish with zero extra events, while breaking a 200 ms + 1 s
   # EVENT_LOCKED timer stall once no synth/worker holds the whole-disk lock.
   for ticks in 6 12 25 25 25; do
-    _wait_pid_ticks "$settle_pid" "$ticks" && break
+    if _wait_pid_ticks "$settle_pid" "$ticks"; then
+      break
+    fi
     if { exec {probe_fd}<"$disk"; } 2>/dev/null; then
       if flock -x -n "$probe_fd" 2>/dev/null; then
         exec {probe_fd}<&-

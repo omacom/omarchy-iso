@@ -1209,39 +1209,14 @@ def _write_root_image_dd(image: Path, device: str) -> None:
         _check_dd_full_blocks(dd.stderr)
 
 
-@contextmanager
 def _flock_whole_disk(device: str):
     """Hold an exclusive BSD lock on `device`'s whole-disk block node so
     systemd-udevd defers probing across the raw image write and `btrfstune -m`.
     Otherwise udev reacts to the write's IN_CLOSE_WRITE and scans the target
     while it still carries the mounted live root image's FSID."""
-    try:
-        resolved = Path(device).resolve()
-        if not stat.S_ISBLK(resolved.stat().st_mode):
-            yield
-            return
-        lock_target = resolved
-        sys_block = Path("/sys/class/block") / resolved.name
-        if (sys_block / "partition").exists():
-            parent = Path("/dev") / sys_block.resolve().parent.name
-            if parent.exists() and stat.S_ISBLK(parent.stat().st_mode):
-                lock_target = parent
-        fd = os.open(str(lock_target), os.O_RDONLY | os.O_CLOEXEC)
-    except OSError:
-        yield
-        return
-    try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-        except OSError:
-            pass
-        yield
-    finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        os.close(fd)
+    from .disk_udev import flock_whole_disk
+
+    return flock_whole_disk(device)
 
 
 def _place_root_image(ctx: InstallContext) -> None:

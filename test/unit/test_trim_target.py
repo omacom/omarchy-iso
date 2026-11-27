@@ -1,5 +1,5 @@
-"""Unit tests for the first-boot trim: phases_impl.stage_first_boot_trim stages
-a self-removing first-boot fstrim unit on the target, never fails a completed
+"""Unit tests for the first-boot trim: phases_impl.stage_first_boot_trim enables
+Arch's built-in fstrim.timer with an overdue stamp file, never fails a completed
 install, and main() calls it only after run() succeeds."""
 
 import stat
@@ -24,6 +24,9 @@ class StageFirstBootTrimTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.target = Path(self.tmp.name)
+        timer = self.target / "usr/lib/systemd/system/fstrim.timer"
+        timer.parent.mkdir(parents=True)
+        timer.write_text("[Timer]\nOnCalendar=weekly\nPersistent=true\n")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -34,63 +37,59 @@ class StageFirstBootTrimTest(unittest.TestCase):
             phases_impl.stage_first_boot_trim(types.SimpleNamespace(target=self.target))
         return lines
 
-    def test_stages_self_removing_background_trim_unit(self):
+    def test_enables_fstrim_timer_and_backdates_stamp(self):
         lines = self.stage()
 
-        unit = self.target / "etc/systemd/system" / phases_impl.FIRST_BOOT_TRIM_SERVICE
-        link = (
-            self.target
-            / "etc/systemd/system/multi-user.target.wants"
-            / phases_impl.FIRST_BOOT_TRIM_SERVICE
-        )
+        link = self.target / "etc/systemd/system/timers.target.wants/fstrim.timer"
+        stamp = self.target / "var/lib/systemd/timers/stamp-fstrim.timer"
 
-        self.assertTrue(unit.is_file())
-        self.assertEqual(stat.S_IMODE(unit.stat().st_mode), 0o644)
         self.assertTrue(link.is_symlink())
-        self.assertEqual(
-            str(link.readlink()),
-            f"/etc/systemd/system/{phases_impl.FIRST_BOOT_TRIM_SERVICE}",
-        )
+        self.assertEqual(str(link.readlink()), "/usr/lib/systemd/system/fstrim.timer")
+        self.assertTrue(stamp.is_file())
+        self.assertFalse(stamp.is_symlink())
+        self.assertEqual(stat.S_IMODE(stamp.stat().st_mode), 0o644)
+        self.assertEqual(int(stamp.stat().st_mtime), phases_impl.FSTRIM_OVERDUE_STAMP_EPOCH)
+        self.assertIn("enabled fstrim.timer", lines[-1])
 
-        text = unit.read_text()
-        self.assertIn("After=local-fs.target", text)
-        self.assertIn("Type=simple", text)
-        self.assertIn("Nice=19", text)
-        self.assertIn("IOSchedulingClass=idle", text)
-        self.assertIn(f"/usr/bin/timeout --kill-after=5 {phases_impl.TRIM_BUDGET} /usr/bin/fstrim --verbose / || true", text)
-        self.assertIn(
-            f"/usr/bin/rm -f /etc/systemd/system/multi-user.target.wants/{phases_impl.FIRST_BOOT_TRIM_SERVICE}"
-            f" /etc/systemd/system/{phases_impl.FIRST_BOOT_TRIM_SERVICE}",
-            text,
-        )
-        self.assertIn("WantedBy=multi-user.target", text)
-        self.assertIn("staged one-time first-boot fstrim", lines[-1])
-
-    def test_restaging_replaces_existing_symlink(self):
-        wants = self.target / "etc/systemd/system/multi-user.target.wants"
+    def test_restaging_replaces_existing_symlinks_without_writing_through_stamp(self):
+        wants = self.target / "etc/systemd/system/timers.target.wants"
         wants.mkdir(parents=True)
-        (wants / phases_impl.FIRST_BOOT_TRIM_SERVICE).symlink_to("/stale/target")
+        (wants / "fstrim.timer").symlink_to("/stale/target")
+
+        timers_dir = self.target / "var/lib/systemd/timers"
+        timers_dir.mkdir(parents=True)
+        sentinel = self.target / "sentinel"
+        sentinel.write_text("untouched")
+        (timers_dir / "stamp-fstrim.timer").symlink_to(sentinel)
 
         self.stage()
 
-        link = wants / phases_impl.FIRST_BOOT_TRIM_SERVICE
         self.assertEqual(
-            str(link.readlink()),
-            f"/etc/systemd/system/{phases_impl.FIRST_BOOT_TRIM_SERVICE}",
+            str((wants / "fstrim.timer").readlink()),
+            "/usr/lib/systemd/system/fstrim.timer",
         )
+        self.assertFalse((timers_dir / "stamp-fstrim.timer").is_symlink())
+        self.assertEqual(sentinel.read_text(), "untouched")
+
+    def test_missing_fstrim_timer_logs_warning_and_skips(self):
+        (self.target / "usr/lib/systemd/system/fstrim.timer").unlink()
+        lines = self.stage()
+        self.assertFalse((self.target / "etc/systemd/system/timers.target.wants/fstrim.timer").exists())
+        self.assertFalse((self.target / "var/lib/systemd/timers/stamp-fstrim.timer").exists())
+        self.assertIn("WARNING: fstrim.timer not found", lines[-1])
 
     def test_os_error_is_logged_and_does_not_raise(self):
         lines = []
         with mock.patch.object(phases_impl, "info", lines.append), \
-                mock.patch.object(Path, "write_text", side_effect=OSError("read-only filesystem")):
+                mock.patch.object(Path, "symlink_to", side_effect=OSError("read-only filesystem")):
             phases_impl.stage_first_boot_trim(types.SimpleNamespace(target=self.target))
-        self.assertIn("WARNING: could not stage first-boot trim", lines[-1])
+        self.assertIn("WARNING: could not enable fstrim.timer", lines[-1])
         self.assertIn("read-only filesystem", lines[-1])
 
 
 class MainStagesTrimAfterRunTest(unittest.TestCase):
-    """run() writes finished_at and creates @factory before returning. Staging
-    the first-boot trim must come after run(), and only on success."""
+    """run() writes finished_at before returning. Staging the first-boot trim
+    must come after run(), and only on success."""
 
     def main(self, run_error=None):
         events = []

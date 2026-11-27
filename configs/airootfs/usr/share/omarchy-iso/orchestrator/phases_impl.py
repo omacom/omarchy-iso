@@ -5476,39 +5476,17 @@ def restore_cpu_governors(saved: dict[Path, str]) -> None:
 # stage_first_boot_trim: invoked from main() once run() has finished.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Seconds the first-boot trim may take before it is stopped. A drive that
-# discards slowly (SATA without queued TRIM, eMMC) must not churn for minutes;
-# what it did not reach stays as it was.
-TRIM_BUDGET = 120
-
-FIRST_BOOT_TRIM_SERVICE = "omarchy-first-boot-trim.service"
-
-# Type=simple (not oneshot): multi-user.target implicitly gains After= for its
-# Wants=, so a oneshot would hold boot and SDDM until fstrim finishes.
-# Type=simple lets boot proceed immediately while fstrim runs in the background
-# at idle I/O priority. Cleanup runs after fstrim completes (or times out / fails
-# on drives without discard support) so the unit runs once and leaves no failed
-# state or leftover files; if the machine shuts down mid-trim, cleanup is
-# skipped and the next boot retries.
-FIRST_BOOT_TRIM_UNIT = f"""\
-[Unit]
-Description=Trim unallocated root filesystem space once after install
-After=local-fs.target
-
-[Service]
-Type=simple
-Nice=19
-IOSchedulingClass=idle
-ExecStart=/usr/bin/sh -c '/usr/bin/timeout --kill-after=5 {TRIM_BUDGET} /usr/bin/fstrim --verbose / || true; /usr/bin/rm -f /etc/systemd/system/multi-user.target.wants/{FIRST_BOOT_TRIM_SERVICE} /etc/systemd/system/{FIRST_BOOT_TRIM_SERVICE}'
-
-[Install]
-WantedBy=multi-user.target
-"""
+# Non-zero epoch timestamp (1970-01-02 UTC) for stamp-fstrim.timer: systemd
+# treats 0 as unset, while any past timestamp >1 week old makes fstrim.timer's
+# Persistent=true fire fstrim.service once after first boot (after its built-in
+# RandomizedDelaySec=100min) instead of waiting up to a week for Monday.
+FSTRIM_OVERDUE_STAMP_EPOCH = 86400
 
 
 def stage_first_boot_trim(ctx: InstallContext) -> None:
-    """Stage a one-time background fstrim on / for the installed system's first
-    boot, instead of blocking the end of the install on a synchronous trim.
+    """Enable Arch's built-in fstrim.timer with an overdue stamp file so
+    fstrim.service trims unallocated SSD space in the background after first
+    boot instead of blocking the end of the install.
 
     Nothing else trims the unallocated space on a fresh root. mkfs.btrfs runs
     with -K on both paths, the root image fills only the start of the
@@ -5520,31 +5498,35 @@ def stage_first_boot_trim(ctx: InstallContext) -> None:
     mapping wrote 40 GiB at 2.07 GB/s onto such space, and at 6.57 GB/s after
     a discard.
 
-    Running fstrim synchronously during install stalled the finish screen for
-    seconds on NVMe (and up to TRIM_BUDGET on slower drives). Staging a
-    self-removing first-boot unit costs <1 ms during install, runs after
-    create_factory_snapshot so @factory stays clean, and trims through dm-crypt
-    (opened with allow-discards) in the background on first boot without
-    delaying login.
+    Using util-linux's stock fstrim.timer + fstrim.service avoids maintaining a
+    custom self-deleting unit: fstrim.service already passes --quiet-unsupported
+    and --verbose, runs under timers.target without delaying login, and keeps
+    periodic weekly TRIM enabled afterward.
 
     Best effort: it never fails a completed install."""
-    try:
-        systemd_dir = ctx.target / "etc/systemd/system"
-        unit = systemd_dir / FIRST_BOOT_TRIM_SERVICE
-        unit.parent.mkdir(parents=True, exist_ok=True)
-        unit.write_text(FIRST_BOOT_TRIM_UNIT)
-        unit.chmod(0o644)
-
-        wants_dir = systemd_dir / "multi-user.target.wants"
-        wants_dir.mkdir(parents=True, exist_ok=True)
-        link = wants_dir / FIRST_BOOT_TRIM_SERVICE
-        link.unlink(missing_ok=True)
-        link.symlink_to(f"/etc/systemd/system/{FIRST_BOOT_TRIM_SERVICE}")
-    except OSError as exc:
-        info(f"› trim: WARNING: could not stage first-boot trim ({exc}); continuing without it")
+    timer_unit = ctx.target / "usr/lib/systemd/system/fstrim.timer"
+    if not timer_unit.exists():
+        info("› trim: WARNING: fstrim.timer not found on target; continuing without it")
         return
 
-    info("› trim: staged one-time first-boot fstrim on /")
+    try:
+        wants_dir = ctx.target / "etc/systemd/system/timers.target.wants"
+        wants_dir.mkdir(parents=True, exist_ok=True)
+        link = wants_dir / "fstrim.timer"
+        link.unlink(missing_ok=True)
+        link.symlink_to("/usr/lib/systemd/system/fstrim.timer")
+
+        stamp = ctx.target / "var/lib/systemd/timers/stamp-fstrim.timer"
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.unlink(missing_ok=True)
+        stamp.write_bytes(b"")
+        stamp.chmod(0o644)
+        os.utime(stamp, (FSTRIM_OVERDUE_STAMP_EPOCH, FSTRIM_OVERDUE_STAMP_EPOCH))
+    except OSError as exc:
+        info(f"› trim: WARNING: could not enable fstrim.timer ({exc}); continuing without it")
+        return
+
+    info("› trim: enabled fstrim.timer with overdue stamp for first-boot trim")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

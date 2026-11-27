@@ -1133,12 +1133,11 @@ iso_subdir="$(sed -n 's/^install_dir="\(.*\)"$/\1/p' "$build_cache_dir/profilede
 root_image_dir="$build_cache_dir/work/iso/$iso_subdir"
 root_image="$root_image_dir/omarchy-root.sfs"
 # The Try Omarchy layer (builder/build-try-layer.sh) beside it, which the
-# installer mounts over the image when Try is picked (omarchy-try). x86_64
-# consumer media only: the installer asks only where the layer is, aarch64
-# images are not tested with it, and OEM factory-flashing media install
-# directly.
+# installer mounts over the image when Try is picked (omarchy-try). Consumer
+# media only, on both architectures: the installer offers Try wherever the
+# layer is, and OEM factory-flashing media install directly.
 try_layer=""
-[[ $OMARCHY_ARCH == x86_64 && ${OMARCHY_OEM_INSTALL:-} != "1" ]] && try_layer="$root_image_dir/omarchy-try.sfs"
+[[ ${OMARCHY_OEM_INSTALL:-} != "1" ]] && try_layer="$root_image_dir/omarchy-try.sfs"
 mkdir -p "$root_image_dir"
 # Builds from before the raw image left a send stream (and, briefly, its
 # checksum) in the persistent build cache, where they would ship inside the

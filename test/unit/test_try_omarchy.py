@@ -373,7 +373,7 @@ class DedupAndBuildIsoTest(unittest.TestCase):
     def test_oem_iso_skips_try_layer(self):
         # Without the layer the installer never asks Install or Try.
         text = BUILD_ISO.read_text()
-        self.assertIn('[[ $OMARCHY_ARCH == x86_64 && ${OMARCHY_OEM_INSTALL:-} != "1" ]]', text)
+        self.assertIn('[[ ${OMARCHY_OEM_INSTALL:-} != "1" ]] && try_layer=', text)
 
     def test_iso_size_gate_checks_only_newly_built_isos_after_chown(self):
         text = BUILD_ISO.read_text()

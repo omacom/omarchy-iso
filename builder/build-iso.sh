@@ -182,7 +182,8 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # The container image arrives pointed at Arch Linux ARM's own mirrors. Its
   # packages come from the same place the ISO's do: Omarchy's mirror of them.
   channel_core_server "$online_pacman_conf" >/etc/pacman.d/mirrorlist || exit 1
-  pacman --noconfirm -Sy archlinuxarm-keyring
+  sed -i -E 's/^#?ParallelDownloads[[:space:]]*=.*/ParallelDownloads = 16/' /etc/pacman.conf
+  pacman --noconfirm -Sy --needed archlinuxarm-keyring
   pacman-key --populate archlinuxarm
   # Arch Linux ARM does not publish archiso. Install its runtime dependencies
   # and run the repository's pinned submodule copy, patched for arm64-efi GRUB.
@@ -203,7 +204,8 @@ else
   # reaches through its Include.
   core_server=$(channel_core_server "$online_pacman_conf") || exit 1
   sed -i "1i $core_server" /etc/pacman.d/mirrorlist
-  pacman --noconfirm -Sy archlinux-keyring
+  sed -i -E 's/^#?ParallelDownloads[[:space:]]*=.*/ParallelDownloads = 16/' /etc/pacman.conf
+  pacman --noconfirm -Sy --needed archlinux-keyring
   # Full upgrade, not just -Sy: the pinned container can fall behind the mirror
   # it installs from. A plain -Sy install is then a partial upgrade — new packages
   # can link against a glibc the container doesn't have yet.
@@ -237,9 +239,9 @@ fi
 pacman-key --add /builder/omarchy.gpg
 pacman-key --lsign-key 40DFB630FF42BCFFB047046CF0134EE680CAC571
 
-# omarchy-keyring is needed inside the offline mirror too.
+# omarchy-keyring is needed inside the offline mirror too; its post_install
+# scriptlet already runs pacman-key --populate omarchy.
 pacman --config "$online_pacman_conf" --noconfirm -Sy omarchy-keyring
-pacman-key --populate omarchy
 
 # Put OPR first in the container too so makepkg resolves the same overrides
 # as the online installer configuration.
@@ -531,32 +533,33 @@ else
     exit 1
   fi
   mkdir -p /tmp/omarchy-pkglists
-  bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/omarchy-base.packages usr/share/omarchy/install/omarchy-other.packages
+  # Extract required and optional runtime metadata in a single archive pass
+  # (--include tolerates optional members absent from older runtimes).
+  bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists \
+    --include='usr/share/omarchy/install/omarchy-base.packages' \
+    --include='usr/share/omarchy/install/omarchy-other.packages' \
+    --include='usr/share/omarchy/install/provisioning/setup-form.sh' \
+    --include='usr/share/omarchy/install/provisioning/progress-icon.sh' \
+    --include='usr/share/omarchy/install/provisioning/kmscon.sh' \
+    --include='usr/share/omarchy/install/provisioning/console-font.sh' \
+    --include='usr/share/omarchy/install/provisioning/console-font.py' \
+    --include='usr/share/omarchy/install/user/mise-work.sh' \
+    --include='usr/share/omarchy/install/omarchy-aarch64*.packages' \
+    --include='usr/share/omarchy/install/omarchy-other-aarch64.packages' \
+    --include='usr/share/omarchy/install/omarchy-x86_64-only.packages' \
+    --include='usr/bin/omarchy-hw-platform'
   base_pkg_lists=(/tmp/omarchy-pkglists/usr/share/omarchy/install/omarchy-base.packages /tmp/omarchy-pkglists/usr/share/omarchy/install/omarchy-other.packages)
-  # Extracted on its own, tolerating a miss: bsdtar exits non-zero for a member
-  # it can't find, so asking for this alongside the package lists would abort the
-  # build here (set -e) with a bare "Not found in archive" instead of the
-  # actionable error below.
-  bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/setup-form.sh 2>/dev/null || true
-  setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
-  bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/progress-icon.sh 2>/dev/null || true
-  progress_icon=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/progress-icon.sh
-  bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/kmscon.sh 2>/dev/null || true
-  kmscon_lib=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/kmscon.sh
-  bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/provisioning/console-font.sh \
-    usr/share/omarchy/install/provisioning/console-font.py 2>/dev/null || true
-  console_font=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/console-font
-  bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/share/omarchy/install/user/mise-work.sh 2>/dev/null || true
-  mise_work=/tmp/omarchy-pkglists/usr/share/omarchy/install/user/mise-work.sh
-  # The aarch64 list, each platform's own, the aarch64-only optional list, and
-  # the x86_64-only one. Runtimes from before the platform lists ship none, so
-  # each is optional.
-  for platform_list in 'omarchy-aarch64*.packages' omarchy-other-aarch64.packages omarchy-x86_64-only.packages; do
-    bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists "usr/share/omarchy/install/$platform_list" 2>/dev/null || true
+  for required_list in "${base_pkg_lists[@]}"; do
+    if [[ ! -f $required_list ]]; then
+      echo "ERROR: $OMARCHY_RUNTIME_PACKAGE does not ship ${required_list#/tmp/omarchy-pkglists/}" >&2
+      exit 1
+    fi
   done
-  # The package installs its commands to /usr/bin and links them from
-  # /usr/share/omarchy/bin, so the detector itself is the one in usr/bin.
-  bsdtar -xf "$omarchy_pkg" -C /tmp/omarchy-pkglists usr/bin/omarchy-hw-platform 2>/dev/null || true
+  setup_form=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/setup-form.sh
+  progress_icon=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/progress-icon.sh
+  kmscon_lib=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/kmscon.sh
+  console_font=/tmp/omarchy-pkglists/usr/share/omarchy/install/provisioning/console-font
+  mise_work=/tmp/omarchy-pkglists/usr/share/omarchy/install/user/mise-work.sh
 fi
 
 # One aarch64 image serves every board, so the runtime it installs has to tell
@@ -1172,10 +1175,8 @@ mirror_package_index() {
     awk '/^%FILENAME%$/ { getline f } /^%NAME%$/ { getline n } /^%VERSION%$/ { getline v; print n "\t" v "\t" f }'
 }
 image_package_index() {
-  local desc
-  for desc in "$image_localdb"/local/*/desc; do
-    awk '/^%NAME%$/ { getline n } /^%VERSION%$/ { getline v; print n "\t" v }' "$desc"
-  done
+  find "$image_localdb/local" -maxdepth 2 -name desc -exec \
+    awk '/^%NAME%$/ { getline n } /^%VERSION%$/ { getline v; print n "\t" v }' {} +
 }
 #
 # And of what the image lacks, only what an install can reach: the dependency
@@ -1244,11 +1245,13 @@ mirror_files() {
 }
 write_mirror_checksums() {
   local mirror_dir=${1:-$offline_mirror_dir}
+  local target_airootfs=${2:-$build_cache_dir/airootfs}
   local mirror_sums mirror_bytes mirror_dropin_dir
-  mirror_sums="$build_cache_dir/airootfs/usr/share/omarchy-iso/offline-mirror.sha256"
+  mirror_sums="$target_airootfs/usr/share/omarchy-iso/offline-mirror.sha256"
+  mkdir -p "${mirror_sums%/*}"
   (cd "$mirror_dir" && mirror_files | xargs -d '\n' sha256sum) >"$mirror_sums"
   mirror_bytes=$(cd "$mirror_dir" && mirror_files | xargs -d '\n' stat -L -c %s | awk '{ s += $1 } END { print s }')
-  mirror_dropin_dir="$build_cache_dir/airootfs/etc/systemd/system/omarchy-mirror-verify.service.d"
+  mirror_dropin_dir="$target_airootfs/etc/systemd/system/omarchy-mirror-verify.service.d"
   mkdir -p "$mirror_dropin_dir"
   printf '%s\n' "# Generated by build-iso.sh: 2 MiB/s floor over the $mirror_bytes bytes of the shipped mirror." \
     "[Service]" "TimeoutStartSec=$((mirror_bytes / (2 * 1024 * 1024) + 600))" >"$mirror_dropin_dir/50-size-timeout.conf"
@@ -1268,23 +1271,47 @@ cp "$build_cache_dir/pacman-offline.conf" "$build_cache_dir/airootfs/etc/pacman.
 # taken for the local one and failed the mirror's checksum ("invalid or
 # corrupted package"), ending the build.
 sed -i "/^\[options\]/a CacheDir = /var/cache/omarchy/mirror/offline/" "$build_cache_dir/pacman-offline.conf"
+# Mask fontconfig.hook during mkarchiso's build-time live pacstrap only (the
+# shipped airootfs/etc/pacman.conf was already copied untouched above):
+# customize_airootfs.sh trims 280 MiB of CJK fonts and runs fc-cache -s -f
+# unconditionally right afterwards.
+live_hooks_dir=/tmp/omarchy-live-hooks
+rm -rf "$live_hooks_dir"
+mkdir -p "$live_hooks_dir"
+ln -s /dev/null "$live_hooks_dir/fontconfig.hook"
+sed -i "/^\[options\]/a HookDir = $live_hooks_dir/" "$build_cache_dir/pacman-offline.conf"
 
 # Stage only the shipped mirror packages and repo db into airootfs rather than
 # copying the entire 4.5-5.4 GB build cache and deleting ~1,000 packages later.
 # Recompress low-level zstd packages in the staged copy (leaving the persistent
-# build cache untouched), then compute offline-mirror.sha256 over the final
-# staged bytes.
+# build cache untouched), verify completeness, then compute
+# offline-mirror.sha256 over the final staged bytes.
 stage_shipped_mirror() {
-  local dst="$build_cache_dir/airootfs/var/cache/omarchy/mirror/offline"
+  local dst=${1:-$build_cache_dir/airootfs/var/cache/omarchy/mirror/offline}
+  local meta_root=${2:-$build_cache_dir/airootfs}
+  local file staged_count=0
   rm -rf "$dst"
   mkdir -p "$dst"
   cp -a "$offline_mirror_dir"/offline.db* "$offline_mirror_dir"/offline.files* "$dst/"
   while IFS= read -r file; do
+    [[ -n $file ]] || continue
     cp -a --reflink=auto "$offline_mirror_dir/$file" "$dst/"
     [[ ! -f "$offline_mirror_dir/$file.sig" ]] || cp -a --reflink=auto "$offline_mirror_dir/$file.sig" "$dst/"
   done <"$shipped_list"
   bash /builder/recompress-offline-mirror.sh "$dst"
-  write_mirror_checksums "$dst"
+  while IFS= read -r file; do
+    [[ -n $file ]] || continue
+    if [[ ! -f "$dst/$file" ]]; then
+      echo "ERROR: shipped mirror selection names a missing package: $file" >&2
+      return 1
+    fi
+    staged_count=$((staged_count + 1))
+  done <"$shipped_list"
+  if (( staged_count == 0 )); then
+    echo "ERROR: refusing to stage an empty shipped mirror" >&2
+    return 1
+  fi
+  write_mirror_checksums "$dst" "$meta_root"
 }
 
 image_localdb=/tmp/omarchy-root-image-localdb
@@ -1344,21 +1371,7 @@ resolve_expected_packages() {
   echo $(( image_count + $(printf '%s\n' "$resolved" | sort -u | grep -c .) ))
 }
 
-finalize_root_image_metadata() {
-  # $1: airootfs tree where post-image files go (profile airootfs before
-  # mkarchiso, or work/<arch>/airootfs between pass 1 and pass 2).
-  local target_airootfs=$1
-
-  # Cross-check that the packages actually installed into the root image match
-  # what was pre-resolved for offline-mirror.shipped.
-  local mismatch
-  mismatch=$(LC_ALL=C comm -3 <(printf '%s\n' "$image_resolved" | LC_ALL=C sort) <(image_package_index | LC_ALL=C sort))
-  if [[ -n $mismatch ]]; then
-    printf '%s\n' "$mismatch" >&2
-    echo "ERROR: root image packages differed from pre-resolved package set" >&2
-    exit 1
-  fi
-
+write_root_image_sha256() {
   # The installer verifies the image against this before it touches the disk
   # (orchestrator prepare_install_target), so a truncated copy on a badly
   # flashed USB fails the install while it is still free to fail. Next to the
@@ -1370,7 +1383,9 @@ finalize_root_image_metadata() {
     shopt -s nullglob
     sha256sum "${root_image##*/}" omarchy-layer.*.tar.zst >"$root_image.sha256"
   )
+}
 
+stage_snapdragon_firmware() {
   # Snapdragon: each laptop's ADSP firmware, as plain files next to the
   # root image with a SHA256SUMS list. The live UKI holds only linux-firmware's;
   # the OEM packages' ADSP files are over 300 MiB, and GRUB has to place the
@@ -1380,6 +1395,7 @@ finalize_root_image_metadata() {
   # board names from here, checked against SHA256SUMS, before it starts the ADSP.
   # Which files to stage comes from the kernel's device trees
   # (qualcomm/stage-medium-firmware.sh).
+  local provided_root=$1
   if [[ -n $OMARCHY_SNAPDRAGON ]]; then
     # -Sp prints dependencies too; keep only the packages named here.
     qcom_kernel_file=''
@@ -1399,7 +1415,31 @@ finalize_root_image_metadata() {
     [[ -n $qcom_kernel_file ]] || { echo "ERROR: $OMARCHY_KERNEL is not in the offline mirror" >&2; exit 1; }
     bash /builder/qualcomm/stage-medium-firmware.sh "${qcom_tree_packages[@]}" "$offline_mirror_dir/$qcom_kernel_file" \
       "$root_image_dir/qcom-firmware" "${qcom_firmware_files[@]}"
-    stage_live_qcom_provided_lists "$target_airootfs" "${qcom_firmware_files[@]}"
+    stage_live_qcom_provided_lists "$provided_root" "${qcom_firmware_files[@]}"
+  fi
+}
+
+finalize_root_image_metadata() {
+  # $1: airootfs tree where post-image files go (profile airootfs before
+  # mkarchiso, or work/<arch>/airootfs between pass 1 and pass 2).
+  # $2: optional --skip-sha256-and-qcom when the overlap path already runs both
+  # concurrently with mkarchiso.
+  local target_airootfs=$1
+  local skip_async=${2:-}
+
+  # Cross-check that the packages actually installed into the root image match
+  # what was pre-resolved for offline-mirror.shipped.
+  local mismatch
+  mismatch=$(LC_ALL=C comm -3 <(printf '%s\n' "$image_resolved" | LC_ALL=C sort) <(image_package_index | LC_ALL=C sort))
+  if [[ -n $mismatch ]]; then
+    printf '%s\n' "$mismatch" >&2
+    echo "ERROR: root image packages differed from pre-resolved package set" >&2
+    exit 1
+  fi
+
+  if [[ $skip_async != "--skip-sha256-and-qcom" ]]; then
+    write_root_image_sha256
+    stage_snapdragon_firmware "$target_airootfs"
   fi
 
   # Bound the boot-time hash: Type=oneshot units are exempt from systemd's
@@ -1464,23 +1504,27 @@ EOF
 # The boot menus' theme (builder/boot-menu-theme.sh). x86_64's BIOS menu
 # draws on its splash. GRUB boots Install at once and shows its menu only when
 # that boot fails. aarch64 carries no theme.
-if [[ $OMARCHY_ARCH == aarch64 ]]; then
-  rm -rf "$build_cache_dir/grub/themes"
-else
-  settings_archive=$(find "$offline_mirror_dir" -maxdepth 1 -name "$OMARCHY_SETTINGS_PACKAGE-[0-9]*.pkg.tar.*" ! -name '*.sig' | head -1)
-  if [[ -z $settings_archive ]]; then
-    echo "ERROR: $OMARCHY_SETTINGS_PACKAGE is not in the offline mirror, so the boot menu has no logo" >&2
-    exit 1
+build_boot_menu_theme() {
+  if [[ $OMARCHY_ARCH == aarch64 ]]; then
+    rm -rf "$build_cache_dir/grub/themes"
+  else
+    settings_archive=$(find "$offline_mirror_dir" -maxdepth 1 -name "$OMARCHY_SETTINGS_PACKAGE-[0-9]*.pkg.tar.*" ! -name '*.sig' | head -1)
+    if [[ -z $settings_archive ]]; then
+      echo "ERROR: $OMARCHY_SETTINGS_PACKAGE is not in the offline mirror, so the boot menu has no logo" >&2
+      return 1
+    fi
+    build_grub_theme "$build_cache_dir/grub/themes/omarchy" "$settings_archive" || return 1
+    build_syslinux_splash "$build_cache_dir/syslinux/splash.png" "$settings_archive" || return 1
   fi
-  build_grub_theme "$build_cache_dir/grub/themes/omarchy" "$settings_archive" || exit 1
-  build_syslinux_splash "$build_cache_dir/syslinux/splash.png" "$settings_archive" || exit 1
-fi
+}
 
-# Overlap build-root-image.sh with mkarchiso's live root pacstrap, initramfs,
+# Overlap build-root-image.sh, stage_shipped_mirror (recompression + checksums),
+# Snapdragon firmware staging, and mkarchiso's live root pacstrap, initramfs,
 # customize_airootfs and bootmodes. Pre-stamping mkarchiso's _run_once markers
-# for mksquashfs and xorriso lets pass 1 build the live root while the root
-# image builds in the background, then pass 2 runs mksquashfs and xorriso once
-# the root image and its metadata are in place.
+# for mksquashfs and xorriso lets pass 1 build the live root immediately without
+# waiting for mirror recompression (and without copying 1.1 GiB of packages
+# through _make_custom_airootfs), then pass 2a squashes airootfs.sfs while
+# omarchy-root.sfs is hashed in parallel, and pass 2b writes the final ISO.
 mkarchiso_path=$(command -v "$mkarchiso_command")
 overlap_mkarchiso=0
 if grep -Fq '_run_once _prepare_airootfs_image' "$mkarchiso_path" &&
@@ -1496,41 +1540,129 @@ fi
 iso_staging=$(mktemp -d /out/.omarchy-iso-out.XXXXXX)
 trap 'rm -rf "$iso_staging"' EXIT
 if (( overlap_mkarchiso )); then
+  # Ensure airootfs has no staged mirror during pass 1 so customize_airootfs.sh
+  # finishes trimming firmware/fonts/fc-cache and exits cleanly at its mirror
+  # presence check, while stage_shipped_mirror runs in parallel and moves the
+  # finished mirror directly into work/<arch>/airootfs before pass 2.
+  rm -rf "$build_cache_dir/airootfs/var/cache/omarchy/mirror/offline"
+  staged_mirror_dir="$build_cache_dir/staged-mirror"
+  staged_mirror_meta="$build_cache_dir/staged-mirror-meta"
+  rm -rf "$staged_mirror_dir" "$staged_mirror_meta"
+  mkdir -p "$staged_mirror_meta"
+
+  stage_mirror_log=/tmp/omarchy-stage-mirror.log
+  {
+    echo "[timing] stage mirror start $(date +%s)"
+    stage_shipped_mirror "$staged_mirror_dir" "$staged_mirror_meta"
+    echo "[timing] stage mirror end $(date +%s)"
+  } >"$stage_mirror_log" 2>&1 &
+  stage_mirror_pid=$!
+
   root_image_log=/tmp/omarchy-root-image.log
   run_root_image_build >"$root_image_log" 2>&1 &
   root_image_pid=$!
 
-  stage_shipped_mirror
-  mkdir -p "$build_cache_dir/work"
-  touch "$build_cache_dir/work/base._prepare_airootfs_image" \
-        "$build_cache_dir/work/iso._build_iso_image"
-  echo "[timing] mkarchiso start $(date +%s)"
-  mkarchiso_prep_status=0
-  "$mkarchiso_command" -v -w "$build_cache_dir/work/" -o "$iso_staging/" "$build_cache_dir/" || mkarchiso_prep_status=$?
-  echo "[timing] mkarchiso prep end $(date +%s)"
+  qcom_fw_pid=""
+  qcom_fw_log=/tmp/omarchy-qcom-fw.log
+  qcom_provided_dir=/tmp/omarchy-qcom-provided
+  if [[ -n $OMARCHY_SNAPDRAGON ]]; then
+    rm -rf "$qcom_provided_dir"
+    mkdir -p "$qcom_provided_dir"
+    stage_snapdragon_firmware "$qcom_provided_dir" >"$qcom_fw_log" 2>&1 &
+    qcom_fw_pid=$!
+  fi
 
+  mkarchiso_prep_status=0
+  if build_boot_menu_theme; then
+    mkdir -p "$build_cache_dir/work"
+    touch "$build_cache_dir/work/base._prepare_airootfs_image" \
+          "$build_cache_dir/work/iso._build_iso_image"
+    echo "[timing] mkarchiso start $(date +%s)"
+    "$mkarchiso_command" -v -w "$build_cache_dir/work/" -o "$iso_staging/" "$build_cache_dir/" || mkarchiso_prep_status=$?
+    echo "[timing] mkarchiso prep end $(date +%s)"
+  else
+    mkarchiso_prep_status=$?
+  fi
+
+  # Join the root image first so its sha256 and metadata finalization can
+  # overlap with any remaining mirror recompression.
   root_image_status=0
   wait "$root_image_pid" || root_image_status=$?
   cat "$root_image_log"
-  if (( root_image_status != 0 )); then
-    exit "$root_image_status"
+
+  pacstrap_airootfs="$build_cache_dir/work/$OMARCHY_ARCH/airootfs"
+  root_sha256_pid=""
+  finalize_status=0
+  if (( root_image_status == 0 && mkarchiso_prep_status == 0 )); then
+    write_root_image_sha256 &
+    root_sha256_pid=$!
+    ( finalize_root_image_metadata "$pacstrap_airootfs" --skip-sha256-and-qcom ) || finalize_status=$?
   fi
-  if (( mkarchiso_prep_status != 0 )); then
+
+  stage_mirror_status=0
+  wait "$stage_mirror_pid" || stage_mirror_status=$?
+  cat "$stage_mirror_log"
+
+  qcom_fw_status=0
+  if [[ -n $qcom_fw_pid ]]; then
+    wait "$qcom_fw_pid" || qcom_fw_status=$?
+    cat "$qcom_fw_log"
+  fi
+
+  if (( root_image_status != 0 || mkarchiso_prep_status != 0 || finalize_status != 0 || stage_mirror_status != 0 || qcom_fw_status != 0 )); then
+    [[ -n $root_sha256_pid ]] && wait "$root_sha256_pid" 2>/dev/null || true
+    (( root_image_status == 0 )) || exit "$root_image_status"
+    (( finalize_status == 0 )) || exit "$finalize_status"
+    (( stage_mirror_status == 0 )) || exit "$stage_mirror_status"
+    (( qcom_fw_status == 0 )) || exit "$qcom_fw_status"
     exit "$mkarchiso_prep_status"
   fi
 
-  finalize_root_image_metadata "$build_cache_dir/work/$OMARCHY_ARCH/airootfs"
+  # Place the finished mirror into work/<arch>/airootfs by same-filesystem
+  # rename and restore the exact 0:0:775 permissions declared in profiledef.sh.
+  # Copy only leaf metadata files (never /usr or /etc directory mtimes) so
+  # systemd-update-done's ConditionNeedsUpdate= stamps stay newer than /usr.
+  mkdir -p "$pacstrap_airootfs/var/cache/omarchy/mirror"
+  rm -rf "$pacstrap_airootfs/var/cache/omarchy/mirror/offline"
+  mv "$staged_mirror_dir" "$pacstrap_airootfs/var/cache/omarchy/mirror/offline"
+  chown -fhR 0:0 "$pacstrap_airootfs/var/cache/omarchy/mirror/offline"
+  chmod -fhR 775 "$pacstrap_airootfs/var/cache/omarchy/mirror/offline"
+  install -Dm644 "$staged_mirror_meta/usr/share/omarchy-iso/offline-mirror.sha256" \
+    "$pacstrap_airootfs/usr/share/omarchy-iso/offline-mirror.sha256"
+  install -Dm644 "$staged_mirror_meta/etc/systemd/system/omarchy-mirror-verify.service.d/50-size-timeout.conf" \
+    "$pacstrap_airootfs/etc/systemd/system/omarchy-mirror-verify.service.d/50-size-timeout.conf"
+  rm -rf "$staged_mirror_meta"
 
+  if [[ -n $OMARCHY_SNAPDRAGON && -d $qcom_provided_dir/usr/share/qcom-firmware-extract/provided.d ]]; then
+    mkdir -p "$pacstrap_airootfs/usr/share/qcom-firmware-extract/provided.d"
+    cp -a "$qcom_provided_dir/usr/share/qcom-firmware-extract/provided.d/." \
+      "$pacstrap_airootfs/usr/share/qcom-firmware-extract/provided.d/"
+  fi
+  rm -rf "$qcom_provided_dir"
+
+  # Pass 2a: dedup + mksquashfs airootfs.sfs + sha512sum while omarchy-root.sfs
+  # finishes hashing in the background (iso._build_iso_image stays stamped).
   rm -f "$build_cache_dir/work/base._prepare_airootfs_image" \
-        "$build_cache_dir/work/iso._build_iso_image" \
         "$build_cache_dir/work/build._build_buildmode_iso"
   echo "[timing] mkarchiso pack start $(date +%s)"
   # The live system goes in as a layer over the root image, which then carries
   # what both hold (builder/mksquashfs-shim, builder/dedup-airootfs.sh).
+  mkarchiso_pack_status=0
   OMARCHY_ROOT_IMAGE="$root_image" PATH="/builder/mksquashfs-shim:$PATH" \
-    "$mkarchiso_command" -v -w "$build_cache_dir/work/" -o "$iso_staging/" "$build_cache_dir/"
+    "$mkarchiso_command" -v -w "$build_cache_dir/work/" -o "$iso_staging/" "$build_cache_dir/" || mkarchiso_pack_status=$?
+
+  root_sha256_status=0
+  wait "$root_sha256_pid" || root_sha256_status=$?
+  (( mkarchiso_pack_status == 0 )) || exit "$mkarchiso_pack_status"
+  (( root_sha256_status == 0 )) || exit "$root_sha256_status"
+
+  # Pass 2b: xorriso ISO assembly once omarchy-root.sfs.sha256 is in work/iso/.
+  rm -f "$build_cache_dir/work/iso._build_iso_image" \
+        "$build_cache_dir/work/build._build_buildmode_iso"
+  "$mkarchiso_command" -v -w "$build_cache_dir/work/" -o "$iso_staging/" "$build_cache_dir/"
   echo "[timing] mkarchiso end $(date +%s)"
 else
+  build_boot_menu_theme || exit 1
   stage_shipped_mirror
   run_root_image_build
   finalize_root_image_metadata "$build_cache_dir/airootfs"

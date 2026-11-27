@@ -41,9 +41,12 @@ from the start.
 
 from __future__ import annotations
 
+import fcntl
 import importlib
 import json
 import os
+import stat
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -169,6 +172,85 @@ def make_mirror_handler(offline: bool = True) -> MirrorListHandler:
 # How long a committed partition table may take to show up as device nodes.
 PARTITION_NODES_TIMEOUT = 10.0
 
+# Intervals (seconds) between checks for a udevadm settle stuck on
+# systemd-udevd's 200ms+1s EVENT_LOCKED retry timer after (udev-synth) exits.
+# Fast settles finish before the first tick; slow disks that are actively
+# locked by (udev-synth) or (udev-worker) fail the non-blocking LOCK_EX probe
+# and are left undisturbed.
+_SETTLE_NUDGE_DELAYS = (0.025, 0.05, 0.1, 0.25, 0.5)
+_SYS_BLOCK = Path("/sys/class/block")
+
+
+def _whole_disk_block_device(disk_path: str) -> Path | None:
+    try:
+        resolved = Path(disk_path).resolve()
+        if not stat.S_ISBLK(resolved.stat().st_mode):
+            return None
+        sys_block = _SYS_BLOCK / resolved.name
+        if (sys_block / "partition").exists():
+            parent = Path("/dev") / sys_block.resolve().parent.name
+            if parent.exists() and stat.S_ISBLK(parent.stat().st_mode):
+                return parent
+        return resolved
+    except OSError:
+        return None
+
+
+def _nudge_if_disk_unlocked(disk_path: str, done: threading.Event | None = None) -> bool:
+    """Wake an EVENT_LOCKED retry timer on disk_path if no udev process holds
+    a lock on it.
+
+    When parted.Disk.commit() (or archinstall's wipe_dev()) closes a whole disk
+    O_RDWR, systemd-udevd forks (udev-synth) taking flock(LOCK_EX) and emitting
+    change uevents while still locked. A (udev-worker) colliding with that lock
+    requeues its event with TRY_AGAIN=1; (udev-synth) then exits closing an
+    O_RDONLY descriptor (no IN_CLOSE_WRITE), stranding udevadm settle for up to
+    1.2 s. Taking and immediately releasing a non-blocking LOCK_EX on an
+    O_RDONLY descriptor proves neither (udev-synth) nor any (udev-worker) is
+    actively working on the disk, and writing "change" to sysfs wakes the
+    queued event without firing IN_CLOSE_WRITE or forking (udev-synth).
+    """
+    whole_disk = _whole_disk_block_device(disk_path)
+    if whole_disk is None:
+        return False
+    try:
+        fd = os.open(str(whole_disk), os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+    if done is not None and done.is_set():
+        return False
+    try:
+        (_SYS_BLOCK / whole_disk.name / "uevent").write_text("change\n")
+        return True
+    except OSError:
+        return False
+
+
+def _settle_disk(disk_path: str | None, settle_fn: Callable[[], object]):
+    if not disk_path:
+        return settle_fn()
+    done = threading.Event()
+
+    def watchdog() -> None:
+        for delay in _SETTLE_NUDGE_DELAYS:
+            if done.wait(delay):
+                return
+            _nudge_if_disk_unlocked(disk_path, done)
+
+    thread = threading.Thread(target=watchdog, daemon=True)
+    thread.start()
+    try:
+        return settle_fn()
+    finally:
+        done.set()
+        thread.join(timeout=1.0)
+
 
 @contextmanager
 def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
@@ -260,7 +342,8 @@ def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
     def commit_wrapper(original):
         def wrapper(disk, *args, **kwargs):
             result = original(disk, *args, **kwargs)
-            dh_module.udev_sync()
+            disk_path = getattr(getattr(disk, "device", None), "path", None)
+            _settle_disk(disk_path, dh_module.udev_sync)
             nodes = [Path(partition.path) for partition in disk.partitions]
             deadline = time.monotonic() + PARTITION_NODES_TIMEOUT
             while missing := [str(node) for node in nodes if not node.exists()]:

@@ -167,14 +167,10 @@ settle_disk() {
 # before --rereadpt runs. On a clean disk, skip the lock so udevd does not hit
 # EAGAIN and stall udevadm settle.
 release_disk() {
-  local lock used=false
+  local lock
   released=false
   for _ in $(seq 1 20); do
-    if $used; then
-      settle_disk
-    else
-      udevadm settle 2>/dev/null || true
-    fi
+    settle_disk
     if disk_has_state; then
       # Verify the disk exists and is writable before any teardown, then hold
       # flock -x on a read-only descriptor. Closing an O_RDWR descriptor on a
@@ -191,7 +187,6 @@ release_disk() {
         echo "$disk cannot be opened for writing and locked. Reboot the installer and try again."
         exit 1
       fi
-      used=true
       release_and_wipe
       blockdev --flushbufs "$disk" 2>/dev/null || true
       blockdev --rereadpt "$disk" 2>/dev/null && released=true
@@ -204,11 +199,7 @@ release_disk() {
     $released && break
     sleep 0.2
   done
-  if $used; then
-    settle_disk
-  else
-    udevadm settle 2>/dev/null || true
-  fi
+  settle_disk
 }
 
 release_disk

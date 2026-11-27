@@ -350,6 +350,259 @@ INSTALL
     sort -u >"$root/var/lib/omarchy-iso/prebuilt-uki-n1x.modules"
 }
 
+# The Snapdragon UKI carries the arm64 kernel (63 MiB), the Qualcomm early
+# modules, Adreno microcode and all Snapdragon device trees (~15 MiB), so it
+# uses the same 256 MiB ceiling as the N1x UKI.
+qualcomm_prebuilt_uki_size_ok() {
+  local bytes limit=$((256 * 1024 * 1024))
+  bytes=$(stat -c %s "$1")
+  if ((bytes > limit)); then
+    echo "ERROR: the Qualcomm pre-built UKI is $bytes bytes, over the $limit limit" >&2
+    return 1
+  fi
+}
+
+# Every early-loading module name named by the image's own mkinitcpio drop-ins
+# and Omarchy's Qualcomm hardware scripts under $1, normalized (no ?, - -> _),
+# excluding qcom_q6v5_pas: loading the DSP driver early resets USB-C controllers
+# and breaks USB-root installs, so only machines that explicitly ask for it
+# (Surface Laptop 8) build their own UKI with it.
+qualcomm_module_names() {
+  local root=$1
+  python3 - "$root" <<'PY'
+import pathlib, re, sys
+
+root = pathlib.Path(sys.argv[1])
+modules = set()
+
+def extract(text):
+    for m in re.finditer(r"^\s*MODULES\s*\+?=\(([^)]*)\)", text, re.M | re.S):
+        body = "\n".join(line.split("#", 1)[0] for line in m.group(1).splitlines())
+        for tok in body.split():
+            tok = tok.strip("'\"")
+            if not tok or tok.startswith("$"):
+                continue
+            name = tok.rstrip("?").replace("-", "_")
+            if re.fullmatch(r"[A-Za-z0-9_]+", name) and name != "qcom_q6v5_pas":
+                modules.add(name)
+
+conf_dir = root / "etc" / "mkinitcpio.conf.d"
+if conf_dir.is_dir():
+    for conf in sorted(conf_dir.glob("*.conf")):
+        extract(conf.read_text(errors="ignore"))
+
+hw_dir = root / "usr" / "share" / "omarchy" / "install" / "hardware"
+if hw_dir.is_dir():
+    for script in sorted(hw_dir.rglob("*.sh")):
+        text = script.read_text(errors="ignore")
+        if "omarchy-hw-aarch64-qualcomm" in text and "mkinitcpio" in text:
+            extract(text)
+
+for name in sorted(modules):
+    print(name)
+PY
+}
+
+# Root board-level compatible string from each FDT (.dtb) file given as args.
+qualcomm_dtb_compatibles() {
+  python3 - "$@" <<'PY'
+import struct, sys
+
+def root_compatible(path):
+    data = open(path, "rb").read()
+    if len(data) < 40:
+        return None
+    magic, _, off_struct, off_strings, _, _, _, _, size_strings, size_struct = struct.unpack(">10I", data[:40])
+    if magic != 0xD00DFEED:
+        return None
+    pos = off_struct
+    end = off_struct + size_struct
+    depth = 0
+    while pos + 4 <= end:
+        token = struct.unpack(">I", data[pos:pos + 4])[0]
+        pos += 4
+        if token == 1:  # FDT_BEGIN_NODE
+            nul = data.find(b"\x00", pos)
+            if nul == -1:
+                break
+            pos = (nul + 4) & ~3
+            depth += 1
+        elif token == 2:  # FDT_END_NODE
+            depth -= 1
+            if depth == 0:
+                break
+        elif token == 3:  # FDT_PROP
+            if pos + 8 > end:
+                break
+            plen, nameoff = struct.unpack(">II", data[pos:pos + 8])
+            pos += 8
+            val = data[pos:pos + plen]
+            pos = (pos + plen + 3) & ~3
+            if depth == 1:
+                nstart = off_strings + nameoff
+                nend = data.find(b"\x00", nstart)
+                if nend != -1 and data[nstart:nend] == b"compatible":
+                    first = val.split(b"\x00", 1)[0].decode("utf-8", errors="ignore")
+                    return first or None
+        elif token == 4:  # FDT_NOP
+            continue
+        elif token == 9:  # FDT_END
+            break
+        else:
+            break
+    return None
+
+seen = set()
+for p in sys.argv[1:]:
+    c = root_compatible(p)
+    if c:
+        seen.add(c)
+for c in sorted(seen):
+    print(c)
+PY
+}
+
+# Hash the Qualcomm UKI's non-drop-in initramfs inputs so the installer can
+# detect modified mkinitcpio.conf, custom /etc/initcpio hooks, or unexpected
+# /etc/modprobe.d overrides added by a board's hardware setup.
+qualcomm_initramfs_inputs() {
+  local root=$1 path hash
+  while IFS= read -r -d '' path; do
+    if [[ -L $root/$path ]]; then
+      hash=$(readlink "$root/$path" | sha256sum)
+    else
+      hash=$(sha256sum <"$root/$path")
+    fi
+    printf '%s  %s\n' "${hash%% *}" "$path"
+  done < <(cd "$root" && find etc/mkinitcpio.conf etc/initcpio etc/modprobe.d \
+    \( -type f -o -type l \) -print0 2>/dev/null | LC_ALL=C sort -z)
+}
+
+# Adreno X1 / X2 GPU microcode shared by the Snapdragon display initramfs
+# drop-ins (glymur-display.sh, hamoa-display.sh and board boot scripts), under
+# 600 KiB total.
+QUALCOMM_ADRENO_FIRMWARE=(
+  qcom/gen70500_sqe.fw
+  qcom/gen70500_gmu.bin
+  qcom/gen71500_sqe.fw
+  qcom/gen71500_gmu.bin
+  qcom/gen80100_sqe.fw
+  qcom/gen80100_gmu.bin
+)
+
+# Build /var/lib/omarchy-iso/prebuilt-uki-qualcomm.efi in a throwaway overlay
+# of $root with all Snapdragon DTBs (DeviceTreeAuto + HWIDs), the Qualcomm early
+# modules that resolve in $image_kver, and the Adreno GPU microcode. Runs while
+# the generic UKI's config and cmdline are still in $root.
+build_qualcomm_uki_in() {
+  local merged=$1 _upper=$2
+  local stub=/usr/lib/systemd-stub-omarchy/linuxaa64.efi.stub
+  local hwids=/usr/lib/systemd/boot/hwids/aa64
+  local dtb_dir="$merged/boot/dtbs/$image_kernel/qcom"
+  local mod fn fw suffix dir dtb sections n_dtb
+  local -a loadable_modules=() covered_modules=() firmware_files=() recorded_firmware=() dtbs=() dtb_paths=()
+
+  [[ -f $merged$stub ]] || { echo "WARNING: $stub missing; skipping Qualcomm pre-built UKI" >&2; return 1; }
+  [[ -d $merged$hwids ]] || { echo "WARNING: $hwids missing; skipping Qualcomm pre-built UKI" >&2; return 1; }
+
+  # Match live-uki.sh and omarchy-update-qualcomm-device-trees: supported
+  # Windows-on-ARM Snapdragon families, excluding *-el2.dtb variants whose
+  # shared hardware IDs would sort ahead of and shadow their base DTBs.
+  for dtb in \
+    "$dtb_dir"/x1*.dtb "$dtb_dir"/hamoa*.dtb "$dtb_dir"/purwa*.dtb \
+    "$dtb_dir"/glymur*.dtb "$dtb_dir"/mahua*.dtb "$dtb_dir"/kalambo*.dtb \
+    "$dtb_dir"/sc8280xp*.dtb "$dtb_dir"/sc8180x*.dtb "$dtb_dir"/sdm850*.dtb \
+    "$dtb_dir"/msm8998-{asus,hp,lenovo}*.dtb \
+    "$dtb_dir"/sc7180-{acer,apcsilmic,ecs,lenovo,samsung,tcl}*.dtb \
+    "$dtb_dir"/sc7280-{hp,samsung}*.dtb; do
+    if [[ -f $dtb && $dtb != *-el2.dtb ]]; then
+      dtbs+=("${dtb#"$merged"}")
+      dtb_paths+=("$dtb")
+    fi
+  done
+  ((${#dtbs[@]} > 0)) || { echo "WARNING: no Qualcomm DTBs in $dtb_dir; skipping Qualcomm pre-built UKI" >&2; return 1; }
+
+  # Resolve inside $merged against $image_kver so we use the image's own kmod,
+  # never pass ?/builtins/absent modules to MODULES=(), and record only what
+  # actually resolved (loadable or built-in) as covered.
+  for mod in "${qcom_modules[@]}"; do
+    fn=$(arch-chroot "$merged" modinfo -k "$image_kver" -F filename "$mod" 2>/dev/null || true)
+    if [[ $fn == /* ]]; then
+      loadable_modules+=("$mod")
+      covered_modules+=("$mod")
+    elif [[ $fn == "(builtin)" ]]; then
+      covered_modules+=("$mod")
+    fi
+  done
+  ((${#loadable_modules[@]} > 0)) || { echo "WARNING: no Qualcomm modules resolved in $image_kver; skipping Qualcomm pre-built UKI" >&2; return 1; }
+
+  for fw in "${QUALCOMM_ADRENO_FIRMWARE[@]}"; do
+    for dir in /usr/lib/firmware/updates /usr/lib/firmware; do
+      for suffix in '' .zst .xz; do
+        if [[ -f $merged$dir/$fw$suffix ]]; then
+          firmware_files+=("$dir/$fw$suffix")
+          recorded_firmware+=("$fw")
+          break 2
+        fi
+      done
+    done
+  done
+
+  sed -E "s/^MODULES=.*/MODULES=(${loadable_modules[*]})/" \
+    "$root/etc/mkinitcpio-prebuilt-uki.conf" >"$merged/etc/mkinitcpio-prebuilt-uki-qualcomm.conf" || return 1
+  if ((${#firmware_files[@]} > 0)); then
+    printf 'FILES+=(%s)\n' "${firmware_files[*]}" >>"$merged/etc/mkinitcpio-prebuilt-uki-qualcomm.conf" || return 1
+  fi
+
+  install -d "$merged/etc/kernel" || return 1
+  printf '[UKI]\nStub=%s\nHWIDs=%s\nDeviceTreeAuto=%s\n' "$stub" "$hwids" "${dtbs[*]}" \
+    >"$merged/etc/kernel/uki-prebuilt-qualcomm.conf" || return 1
+
+  echo "Pre-building the Qualcomm Snapdragon UKI (${#loadable_modules[@]} modules, ${#firmware_files[@]} firmware files, ${#dtbs[@]} DTBs)"
+  arch-chroot "$merged" mkinitcpio \
+    -k "/usr/lib/modules/${image_kver}/vmlinuz" \
+    -c /etc/mkinitcpio-prebuilt-uki-qualcomm.conf \
+    --cmdline /etc/kernel/cmdline.prebuilt-uki \
+    --ukiconfig /etc/kernel/uki-prebuilt-qualcomm.conf \
+    -U /var/lib/omarchy-iso/prebuilt-uki-qualcomm.efi \
+    -S autodetect 2>&1 | tail -25 || return 1
+  [[ -f "$merged/var/lib/omarchy-iso/prebuilt-uki-qualcomm.efi" ]] || return 1
+
+  # Verify ukify embedded .hwids and every .dtbauto section, matching live-uki.sh.
+  sections=$(arch-chroot "$merged" ukify inspect /var/lib/omarchy-iso/prebuilt-uki-qualcomm.efi) || return 1
+  grep -q '^\.hwids:' <<<"$sections" || { echo "WARNING: Qualcomm pre-built UKI missing .hwids section" >&2; return 1; }
+  n_dtb=$(grep -c '^\.dtbauto:' <<<"$sections" || true)
+  if (( n_dtb != ${#dtbs[@]} )); then
+    echo "WARNING: Qualcomm pre-built UKI has $n_dtb .dtbauto sections, expected ${#dtbs[@]}" >&2
+    return 1
+  fi
+
+  qualcomm_prebuilt_uki_size_ok "$merged/var/lib/omarchy-iso/prebuilt-uki-qualcomm.efi" || return 1
+  install -m 0644 "$merged/var/lib/omarchy-iso/prebuilt-uki-qualcomm.efi" \
+    "$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm.efi" || return 1
+  echo "Pre-built Qualcomm UKI: $(du -h "$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm.efi" | cut -f1)"
+  printf '%s\n' "${covered_modules[@]}" | sort -u >"$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm.modules" || return 1
+  if ((${#recorded_firmware[@]} > 0)); then
+    printf '%s\n' "${recorded_firmware[@]}" | sort -u >"$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm.files" || return 1
+  else
+    : >"$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm.files" || return 1
+  fi
+  (cd "$root/etc/mkinitcpio.conf.d" 2>/dev/null && printf '%s\n' *.conf | grep -v '^\*\.conf$' | LC_ALL=C sort -u || true) \
+    >"$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm.dropins" || return 1
+  qualcomm_dtb_compatibles "${dtb_paths[@]}" >"$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm.compatibles" || return 1
+  qualcomm_initramfs_inputs "$root" >"$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm.inputs" || return 1
+}
+
+build_qualcomm_prebuilt_uki() {
+  local -a qcom_modules
+  mapfile -t qcom_modules < <(qualcomm_module_names "$root")
+  if ((${#qcom_modules[@]} == 0)); then
+    echo "WARNING: no Qualcomm initramfs modules found under $root" >&2
+    return 1
+  fi
+  with_image_overlay build_qualcomm_uki_in
+}
+
 # Build /var/lib/omarchy-iso/prebuilt-uki-n1x.efi from a throwaway overlay of
 # $root. Runs while the generic UKI's config and cmdline are still in $root.
 build_n1x_prebuilt_uki() {
@@ -777,11 +1030,17 @@ CONF
     >"$root/etc/kernel/cmdline.prebuilt-uki"
 
   if [[ -n ${OMARCHY_SNAPDRAGON:-} ]]; then
-    # A Snapdragon ISO installs only Snapdragon laptops, whose platform builds
-    # its own UKI with board firmware and device trees, so shipping the generic
-    # ~116 MiB pre-built UKI only bloats the root image and slows image writes.
-    rm -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi"
-    echo "Skipping generic pre-built UKI on Snapdragon image (platform builds its own)"
+    # A Snapdragon ISO installs only Snapdragon laptops, so skip the generic
+    # UKI and pre-build the Snapdragon UKI (all Snapdragon DTBs via
+    # DeviceTreeAuto + HWIDs + shared Qualcomm early modules + Adreno microcode)
+    # so standard Snapdragon installs copy it in place instead of spending ~7s
+    # running mkinitcpio + ukify on the target.
+    rm -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" \
+      "$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm".{efi,modules,files,dropins,compatibles,inputs}
+    if [[ $(uname -m) == aarch64 ]] && ! build_qualcomm_prebuilt_uki; then
+      echo "WARNING: no Qualcomm pre-built UKI; Snapdragon installs will build their own"
+      rm -f "$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm".{efi,modules,files,dropins,compatibles,inputs}
+    fi
   else
     echo "Pre-building the UKI in the image (kver=$image_kver, generic cmdline, systemd and sd-encrypt hooks, no autodetect)"
     # mkinitcpio is called directly: the preset flow (-P) runs Limine's install

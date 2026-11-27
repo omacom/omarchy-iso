@@ -284,6 +284,12 @@ jobs:
           - variant: encrypted-kb-de
             scenarios: boot keymap-locale
             env: OMARCHY_INTEGRATION_ENCRYPT=true OMARCHY_INTEGRATION_KB_LAYOUT=de
+          # A CPU without AES-NI: the installer must format LUKS with Adiantum
+          # (256-bit key) instead of software AES-XTS, and the installed system
+          # must unlock and boot from it.
+          - variant: encrypted-no-aes
+            scenarios: boot
+            env: OMARCHY_INTEGRATION_ENCRYPT=true OMARCHY_INTEGRATION_CPU_FLAGS=-aes
           - variant: small-disk
             scenarios: boot
             env: OMARCHY_INTEGRATION_DISK_GB=24
@@ -438,7 +444,7 @@ jobs:
           # The variant's own install folder, named the way base-test.sh
           # names it. A job running every scenario also leaves pxe-test.sh's
           # -bios one, which can sort first and holds no install numbers.
-          firmware=uefi kb=us encrypt=false uki=false disk_gb=40
+          firmware=uefi kb=us encrypt=false uki=false disk_gb=40 cpu_flags=
           for setting in $VARIANT_ENV; do
             case $setting in
               OMARCHY_INTEGRATION_FIRMWARE=*) firmware=${setting#*=} ;;
@@ -446,6 +452,7 @@ jobs:
               OMARCHY_INTEGRATION_ENCRYPT=*) encrypt=${setting#*=} ;;
               OMARCHY_INTEGRATION_UKI=*) uki=${setting#*=} ;;
               OMARCHY_INTEGRATION_DISK_GB=*) disk_gb=${setting#*=} ;;
+              OMARCHY_INTEGRATION_CPU_FLAGS=*) cpu_flags=${setting#*=} ;;
             esac
           done
           for option in $OPTIONS; do [ "$option" != --bios ] || firmware=bios; done
@@ -456,6 +463,7 @@ jobs:
           [ "$encrypt" != true ] || suffix+=-luks
           [ "$uki" != true ] || suffix+=-uki
           [ "$disk_gb" = 40 ] || suffix+="-${disk_gb}g"
+          [ -z "$cpu_flags" ] || suffix+="-cpu${cpu_flags//[^a-zA-Z0-9_-]/}"
           base=$(ls -d test-runs/*-integration"$suffix" 2>/dev/null | head -1)
           boot() { head -1 "$1" | sed -E 's/in [^+]*\(firmware\) \+ /in /; s/ *=.*//'; }
           [ -n "$base" ] || { echo "No test run to report" >> "$GITHUB_STEP_SUMMARY"; exit 0; }

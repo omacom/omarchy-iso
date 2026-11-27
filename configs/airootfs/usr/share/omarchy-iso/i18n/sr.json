@@ -20,8 +20,6 @@
   "summary.keyboard": "Тастатура",
   "summary.language": "Језик",
   "summary.prompt": "Да ли је све у реду?",
-  "firmware.title": "Чување Qualcomm фирмвера из Windows-а",
-  "firmware.saved": "Сачувано је %1 датотека фирмвера из Windows-а за инсталацију.",
   "firmware.partial": "Сачувано је %1 од %2 датотека фирмвера; остале нису у Windows складишту драјвера.",
   "firmware.none": "На овом рачунару није пронађен Windows фирмвер.",
   "firmware.bitlocker": "Windows партиција је шифрована BitLocker-ом.",

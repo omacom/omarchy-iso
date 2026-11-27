@@ -20,8 +20,6 @@
   "summary.keyboard": "Kibodi",
   "summary.language": "Lugha",
   "summary.prompt": "Je hii iko sawa?",
-  "firmware.title": "Inahifadhi firmware ya Qualcomm kutoka Windows",
-  "firmware.saved": "Imehifadhi faili %1 za firmware kutoka Windows kwa usakinishaji.",
   "firmware.partial": "Imehifadhi faili %1 kati ya %2 za firmware; zilizobaki hazikuwa kwenye Windows.",
   "firmware.none": "Hakuna firmware ya Windows iliyopatikana kwenye kompyuta hii.",
   "firmware.bitlocker": "Kizigeu cha Windows kimesimbwa kwa BitLocker.",

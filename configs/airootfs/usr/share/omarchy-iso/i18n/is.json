@@ -20,8 +20,6 @@
   "summary.keyboard": "Lyklaborð",
   "summary.language": "Tungumál",
   "summary.prompt": "Lítur þetta rétt út?",
-  "firmware.title": "Vista Qualcomm-fastbúnað úr Windows",
-  "firmware.saved": "Vistaði %1 fastbúnaðarskrár úr Windows fyrir uppsetninguna.",
   "firmware.partial": "Vistaði %1 af %2 fastbúnaðarskrám úr Windows; hinar voru ekki í rekilssafninu.",
   "firmware.none": "Enginn Windows-fastbúnaður fannst á þessari tölvu.",
   "firmware.bitlocker": "Windows-disksneiðin er dulkóðuð með BitLocker.",

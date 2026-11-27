@@ -1,13 +1,13 @@
-"""Unit tests for the post-install trim: phases_impl.trim_target runs fstrim
-on the target, never fails the install, and main() calls it only after
-run() has stopped the install timer."""
+"""Unit tests for the first-boot trim: phases_impl.stage_first_boot_trim enables
+Arch's built-in fstrim.timer with an overdue stamp file, never fails a completed
+install, and main() calls it only after run() succeeds."""
 
-import subprocess
+import stat
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
-from subprocess import CompletedProcess
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "configs/airootfs/usr/share/omarchy-iso"))
@@ -20,45 +20,76 @@ from orchestrator import main, phases_impl  # noqa: E402
 from orchestrator.phases import PhaseError  # noqa: E402
 
 
-class TrimTargetTest(unittest.TestCase):
-    def trim(self, **run):
+class StageFirstBootTrimTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self.tmp.name)
+        timer = self.target / "usr/lib/systemd/system/fstrim.timer"
+        timer.parent.mkdir(parents=True)
+        timer.write_text("[Timer]\nOnCalendar=weekly\nPersistent=true\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def stage(self):
+        lines = []
+        with mock.patch.object(phases_impl, "info", lines.append):
+            phases_impl.stage_first_boot_trim(types.SimpleNamespace(target=self.target))
+        return lines
+
+    def test_enables_fstrim_timer_and_backdates_stamp(self):
+        lines = self.stage()
+
+        link = self.target / "etc/systemd/system/timers.target.wants/fstrim.timer"
+        stamp = self.target / "var/lib/systemd/timers/stamp-fstrim.timer"
+
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(str(link.readlink()), "/usr/lib/systemd/system/fstrim.timer")
+        self.assertTrue(stamp.is_file())
+        self.assertFalse(stamp.is_symlink())
+        self.assertEqual(stat.S_IMODE(stamp.stat().st_mode), 0o644)
+        self.assertEqual(int(stamp.stat().st_mtime), phases_impl.FSTRIM_OVERDUE_STAMP_EPOCH)
+        self.assertIn("enabled fstrim.timer", lines[-1])
+
+    def test_restaging_replaces_existing_symlinks_without_writing_through_stamp(self):
+        wants = self.target / "etc/systemd/system/timers.target.wants"
+        wants.mkdir(parents=True)
+        (wants / "fstrim.timer").symlink_to("/stale/target")
+
+        timers_dir = self.target / "var/lib/systemd/timers"
+        timers_dir.mkdir(parents=True)
+        sentinel = self.target / "sentinel"
+        sentinel.write_text("untouched")
+        (timers_dir / "stamp-fstrim.timer").symlink_to(sentinel)
+
+        self.stage()
+
+        self.assertEqual(
+            str((wants / "fstrim.timer").readlink()),
+            "/usr/lib/systemd/system/fstrim.timer",
+        )
+        self.assertFalse((timers_dir / "stamp-fstrim.timer").is_symlink())
+        self.assertEqual(sentinel.read_text(), "untouched")
+
+    def test_missing_fstrim_timer_logs_warning_and_skips(self):
+        (self.target / "usr/lib/systemd/system/fstrim.timer").unlink()
+        lines = self.stage()
+        self.assertFalse((self.target / "etc/systemd/system/timers.target.wants/fstrim.timer").exists())
+        self.assertFalse((self.target / "var/lib/systemd/timers/stamp-fstrim.timer").exists())
+        self.assertIn("WARNING: fstrim.timer not found", lines[-1])
+
+    def test_os_error_is_logged_and_does_not_raise(self):
         lines = []
         with mock.patch.object(phases_impl, "info", lines.append), \
-                mock.patch.object(phases_impl.subprocess, "run", **run) as fake:
-            phases_impl.trim_target(types.SimpleNamespace(target=Path("/mnt")))
-        return fake, lines
-
-    def test_trims_the_mounted_target_within_its_budget(self):
-        fake, lines = self.trim(return_value=CompletedProcess(
-            [], 0, "/mnt: 36.5 GiB (39187726336 bytes) trimmed\n", ""))
-        args, kwargs = fake.call_args
-        self.assertEqual(args[0], ["fstrim", "--verbose", "/mnt"])
-        self.assertEqual(kwargs["timeout"], phases_impl.TRIM_BUDGET)
-        self.assertRegex(lines[-1], r"^› trim: /mnt: 36\.5 GiB \(39187726336 bytes\) trimmed in \d+\.\d\ds$")
-
-    def test_a_failed_trim_is_logged_and_does_not_raise(self):
-        _, lines = self.trim(return_value=CompletedProcess(
-            [], 1, "", "fstrim: /mnt: the discard operation is not supported\n"))
-        self.assertIn("WARNING: fstrim /mnt exited 1", lines[-1])
-        self.assertIn("not supported", lines[-1])
-        self.assertNotIn("trimmed in", lines[-1])
-
-    def test_a_slow_trim_is_stopped_at_its_budget(self):
-        _, lines = self.trim(side_effect=subprocess.TimeoutExpired(["fstrim"], phases_impl.TRIM_BUDGET))
-        self.assertIn(f"still running after {phases_impl.TRIM_BUDGET}s", lines[-1])
-
-    def test_an_interrupted_trim_leaves_the_finished_install_alone(self):
-        _, lines = self.trim(side_effect=KeyboardInterrupt)
-        self.assertIn("was interrupted", lines[-1])
-
-    def test_a_missing_fstrim_does_not_raise(self):
-        _, lines = self.trim(side_effect=FileNotFoundError("fstrim"))
-        self.assertIn("could not run fstrim", lines[-1])
+                mock.patch.object(Path, "symlink_to", side_effect=OSError("read-only filesystem")):
+            phases_impl.stage_first_boot_trim(types.SimpleNamespace(target=self.target))
+        self.assertIn("WARNING: could not enable fstrim.timer", lines[-1])
+        self.assertIn("read-only filesystem", lines[-1])
 
 
-class MainTrimsAfterTheTimerTest(unittest.TestCase):
-    """run() writes finished_at, which the finish screen's time is read from,
-    before it returns. The trim must come after it, and only on success."""
+class MainStagesTrimAfterRunTest(unittest.TestCase):
+    """run() writes finished_at before returning. Staging the first-boot trim
+    must come after run(), and only on success."""
 
     def main(self, run_error=None):
         events = []
@@ -76,16 +107,16 @@ class MainTrimsAfterTheTimerTest(unittest.TestCase):
         with mock.patch.object(main.InstallContext, "from_env", return_value=ctx), \
                 mock.patch.object(main, "run", fake_run), \
                 mock.patch.object(main, "build_phases", return_value=[]), \
-                mock.patch.object(phases_impl, "trim_target", lambda c: events.append("trim")), \
+                mock.patch.object(phases_impl, "stage_first_boot_trim", lambda c: events.append("stage_trim")), \
                 mock.patch.multiple(phases_impl, **helpers), \
                 mock.patch.object(main, "info"), mock.patch.object(main, "error"):
             status = main.main()
         return status, events
 
-    def test_a_finished_install_is_trimmed_after_run_returns(self):
-        self.assertEqual(self.main(), (0, ["run", "trim"]))
+    def test_a_finished_install_stages_first_boot_trim_after_run_returns(self):
+        self.assertEqual(self.main(), (0, ["run", "stage_trim"]))
 
-    def test_a_failed_install_is_not_trimmed(self):
+    def test_a_failed_install_does_not_stage_first_boot_trim(self):
         self.assertEqual(self.main(PhaseError("boom")), (1, ["run"]))
 
 

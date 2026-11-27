@@ -177,7 +177,7 @@ disk=$(mktemp -d -p /var/tmp)
 trap 'rm -rf "$work" "$disk"' EXIT
 cp "$image" "$disk/image.zst"
 cache() {
-  python3 - "$disk/image.zst" "$1" <<'PY'
+  python3 - "${2:-$disk/image.zst}" "$1" <<'PY'
 import os, sys
 fd = os.open(sys.argv[1], os.O_RDONLY)
 os.fsync(fd)
@@ -202,6 +202,71 @@ for state in none half all; do
   ((ok)) || fail "with $state of the image cached, write counts $cached frames as cached" "$(cat "$work/stderr")"
   pass "with $state of the image cached, write reproduces the image and counts $cached cached"
 done
+
+# Uncached and partially cached runs also report final progress and fail cleanly
+# (without deadlocking the reader/worker pool) on corrupt frames.
+for state in none half; do
+  cache "$state"
+  target "$work/target" 0
+  rm -f "$work/progress-$state"
+  OMARCHY_IMAGE_WRITE_PROGRESS="$work/progress-$state" run write "$disk/image.zst" "$work/target" 3
+  [[ $status == 0 && $(cat "$work/progress-$state" 2>/dev/null) == "11 11" ]] ||
+    fail "write with $state cached reports final progress" "status $status, progress '$(cat "$work/progress-$state" 2>/dev/null)'"
+  cmp -s "$work/target" "$raw" || fail "write with $state cached and progress reproduces the raw image"
+done
+pass "uncached and partially cached writes report final progress cleanly"
+
+cp "$image" "$disk/corrupt.zst"
+printf '\xff' | dd of="$disk/corrupt.zst" bs=1 seek=1000 conv=notrunc status=none
+for state in none half; do
+  cache "$state" "$disk/corrupt.zst"
+  target "$work/target" 0
+  run write "$disk/corrupt.zst" "$work/target" 4
+  [[ $status == 1 ]] || fail "$state-cached corrupt frame fails cleanly without hanging" "status $status: $(cat "$work/stderr")"
+  grep -q "frame 0:" "$work/stderr" || fail "$state-cached corrupt frame names frame 0" "$(cat "$work/stderr")"
+done
+pass "cold and partial-cache corrupt frames fail cleanly without deadlocking"
+
+# Partial-cache runs drop source page cache (POSIX_FADV_DONTNEED) so low-RAM
+# machines do not fill RAM with already-consumed image pages; fully cached runs
+# take the fast path without touching page cache eviction.
+resident_pages() {
+  python3 - "$1" <<'PY'
+import ctypes, mmap, os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+size = os.fstat(fd).st_size
+page = os.sysconf("SC_PAGE_SIZE")
+npages = (size + page - 1) // page
+libc = ctypes.CDLL(None)
+libc.mmap.restype = ctypes.c_void_p
+libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+libc.munmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+addr = libc.mmap(None, size, mmap.PROT_READ, mmap.MAP_PRIVATE, fd, 0)
+assert addr != ctypes.c_void_p(-1).value
+vec = (ctypes.c_ubyte * npages)()
+assert libc.mincore(ctypes.c_void_p(addr), ctypes.c_size_t(size), vec) == 0
+resident = sum(b & 1 for b in vec)
+libc.munmap(ctypes.c_void_p(addr), size)
+os.close(fd)
+print(resident, npages)
+PY
+}
+
+cache half
+target "$work/target" 0
+run write "$disk/image.zst" "$work/target" 3
+[[ $status == 0 ]] || fail "partial-cache write for cache-drop check succeeds" "$(cat "$work/stderr")"
+read -r res tot < <(resident_pages "$disk/image.zst")
+((res <= 2)) || fail "partial-cache write drops consumed source pages" "got $res/$tot resident"
+pass "partial-cache write drops consumed source pages"
+
+cache all
+target "$work/target" 0
+run write "$disk/image.zst" "$work/target" 3
+[[ $status == 0 ]] || fail "full-cache write for residency check succeeds" "$(cat "$work/stderr")"
+read -r res tot < <(resident_pages "$disk/image.zst")
+((res == tot)) || fail "full-cache fast path leaves cached pages untouched" "got $res/$tot resident"
+pass "full-cache fast path leaves cached pages untouched"
 
 # Frames 4-5 decode to zeros and are never written, like dd conv=sparse:
 # whatever the target held there survives. Everything else must match.
@@ -393,6 +458,35 @@ run write-squashfs "$disk/image.sfs" "$work/target" 3
 [[ $status == 0 ]] && grep -q "(11 frames, 2 zero, 11 cached, 3 threads)" "$work/stderr" ||
   fail "write-squashfs orders by what the page cache holds of the squashfs" "$(cat "$work/stderr")"
 pass "write-squashfs orders by what the page cache holds of the squashfs"
+
+# Cold and partially cached SquashFS writes cover stored blocks (0-3), sparse
+# zero blocks (4-5), compressed blocks (6-10), final progress, timing bounds,
+# and POSIX_FADV_DONTNEED cache eviction through the two-stage reader path.
+for state in none half; do
+  cache "$state" "$disk/image.sfs"
+  target "$work/target" 170
+  rm -f "$work/progress-sfs-$state"
+  OMARCHY_IMAGE_WRITE_PROGRESS="$work/progress-sfs-$state" run write-squashfs "$disk/image.sfs" "$work/target" 4
+  [[ $status == 0 ]] || fail "write-squashfs with $state cached succeeds" "$(cat "$work/stderr")"
+  [[ $(cat "$work/progress-sfs-$state" 2>/dev/null) == "11 11" ]] ||
+    fail "write-squashfs with $state cached reports final progress" "progress '$(cat "$work/progress-sfs-$state" 2>/dev/null)'"
+  cached=$(sed -n 's/.* \([0-9]*\) cached,.*/\1/p' "$work/stderr")
+  ((cached < 11)) || fail "write-squashfs with $state cached enters uncached path" "$(cat "$work/stderr")"
+  python3 - "$work/target" "$raw" "$work/stderr" <<'PY' || fail "write-squashfs with $state cached output and timing valid" "$(cat "$work/stderr")"
+import re, sys
+frame = 256 * 1024
+target, raw, text = open(sys.argv[1], "rb").read(), open(sys.argv[2], "rb").read(), open(sys.argv[3]).read()
+assert target[4 * frame:6 * frame] == bytes([170]) * 2 * frame
+assert target[:4 * frame] == raw[:4 * frame] and target[6 * frame:] == raw[6 * frame:]
+m = re.search(r"thread-seconds decoding ([\d.]+), writing ([\d.]+), skipping ([\d.]+), of ([\d.]+)$", text, re.M)
+assert m, "no timing line"
+decoding, writing, skipping, available = map(float, m.groups())
+assert decoding + writing + skipping <= available + 0.02, m.group(0)
+PY
+  read -r res tot < <(resident_pages "$disk/image.sfs")
+  ((res <= 2)) || fail "write-squashfs with $state cached drops consumed pages" "got $res/$tot resident"
+done
+pass "cold and partial-cache write-squashfs reproduces stored/sparse blocks, reports progress, and drops cache"
 
 # Sparse blocks are left unwritten: over a target of 170s, frames 4 and 5 keep
 # the 170s and everything else is the image.

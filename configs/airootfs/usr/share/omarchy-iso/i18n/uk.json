@@ -20,8 +20,6 @@
   "summary.keyboard": "Клавіатура",
   "summary.language": "Мова",
   "summary.prompt": "Усе правильно?",
-  "firmware.title": "Збереження мікропрограм Qualcomm з Windows",
-  "firmware.saved": "Збережено файлів мікропрограм з Windows для встановлення: %1.",
   "firmware.partial": "Збережено %1 з %2 файлів мікропрограм; решти немає в сховищі драйверів Windows.",
   "firmware.none": "Мікропрограм Windows на цьому комп'ютері не знайдено.",
   "firmware.bitlocker": "Розділ Windows зашифровано BitLocker.",

@@ -86,7 +86,9 @@ def exercise_formats(calibration, Luks2, report, expect_no_cache=False):
                 slot = metadata['keyslots']['0']
                 kdf = slot['kdf']
                 assert kdf['type'] == 'argon2id'
-                assert slot['key_size'] == 64
+                assert slot['key_size'] == calibration.volume_key_size() // 8
+                if not calibration.has_aes_acceleration():
+                    assert metadata['segments']['0']['encryption'] == calibration.ADIANTUM_CIPHER
                 assert kdf['time'] >= 4 and 1 <= kdf['cpus'] <= 4
                 assert calibration.MIN_MEMORY <= kdf['memory'] <= calibration.MAX_MEMORY
                 if cache is not None:
@@ -127,12 +129,13 @@ def exercise_formats(calibration, Luks2, report, expect_no_cache=False):
             state.write_bytes(saved)
 
 
-def exercise_volume_key(Luks2, report):
+def exercise_volume_key(calibration, Luks2, report):
     """Both callers open the volume they just formatted with the volume key
     the format was given: no second key derivation, the open flags stored in
     the header, the key file gone afterwards, and the passphrase still
     opening the volume, as it must at every boot."""
     flags = ['--persistent', '--allow-discards', '--perf-no_read_workqueue']
+    expected_key_bytes = calibration.volume_key_size() // 8
     with tempfile.TemporaryDirectory(prefix='luks-volume-key-', dir='/var/tmp') as tmp:
         tmp = Path(tmp)
         password = b'only-a-disposable-vm-test'
@@ -150,7 +153,7 @@ def exercise_volume_key(Luks2, report):
             handler = Luks2(path, mapper_name=name, password=password)
             handler.encrypt(iter_time=2000)
             volume_key = handler.omarchy_volume_key
-            assert volume_key.stat().st_mode & 0o777 == 0o600 and volume_key.stat().st_size == 64, volume_key
+            assert volume_key.stat().st_mode & 0o777 == 0o600 and volume_key.stat().st_size == expected_key_bytes, volume_key
             start = time.monotonic()
             handler.unlock()
             return volume_key, time.monotonic() - start
@@ -158,7 +161,7 @@ def exercise_volume_key(Luks2, report):
         def free_space(path, name):
             result, _ = command(['omarchy-luks-calibrate', 'volume-key'], text=True)
             volume_key = Path(result.stdout.strip())
-            assert volume_key.stat().st_mode & 0o777 == 0o600 and volume_key.stat().st_size == 64, volume_key
+            assert volume_key.stat().st_mode & 0o777 == 0o600 and volume_key.stat().st_size == expected_key_bytes, volume_key
             command(['omarchy-luks-calibrate', 'format', str(path), str(volume_key)], input=password)
             _, seconds = command(['cryptsetup', 'open', *flags, '--volume-key-file', str(volume_key), str(path), name])
             volume_key.unlink()
@@ -198,7 +201,7 @@ def main():
         from orchestrator import luks_tuning
         luks_tuning.apply()
         exercise_formats(calibration, Luks2, report, args.expect_no_cache)
-        exercise_volume_key(Luks2, report)
+        exercise_volume_key(calibration, Luks2, report)
     finally:
         print(json.dumps(report, indent=2))
 

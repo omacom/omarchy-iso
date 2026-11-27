@@ -20,8 +20,6 @@
   "summary.keyboard": "Clavier",
   "summary.language": "Langue",
   "summary.prompt": "Tout est correct ?",
-  "firmware.title": "Sauvegarde du firmware Qualcomm depuis Windows",
-  "firmware.saved": "%1 fichiers de firmware sauvegardés depuis Windows pour l'installation.",
   "firmware.partial": "%1 fichiers de firmware sur %2 sauvegardés depuis Windows ; les autres étaient absents.",
   "firmware.none": "Aucun firmware Windows trouvé sur cette machine.",
   "firmware.bitlocker": "La partition Windows est chiffrée avec BitLocker.",

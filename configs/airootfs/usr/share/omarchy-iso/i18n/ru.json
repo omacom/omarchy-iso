@@ -20,8 +20,6 @@
   "summary.keyboard": "Клавиатура",
   "summary.language": "Язык",
   "summary.prompt": "Всё верно?",
-  "firmware.title": "Сохранение прошивок Qualcomm из Windows",
-  "firmware.saved": "Сохранено файлов прошивки из Windows для установки: %1.",
   "firmware.partial": "Сохранено %1 из %2 файлов прошивки; остальных нет в хранилище драйверов Windows.",
   "firmware.none": "Прошивки Windows на этом компьютере не найдены.",
   "firmware.bitlocker": "Раздел Windows зашифрован BitLocker.",

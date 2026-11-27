@@ -8,6 +8,7 @@ and the layout left behind (@ from the image, @home/@log/@pkg, pacman.log in
 @log, the target's mounts restored). finalize_boot_and_user runs its two
 branches at once, waits for both, and raises the first failure."""
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -101,6 +102,8 @@ class InstallRootImageDdTest(unittest.TestCase):
              mock.patch.object(phases_impl, "_wait_for_blkid_uuid",
                                side_effect=lambda d: self.calls.append(["blkid-wait", d])), \
              mock.patch.object(phases_impl, "_medium_bytes_read", return_value=None), \
+             mock.patch.object(phases_impl, "_boot_medium_scheduler_for_image_write",
+                               side_effect=lambda: contextlib.nullcontext()), \
              mock.patch.object(phases_impl, "_write_phase_progress"), \
              mock.patch.object(phases_impl, "info"), \
              mock.patch.object(phases_impl.subprocess, "run", side_effect=self.fake_run):

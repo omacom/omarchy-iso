@@ -119,12 +119,15 @@ install_from_slow_medium() {
   check "verify unit is still hashing when the medium dies" \
     ssh_live_root "systemctl show -p ActiveState --value $VERIFY_UNIT | grep -qx activating"
 
-  log "Choking the medium to 64 KB/s"
-  # Slow enough that the hash cannot finish and the stop of a mid-read
-  # process takes visible seconds, fast enough that no single request
-  # outlives the guest kernel's 30 s command timeout — 1 KB/s turns reads
-  # into I/O errors and the unit fails as corrupt instead of slow.
-  throttle_medium 65536
+  log "Choking the medium to 256 KB/s"
+  # Slow enough that the multi-GB hash cannot finish within the 180 s timeout
+  # (<45 MiB read) and stopping a mid-read readahead takes visible seconds, yet
+  # fast enough that BFQ's normal-priority reads off airootfs.sfs (SSH polling,
+  # dashboard, systemctl) cannot starve the IOSchedulingClass=idle hasher past
+  # the 60 s stall watchdog or the guest kernel's 30 s command timeout — at
+  # 64 KB/s, a few MiB of normal-priority page faults tripped "made no progress
+  # for 60 s" before the 180 s start timeout fired.
+  throttle_medium 262144
 
   log "Waiting for the installer to stop"
   local waited=0

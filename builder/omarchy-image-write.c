@@ -64,6 +64,7 @@
 #define LEVEL		3
 #define MAX_THREADS	64
 #define MAX_BATCH	16		/* max consecutive frames per worker grab */
+#define DROP_WINDOW	(16 << 20)	/* drop uncached source pages after this many bytes */
 
 /* The seekable format: a skippable frame of 8-byte entries and a footer. */
 #define SEEK_TABLE_MAGIC	0x184D2A5Eu	/* skippable frame magic */
@@ -97,7 +98,9 @@ static const uint8_t *image;
 static struct frame *frames;
 static size_t *order;		/* the frames in the order they are written */
 static size_t nframes, max_dsize, max_csize, cached_frames, frame_batch = 1;
-static int src_fd = -1, target_fd;
+static size_t stage_end, drop_start;
+static int src_fd = -1, target_fd, serialize_reads;
+static pthread_mutex_t read_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t *zero_frame;
 static size_t zero_frame_size;
 static _Alignas(64) atomic_size_t next_frame;
@@ -671,12 +674,84 @@ static void fail(const char *fmt, ...)
 	fputc('\n', stderr);
 }
 
+/*
+ * Drop consumed uncached source pages behind the sequential reader (under
+ * read_mu). Reads are strictly monotonic in src and DONTNEED on uncached pages
+ * is a no-op; aligning down to a page boundary keeps any partial trailing page
+ * shared with the next frame warm.
+ */
+static void drop_behind(size_t src_end, size_t page)
+{
+	size_t end = src_end & ~(page - 1);
+
+	if (end > drop_start && end - drop_start >= DROP_WINDOW) {
+		posix_fadvise(src_fd, (off_t)drop_start, (off_t)(end - drop_start),
+			      POSIX_FADV_DONTNEED);
+		drop_start = end;
+	}
+}
+
+static int decode_and_write(ZSTD_DCtx *dctx, uint8_t *buf, const uint8_t *cbuf,
+			    size_t k, int err, uint64_t t0, uint64_t *decode,
+			    uint64_t *write, uint64_t *skip,
+			    size_t *local_bytes, size_t *local_zeros)
+{
+	const struct frame *f = &frames[k];
+	uint64_t t1;
+	size_t n;
+
+	if (f->csize == 0) {
+		(*local_zeros)++;
+		*skip += now_ns() - t0;
+		return 0;
+	}
+	if (err) {
+		fail("frame %zu: read at byte %zu: %s", k, f->src, strerror(-err));
+		return -1;
+	}
+	if (f->stored) {
+		n = f->dsize;
+	} else {
+		if (!squashfs_input && f->dsize == max_dsize &&
+		    f->csize == zero_frame_size &&
+		    memcmp(cbuf, zero_frame, zero_frame_size) == 0) {
+			(*local_zeros)++;
+			*skip += now_ns() - t0;
+			return 0;
+		}
+		n = ZSTD_decompressDCtx(dctx, buf, f->dsize, cbuf, f->csize);
+	}
+	t1 = now_ns();
+	*decode += t1 - t0;
+	if (ZSTD_isError(n) || n != f->dsize) {
+		fail("frame %zu: %s", k, ZSTD_isError(n) ?
+		     ZSTD_getErrorName(n) : "decoded to the wrong size");
+		return -1;
+	}
+	if (all_zero(buf, n)) {
+		(*local_zeros)++;
+		*skip += now_ns() - t1;
+		return 0;
+	}
+	t0 = now_ns();
+	*skip += t0 - t1;
+	err = pwrite_all(target_fd, buf, n, f->dst);
+	*write += now_ns() - t0;
+	if (err) {
+		fail("write at byte %lld: %s", (long long)f->dst, strerror(-err));
+		return -1;
+	}
+	*local_bytes += n;
+	return 0;
+}
+
 static void *worker(void *arg)
 {
 	ZSTD_DCtx *dctx = ZSTD_createDCtx();
 	uint8_t *buf = NULL, *cbuf = NULL;
-	uint64_t decode = 0, write = 0, skip = 0, t0, t1;
+	uint64_t decode = 0, write = 0, skip = 0, t0;
 	size_t local_bytes = 0, local_zeros = 0;
+	size_t page = (size_t)sysconf(_SC_PAGESIZE);
 
 	(void)arg;
 	if (!dctx || posix_memalign((void **)&buf, ALIGN, max_dsize) ||
@@ -684,67 +759,61 @@ static void *worker(void *arg)
 		fail("out of memory");
 		goto out;
 	}
-	while (!atomic_load(&failed)) {
-		size_t base = atomic_fetch_add(&next_frame, frame_batch);
-		size_t end = base + frame_batch < nframes ? base + frame_batch : nframes;
-
-		if (base >= nframes)
-			break;
-		for (size_t idx = base; idx < end && !atomic_load(&failed); idx++) {
-			size_t k = order[idx];
-			const struct frame *f = &frames[k];
-			size_t n;
-			int err;
+	if (serialize_reads) {
+		/*
+		 * Cold/uncached stage: serialize pread() in strict file order
+		 * so kernel readahead stays sequential; decode and O_DIRECT
+		 * pwrite() still run in parallel across all workers.
+		 */
+		while (!atomic_load(&failed)) {
+			size_t idx, k = 0;
+			const struct frame *f;
+			int err = 0;
 
 			t0 = now_ns();
-			if (f->csize == 0) {
-				local_zeros++;
-				skip += now_ns() - t0;
-				continue;
+			pthread_mutex_lock(&read_mu);
+			idx = atomic_fetch_add(&next_frame, 1);
+			if (idx < stage_end && !atomic_load(&failed)) {
+				k = order[idx];
+				f = &frames[k];
+				if (f->csize > 0) {
+					err = pread_all(src_fd, f->stored ? buf : cbuf,
+							f->stored ? f->dsize : f->csize,
+							(off_t)f->src);
+					if (!err)
+						drop_behind(f->src + f->csize, page);
+				}
 			}
-			if (f->stored) {
-				err = pread_all(src_fd, buf, f->dsize, (off_t)f->src);
-				if (err) {
-					fail("frame %zu: read at byte %zu: %s", k, f->src, strerror(-err));
-					goto out;
-				}
-				n = f->dsize;
-			} else {
-				err = pread_all(src_fd, cbuf, f->csize, (off_t)f->src);
-				if (err) {
-					fail("frame %zu: read at byte %zu: %s", k, f->src, strerror(-err));
-					goto out;
-				}
-				if (!squashfs_input && f->dsize == max_dsize &&
-				    f->csize == zero_frame_size &&
-				    memcmp(cbuf, zero_frame, zero_frame_size) == 0) {
-					local_zeros++;
-					skip += now_ns() - t0;
-					continue;
-				}
-				n = ZSTD_decompressDCtx(dctx, buf, f->dsize, cbuf, f->csize);
-			}
-			t1 = now_ns();
-			decode += t1 - t0;
-			if (ZSTD_isError(n) || n != f->dsize) {
-				fail("frame %zu: %s", k, ZSTD_isError(n) ?
-				     ZSTD_getErrorName(n) : "decoded to the wrong size");
+			pthread_mutex_unlock(&read_mu);
+			if (idx >= stage_end || atomic_load(&failed))
+				break;
+			if (decode_and_write(dctx, buf, cbuf, k, err, t0,
+					     &decode, &write, &skip,
+					     &local_bytes, &local_zeros) < 0)
 				goto out;
+		}
+	} else {
+		while (!atomic_load(&failed)) {
+			size_t base = atomic_fetch_add(&next_frame, frame_batch);
+			size_t end = base + frame_batch < stage_end ? base + frame_batch : stage_end;
+
+			if (base >= stage_end)
+				break;
+			for (size_t idx = base; idx < end && !atomic_load(&failed); idx++) {
+				size_t k = order[idx];
+				const struct frame *f = &frames[k];
+				int err = 0;
+
+				t0 = now_ns();
+				if (f->csize > 0)
+					err = pread_all(src_fd, f->stored ? buf : cbuf,
+							f->stored ? f->dsize : f->csize,
+							(off_t)f->src);
+				if (decode_and_write(dctx, buf, cbuf, k, err, t0,
+						     &decode, &write, &skip,
+						     &local_bytes, &local_zeros) < 0)
+					goto out;
 			}
-			if (all_zero(buf, n)) {
-				local_zeros++;
-				skip += now_ns() - t1;
-				continue;
-			}
-			t0 = now_ns();
-			skip += t0 - t1;
-			err = pwrite_all(target_fd, buf, n, f->dst);
-			write += now_ns() - t0;
-			if (err) {
-				fail("write at byte %lld: %s", (long long)f->dst, strerror(-err));
-				goto out;
-			}
-			local_bytes += n;
 		}
 	}
 out:
@@ -864,7 +933,7 @@ static void report_progress(const char *path)
 		pthread_mutex_unlock(&done_mu);
 
 		k = atomic_load(&next_frame);
-		n = snprintf(line, sizeof(line), "%zu %zu\n", k < nframes ? k : nframes, nframes);
+		n = snprintf(line, sizeof(line), "%zu %zu\n", k < stage_end ? k : stage_end, nframes);
 		fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 		if (fd >= 0) {
 			if (write(fd, line, n) != n) {
@@ -890,15 +959,50 @@ static void report_progress(const char *path)
 	}
 }
 
-static int write_image(const char *path, const char *target, int threads)
+static int run_stage(int threads, size_t start, size_t end, int serialize,
+		     const char *progress_path)
 {
 	pthread_t tid[MAX_THREADS];
+	size_t batch = (end - start) / ((size_t)threads * MAX_BATCH);
+	int i, started;
+
+	atomic_store(&next_frame, start);
+	stage_end = end;
+	serialize_reads = serialize;
+	frame_batch = batch < 1 ? 1 : batch > MAX_BATCH ? MAX_BATCH : batch;
+	done_count = 0;
+	expected_workers = threads;
+	drop_start = 0;
+
+	for (i = 0; i < threads; i++)
+		if (pthread_create(&tid[i], NULL, worker, NULL))
+			break;
+	if (i == 0)
+		die(FAILED, "cannot start a thread");
+	started = i;
+	if (started < threads) {
+		pthread_mutex_lock(&done_mu);
+		expected_workers = started;
+		if (done_count >= expected_workers)
+			pthread_cond_broadcast(&done_cv);
+		pthread_mutex_unlock(&done_mu);
+	}
+	if (progress_path)
+		report_progress(progress_path);
+	while (i--)
+		pthread_join(tid[i], NULL);
+	return started;
+}
+
+static int write_image(const char *path, const char *target, int threads)
+{
 	pthread_condattr_t cattr;
 	uint64_t t0, t1, t2, t3;
 	unsigned char *cached;
-	size_t size, batch;
+	const char *progress = getenv("OMARCHY_IMAGE_WRITE_PROGRESS");
+	size_t size;
 	off_t total;
-	int i, started;
+	int started = 0;
 
 	t0 = now_ns();
 	src_fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -935,35 +1039,37 @@ static int write_image(const char *path, const char *target, int threads)
 	if (target_size(target_fd, target) < (uint64_t)total)
 		die(FAILED, "%s: smaller than the %lld-byte image", target, (long long)total);
 
-	batch = nframes / ((size_t)threads * MAX_BATCH);
-	frame_batch = batch < 1 ? 1 : batch > MAX_BATCH ? MAX_BATCH : batch;
-
 	pthread_condattr_init(&cattr);
 	pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC);
 	pthread_cond_init(&done_cv, &cattr);
 	pthread_condattr_destroy(&cattr);
-	done_count = 0;
-	expected_workers = threads;
 
 	writing = 1;
 	t1 = now_ns();
-	for (i = 0; i < threads; i++)
-		if (pthread_create(&tid[i], NULL, worker, NULL))
-			break;
-	if (i == 0)
-		die(FAILED, "cannot start a thread");
-	started = i;
-	if (started < threads) {
-		pthread_mutex_lock(&done_mu);
-		expected_workers = started;
-		if (done_count >= expected_workers)
-			pthread_cond_broadcast(&done_cv);
-		pthread_mutex_unlock(&done_mu);
+	if (cached_frames == nframes) {
+		/* High-RAM fast path: everything is in page cache; zero locks, zero fadvise drops. */
+		started = run_stage(threads, 0, nframes, 0, progress);
+	} else {
+		/*
+		 * Low-RAM / cold path: drain cached frames in parallel, drop
+		 * their page cache once, then stream uncached frames sequentially
+		 * under read_mu while workers decode and pwrite() in parallel.
+		 */
+		if (cached_frames > 0) {
+			started = run_stage(threads, 0, cached_frames, 0, progress);
+			if (!atomic_load(&failed)) {
+				posix_fadvise(src_fd, 0, 0, POSIX_FADV_DONTNEED);
+				posix_fadvise(src_fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+			}
+		}
+		if (!atomic_load(&failed)) {
+			int s2 = run_stage(threads, cached_frames, nframes, 1, progress);
+
+			if (s2 > started)
+				started = s2;
+			posix_fadvise(src_fd, 0, 0, POSIX_FADV_DONTNEED);
+		}
 	}
-	if (getenv("OMARCHY_IMAGE_WRITE_PROGRESS"))
-		report_progress(getenv("OMARCHY_IMAGE_WRITE_PROGRESS"));
-	while (i--)
-		pthread_join(tid[i], NULL);
 	pthread_cond_destroy(&done_cv);
 	close(src_fd);
 	t2 = now_ns();

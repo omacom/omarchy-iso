@@ -21,8 +21,6 @@
   "summary.keyboard": "鍵盤",
   "summary.language": "語言",
   "summary.prompt": "以上資訊正確嗎？",
-  "firmware.title": "正在從 Windows 儲存高通韌體",
-  "firmware.saved": "已從 Windows 儲存 %1 個韌體檔案供安裝使用。",
   "firmware.partial": "已從 Windows 儲存 %1/%2 個韌體檔案；其餘不在驅動程式存放區中。",
   "firmware.none": "這臺電腦上沒有找到 Windows 韌體。",
   "firmware.bitlocker": "Windows 分割槽已啟用 BitLocker 加密。",

@@ -20,8 +20,6 @@
   "summary.keyboard": "키보드",
   "summary.language": "언어",
   "summary.prompt": "이대로 진행할까요?",
-  "firmware.title": "Windows에서 Qualcomm 펌웨어를 저장하는 중",
-  "firmware.saved": "설치에 사용할 펌웨어 파일 %1개를 Windows에서 저장했습니다.",
   "firmware.partial": "Windows에서 펌웨어 파일 %2개 중 %1개를 저장했습니다. 나머지는 드라이버 저장소에 없었습니다.",
   "firmware.none": "이 컴퓨터에서 Windows 펌웨어를 찾지 못했습니다.",
   "firmware.bitlocker": "Windows 파티션이 BitLocker로 암호화되어 있습니다.",

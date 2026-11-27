@@ -1,6 +1,6 @@
 # Omarchy ISO
 
-[![Nightly ISO Build](https://github.com/omacom/omarchy-iso/actions/workflows/nightly-build.yml/badge.svg?branch=quattro&event=schedule)](https://github.com/omacom/omarchy-iso/actions/workflows/nightly-build.yml?query=branch%3Aquattro+event%3Aschedule)
+[![Nightly ISO Build](https://github.com/omacom/omarchy-iso/actions/workflows/nightly-build.yml/badge.svg?branch=quattro)](https://github.com/omacom/omarchy-iso/actions/workflows/nightly-build.yml?query=branch%3Aquattro)
 
 The Omarchy ISO is the supported way to install Omarchy on x86_64 and non-Apple aarch64 machines (Apple Silicon Macs install from macOS instead). It boots into the Omarchy Configurator to install a pre-built Arch Linux + Omarchy system, or — on x86_64 — lets you **Just try** Omarchy live without touching any drive.
 
@@ -83,7 +83,7 @@ The pre-disk summary lists only answers the user gave (and is skipped if only us
 
 The plain image (`--arch aarch64`) serves NVIDIA boards, Raspberry Pi, and other USB-booting hardware, and pre-packs the N1x NVIDIA stack as a platform layer beside the root image. The Snapdragon image (`--snapdragon`, released as `omarchy-<version>-snapdragon.iso`) adds the Snapdragon live UKI (GRUB boots it on Snapdragon and `systemd-stub` matches the SMBIOS device tree; other boards boot the kernel directly), `linux-firmware-qcom`, `qcom-firmware-extract`, baked Qualcomm platform packages, and >1 GiB of OEM signed firmware. Apple Silicon Macs install from macOS instead.
 
-Both images default to the stable channel (`--rc` or `--edge` selects another via `configs/pacman-online-aarch64-<channel>.conf` and `arm-*mirror.omarchy.org`) and build on `linux-omarchy`; `--package-dir` can place a test kernel or pinned packages ahead of it (see [N1X.md](N1X.md)). At install time, `omarchy-hw-platform` detects the board, extracts any matching platform layer, installs remaining platform packages from the offline mirror, and — on Snapdragon machines with Windows — copies vendor-signed firmware off the Windows partition before touching the disk. The build refuses a runtime missing the platform detector or `install/hardware/qualcomm/`.
+Both images default to the stable channel (`--rc` or `--edge` selects another via `configs/pacman-online-aarch64-<channel>.conf` and `arm-*mirror.omarchy.org`) and build on `linux-omarchy`; `--package-dir` can place a test kernel or pinned packages ahead of it (see [docs/n1x.md](docs/n1x.md)). At install time, `omarchy-hw-platform` detects the board, extracts any matching platform layer, installs remaining platform packages from the offline mirror, and — on Snapdragon machines with Windows — copies vendor-signed firmware off the Windows partition before touching the disk. The build refuses a runtime missing the platform detector or `install/hardware/qualcomm/`.
 
 ## Testing the ISO
 
@@ -189,8 +189,9 @@ Every ISO passes the PR install test, and x86_64 channels also pass `test/vm-ima
 
 ## Guides
 
+- [USB boot](docs/usb-boot.md) — the ISO's partition layout, which firmware offers a fixed-disk stick, and what to do when a stick doesn't boot.
 - [VM images](docs/vm-images.md) — booting nightly and release `.qcow2` images with QEMU, `vm-boot`, or libvirt, and injecting SSH keys via SMBIOS credentials.
 - [Autoinstall](docs/autoinstall.md) — unattended installs from a `cidata` drive, SSH and Tailscale provisioning, region selection, and Proxmox setup.
 - [OEM ISO](docs/oem.md) — factory installation media, OEM branding/logo/EULA bundles, and post-install setup scripts.
 - [Translations](docs/translations.md) — installer language catalogs, `kmscon` XKB/CJK rendering, and Terminus console fallbacks.
-- [NVIDIA N1x laptops](N1X.md) — normal and dev-SSH aarch64 builds, platform differences, and hardware notes for N1x laptops.
+- [NVIDIA N1x laptops](docs/n1x.md) — normal and dev-SSH aarch64 builds, platform differences, and hardware notes for N1x laptops.

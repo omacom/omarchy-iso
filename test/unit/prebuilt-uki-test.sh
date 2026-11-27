@@ -89,13 +89,20 @@ run_uki_branch() {
       printf '%s\n' "$*" >>"$log"
       printf 'built-uki' >"$1/var/lib/omarchy-iso/prebuilt-uki.efi"
     }
+    build_qualcomm_prebuilt_uki() {
+      printf 'built-qualcomm-uki' >"$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm.efi"
+    }
     eval "$uki_branch"
   ) >/dev/null
 }
 
 run_uki_branch 1
-[[ ! -e $work/chroot-1.log ]] || fail "Snapdragon build must not invoke arch-chroot/mkinitcpio: $(cat "$work/chroot-1.log")"
+[[ ! -e $work/chroot-1.log ]] || fail "Snapdragon build must not invoke arch-chroot/mkinitcpio for generic UKI: $(cat "$work/chroot-1.log")"
 [[ ! -e $work/root-1/var/lib/omarchy-iso/prebuilt-uki.efi ]] || fail "Snapdragon build must remove stale prebuilt-uki.efi"
+if [[ $(uname -m) == aarch64 ]]; then
+  [[ $(cat "$work/root-1/var/lib/omarchy-iso/prebuilt-uki-qualcomm.efi") == "built-qualcomm-uki" ]] ||
+    fail "Snapdragon aarch64 build did not invoke build_qualcomm_prebuilt_uki"
+fi
 
 run_uki_branch ""
 [[ -f $work/chroot-ordinary.log ]] || fail "ordinary build must invoke arch-chroot/mkinitcpio"

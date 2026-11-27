@@ -80,6 +80,8 @@ report "encrypted reports its install, not the PXE run's -bios-encrypted-luks fo
 report "bios reports its own -bios-bios folder" bios "--bios" "" "-bios-bios"
 report "a keyboard variant reports its -kb folder" encrypted-kb-uk "" \
   "OMARCHY_INTEGRATION_ENCRYPT=true OMARCHY_INTEGRATION_KB_LAYOUT=uk" "-encrypted-kb-uk-kbuk-luks" "-bios-encrypted-kb-uk-kbuk-luks"
+report "a no-AES variant reports its -cpu-aes folder" encrypted-no-aes "" \
+  "OMARCHY_INTEGRATION_ENCRYPT=true OMARCHY_INTEGRATION_CPU_FLAGS=-aes" "-encrypted-no-aes-luks-cpu-aes"
 report "a small disk reports its -24g folder" small-disk "" "OMARCHY_INTEGRATION_DISK_GB=24" "-small-disk-24g"
 report "the UKI variant reports its -uki folder" uki "" "OMARCHY_INTEGRATION_UKI=true" "-uki-uki"
 

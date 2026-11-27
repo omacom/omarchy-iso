@@ -73,6 +73,56 @@ rm -r "$work/sys/bus/acpi/devices/OVTI08F4:00"
 matches && fail "it matched without the OV08F4 camera"
 echo "ok - it does not match where any of its scripts would install nothing"
 
+# Ordering: the narrower Panther Lake + IPU7 layer must sort before the broader
+# Intel SOF laptop layer so machines with the OV08F4 camera still get IPU7.
+mapfile -t sorted_layers < <(printf '%s\n' "$layers"/*.layer | LC_ALL=C sort)
+ptl_idx=-1
+sof_idx=-1
+for i in "${!sorted_layers[@]}"; do
+  case "${sorted_layers[$i]##*/}" in
+    intel-ptl-ipu7.layer) ptl_idx=$i ;;
+    intel-sof-laptop.layer) sof_idx=$i ;;
+  esac
+done
+((ptl_idx >= 0 && sof_idx >= 0 && ptl_idx < sof_idx)) ||
+  fail "intel-ptl-ipu7.layer ($ptl_idx) must sort before intel-sof-laptop.layer ($sof_idx)"
+echo "ok - intel-ptl-ipu7.layer sorts before intel-sof-laptop.layer"
+
+# The broader Intel SOF laptop layer matches hybrid Intel laptops without the
+# OV08F4 camera (e.g. Panther Lake without IPU7, Lunar Lake, Meteor Lake, etc.).
+sof_matches() {
+  # shellcheck disable=SC2016 # expanded by the inner shell
+  OMARCHY_PROC_ROOT="$work/proc" OMARCHY_SYS_ROOT="$work/sys" bash -c '
+    omarchy-hw-pci() { [[ $# == 3 && $1 == --class && $2 == 03 && $3 == "8086:*" && ${NO_INTEL_GPU:-} != 1 ]]; }
+    omarchy-hw-intel() { [[ ${NO_INTEL:-} != 1 ]]; }
+    omarchy-battery-present() { [[ ${NO_BATTERY:-} != 1 ]]; }
+    omarchy-hw-intel-sof() { [[ ${NO_SOF:-} != 1 ]]; }
+    source "$1"
+    layer_matches' _ "$layers/intel-sof-laptop.layer"
+}
+
+fixture
+rm -r "$work/sys/bus/acpi/devices/OVTI08F4:00"
+sof_matches || fail "intel-sof-laptop did not match a Panther Lake laptop without OV08F4"
+for model in 151 154 170 172 181 183 186 189 191 204 213; do
+  printf 'processor\t: 0\ncpu family\t: 6\nmodel\t\t: %s\n' "$model" >"$work/proc/cpuinfo"
+  sof_matches || fail "intel-sof-laptop did not match supported hybrid Intel model $model"
+done
+echo "ok - intel-sof-laptop matches supported hybrid Intel laptops without OV08F4"
+
+fixture
+NO_INTEL_GPU=1 sof_matches && fail "intel-sof-laptop matched without an Intel GPU"
+NO_INTEL=1 sof_matches && fail "intel-sof-laptop matched without an Intel CPU"
+NO_BATTERY=1 sof_matches && fail "intel-sof-laptop matched without a battery"
+NO_SOF=1 sof_matches && fail "intel-sof-laptop matched without SOF audio"
+printf 'processor\t: 0\ncpu family\t: 6\nmodel\t\t: 142\n' >"$work/proc/cpuinfo"
+sof_matches && fail "intel-sof-laptop matched an unsupported older CPU model (142)"
+fixture
+mkdir -p "$work/sys/devices/platform/thinkpad_acpi"
+touch "$work/sys/devices/platform/thinkpad_acpi/dytc_lapmode"
+sof_matches && fail "intel-sof-laptop matched a ThinkPad with DYTC lapmode"
+echo "ok - intel-sof-laptop does not match where any of its scripts would install nothing"
+
 # A hardware layer is installed with --noscriptlet, and the packages that
 # carry a scriptlet are listed in pacman's order for the installer to run once
 # the user exists. Only what pacman installed after the given log line counts.

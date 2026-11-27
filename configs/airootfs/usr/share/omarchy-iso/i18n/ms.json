@@ -20,8 +20,6 @@
   "summary.keyboard": "Papan kekunci",
   "summary.language": "Bahasa",
   "summary.prompt": "Adakah ini betul?",
-  "firmware.title": "Menyimpan perisian tegar Qualcomm daripada Windows",
-  "firmware.saved": "%1 fail perisian tegar daripada Windows disimpan untuk pemasangan.",
   "firmware.partial": "%1 daripada %2 fail perisian tegar Windows disimpan; selebihnya tiada dalam stor pemacu.",
   "firmware.none": "Tiada perisian tegar Windows ditemui pada komputer ini.",
   "firmware.bitlocker": "Partisyen Windows disulitkan dengan BitLocker.",

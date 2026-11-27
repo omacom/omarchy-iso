@@ -20,8 +20,6 @@
   "summary.keyboard": "Klaviatūra",
   "summary.language": "Kalba",
   "summary.prompt": "Ar viskas teisingai?",
-  "firmware.title": "Išsaugoma Qualcomm programinė aparatinė įranga iš Windows",
-  "firmware.saved": "Diegimui iš Windows išsaugota programinės aparatinės įrangos failų: %1.",
   "firmware.partial": "Iš Windows išsaugota %1 iš %2 failų; kitų tvarkyklių saugykloje nebuvo.",
   "firmware.none": "Šiame kompiuteryje Windows programinės aparatinės įrangos nerasta.",
   "firmware.bitlocker": "Windows skaidinys užšifruotas BitLocker.",

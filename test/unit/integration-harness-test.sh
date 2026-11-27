@@ -240,6 +240,96 @@ grep -qx "success-install-first-boot" "$work/shots" || fail "did not reach first
 capture_console() { :; }
 echo "ok - wait_for_unattended_install tolerates a single transient greeter screen"
 
+# Failure collection: pre-reboot timeout bounds live console bootstrap
+# (LIVE_CONSOLE_TIMEOUT=24, LIVE_SSH_ATTEMPTS=1) and saves all six diagnostic
+# files; greeter fallback collects unbounded; unreachable live SSH leaves no
+# empty files; and a post-reboot timeout skips live collection altogether.
+take collect_live_failure_artifacts installed_system_started
+RUN_DIR="$work/fail-artifacts"
+bootstrap_log="$work/bootstrap-calls"
+ssh_live_flag="$work/live-ssh-up"
+ssh_live_cmds="$work/live-ssh-cmds"
+ssh_live_root() {
+  if [[ ${1:-} == true ]]; then
+    [[ -e $ssh_live_flag ]]
+    return
+  fi
+  echo "$1" >>"$ssh_live_cmds"
+  printf 'collected: %s\n' "$1"
+}
+bootstrap_live_root_ssh() {
+  echo "timeout=${LIVE_CONSOLE_TIMEOUT:-default} attempts=${LIVE_SSH_ATTEMPTS:-default}" >>"$bootstrap_log"
+  if [[ ${BOOTSTRAP_SUCCEEDS:-1} == 1 ]]; then
+    : >"$ssh_live_flag"
+    return 0
+  fi
+  return 1
+}
+
+# 1) Pre-reboot timeout -> bounded bootstrap + all 6 diagnostic files.
+rm -rf "$RUN_DIR" "$ssh_live_flag"
+mkdir -p "$RUN_DIR"
+: >"$bootstrap_log"
+: >"$ssh_live_cmds"
+INSTALL_TIMEOUT=30
+ssh_guest() { false; }
+ocr_screen() { echo "Installing Omarchy"; }
+run wait_for_unattended_install install
+((status == 1)) || fail "timeout collection test did not fail (status $status)"
+grep -qx "timeout=24 attempts=1" "$bootstrap_log" ||
+  fail "timeout did not bound live console bootstrap: $(cat "$bootstrap_log")"
+for artifact in omarchy-install.log state.json dmesg.txt journal-tail.txt target-state.txt live-usb-cidata.txt; do
+  [[ -s $RUN_DIR/$artifact ]] || fail "timeout collection did not write $artifact"
+done
+grep -q "bash -c 'shopt -s nullglob;" "$ssh_live_cmds" ||
+  fail "USB diagnostic did not run under bash with nullglob: $(cat "$ssh_live_cmds")"
+echo "ok - timeout collects live failure artifacts with bounded console bootstrap"
+
+# 2) Greeter fallback -> unbounded bootstrap + all 6 diagnostic files.
+rm -rf "$RUN_DIR" "$ssh_live_flag"
+mkdir -p "$RUN_DIR"
+: >"$bootstrap_log"
+: >"$ssh_live_cmds"
+ocr_screen() { printf '%s\n' "Beautiful, Fun & Agentic Linux by OHH" "Press Return to Start Install"; }
+run wait_for_unattended_install install
+((status == 1)) || fail "greeter collection test did not fail (status $status)"
+grep -qx "timeout=default attempts=default" "$bootstrap_log" ||
+  fail "greeter fallback did not use default bootstrap bounds: $(cat "$bootstrap_log")"
+for artifact in omarchy-install.log state.json dmesg.txt journal-tail.txt target-state.txt live-usb-cidata.txt; do
+  [[ -s $RUN_DIR/$artifact ]] || fail "greeter collection did not write $artifact"
+done
+echo "ok - greeter fallback collects live failure artifacts"
+
+# 3) Unreachable live SSH -> returns early without creating empty files.
+rm -rf "$RUN_DIR" "$ssh_live_flag"
+mkdir -p "$RUN_DIR"
+: >"$bootstrap_log"
+: >"$ssh_live_cmds"
+BOOTSTRAP_SUCCEEDS=0 run wait_for_unattended_install install
+((status == 1)) || fail "unreachable SSH collection test did not fail (status $status)"
+[[ ! -s $ssh_live_cmds ]] || fail "unreachable SSH still ran collection commands: $(cat "$ssh_live_cmds")"
+for artifact in omarchy-install.log state.json dmesg.txt journal-tail.txt target-state.txt live-usb-cidata.txt; do
+  [[ ! -e $RUN_DIR/$artifact ]] || fail "unreachable SSH left an empty $artifact behind"
+done
+echo "ok - unreachable live SSH leaves no empty failure artifact files"
+
+# 4) Post-reboot timeout -> skips live collection entirely.
+rm -rf "$RUN_DIR" "$ssh_live_flag"
+mkdir -p "$RUN_DIR"
+: >"$bootstrap_log"
+: >"$ssh_live_cmds"
+serial_rebooted="$work/serial-rebooted.log"
+echo 'BdsDxe: starting Boot0001 "Limine"' >"$serial_rebooted"
+ocr_screen() { echo "Booting"; }
+run wait_for_unattended_install install "$serial_rebooted"
+((status == 1)) || fail "post-reboot timeout did not fail (status $status)"
+[[ ! -s $bootstrap_log && ! -s $ssh_live_cmds ]] ||
+  fail "post-reboot timeout tried to collect from the live ISO: $(cat "$bootstrap_log" "$ssh_live_cmds")"
+echo "ok - post-reboot timeout skips live failure artifact collection"
+
+unset -f collect_live_failure_artifacts installed_system_started ssh_live_root bootstrap_live_root_ssh
+unset RUN_DIR
+
 # -------------------------------------------- typing under the guest's layout
 #
 # type_text sends key positions, which the guest reads through the layout

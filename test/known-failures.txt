@@ -13,3 +13,10 @@
 2026-12-01 factory-reset windows entry survives staging
 2026-12-01 factory-reset foreign linux entry survives staging
 2026-12-01 factory-reset foreign boot directory survives staging
+#
+# The login screen's compositor opens Hyprland's update news over the login
+# screen after an install and after every Hyprland upgrade: its config,
+# omarchy's default/sddm/hyprland.lua, does not set ecosystem:no_update_news
+# the way the session's does. The fix (omarchy branch sddm-no-hyprland-popups)
+# reaches the edge packages PR ISOs install once it merges.
+2026-12-04 desktop the login screen shows no Hyprland update news

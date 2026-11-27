@@ -339,6 +339,211 @@ browser_launch_phase() {
   ssh_session "systemctl --user stop 'omarchy-browser-smoke-*'" >/dev/null 2>&1 || true
 }
 
+# ------------------------------------------- the Omarchy desktop, not a session
+
+# A Hyprland socket proves a session, not that it is Omarchy's. When Hyprland
+# aborts, start-hyprland restarts it with --safe-mode, which loads a generated
+# recovery config instead of Omarchy's: no bar, no wallpaper, Hyprland's own
+# background and its "safe mode" dialog. That session still answers SSH and
+# hyprctl, so every check above passed on it.
+
+# The windows Hyprland opens by itself, from hyprland-guiutils: the update
+# news, the donation nag, the welcome window, and the dialogs (the safe-mode
+# notice is one). Omarchy turns them off for the session
+# (default/hypr/envs.lua) and for the login screen
+# (default/sddm/hyprland.lua), and starts none of them itself, so one running
+# means a config that did not load, or a screen that config does not cover.
+# They are looked for as processes: in the VM their windows do not always map,
+# so hyprctl clients can miss one that a real screen shows.
+HYPRLAND_POPUPS='hyprland-(update-screen|donate-screen|welcome|dialog)'
+
+# Two measures of the screen, both from 0 to 1, measured on the 4.6.0-rc1 ISO
+# in this harness:
+#   stddev  the spread of its gray levels. Black, or one flat colour, is 0;
+#           a black screen with one 32x32 white patch 0.036; the login screen
+#           (logo and password field on near-black) 0.165; the desktop 0.177.
+#   bright  the share of its pixels lighter than 10% gray. Black is 0; the
+#           safe-mode session 0.076; the desktop's wallpaper 0.925; the login
+#           screen's background, just lighter than that, 1.0.
+# The login screen is dark by design, so it is judged by the spread; the
+# desktop by its wallpaper showing, which a black or near-black frame with a
+# bar or a few windows on it would not.
+SCREEN_DRAWN_MIN_STDDEV=0.08
+WALLPAPER_MIN_BRIGHT=0.5
+
+screen_measure() {
+  local what="$1" shot="$RUN_DIR/.drawn.ppm" value="" format
+
+  case $what in
+    stddev) format='%[fx:standard_deviation]' ;;
+    bright) format='%[fx:mean]' ;;
+  esac
+  screendump "$shot"
+  if [[ -s $shot ]]; then
+    if [[ $what == bright ]]; then
+      value=$(magick "$shot" -colorspace Gray -threshold 10% -format "$format" info: 2>/dev/null)
+    else
+      value=$(magick "$shot" -colorspace Gray -format "$format" info: 2>/dev/null)
+    fi
+  fi
+  rm -f "$shot"
+  [[ $value =~ ^[0-9]*\.?[0-9]+(e-?[0-9]+)?$ ]] && echo "$value" || echo 0
+}
+
+screen_above() {
+  awk -v value="$(screen_measure "$1")" -v floor="$2" 'BEGIN { exit !(value + 0 > floor + 0) }'
+}
+
+screen_drawn() { screen_above stddev "$SCREEN_DRAWN_MIN_STDDEV"; }
+wallpaper_visible() { screen_above bright "$WALLPAPER_MIN_BRIGHT"; }
+
+# The Hyprland a user runs, read once, so it cannot exit between two looks.
+hyprland_pid_for() {
+  ssh_guest "pgrep -u $1 -x Hyprland"
+}
+
+hyprland_not_in_safe_mode_for() {
+  ssh_guest "args=\$(pgrep -a -u $1 -x Hyprland) && [[ \$args != *--safe-mode* ]]"
+}
+
+# The popups a user runs, one name per line, and "unknown" when they could
+# not be read: pgrep exits 1 when nothing matches and 2 or 3 when it could not
+# look, and an SSH failure is no answer either. The pattern can't match the
+# command that runs pgrep: there it is written "hyprland-(update...", a
+# parenthesis where a popup has a letter.
+hyprland_popups_for() {
+  local out
+  out=$(ssh_guest "pgrep -a -u $1 -f '$HYPRLAND_POPUPS'; [[ \$? -le 1 ]] || echo unknown" 2>/dev/null) || out=unknown
+  [[ $out == *unknown* ]] && echo unknown
+  grep -oE "$HYPRLAND_POPUPS" <<<"$out" || true
+}
+
+no_hyprland_popups_for() {
+  [[ -z $(hyprland_popups_for "$1") ]]
+}
+
+# Hyprland writes a crash report into its user's cache before it aborts, and
+# systemd-coredump keeps the core: neither may exist, for the session's
+# compositor or for the login screen's. coredumpctl's rows end in the size,
+# so the dumps are asked for by executable.
+no_hyprland_crash() {
+  ssh_sudo 'compgen -G "/home/*/.cache/hyprland/hyprlandCrashReport*.txt" >/dev/null && exit 1
+    compgen -G "/var/lib/sddm/.cache/hyprland/hyprlandCrashReport*.txt" >/dev/null && exit 1
+    dumps=$(coredumpctl --no-legend --no-pager list /usr/bin/Hyprland 2>&1)
+    [[ $? == 1 && $dumps == *"No coredumps found"* ]]'
+}
+
+# A value Omarchy sets and Hyprland's default does not: the session loaded
+# Omarchy's config, not a recovery or a default one.
+omarchy_config_loaded() {
+  ssh_session "hyprctl -j getoption ecosystem:no_update_news | jq -e '.bool == true'"
+}
+
+# What an assertion here saw, for the artifact: the compositors' command lines,
+# the popups, the layers, and the crash records.
+diagnose_desktop() {
+  local name="$1"
+  {
+    echo "### Hyprland processes ###"; ssh_guest "pgrep -a -x Hyprland"
+    echo "### hyprland-guiutils processes ###"; ssh_guest "pgrep -a -f '$HYPRLAND_POPUPS'"
+    echo "### layers ###"; ssh_session "hyprctl -j layers | jq -r '.. | objects | select(.namespace?) | .namespace' | sort | uniq -c"
+    echo "### crash reports ###"; ssh_sudo 'ls -la /home/*/.cache/hyprland/ /var/lib/sddm/.cache/hyprland/ 2>&1'
+    echo "### coredumps ###"; ssh_sudo 'coredumpctl --no-legend --no-pager list 2>&1'
+    echo "### login screen's lastVersion ###"; ssh_sudo 'cat /var/lib/sddm/.local/share/hyprland/lastVersion 2>&1'
+    echo "### screen stddev, bright ###"; screen_measure stddev; screen_measure bright
+  } >"$RUN_DIR/$name.txt" 2>&1 || true
+}
+
+login_greeter_running() {
+  # By command line: the kernel keeps 15 characters of a process name, so -x
+  # would compare "sddm-greeter-qt".
+  ssh_guest "pgrep -u sddm -f '^/usr/bin/sddm-greeter' >/dev/null"
+}
+
+# The login screen's compositor, kept for the checks that it stayed the same.
+record_login_compositor() {
+  LOGIN_COMPOSITOR=$(hyprland_pid_for sddm) && [[ -n $LOGIN_COMPOSITOR ]]
+}
+
+# Hyprland records the last version a user ran and opens its update news when
+# that is an older major (src/managers/VersionKeeperManager.cpp); the first
+# start records 0.0.0. So the login screen's compositor, the sddm user, opens
+# it on its second start after an install and on its first after every
+# Hyprland upgrade. Put the record Hyprland itself leaves there, start the
+# login screen again, and watch its compositor's first seconds: it opens the
+# update news within about 2 s unless the login screen's config turns it off.
+reset_login_screen_to_after_upgrade() {
+  ssh_sudo 'set -e
+    systemctl stop sddm
+    for _ in $(seq 30); do pgrep -u sddm -x Hyprland >/dev/null || break; sleep 1; done
+    if pgrep -u sddm -x Hyprland >/dev/null; then exit 1; fi
+    install -d -o sddm -g sddm /var/lib/sddm/.local/share/hyprland
+    printf 0.0.0 >/var/lib/sddm/.local/share/hyprland/lastVersion
+    chown sddm:sddm /var/lib/sddm/.local/share/hyprland/lastVersion
+    [[ $(cat /var/lib/sddm/.local/share/hyprland/lastVersion) == 0.0.0 ]]
+    systemctl start sddm'
+}
+
+# The login screen of an unencrypted install, which shows it at every boot
+# (an encrypted one logs straight in once the disk is unlocked).
+verify_login_screen() {
+  local before=$FAILURES seen="" unread=false
+
+  if reset_login_screen_to_after_upgrade >/dev/null 2>&1; then
+    printf 'ok - %s\n' "the login screen starts again as after a Hyprland upgrade"
+  else
+    printf 'not ok - %s\n' "the login screen starts again as after a Hyprland upgrade"
+    ((FAILURES += 1))
+    diagnose_desktop "failure-login-screen"
+    return 1
+  fi
+
+  wait_for_guest_state "the login screen's compositor is up" 60 record_login_compositor || return 1
+  # Its first 15 seconds, the popups open about 2 s in: every popup seen in
+  # any of them counts, and a reading that could not be taken is kept apart.
+  local reading
+  for _ in $(seq 15); do
+    reading=$(hyprland_popups_for sddm)
+    grep -qx unknown <<<"$reading" && unread=true
+    seen+=$(grep -vx unknown <<<"$reading" || true)$'\n'
+    sleep 1
+  done
+  seen=$(sort -u <<<"$seen" | sed '/^$/d')
+
+  wait_for_guest_state "the login screen's greeter is up" 60 login_greeter_running || return 1
+  if ! wait_for_guest_state "the login screen is drawn" 60 screen_drawn; then
+    diagnose_desktop "failure-login-screen"
+    return 1
+  fi
+  capture_console "success-desktop-00-login-screen"
+
+  check "the login screen's popups could be read" test "$unread" = false
+  check "the login screen shows no Hyprland update news" test -z "$(grep -x hyprland-update-screen <<<"$seen")"
+  check "the login screen shows no other Hyprland popup" test -z "$(grep -vx hyprland-update-screen <<<"$seen")"
+  check "the login screen's Hyprland is not in safe mode" hyprland_not_in_safe_mode_for sddm
+  check "the login screen's compositor stayed up" test "$(hyprland_pid_for sddm)" = "$LOGIN_COMPOSITOR"
+
+  ((FAILURES == before)) || diagnose_desktop "failure-login-screen"
+}
+
+# The session the owner logged in to is Omarchy's desktop: its compositor
+# with its config, its shell drawing the bar and the wallpaper, nothing of
+# Hyprland's own on top, and pixels on the screen. The bar and the wallpaper
+# may map a moment after the shell answers, so they are waited for.
+verify_omarchy_desktop() {
+  local before=$FAILURES
+
+  check "the session's Hyprland is not in safe mode" hyprland_not_in_safe_mode_for "$GUEST_USER"
+  check "Hyprland has not crashed since the install" no_hyprland_crash
+  check "the session runs Omarchy's Hyprland config" omarchy_config_loaded
+  wait_for_guest_state "Omarchy's bar is drawn" 30 guest_layer_present omarchy-bar || true
+  wait_for_guest_state "Omarchy's wallpaper is drawn" 30 guest_layer_present omarchy-background || true
+  check "the desktop shows no Hyprland popup" no_hyprland_popups_for "$GUEST_USER"
+  wait_for_guest_state "the desktop's wallpaper is visible" 15 wallpaper_visible || true
+
+  ((FAILURES == before)) || diagnose_desktop "failure-desktop-not-omarchy"
+}
+
 # ------------------------------------------------------- reaching the desktop
 
 # The base was provisioned at install time (cidata created the owner), so it
@@ -404,10 +609,17 @@ reach_desktop() {
     return 1
   fi
 
-  sleep 3
+  if [[ $ENCRYPT != true ]]; then
+    verify_login_screen || return 1
+  else
+    sleep 3
+  fi
+
+  # No capture here: a frame taken right after Enter is the hand-off, black
+  # (stddev 0), with the login screen's compositor gone and the session's not
+  # drawn yet. The login screen is captured above, before the password.
   type_text "$GUEST_PASSWORD"
   press ret
-  capture_console "success-desktop-00-login"
 
   if ! wait_for_guest_state "the owner logs in to a Hyprland session" 90 session_started; then
     diagnose_login
@@ -422,6 +634,7 @@ reach_desktop() {
     ssh_sudo 'journalctl -b -t omarchy-shell --no-pager' >>"$RUN_DIR/desktop-settle.txt" 2>&1 || true
     return 1
   fi
+  verify_omarchy_desktop
   capture_console "success-desktop-01-session"
 }
 

@@ -57,6 +57,8 @@ jobs:
           # (4.5.0-rc2 onward) or omarchy-<version>rc<N>.iso (earlier candidates).
           [[ $version =~ ^[0-9]+(\.[0-9]+)+(-?rc[0-9]+)?$ ]] || { echo "::error::'$version' is not a release version"; exit 1; }
           echo "version=$version" | tee -a "$GITHUB_OUTPUT"
+          kernel=$(./test/vm-image/release-kernel "$version")
+          echo "kernel=$kernel" | tee -a "$GITHUB_OUTPUT"
 
       # Good only if the signature is the release key's, the one in this repo.
       - name: Download the released ISO and check its signature
@@ -82,10 +84,12 @@ jobs:
       # (--release-iso). A failed install or upgrade does not stop here: the
       # evidence is kept first, and the last step fails the job.
       - name: Install the release, then upgrade it
+        env:
+          OMARCHY_INTEGRATION_KERNEL: ${{ steps.release.outputs.kernel }}
         run: |
           sudo chmod 0666 /dev/kvm
           docker run --rm --device /dev/kvm -v "$PWD:/w" -w /w \
-            -e OMARCHY_INTEGRATION_DISK_CACHE=none -e TO \
+            -e OMARCHY_INTEGRATION_DISK_CACHE=none -e OMARCHY_INTEGRATION_KERNEL -e TO \
             ghcr.io/archlinux/archlinux:latest bash -euo pipefail -c '
               if ! grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then
                 printf "#!/bin/sh\nexec /usr/bin/pacman --disable-sandbox \"\$@\"\n" >/usr/local/bin/pacman
@@ -104,7 +108,7 @@ jobs:
               status=0
               ./test/integration release/*.iso boot --release-iso --no-preview --memory 8192 --timeout 1800 || status=$?
               if [ "$status" = 0 ]; then
-                VM_STATE_DIR=/w ./test/upgrade-test "$(ls -d test-runs/*-integration)" "$TO" upgrade-evidence || status=$?
+                VM_STATE_DIR=/w ./test/upgrade-test "$(ls -d test-runs/*-integration*)" "$TO" upgrade-evidence || status=$?
               else
                 # No installed system to upgrade: keep what the install left,
                 # its logs and screenshots, not its disks or keys.

@@ -295,6 +295,22 @@ for v in 4.6.0--rc1 4.6.0-rc 4.6.0rc 4.6.0-beta1 ../4.6.0; do
   [[ ! $v =~ $upgrade_re ]] || fail "upgrade-test: version regex accepted $v"
 done
 
+# ------------------------------------------------------------- release-kernel
+# upgrade-test.yml installs a release with the kernel it shipped.
+kernel="$ROOT/test/vm-image/release-kernel"
+bash -n "$kernel"
+equal "kernel: a release before 4.0.4 installed linux" "$("$kernel" 4.0.3)" "linux"
+equal "kernel: 4.0.4 moved to linux-omarchy" "$("$kernel" 4.0.4)" "linux-omarchy"
+equal "kernel: a later release" "$("$kernel" 4.5.0)" "linux-omarchy"
+equal "kernel: a hyphenated RC counts as its release" "$("$kernel" 4.5.0-rc2)" "linux-omarchy"
+equal "kernel: an unhyphenated RC counts as its release" "$("$kernel" 4.6.0rc1)" "linux-omarchy"
+equal "kernel: an RC of a release before 4.0.4" "$("$kernel" 4.0.3rc1)" "linux"
+"$kernel" 4.0.3 >/dev/null || fail "kernel: a release before 4.0.4 is not answered successfully"
+refused "kernel: something other than a version" "$kernel" ../4.0.4
+refused "kernel: a suffix other than an RC" "$kernel" 4.0.4-beta1
+grep -qE '^ +kernel=\$\(\./test/vm-image/release-kernel "\$version"\)$' "$ROOT/.github/workflows/upgrade-test.yml" ||
+  fail "upgrade-test: the install no longer takes its kernel from release-kernel"
+
 # -------------------------------------------------------------- nightly-rclone
 wrapped="$ROOT/test/vm-image/nightly-rclone"
 bash -n "$wrapped"

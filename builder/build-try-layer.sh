@@ -53,9 +53,16 @@ work=$(mktemp -d /tmp/omarchy-try-layer.XXXXXX)
 upper="$work/upper"
 merged="$work/merged"
 
+try_bg_pids=()
 cleanup() {
-  local status=$?
+  local status=$? pid
   set +e
+  if (( ${#try_bg_pids[@]} > 0 )); then
+    for pid in "${try_bg_pids[@]}"; do
+      kill -TERM "$pid" 2>/dev/null || true
+    done
+    wait "${try_bg_pids[@]}" 2>/dev/null || true
+  fi
   if mountpoint -q "$work" 2>/dev/null; then
     umount -R "$work" || { echo "WARNING: $work is still mounted; leaving it" >&2; return $status; }
   fi
@@ -77,6 +84,12 @@ mount -t overlay try-layer \
   "$merged"
 
 in_try() {
+  # Avoid ~27 arch-chroot mount/unmount cycles for offline unit enable/disable/mask.
+  if [[ ${1:-} == systemctl ]] && command -v systemctl >/dev/null 2>&1; then
+    shift
+    systemctl --root="$merged" "$@"
+    return
+  fi
   arch-chroot "$merged" "$@"
 }
 
@@ -752,14 +765,27 @@ umount -R "$merged"
 
 try_zstd_level=19
 [[ ${OMARCHY_FAST_COMPRESSION:-} == 1 ]] && try_zstd_level=1
+# Cap mksquashfs threads and cache when Try and its driver layers compress
+# concurrently with the root image copy so 32 GiB CI runners stay below their
+# RAM ceiling while still exceeding mksquashfs -b 1M minimum memory (~32M/proc).
+try_mksquashfs_procs=$(nproc)
+(( try_mksquashfs_procs > 16 )) && try_mksquashfs_procs=16
+if [[ -n ${OMARCHY_TRY_MKSQUASHFS_MEM:-} ]]; then
+  try_mksquashfs_mem=$OMARCHY_TRY_MKSQUASHFS_MEM
+elif (( try_mksquashfs_procs <= 8 )); then
+  try_mksquashfs_mem=512M
+else
+  try_mksquashfs_mem=1024M
+fi
+try_mksquashfs_opts=(-processors "$try_mksquashfs_procs" -mem "$try_mksquashfs_mem")
 
 # Keep xattrs: overlayfs marks opaque directories with one, and a whiteout is
 # a 0:0 character device; both must survive for the layer to hide what it
-# deleted.
-mksquashfs "$upper" "$output" -comp zstd -Xcompression-level "$try_zstd_level" -b 1M -noappend -quiet
-echo "Try layer: $(du -h "$output" | cut -f1) at $output"
-
-[[ -n $pacman_conf ]] || exit 0
+# deleted. $upper is unmounted and read-only now, so packing omarchy-try.sfs
+# can overlap with the read-only driver_layer overlays below.
+mksquashfs "$upper" "$output" -comp zstd -Xcompression-level "$try_zstd_level" -b 1M "${try_mksquashfs_opts[@]}" -noappend -quiet &
+try_sfs_pid=$!
+try_bg_pids+=("$try_sfs_pid")
 
 # Driver layers: what Omarchy's installer adds to a machine with an NVIDIA
 # card or a T2 chip, one layer each, which omarchy-try stacks over this one
@@ -813,7 +839,7 @@ driver_layer() { # name, script, lspci line, PCI vendor, device, class
   mark_updated "$root"
   umount -R "$root"
   mksquashfs "$dir/upper" "$(dirname "$output")/omarchy-try-$name.sfs" \
-    -comp zstd -Xcompression-level "$try_zstd_level" -b 1M -noappend -quiet
+    -comp zstd -Xcompression-level "$try_zstd_level" -b 1M "${try_mksquashfs_opts[@]}" -noappend -quiet
   echo "Try $name layer: $(du -h "$(dirname "$output")/omarchy-try-$name.sfs" | cut -f1) (${packages[*]})"
   rm -rf "$dir"
 }
@@ -827,7 +853,33 @@ driver_layer() { # name, script, lspci line, PCI vendor, device, class
 # aarch64 build. The ARM machines with an NVIDIA GPU (N1x, GB10) take their
 # driver from their platform's own setup, not from nvidia.sh, so on aarch64
 # Try runs on the generic display driver.
-if [[ ${OMARCHY_ARCH:-$(uname -m)} == "x86_64" ]]; then
-  driver_layer t2 apple/fix-t2.sh "00:00.0 Non-VGA unclassified device [0000]: Apple Inc. T2 Bridge Controller [106b:1801]" 0x106b 0x1801 0x088000
-  driver_layer nvidia-open nvidia.sh "01:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD102 [10de:2684]" 0x10de 0x2684 0x030000
+driver_pids=()
+driver_logs=()
+if [[ -n $pacman_conf && ${OMARCHY_ARCH:-$(uname -m)} == "x86_64" ]]; then
+  driver_layer t2 apple/fix-t2.sh "00:00.0 Non-VGA unclassified device [0000]: Apple Inc. T2 Bridge Controller [106b:1801]" 0x106b 0x1801 0x088000 >"$work/driver-t2.log" 2>&1 &
+  driver_pids+=($!)
+  driver_logs+=("$work/driver-t2.log")
+  try_bg_pids+=($!)
+
+  driver_layer nvidia-open nvidia.sh "01:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD102 [10de:2684]" 0x10de 0x2684 0x030000 >"$work/driver-nvidia-open.log" 2>&1 &
+  driver_pids+=($!)
+  driver_logs+=("$work/driver-nvidia-open.log")
+  try_bg_pids+=($!)
 fi
+
+pack_status=0
+wait "$try_sfs_pid" || pack_status=$?
+if (( pack_status == 0 )); then
+  echo "Try layer: $(du -h "$output" | cut -f1) at $output"
+fi
+
+for i in "${!driver_pids[@]}"; do
+  driver_status=0
+  wait "${driver_pids[i]}" || driver_status=$?
+  cat "${driver_logs[i]}"
+  if (( driver_status != 0 && pack_status == 0 )); then
+    pack_status=$driver_status
+  fi
+done
+try_bg_pids=()
+(( pack_status == 0 )) || exit "$pack_status"

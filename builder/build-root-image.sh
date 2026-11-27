@@ -267,21 +267,49 @@ record_layer_scriptlets() {
 }
 
 build_hardware_layers() {
-  local file name
-  local -a packages
+  local file name log i status
+  local -a packages names=() pids=() logs=()
   [[ -n $hardware_layers && -d $hardware_layers ]] || return 0
+  hardware_layer_pids=()
+  hardware_layer_names=()
+  hardware_layer_logs=()
   for file in "$hardware_layers"/*.layer; do
     [[ -f $file ]] || continue
     name=${file##*/}
     name=${name%.layer}
     mapfile -t packages < <(hardware_layer_packages "$file")
     ((${#packages[@]})) || continue
-    echo "Packing the $name hardware layer: ${packages[*]}"
-    if ! with_image_overlay build_hardware_layer_in "$name" "${packages[@]}"; then
-      echo "WARNING: no $name layer; those machines install its packages at install time"
-      rm -f "$(layer_path "$name")"
+    log="${work:-/tmp}/hw-layer-$name.log"
+    if [[ ${hardware_layers_async:-0} == 1 ]]; then
+      {
+        echo "Packing the $name hardware layer: ${packages[*]}"
+        with_image_overlay build_hardware_layer_in "$name" "${packages[@]}"
+      } >"$log" 2>&1 &
+      hardware_layer_pids+=($!)
+      hardware_layer_names+=("$name")
+      hardware_layer_logs+=("$log")
+    else
+      names+=("$name")
+      logs+=("$log")
+      {
+        echo "Packing the $name hardware layer: ${packages[*]}"
+        with_image_overlay build_hardware_layer_in "$name" "${packages[@]}"
+      } >"$log" 2>&1 &
+      pids+=($!)
     fi
   done
+  if [[ ${hardware_layers_async:-0} != 1 ]]; then
+    for i in "${!pids[@]}"; do
+      status=0
+      wait "${pids[i]}" || status=$?
+      [[ -f ${logs[i]} ]] && cat "${logs[i]}"
+      rm -f "${logs[i]}"
+      if (( status != 0 )); then
+        echo "WARNING: no ${names[i]} layer; those machines install its packages at install time"
+        rm -f "$(layer_path "${names[i]}")"
+      fi
+    done
+  fi
 }
 
 # Set up N1x's boot-time state in the overlay at $1 (upper directory $2), pack
@@ -702,9 +730,19 @@ stop_image_gpg_agents() {
   done
 }
 
+hardware_layer_pids=()
+hardware_layer_names=()
+hardware_layer_logs=()
+try_layer_pid=""
 cleanup() {
-  local status=$?
+  local status=$? pid
   set +e
+  for pid in "${hardware_layer_pids[@]}" ${try_layer_pid:+"$try_layer_pid"}; do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  if (( ${#hardware_layer_pids[@]} > 0 )) || [[ -n $try_layer_pid ]]; then
+    wait "${hardware_layer_pids[@]}" ${try_layer_pid:+"$try_layer_pid"} 2>/dev/null || true
+  fi
   stop_image_gpg_agents
   if mountpoint -q "$stage" 2>/dev/null; then
     sleep 1
@@ -843,7 +881,9 @@ if [[ -n ${OMARCHY_IMAGE_SYNC_DBS:-} ]]; then
   bash "$(dirname -- "${BASH_SOURCE[0]}")/ship-sync-databases.sh" "$root" "$OMARCHY_IMAGE_SYNC_DBS"
 fi
 
-sync
+if [[ ${OMARCHY_FAST_COMPRESSION:-} == 1 ]]; then
+  btrfs filesystem sync "$mnt"
+fi
 
 # Build the UKI here, once, so the installer copies it to the ESP and skips
 # the ~4 s of mkinitcpio, ukify and limine-entry-tool on the target.
@@ -1116,9 +1156,22 @@ CONF
     "$root/etc/vconsole.conf.prebuilt-uki" "$root/usr/lib/initcpio/install/omarchy-vconsole-room"
 fi
 
+# Once the staging tree is final and read-only, hardware layers, Try layers and
+# the parallel copy into the compressed btrfs image are independent read-only
+# consumers of $stage. Overlap them when ample RAM is free (>= 12 GiB available
+# on top of $stage) so 32 GiB CI runners stay under their 24 GiB ceiling.
+stage_async=0
+if [[ ${OMARCHY_FAST_COMPRESSION:-} != 1 ]]; then
+  stage_mem_avail_kb=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null || echo 0)
+  if (( stage_mem_avail_kb >= 12 * 1024 * 1024 )); then
+    stage_async=1
+  fi
+fi
+
 # Hardware layers, now that the image's tree is final: each is the difference
 # its packages make to the image as it ships.
 if [[ -n $image_kver ]]; then
+  hardware_layers_async=$stage_async
   build_hardware_layers
 fi
 
@@ -1126,21 +1179,51 @@ fi
 # compressed btrfs filesystem: it only reads the image, through an overlay whose
 # upper directory it keeps. Pass effective_pacman_conf so deferred boot hooks
 # (mkinitcpio/Limine) stay masked when pacstrap installs Try packages.
+try_layer_log="$work/try-layer.log"
 if [[ -n ${OMARCHY_TRY_LAYER:-} ]]; then
-  bash /builder/build-try-layer.sh "$root" "$OMARCHY_TRY_LAYER" "${OMARCHY_TRY_CHANNEL:-stable}" "$effective_pacman_conf"
+  if (( stage_async )); then
+    (
+      bash /builder/build-try-layer.sh "$root" "$OMARCHY_TRY_LAYER" "${OMARCHY_TRY_CHANNEL:-stable}" "$effective_pacman_conf"
+    ) >"$try_layer_log" 2>&1 &
+    try_layer_pid=$!
+  else
+    bash /builder/build-try-layer.sh "$root" "$OMARCHY_TRY_LAYER" "${OMARCHY_TRY_CHANNEL:-stable}" "$effective_pacman_conf"
+  fi
 fi
 
 if [[ ${OMARCHY_FAST_COMPRESSION:-} != 1 ]]; then
   # Now create the compressed btrfs filesystem and populate it in parallel across
-  # every CPU so zstd:15 runs at full host parallelism, then free the staging tree
-  # before shrinking and packing.
+  # every CPU so zstd:15 runs at full host parallelism, then join all read-only
+  # consumers and free the staging tree before shrinking and packing.
   mount_root_btrfs
 
   echo "Populating btrfs root image with $IMAGE_COMPRESS across $(nproc) CPUs"
   copy_start=$(date +%s)
   python3 "$(dirname -- "${BASH_SOURCE[0]}")/copy-tree-parallel.py" "$stage" "$mnt/$IMAGE_SUBVOLUME"
-  sync
+  btrfs filesystem sync "$mnt"
   echo "Populated btrfs root image in $(( $(date +%s) - copy_start ))s"
+
+  for i in "${!hardware_layer_pids[@]}"; do
+    hw_status=0
+    wait "${hardware_layer_pids[i]}" || hw_status=$?
+    [[ -f ${hardware_layer_logs[i]} ]] && cat "${hardware_layer_logs[i]}"
+    rm -f "${hardware_layer_logs[i]}"
+    if (( hw_status != 0 )); then
+      echo "WARNING: no ${hardware_layer_names[i]} layer; those machines install its packages at install time"
+      rm -f "$(layer_path "${hardware_layer_names[i]}")"
+    fi
+  done
+  hardware_layer_pids=()
+
+  if [[ -n $try_layer_pid ]]; then
+    try_status=0
+    wait "$try_layer_pid" || try_status=$?
+    try_layer_pid=""
+    [[ -f $try_layer_log ]] && cat "$try_layer_log"
+    rm -f "$try_layer_log"
+    (( try_status == 0 )) || exit "$try_status"
+  fi
+
   if mountpoint -q "$stage" 2>/dev/null; then
     umount -R "$stage"
   fi
@@ -1174,7 +1257,7 @@ fi
 # (or skips a whole zero frame). Measured: 2 GiB trimmed, 83.6 MB (2.0%) off
 # the packed image, 63 more zero frames.
 fstrim -v "$mnt" || echo "WARNING: fstrim failed; free space ships as whatever it holds"
-sync
+btrfs filesystem sync "$mnt"
 umount "$mnt"
 losetup -d "$loop"
 loop=""

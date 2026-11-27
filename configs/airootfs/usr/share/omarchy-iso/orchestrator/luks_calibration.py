@@ -312,25 +312,18 @@ def with_sector_size(command: list[str]) -> list[str]:
 
 
 def has_aes_acceleration() -> bool:
-    """Whether every CPU has AES instructions: `aes` in `flags` (x86 AES-NI)
-    or `Features` (arm64 crypto extensions), or `zknd`+`zkne` / `zvkned` in
-    `isa` (RISC-V crypto extensions). Unreadable cpuinfo or other
-    architectures count as accelerated and keep cryptsetup's default."""
+    """Whether every CPU has AES instructions: `aes` in `flags` on x86_64
+    (AES-NI) or in `Features` on aarch64 (the Armv8 crypto extensions), the
+    CPU features the kernel's AES-NI and AES-CE code load on. Unreadable
+    cpuinfo, or a CPU that lists neither line, keeps cryptsetup's default."""
     try:
         text = CPUINFO_PATH.read_text(errors="replace")
     except OSError:
         return True
     for line in text.splitlines():
         field, sep, value = line.partition(":")
-        if not sep:
-            continue
-        field, value = field.strip(), value.strip()
-        if field in ("flags", "Features") and "aes" not in value.split():
+        if sep and field.strip() in ("flags", "Features") and "aes" not in value.split():
             return False
-        if field == "isa" and value.lower().startswith("rv"):
-            exts = set(value.lower().split("_")[1:])
-            if not ({"zknd", "zkne"} <= exts or exts & {"zkn", "zk", "zvkned", "zvkn", "zvk"}):
-                return False
     return True
 
 

@@ -1009,18 +1009,13 @@ class AdiantumWithoutAes(unittest.TestCase):
             stream.truncate(size)
         return str(path)
 
-    def test_detects_aes_on_x86_arm64_and_riscv(self):
+    def test_detects_aes_on_x86_and_arm64(self):
         for text, expected in ((self.X86_AES, True), (self.X86_NO_AES, False),
                                (self.ARM_AES, True), (self.ARM_NO_AES, False),
                                ('flags\t\t: fpu vaes\n', False),
                                # every CPU must have it, not just the first
                                (self.X86_AES + '\n' + self.X86_NO_AES, False),
-                               # RISC-V crypto extensions in `isa`
-                               ('processor\t: 0\nisa\t\t: rv64imafdvcsu\n', False),
-                               ('processor\t: 0\nisa\t\t: rv64imafdc_zknd\n', False),
-                               ('processor\t: 0\nisa\t\t: rv64imafdc_zknd_zkne\n', True),
-                               ('processor\t: 0\nisa\t\t: rv64imafdvc_zvkned\n', True),
-                               # no flags/Features/isa line at all: unknown, keep the default
+                               # no flags/Features line at all: unknown, keep the default
                                ('processor\t: 0\nvendor_id\t: Unknown\n', True), ('', True)):
             with self.subTest(text=text):
                 self.cpuinfo.write_text(text)
@@ -1047,7 +1042,6 @@ class AdiantumWithoutAes(unittest.TestCase):
             'lab/intel-i5-8265u.txt': True,
             'lab/intel-i7-6600u.txt': True,
             'lab/qualcomm-oryon.txt': True,
-            'lab/riscv64-sg2002.txt': False,
             'lab/rpi5-cortex-a76.txt': True,
             # Extracted from workhorsy/py-cpuinfo
             'py-cpuinfo/intel-i7-nehalem.txt': False,
@@ -1060,7 +1054,6 @@ class AdiantumWithoutAes(unittest.TestCase):
             # Extracted from util-linux tests/ts/lscpu/dumps
             'util-linux/arm-a510-a710-a715-x3.txt': True,
             'util-linux/intel-i5-m560.txt': True,
-            'util-linux/rv64-visionfive2.txt': False,
         }
         actual_files = {p.relative_to(fixtures_dir).as_posix() for p in fixtures_dir.rglob('*.txt')}
         self.assertEqual(actual_files, set(expected))

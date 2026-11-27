@@ -221,5 +221,68 @@ class PartitionNodesAfterCommit(StepTest):
         self.assertIs(Disk.__dict__["commit"], commit)
 
 
+
+class SettleDiskNudge(StepTest):
+    """commit_wrapper nudges an EVENT_LOCKED settle stall via sysfs change
+    only when the disk is unlocked, never when fast or actively locked."""
+
+    def test_fast_settle_does_not_nudge(self):
+        disk = Disk("/dev/fake0", [], reread=None)
+        tweaks = self.load([])[0]
+        with mock.patch("orchestrator.archinstall_adapter._nudge_if_disk_unlocked") as nudge:
+            with tweaks(False):
+                archinstall_partition(disk)
+        nudge.assert_not_called()
+
+    def test_stranded_settle_is_nudged_and_unblocked(self):
+        disk = Disk("/dev/fake0", [], reread=None)
+        unblocked = threading.Event()
+        nudged = []
+
+        def fake_nudge(path, _done=None):
+            nudged.append(path)
+            unblocked.set()
+            return True
+
+        def stuck_settle():
+            assert unblocked.wait(timeout=1.0), "settle was never nudged"
+
+        tweaks = self.load([], stuck_settle)[0]
+        with mock.patch("orchestrator.archinstall_adapter._SETTLE_NUDGE_DELAYS", (0.01, 0.05)), \
+             mock.patch("orchestrator.archinstall_adapter._nudge_if_disk_unlocked", side_effect=fake_nudge):
+            with tweaks(False):
+                archinstall_partition(disk)
+        self.assertEqual(nudged, ["/dev/fake0"])
+
+    def test_nudge_writes_change_when_unlocked_and_skips_when_shared_locked(self):
+        import fcntl
+        arch = self.enterContext(adapter())
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        fake_dev = tmp / "nvme0n1"
+        fake_dev.write_bytes(b"")
+        sys_block = tmp / "sys_block"
+        (sys_block / "nvme0n1").mkdir(parents=True)
+        uevent = sys_block / "nvme0n1" / "uevent"
+
+        with mock.patch.object(arch, "_whole_disk_block_device", return_value=fake_dev), \
+             mock.patch.object(arch, "_SYS_BLOCK", sys_block):
+            self.assertTrue(arch._nudge_if_disk_unlocked(str(fake_dev)))
+            self.assertEqual(uevent.read_text(), "change\n")
+
+            uevent.unlink()
+            holder_fd = os.open(str(fake_dev), os.O_RDONLY)
+            try:
+                fcntl.flock(holder_fd, fcntl.LOCK_SH)
+                self.assertFalse(arch._nudge_if_disk_unlocked(str(fake_dev)))
+                self.assertFalse(uevent.exists())
+            finally:
+                os.close(holder_fd)
+
+            # Settle already finished -> skips write even when unlocked
+            already_done = threading.Event()
+            already_done.set()
+            self.assertFalse(arch._nudge_if_disk_unlocked(str(fake_dev), already_done))
+            self.assertFalse(uevent.exists())
+
 if __name__ == "__main__":
     unittest.main()

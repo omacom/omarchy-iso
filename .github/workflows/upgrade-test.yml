@@ -21,7 +21,7 @@ on:
         options: [edge, rc]
         default: edge
       from:
-        description: "Release or release candidate to start from, like 4.0.4 or 4.0.5rc1 (default: the latest)"
+        description: "Release or release candidate to start from, like 4.0.4 or 4.6.0-rc1 (default: the latest)"
         type: string
         default: ""
 
@@ -53,8 +53,9 @@ jobs:
           set -euo pipefail
           version=${FROM:-$(gh api repos/omacom/omarchy/releases/latest --jq .tag_name)}
           version=${version#v}
-          # A release candidate's ISO is published as omarchy-<version>rc<N>.iso.
-          [[ $version =~ ^[0-9]+(\.[0-9]+)+(rc[0-9]+)?$ ]] || { echo "::error::'$version' is not a release version"; exit 1; }
+          # Release candidate ISOs are published as omarchy-<version>-rc<N>-x86.iso
+          # (4.5.0-rc2 onward) or omarchy-<version>rc<N>.iso (earlier candidates).
+          [[ $version =~ ^[0-9]+(\.[0-9]+)+(-?rc[0-9]+)?$ ]] || { echo "::error::'$version' is not a release version"; exit 1; }
           echo "version=$version" | tee -a "$GITHUB_OUTPUT"
 
       # Good only if the signature is the release key's, the one in this repo.

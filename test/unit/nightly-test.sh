@@ -260,21 +260,40 @@ bash -n "$named"
 mkdir -p "$tmp/iso-curl"
 cat >"$tmp/iso-curl/curl" <<'STUB'
 #!/bin/bash
-echo "${@: -1}" >>"$ISO_LOG"
+url=${@: -1}
+echo "$url" >>"$ISO_LOG"
 [[ $ISO_STATUS == down ]] && { printf 000; echo "curl: (6) Could not resolve host" >&2; exit 6; }
-printf '%s' "$ISO_STATUS"
+if [[ -n ${ISO_FOUND:-} ]]; then
+  [[ ${url##*/} == "$ISO_FOUND" ]] && printf 200 || printf 404
+else
+  printf '%s' "$ISO_STATUS"
+fi
 STUB
 chmod +x "$tmp/iso-curl/curl"
-iso_name() { env PATH="$tmp/iso-curl:$PATH" ISO_LOG="$tmp/iso.log" ISO_STATUS="$1" "$named" "$2"; }
+iso_name() { env PATH="$tmp/iso-curl:$PATH" ISO_LOG="$tmp/iso.log" ISO_STATUS="$1" ISO_FOUND="${3:-}" "$named" "$2"; }
 
 : >"$tmp/iso.log"
 equal "iso name: a release published with its architecture" "$(iso_name 200 4.5.0)" "omarchy-4.5.0-x86.iso"
 equal "iso name: the -x86 name is the one asked for" "$(cat "$tmp/iso.log")" "https://iso.example/omarchy-4.5.0-x86.iso"
 equal "iso name: a release from before 4.5.0" "$(iso_name 404 4.0.6)" "omarchy-4.0.6.iso"
+equal "iso name: a hyphenated RC published with -x86" "$(iso_name "" 4.6.0-rc1 omarchy-4.6.0-rc1-x86.iso)" "omarchy-4.6.0-rc1-x86.iso"
+equal "iso name: an unhyphenated RC input finds the hyphenated -x86 ISO" "$(iso_name "" 4.6.0rc1 omarchy-4.6.0-rc1-x86.iso)" "omarchy-4.6.0-rc1-x86.iso"
+equal "iso name: a hyphenated RC input finds an older unhyphenated ISO" "$(iso_name "" 4.5.0-rc1 omarchy-4.5.0rc1.iso)" "omarchy-4.5.0rc1.iso"
+equal "iso name: an unhyphenated RC input finds an older unhyphenated ISO" "$(iso_name "" 4.5.0rc1 omarchy-4.5.0rc1.iso)" "omarchy-4.5.0rc1.iso"
 refused "iso name: another answer than 200 or 404" iso_name 503 4.5.0
 grep -q 'answered 503' "$tmp/refused.err" || fail "iso name: the answer was not named"
 refused "iso name: a network error" iso_name down 4.5.0
 grep -q 'could not reach' "$tmp/refused.err" || fail "iso name: a network error was not reported as one"
+
+# upgrade-test.yml's version regex accepts stable releases and both RC spellings.
+upgrade_re=$(sed -nE 's/.*\[\[ \$version =~ ([^ ]+) \]\].*/\1/p' "$ROOT/.github/workflows/upgrade-test.yml")
+[[ -n $upgrade_re ]] || fail "upgrade-test: version regex not found"
+for v in 4.5.0 4.0.6 4.6.0-rc1 4.5.0rc1; do
+  [[ $v =~ $upgrade_re ]] || fail "upgrade-test: version regex rejected $v"
+done
+for v in 4.6.0--rc1 4.6.0-rc 4.6.0rc 4.6.0-beta1 ../4.6.0; do
+  [[ ! $v =~ $upgrade_re ]] || fail "upgrade-test: version regex accepted $v"
+done
 
 # -------------------------------------------------------------- nightly-rclone
 wrapped="$ROOT/test/vm-image/nightly-rclone"

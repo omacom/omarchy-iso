@@ -111,8 +111,8 @@ def main() -> int:
             error("Installation interrupted.")
             return 130
 
-        # After run(), so @factory was already snapshotted without this one-time
-        # unit and the install finishes immediately without waiting on fstrim.
+        # Enable fstrim.timer with an overdue stamp so the install finishes
+        # immediately without blocking on a synchronous fstrim.
         stage_first_boot_trim(ctx)
         info("Installation complete.")
         return 0

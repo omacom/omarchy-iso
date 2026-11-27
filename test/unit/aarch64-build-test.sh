@@ -28,6 +28,7 @@ bash -n "$ROOT/bin/omarchy-iso-make" "$ROOT/builder/build-iso.sh" \
   "$ROOT/builder/aarch64-package-filter.sh" "$ROOT/builder/qcom-oem-firmware.sh" "$ROOT/builder/grub-platform.sh" \
   "$ROOT/builder/archiso-aarch64-mkinitcpio.sh" "$ROOT/builder/archiso-aarch64-grub-modules.sh" \
   "$ROOT/builder/node-release.sh" "$ROOT/builder/arm64-kernel-image.sh" \
+  "$ROOT/builder/radxa/live-display-install" \
   "$ROOT/builder/n1x-dev-ssh/omarchy-n1x-dev-ssh" "$ROOT/configs/airootfs/root/.automated_script.sh"
 
 grep -Eq '^ *CONTAINER_IMAGE=ghcr\.io/menci/archlinuxarm@sha256:[0-9a-f]{64}$' "$ROOT/bin/omarchy-iso-make" || fail "aarch64 container is not pinned by digest on ghcr.io"
@@ -129,6 +130,9 @@ for cfg in grub.cfg loopback.cfg; do
     fi
     if [[ $platform == aarch64 ]]; then
       grep -Fq 'n1x-recovery' "$fixture/$platform-$cfg" || fail "the aarch64 menu lost the N1x recovery entry in $cfg"
+      grep -Fq 'orion-serial-debug' "$fixture/$platform-$cfg" || fail "the aarch64 menu lost the Orion O6 serial debug entry in $cfg"
+      grep -Fq 'fbcon=nodefer earlymodules=pwm_bl,linlon_dp,trilin_dpsub' "$fixture/$platform-$cfg" \
+        || fail "the aarch64 $cfg lost the Orion early display module order"
       # No T2 Mac is arm64. Ventoy hooks the initramfs it finds by literal
       # path here; without the hook an arm64 boot from its stick can't find
       # the ISO and drops to a shell.
@@ -138,6 +142,7 @@ for cfg in grub.cfg loopback.cfg; do
         && fail "an aarch64 $cfg entry loads an initramfs Ventoy can't find by name"
     else
       grep -Fq 'n1x-recovery' "$fixture/$platform-$cfg" && fail "recovery entry leaked into the $platform $cfg"
+      grep -Fq 'orion' "$fixture/$platform-$cfg" && fail "Orion boot logic leaked into the $platform $cfg"
       grep -Fq "if [ \"\${sys_vendor}\" == 'Apple Inc.' ]; then" "$fixture/$platform-$cfg" || fail "the x86_64 $cfg no longer boots linux-t2 on a Mac"
       # Ventoy skips an initrd path with a variable in it, as on aarch64.
       grep -E '^\s*initrd\s' "$fixture/$platform-$cfg" | grep -F '$' && fail "an x86_64 $cfg entry loads an initramfs Ventoy can't find by name"
@@ -154,7 +159,7 @@ for cfg in grub.cfg loopback.cfg; do
         [[ $chosen == "/arch/boot/x86_64/initramfs-$kernel.img" ]] || fail "the x86_64 $cfg loads '$chosen' for $kernel"
       done
     fi
-    grep -Eq '^%(N1X|X86)_ONLY|%LIVE_(KERNEL|INITRD)%' "$fixture/$platform-$cfg" && fail "template markers remain in $cfg"
+    grep -Eq '^%(ORION|N1X|X86)_ONLY|%LIVE_(KERNEL|INITRD)%' "$fixture/$platform-$cfg" && fail "template markers remain in $cfg"
     # Every platform boots its default at once: the installer asks whether to
     # install or try Omarchy, where Linux drives the keyboard.
     grep -Fqx 'timeout_style=hidden' "$fixture/$platform-$cfg" || fail "$cfg ($platform) shows the boot menu"
@@ -513,7 +518,25 @@ done
 # variable driver; the hook that quiets it must run after base adds
 # init_functions, and must match the line mkinitcpio actually writes.
 live_hooks=$(sed -n 's/^HOOKS=(\(.*\))$/\1/p' "$fixture/archiso.conf")
-[[ " $live_hooks " == *" base "*" omarchy_quiet_efivars "* ]] || fail "the efivarfs mount is not quieted after base: $live_hooks"
+[[ " $live_hooks " == *" base "*" omarchy-radxa-orion-live omarchy_quiet_efivars "* ]] \
+  || fail "the Orion live hook and quiet-efivars hook are not ordered after base: $live_hooks"
+for module in pwm_bl linlon_dp trilin_dpsub; do
+  [[ " $live_modules " != *" $module"* ]] || fail "Orion driver $module leaked into unconditional live MODULES"
+done
+orion_hook_bundled=$(
+  add_module() { printf 'mod:%s\n' "$1"; }
+  source "$ROOT/builder/radxa/live-display-install"
+  build
+)
+[[ $orion_hook_bundled == $'mod:pwm_bl?\nmod:linlon_dp?\nmod:trilin_dpsub?' ]] \
+  || fail "the Orion live install hook bundled unexpected items: $orion_hook_bundled"
+mkdir -p "$fixture/fw/arm/mali/arch12.8" "$fixture/fw/arm/other"
+: >"$fixture/fw/arm/mali/arch12.8/mali_csffw.bin"
+: >"$fixture/fw/arm/other/unused.bin"
+# shellcheck disable=SC2034 # read by the firmware pruning block run through eval
+(fw="$fixture/fw"; eval "$(sed -n '/^  if \[\[ -d \$fw\/arm \]\]; then$/,/^  fi$/p' "$ROOT/configs/airootfs/root/customize_airootfs.sh")")
+[[ -f "$fixture/fw/arm/mali/arch12.8/mali_csffw.bin" && ! -e "$fixture/fw/arm/other" ]] \
+  || fail "live firmware pruning did not preserve arm/mali while dropping other arm/ blobs"
 mkdir -p "$fixture/buildroot"
 if [[ -f /usr/lib/initcpio/init_functions ]]; then
   cp /usr/lib/initcpio/init_functions "$fixture/buildroot/init_functions"

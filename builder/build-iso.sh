@@ -323,6 +323,7 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   # Drops the x86-only microcode/memdisk hooks and adds the Tegra/MediaTek
   # I2C-HID keyboard modules.
   configure_archiso_aarch64_mkinitcpio "$build_cache_dir/airootfs/etc/mkinitcpio.conf.d/archiso.conf"
+  install -Dm0755 /builder/radxa/live-display-install "$build_cache_dir/airootfs/usr/lib/initcpio/install/omarchy-radxa-orion-live"
   # The initramfs waits for the live medium only on x86_64 (configs/airootfs/
   # etc/initcpio/hooks/udev); the aarch64 boards keep the full settle, which
   # the Qualcomm firmware staging before media discovery was proven with.

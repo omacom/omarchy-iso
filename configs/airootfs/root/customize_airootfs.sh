@@ -59,12 +59,16 @@ rm -f /etc/udev/rules.d/60-omarchy-io-scheduler.rules
 # The live system installs from the stick and never joins a network on its
 # own: the configurator has no Wi-Fi step, and the one network call it makes
 # (tzupdate, for a timezone guess) only works over a cable that is already
-# plugged in. So firmware for radios, datacenter NICs, cameras and ARM SoCs is
+# plugged in. So firmware for radios, datacenter NICs, cameras and SoCs is
 # 330 MB of ISO that no driver in this system can ask for. What stays is
 # everything a machine may need to show the installer and speak it: GPU
 # firmware (a GPU driver that fails for want of firmware has already taken the
-# screen from the firmware framebuffer, and nouveau needs nvidia/ for GSP),
-# audio, microcode, and wired NICs.
+# screen from the firmware framebuffer, and nouveau needs nvidia/ for GSP).
+# arm/mali stays with that GPU firmware (~120 KB): panthor asks for
+# arm/mali/arch12.8/mali_csffw.bin (from linux-firmware-other) once linlondp
+# has taken the screen on CIX Sky1. The live initramfs does not load panthor
+# (no kms hook, and it is not in MODULES), so the blob has to be here on the
+# root, not in the initramfs. Also kept: audio, microcode, and wired NICs.
 # qcom/ goes too, Adreno's included: msm keeps the display without it and
 # loads the GPU's microcode only when the DRM device is first opened
 # (msm_open -> load_gpu in drivers/gpu/drm/msm/msm_drv.c), which the installer,
@@ -83,8 +87,11 @@ if [[ -d $fw ]]; then
     "$fw"/dpaa2 "$fw"/cxgb3 "$fw"/cxgb4 "$fw"/mellanox "$fw"/netronome "$fw"/liquidio \
     "$fw"/qed "$fw"/cavium "$fw"/intel/ice \
     "$fw"/dvb-* "$fw"/v4l-* "$fw"/intel/ipu* "$fw"/intel/vsc "$fw"/intel/irci* \
-    "$fw"/imx "$fw"/meson "$fw"/rockchip "$fw"/arm "$fw"/powervr "$fw"/nvidia/tegra* \
+    "$fw"/imx "$fw"/meson "$fw"/rockchip "$fw"/powervr "$fw"/nvidia/tegra* \
     "$fw"/amlogic "$fw"/cnm "$fw"/cadence "$fw"/ti-keystone "$fw"/microchip
+  if [[ -d $fw/arm ]]; then
+    find "$fw/arm" -mindepth 1 -maxdepth 1 ! -name mali -exec rm -rf -- {} +
+  fi
   echo "Live firmware: ${before} MB -> $(du -sm "$fw" | cut -f1) MB (no radio, datacenter NIC, camera or SoC firmware)."
 fi
 

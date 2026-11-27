@@ -1,0 +1,18 @@
+#!/bin/bash
+
+build() {
+  local module
+  # Keep this order in step with the Orion GRUB earlymodules parameter. Built-in
+  # phy_cix_usbdp and rts5453 reconfigure the Type-C combo PHY during early
+  # init, so linlon_dp and trilin_dpsub retrain DisplayPort inside initramfs.
+  # add_module only bundles these drivers; trailing ? skips them if a channel
+  # kernel predates CIX support. The board-gated kernel command line enables
+  # early loading, so other ARM machines keep their own policy.
+  for module in pwm_bl linlon_dp trilin_dpsub; do
+    add_module "${module}?"
+  done
+}
+
+help() {
+  echo "Bundle Orion Live display drivers for board-scoped early loading."
+}

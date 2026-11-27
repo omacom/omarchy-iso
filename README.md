@@ -137,7 +137,7 @@ gh workflow run install-test.yml --ref <branch> -f channel=rehearsal
 ./test/rehearsal-pins x86_64 /path/to/rehearsal && ./bin/omarchy-iso-make --local-source /path/to/rehearsal/omarchy /path/to/rehearsal/omarchy-pkgs --rehearsal
 ```
 
-Validate a feature release candidate cut from `quattro` in this order (example `4.6.0rc1`):
+Validate a feature release candidate cut from `quattro` in this order (example `4.6.0-rc1`):
 
 ```bash
 gh workflow run install-test.yml -R omacom/omarchy-iso --ref quattro -f channel=rehearsal  # 1. before cutting RC

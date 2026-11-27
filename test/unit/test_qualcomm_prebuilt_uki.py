@@ -263,6 +263,20 @@ class QualcommPrebuiltUkiTests(unittest.TestCase):
         )
         self.assertEqual(dtb_res.stdout.splitlines(), ["asus,zenbook-a16-ux3607oa"])
 
+        # qualcomm_initramfs_inputs (bash) and _qualcomm_initramfs_inputs (Python) must
+        # hash both regular files and symlinks identically.
+        inputs_fn = re.search(r"^qualcomm_initramfs_inputs\(\) \{\n.*?^\}\n", code, re.S | re.M).group(0)
+        (self.modprobe / "masked.conf").symlink_to("/dev/null")
+        sh_inputs = subprocess.run(
+            ["bash", "-c", f'set -euo pipefail\n{inputs_fn}\nqualcomm_initramfs_inputs "{self.target}"'],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        py_inputs = "".join(
+            f"{digest}  {rel}\n"
+            for rel, digest in sorted(self.phases_impl._qualcomm_initramfs_inputs(self.target).items())
+        )
+        self.assertEqual(py_inputs, sh_inputs)
+
         # build_qualcomm_uki_in static invariants: excludes -el2 DTBs, passes HWIDs=,
         # checks mkinitcpio exit status, verifies .hwids/.dtbauto with ukify inspect,
         # resolves modinfo inside chroot, and searches updates/ before base dir.

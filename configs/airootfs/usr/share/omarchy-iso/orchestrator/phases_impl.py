@@ -3978,7 +3978,7 @@ def _qualcomm_initramfs_inputs(root: Path) -> dict[str, str]:
         for path in candidates:
             rel = path.relative_to(root).as_posix()
             if path.is_symlink():
-                digest = hashlib.sha256(os.readlink(path).encode("utf-8", errors="surrogateescape")).hexdigest()
+                digest = hashlib.sha256((os.readlink(path) + "\n").encode("utf-8", errors="surrogateescape")).hexdigest()
             else:
                 digest = hashlib.sha256(path.read_bytes()).hexdigest()
             inputs[rel] = digest

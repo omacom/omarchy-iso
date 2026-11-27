@@ -10,7 +10,6 @@ created if anything fails.
 
 from __future__ import annotations
 
-import fcntl
 import os
 from pathlib import Path
 import re
@@ -18,6 +17,7 @@ import stat
 import subprocess
 import time
 
+from . import disk_udev
 from .command import capture
 from .luks_calibration import format_and_open_luks
 from .ui import info
@@ -25,8 +25,6 @@ from .ui import info
 BOOT_MEDIUM_MOUNT = Path("/run/archiso/bootmnt")
 MIN_PARTITION_BYTES = 1024 * 1024
 SIZE_TOLERANCE_BYTES = 1024 * 1024
-SETTLE_BACKOFF_DELAYS = (0.06, 0.12, 0.25, 0.25, 0.25)
-SETTLE_POLL_TICK = 0.01
 WAIT_DEVICE_TIMEOUT = 10.0
 WAIT_DEVICE_INTERVAL = 0.2
 
@@ -224,64 +222,19 @@ def settle_disk_devices(disk: str, timeout: float = 30.0) -> None:
     """Settle udev for `disk` without stranding on systemd-udevd's EVENT_LOCKED
     200 ms + 1 s retry timer.
 
-    Polls `udevadm settle` in 10 ms ticks across backoff windows; only pokes with
-    `udevadm trigger --action=change --subsystem-match=block --sysname-match=...`
-    when a non-blocking O_RDONLY `flock(LOCK_EX | LOCK_NB)` confirms no worker or
-    `(udev-synth)` holds the disk lock AND settle is still running.
+    Delegates to the shared `disk_udev.settle_disk` watchdog, which probes with
+    non-blocking O_RDONLY `flock(LOCK_EX | LOCK_NB)` and nudges via sysfs
+    `uevent` `"change\\n"` when the disk is unlocked.
     """
-    dev_name = Path(disk).resolve().name
-    proc = subprocess.Popen(
-        ["udevadm", "settle", f"--timeout={int(timeout)}"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    disk_udev.settle_disk(
+        disk,
+        lambda: subprocess.run(
+            ["udevadm", "settle", f"--timeout={int(timeout)}"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ),
     )
-    try:
-        for delay in SETTLE_BACKOFF_DELAYS:
-            deadline = time.monotonic() + delay
-            while time.monotonic() < deadline:
-                if proc.poll() is not None:
-                    return
-                remaining = deadline - time.monotonic()
-                if remaining > 0:
-                    time.sleep(min(SETTLE_POLL_TICK, remaining))
-            if proc.poll() is not None:
-                return
-            try:
-                fd = os.open(disk, os.O_RDONLY | os.O_CLOEXEC)
-            except OSError:
-                continue
-            unlocked = False
-            try:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    unlocked = True
-                except BlockingIOError:
-                    unlocked = False
-                finally:
-                    if unlocked:
-                        fcntl.flock(fd, fcntl.LOCK_UN)
-            finally:
-                os.close(fd)
-            if unlocked and proc.poll() is None:
-                subprocess.run(
-                    [
-                        "udevadm", "trigger", "--action=change",
-                        "--subsystem-match=block", f"--sysname-match={dev_name}",
-                    ],
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-        proc.wait()
-    except BaseException:
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-        raise
 
 
 def wait_for_device(

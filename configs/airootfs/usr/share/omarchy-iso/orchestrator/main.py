@@ -94,7 +94,7 @@ def main() -> int:
         stop_library_warmup,
         stop_luks_keyslot_enroll,
         stop_target_keyring_init,
-        trim_target,
+        stage_first_boot_trim,
     )
 
     governors = boost_cpu_governor()
@@ -111,10 +111,9 @@ def main() -> int:
             error("Installation interrupted.")
             return 130
 
-        # After run(), which has written finished_at: the trim never counts
-        # in the install time. The target stays mounted until the dashboard
-        # releases it.
-        trim_target(ctx)
+        # After run(), so @factory was already snapshotted without this one-time
+        # unit and the install finishes immediately without waiting on fstrim.
+        stage_first_boot_trim(ctx)
         info("Installation complete.")
         return 0
     finally:

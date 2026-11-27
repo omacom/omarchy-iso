@@ -1,13 +1,13 @@
-"""Unit tests for the post-install trim: phases_impl.trim_target runs fstrim
-on the target, never fails the install, and main() calls it only after
-run() has stopped the install timer."""
+"""Unit tests for the first-boot trim: phases_impl.stage_first_boot_trim stages
+a self-removing first-boot fstrim unit on the target, never fails a completed
+install, and main() calls it only after run() succeeds."""
 
-import subprocess
+import stat
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
-from subprocess import CompletedProcess
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "configs/airootfs/usr/share/omarchy-iso"))
@@ -20,45 +20,77 @@ from orchestrator import main, phases_impl  # noqa: E402
 from orchestrator.phases import PhaseError  # noqa: E402
 
 
-class TrimTargetTest(unittest.TestCase):
-    def trim(self, **run):
+class StageFirstBootTrimTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def stage(self):
+        lines = []
+        with mock.patch.object(phases_impl, "info", lines.append):
+            phases_impl.stage_first_boot_trim(types.SimpleNamespace(target=self.target))
+        return lines
+
+    def test_stages_self_removing_background_trim_unit(self):
+        lines = self.stage()
+
+        unit = self.target / "etc/systemd/system" / phases_impl.FIRST_BOOT_TRIM_SERVICE
+        link = (
+            self.target
+            / "etc/systemd/system/multi-user.target.wants"
+            / phases_impl.FIRST_BOOT_TRIM_SERVICE
+        )
+
+        self.assertTrue(unit.is_file())
+        self.assertEqual(stat.S_IMODE(unit.stat().st_mode), 0o644)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(
+            str(link.readlink()),
+            f"/etc/systemd/system/{phases_impl.FIRST_BOOT_TRIM_SERVICE}",
+        )
+
+        text = unit.read_text()
+        self.assertIn("After=local-fs.target", text)
+        self.assertIn("Type=simple", text)
+        self.assertIn("Nice=19", text)
+        self.assertIn("IOSchedulingClass=idle", text)
+        self.assertIn(f"/usr/bin/timeout --kill-after=5 {phases_impl.TRIM_BUDGET} /usr/bin/fstrim --verbose / || true", text)
+        self.assertIn(
+            f"/usr/bin/rm -f /etc/systemd/system/multi-user.target.wants/{phases_impl.FIRST_BOOT_TRIM_SERVICE}"
+            f" /etc/systemd/system/{phases_impl.FIRST_BOOT_TRIM_SERVICE}",
+            text,
+        )
+        self.assertIn("WantedBy=multi-user.target", text)
+        self.assertIn("staged one-time first-boot fstrim", lines[-1])
+
+    def test_restaging_replaces_existing_symlink(self):
+        wants = self.target / "etc/systemd/system/multi-user.target.wants"
+        wants.mkdir(parents=True)
+        (wants / phases_impl.FIRST_BOOT_TRIM_SERVICE).symlink_to("/stale/target")
+
+        self.stage()
+
+        link = wants / phases_impl.FIRST_BOOT_TRIM_SERVICE
+        self.assertEqual(
+            str(link.readlink()),
+            f"/etc/systemd/system/{phases_impl.FIRST_BOOT_TRIM_SERVICE}",
+        )
+
+    def test_os_error_is_logged_and_does_not_raise(self):
         lines = []
         with mock.patch.object(phases_impl, "info", lines.append), \
-                mock.patch.object(phases_impl.subprocess, "run", **run) as fake:
-            phases_impl.trim_target(types.SimpleNamespace(target=Path("/mnt")))
-        return fake, lines
-
-    def test_trims_the_mounted_target_within_its_budget(self):
-        fake, lines = self.trim(return_value=CompletedProcess(
-            [], 0, "/mnt: 36.5 GiB (39187726336 bytes) trimmed\n", ""))
-        args, kwargs = fake.call_args
-        self.assertEqual(args[0], ["fstrim", "--verbose", "/mnt"])
-        self.assertEqual(kwargs["timeout"], phases_impl.TRIM_BUDGET)
-        self.assertRegex(lines[-1], r"^› trim: /mnt: 36\.5 GiB \(39187726336 bytes\) trimmed in \d+\.\d\ds$")
-
-    def test_a_failed_trim_is_logged_and_does_not_raise(self):
-        _, lines = self.trim(return_value=CompletedProcess(
-            [], 1, "", "fstrim: /mnt: the discard operation is not supported\n"))
-        self.assertIn("WARNING: fstrim /mnt exited 1", lines[-1])
-        self.assertIn("not supported", lines[-1])
-        self.assertNotIn("trimmed in", lines[-1])
-
-    def test_a_slow_trim_is_stopped_at_its_budget(self):
-        _, lines = self.trim(side_effect=subprocess.TimeoutExpired(["fstrim"], phases_impl.TRIM_BUDGET))
-        self.assertIn(f"still running after {phases_impl.TRIM_BUDGET}s", lines[-1])
-
-    def test_an_interrupted_trim_leaves_the_finished_install_alone(self):
-        _, lines = self.trim(side_effect=KeyboardInterrupt)
-        self.assertIn("was interrupted", lines[-1])
-
-    def test_a_missing_fstrim_does_not_raise(self):
-        _, lines = self.trim(side_effect=FileNotFoundError("fstrim"))
-        self.assertIn("could not run fstrim", lines[-1])
+                mock.patch.object(Path, "write_text", side_effect=OSError("read-only filesystem")):
+            phases_impl.stage_first_boot_trim(types.SimpleNamespace(target=self.target))
+        self.assertIn("WARNING: could not stage first-boot trim", lines[-1])
+        self.assertIn("read-only filesystem", lines[-1])
 
 
-class MainTrimsAfterTheTimerTest(unittest.TestCase):
-    """run() writes finished_at, which the finish screen's time is read from,
-    before it returns. The trim must come after it, and only on success."""
+class MainStagesTrimAfterRunTest(unittest.TestCase):
+    """run() writes finished_at and creates @factory before returning. Staging
+    the first-boot trim must come after run(), and only on success."""
 
     def main(self, run_error=None):
         events = []
@@ -76,16 +108,16 @@ class MainTrimsAfterTheTimerTest(unittest.TestCase):
         with mock.patch.object(main.InstallContext, "from_env", return_value=ctx), \
                 mock.patch.object(main, "run", fake_run), \
                 mock.patch.object(main, "build_phases", return_value=[]), \
-                mock.patch.object(phases_impl, "trim_target", lambda c: events.append("trim")), \
+                mock.patch.object(phases_impl, "stage_first_boot_trim", lambda c: events.append("stage_trim")), \
                 mock.patch.multiple(phases_impl, **helpers), \
                 mock.patch.object(main, "info"), mock.patch.object(main, "error"):
             status = main.main()
         return status, events
 
-    def test_a_finished_install_is_trimmed_after_run_returns(self):
-        self.assertEqual(self.main(), (0, ["run", "trim"]))
+    def test_a_finished_install_stages_first_boot_trim_after_run_returns(self):
+        self.assertEqual(self.main(), (0, ["run", "stage_trim"]))
 
-    def test_a_failed_install_is_not_trimmed(self):
+    def test_a_failed_install_does_not_stage_first_boot_trim(self):
         self.assertEqual(self.main(PhaseError("boom")), (1, ["run"]))
 
 

@@ -5473,65 +5473,78 @@ def restore_cpu_governors(saved: dict[Path, str]) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# trim_target: invoked from main() once run() has stopped the install timer.
+# stage_first_boot_trim: invoked from main() once run() has finished.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Seconds the trim may take before it is stopped. A drive that discards
-# slowly (SATA without queued TRIM, eMMC) must not hold the finish screen for
-# minutes. What it did not reach stays as it was.
+# Seconds the first-boot trim may take before it is stopped. A drive that
+# discards slowly (SATA without queued TRIM, eMMC) must not churn for minutes;
+# what it did not reach stays as it was.
 TRIM_BUDGET = 120
 
+FIRST_BOOT_TRIM_SERVICE = "omarchy-first-boot-trim.service"
 
-def trim_target(ctx: InstallContext) -> None:
-    """Tell the drive which blocks of the new root are free: fstrim on the
-    mounted target, once the install is done and its timer has stopped.
+# Type=simple (not oneshot): multi-user.target implicitly gains After= for its
+# Wants=, so a oneshot would hold boot and SDDM until fstrim finishes.
+# Type=simple lets boot proceed immediately while fstrim runs in the background
+# at idle I/O priority. Cleanup runs after fstrim completes (or times out / fails
+# on drives without discard support) so the unit runs once and leaves no failed
+# state or leftover files; if the machine shuts down mid-trim, cleanup is
+# skipped and the next boot retries.
+FIRST_BOOT_TRIM_UNIT = f"""\
+[Unit]
+Description=Trim unallocated root filesystem space once after install
+After=local-fs.target
 
-    Nothing else ever does. mkfs.btrfs runs with -K on both paths, the root
-    image fills only the start of the partition, and btrfs's discard=async
-    trims only what it frees after mount. archinstall leaves fstrim.timer
-    disabled on btrfs, so a full-disk install never trims the space btrfs has
-    not allocated. Whatever that space held (an earlier install, Windows)
-    stays live data to the drive's flash translation layer: on a Samsung 990
-    PRO, the installer's LUKS2 mapping wrote 40 GiB at 2.07 GB/s onto such
-    space, and at 6.57 GB/s after a discard.
+[Service]
+Type=simple
+Nice=19
+IOSchedulingClass=idle
+ExecStart=/usr/bin/sh -c '/usr/bin/timeout --kill-after=5 {TRIM_BUDGET} /usr/bin/fstrim --verbose / || true; /usr/bin/rm -f /etc/systemd/system/multi-user.target.wants/{FIRST_BOOT_TRIM_SERVICE} /etc/systemd/system/{FIRST_BOOT_TRIM_SERVICE}'
 
-    btrfs's FITRIM trims the free space in its block groups and then the
-    unallocated space on the device (btrfs_trim_fs), so one call covers the
-    whole partition, through dm-crypt, which the installer opens with
-    allow-discards. It holds the chunk mutex for each range it discards, so
-    it runs after the install instead of alongside it: main() calls it once
-    run() has written finished_at, while the target is still mounted (the
-    dashboard releases it before the finish screen). It runs in the
-    installer's process group, so cancelling the install stops it too.
+[Install]
+WantedBy=multi-user.target
+"""
 
-    Best effort: it never fails the install, which is complete by now. A
-    failed, unsupported or interrupted trim is logged. A slow one is killed
-    after TRIM_BUDGET seconds: btrfs sends at most 1 GiB per discard request
-    (BTRFS_MAX_DISCARD_CHUNK_SIZE) and checks for a fatal signal after each,
-    so it stops within one request."""
-    target = str(ctx.target)
-    started = time.monotonic()
+
+def stage_first_boot_trim(ctx: InstallContext) -> None:
+    """Stage a one-time background fstrim on / for the installed system's first
+    boot, instead of blocking the end of the install on a synchronous trim.
+
+    Nothing else trims the unallocated space on a fresh root. mkfs.btrfs runs
+    with -K on both paths, the root image fills only the start of the
+    partition, and btrfs's discard=async trims only what it frees after mount.
+    archinstall leaves fstrim.timer disabled on btrfs, so a full-disk install
+    would otherwise never trim the space btrfs has not allocated. Whatever that
+    space held (an earlier install, Windows) stays live data to the drive's
+    flash translation layer: on a Samsung 990 PRO, the installer's LUKS2
+    mapping wrote 40 GiB at 2.07 GB/s onto such space, and at 6.57 GB/s after
+    a discard.
+
+    Running fstrim synchronously during install stalled the finish screen for
+    seconds on NVMe (and up to TRIM_BUDGET on slower drives). Staging a
+    self-removing first-boot unit costs <1 ms during install, runs after
+    create_factory_snapshot so @factory stays clean, and trims through dm-crypt
+    (opened with allow-discards) in the background on first boot without
+    delaying login.
+
+    Best effort: it never fails a completed install."""
     try:
-        result = subprocess.run(["fstrim", "--verbose", target], stdin=subprocess.DEVNULL,
-                                capture_output=True, text=True, timeout=TRIM_BUDGET)
-    except subprocess.TimeoutExpired:
-        info(f"› trim: WARNING: fstrim {target} was still running after {TRIM_BUDGET}s; "
-             "stopped it, the rest of the free space is left as it was")
-        return
+        systemd_dir = ctx.target / "etc/systemd/system"
+        unit = systemd_dir / FIRST_BOOT_TRIM_SERVICE
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text(FIRST_BOOT_TRIM_UNIT)
+        unit.chmod(0o644)
+
+        wants_dir = systemd_dir / "multi-user.target.wants"
+        wants_dir.mkdir(parents=True, exist_ok=True)
+        link = wants_dir / FIRST_BOOT_TRIM_SERVICE
+        link.unlink(missing_ok=True)
+        link.symlink_to(f"/etc/systemd/system/{FIRST_BOOT_TRIM_SERVICE}")
     except OSError as exc:
-        info(f"› trim: WARNING: could not run fstrim on {target} ({exc}); continuing without it")
+        info(f"› trim: WARNING: could not stage first-boot trim ({exc}); continuing without it")
         return
-    except KeyboardInterrupt:
-        # subprocess.run has killed fstrim and waited for it.
-        info(f"› trim: WARNING: fstrim {target} was interrupted; the install itself is complete")
-        return
-    elapsed = time.monotonic() - started
-    output = " ".join((result.stdout + result.stderr).split())
-    if result.returncode == 0:
-        info(f"› trim: {output} in {elapsed:.2f}s")
-    else:
-        info(f"› trim: WARNING: fstrim {target} exited {result.returncode} after {elapsed:.2f}s "
-             f"({output}); continuing without it")
+
+    info("› trim: staged one-time first-boot fstrim on /")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

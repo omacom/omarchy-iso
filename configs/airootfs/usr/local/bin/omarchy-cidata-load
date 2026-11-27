@@ -18,21 +18,127 @@
 # run against a sandbox instead of the live system.
 
 set -uo pipefail
+shopt -s nullglob
 
 root=${1:-}
 by_label=$root/dev/disk/by-label
+sys_usb=$root/sys/bus/usb/devices
+udev_data=$root/run/udev/data
 dest=$root/root
 mnt=$root/run/cidata
 
-# The by-label symlinks come from udev, and on a fast boot this can run before
-# device enumeration has finished. Wait for the queue to drain instead of
-# racing it and silently dropping a headless install into the wizard.
-udevadm settle 2>/dev/null || true
-
 device=""
-for label in cidata CIDATA; do
-  [[ -e $by_label/$label ]] && { device=$by_label/$label; break; }
-done
+find_cidata() {
+  local label
+  for label in cidata CIDATA; do
+    if [[ -e $by_label/$label ]]; then
+      device=$by_label/$label
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Return 0 if any USB mass-storage interface is still enumerating its SCSI host,
+# LUNs, or block devices. On a fast live boot, `udevadm settle` alone is not
+# enough: `usb-storage` holds a 1 s `delay_use` timer before scanning SCSI LUNs,
+# and `CONFIG_SCSI_SCAN_ASYNC=y` probes LUNs and `sd` block devices off-queue,
+# so udev can look completely idle while a USB cidata stick has not produced a
+# block device yet. Interactive boots with no pending USB mass-storage devices
+# (e.g., no USB storage or only the already-mounted boot medium) return 1 here
+# immediately and pay zero wait.
+has_pending_usb_storage() {
+  local intf iclass authorized drv host sdev scsi_type blk part devnum
+  local -a hosts luns blocks parts
+
+  for intf in "$sys_usb"/*:*; do
+    [[ -r $intf/bInterfaceClass ]] || continue
+    iclass=""
+    read -r iclass 2>/dev/null <"$intf/bInterfaceClass" || true
+    [[ $iclass == 08 ]] || continue
+
+    if [[ -r $intf/authorized ]]; then
+      authorized=""
+      read -r authorized 2>/dev/null <"$intf/authorized" || true
+      [[ $authorized == 0 ]] && continue
+    fi
+
+    [[ -L $intf/driver ]] || return 0
+
+    drv=$(readlink "$intf/driver" 2>/dev/null || true)
+    drv=${drv##*/}
+    case $drv in
+      usb-storage|uas|ums-*) ;;
+      *) continue ;;
+    esac
+
+    hosts=("$intf"/host*)
+    (( ${#hosts[@]} == 0 )) && return 0
+
+    for host in "${hosts[@]}"; do
+      luns=("$host"/target*/[0-9]*:[0-9]*:[0-9]*:[0-9]*)
+      (( ${#luns[@]} == 0 )) && return 0
+
+      for sdev in "${luns[@]}"; do
+        scsi_type=0
+        if [[ -r $sdev/type ]]; then
+          read -r scsi_type 2>/dev/null <"$sdev/type" || true
+          [[ -n $scsi_type ]] || scsi_type=0
+        fi
+        case $scsi_type in
+          0|5|7|14)
+            blocks=("$sdev"/block/*)
+            (( ${#blocks[@]} == 0 )) && return 0
+            # device_add_disk() creates block/<dev> with uevent_suppress=1
+            # before scanning partitions and emitting KOBJ_ADD. Waiting for
+            # udevd's database entry (/run/udev/data/b<maj>:<min>) proves
+            # KOBJ_ADD fired and 60-persistent-storage (blkid + by-label) ran.
+            if [[ -d $udev_data ]]; then
+              for blk in "${blocks[@]}"; do
+                devnum=""
+                read -r devnum 2>/dev/null <"$blk/dev" || true
+                [[ -n $devnum && -e $udev_data/b$devnum ]] || return 0
+                parts=("$blk"/"${blk##*/}"*/dev)
+                for part in "${parts[@]}"; do
+                  devnum=""
+                  read -r devnum 2>/dev/null <"$part" || true
+                  [[ -n $devnum && -e $udev_data/b$devnum ]] || return 0
+                done
+              done
+            fi
+            ;;
+        esac
+      done
+    done
+  done
+
+  return 1
+}
+
+deadline=$((SECONDS + ${OMARCHY_CIDATA_WAIT_TIMEOUT:-5}))
+poll=${OMARCHY_CIDATA_WAIT_POLL:-0.05}
+wait_pending_usb_storage() {
+  while ! find_cidata && has_pending_usb_storage && ((SECONDS < deadline)); do
+    sleep "$poll"
+  done
+}
+
+# Wait for any in-flight USB mass-storage probe before draining udev so the
+# by-label symlinks exist when we look for cidata. If a new USB mass-storage
+# interface appeared while udev was settling, wait for it too under the same
+# bounded deadline and settle once more.
+find_cidata || wait_pending_usb_storage
+udevadm settle 2>/dev/null || true
+[[ -n $device ]] || find_cidata || true
+
+if [[ -z $device ]] && ((SECONDS < deadline)) && has_pending_usb_storage; then
+  wait_pending_usb_storage
+  if [[ -z $device ]]; then
+    udevadm settle 2>/dev/null || true
+    find_cidata || true
+  fi
+fi
+
 [[ -n $device ]] || exit 1
 
 mkdir -p "$mnt"

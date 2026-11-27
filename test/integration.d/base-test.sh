@@ -677,10 +677,18 @@ EOF
   # before each line, and an attempt that still loses its console moves to a
   # fresh getty (tty3, tty4, tty5).
   local attempt vt waited deadline seen menus answered=0 up=false
-  for attempt in 1 2 3; do
+  local login_timeout=${LIVE_CONSOLE_TIMEOUT:-300}
+  local max_attempts=${LIVE_SSH_ATTEMPTS:-3}
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
     vt=$((attempt + 2))
     waited=0
     while true; do
+      if ! vm_running; then
+        kill "$HTTP_PID" 2>/dev/null || true
+        HTTP_PID=""
+        echo "VM exited while waiting for a live console login prompt" >&2
+        return 1
+      fi
       press "ctrl-alt-f$vt"
       sleep 4
       seen=$(ocr_screen)
@@ -699,8 +707,10 @@ EOF
       fi
       ((waited += 8))
 
-      if ((waited >= 300)); then
+      if ((waited >= login_timeout)); then
         capture_console "failure-live-console-timeout"
+        kill "$HTTP_PID" 2>/dev/null || true
+        HTTP_PID=""
         echo "Timed out waiting for a live console login prompt" >&2
         return 1
       fi
@@ -728,6 +738,8 @@ EOF
     deadline=$((SECONDS + 60))
     until ssh_live_root true 2>/dev/null && up=true; do
       if ! vm_running; then
+        kill "$HTTP_PID" 2>/dev/null || true
+        HTTP_PID=""
         echo "VM exited while waiting for live root SSH" >&2
         return 1
       fi
@@ -739,7 +751,9 @@ EOF
     log "Root SSH did not come up after the console login on tty$vt (attempt $attempt); retrying on the next VT"
   done
   if [[ $up != true ]]; then
-    echo "Live root SSH bootstrap failed after 3 console logins" >&2
+    kill "$HTTP_PID" 2>/dev/null || true
+    HTTP_PID=""
+    echo "Live root SSH bootstrap failed after $max_attempts console login(s)" >&2
     return 1
   fi
   capture_console "success-live-root-ssh"
@@ -945,19 +959,59 @@ installed_system_started() {
   grep -aqE 'starting Boot.*"(Limine|Omarchy Boot)"' "$1" 2>/dev/null
 }
 
+# Save the live ISO's installer log, state, kernel/journal logs, target disks,
+# and USB/cidata visibility best-effort after an unattended install stops,
+# drops to the greeter, or times out before the installed system boots.
+# Pass "bounded" when the guest may not be at a live console (e.g. a timeout
+# on BIOS/PXE or a hung firmware/kernel) so console login caps quickly instead
+# of waiting 300 s.
+collect_live_failure_artifacts() {
+  local mode="${1:-}"
+  [[ -n ${RUN_DIR:-} ]] || return 0
+  declare -F ssh_live_root >/dev/null || return 0
+  if declare -F vm_running >/dev/null && ! vm_running 2>/dev/null; then
+    return 0
+  fi
+
+  # The unattended path does not authorize root SSH on the live ISO, so
+  # without this the log copies below come back empty.
+  if ! ssh_live_root true 2>/dev/null; then
+    if declare -F bootstrap_live_root_ssh >/dev/null; then
+      if [[ $mode == bounded ]]; then
+        LIVE_CONSOLE_TIMEOUT=24 LIVE_SSH_ATTEMPTS=1 bootstrap_live_root_ssh 2>/dev/null || true
+      else
+        bootstrap_live_root_ssh 2>/dev/null || true
+      fi
+    fi
+    ssh_live_root true 2>/dev/null || return 0
+  fi
+
+  ssh_live_root "cat /var/log/omarchy-install.log" >"$RUN_DIR/omarchy-install.log" 2>/dev/null || true
+  ssh_live_root "cat /run/omarchy-install/state.json" >"$RUN_DIR/state.json" 2>/dev/null || true
+  # What the kernel saw: an I/O error in the installer is only explainable
+  # with the block and filesystem messages behind it.
+  ssh_live_root "dmesg" >"$RUN_DIR/dmesg.txt" 2>/dev/null || true
+  ssh_live_root "journalctl -b --no-pager -o short-precise | tail -n 400" >"$RUN_DIR/journal-tail.txt" 2>/dev/null || true
+  ssh_live_root "lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS; df -h /mnt /mnt/boot 2>/dev/null; btrfs device stats /mnt 2>/dev/null" >"$RUN_DIR/target-state.txt" 2>/dev/null || true
+  # Live root's login shell is zsh (NOMATCH enabled), so run under bash with
+  # nullglob: an unbound USB interface with no host* child yet must still print.
+  ssh_live_root "bash -c 'shopt -s nullglob; ls -la /dev/disk/by-label /run/cidata 2>&1; lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,TRAN,MOUNTPOINTS 2>&1; lsusb 2>&1 || true; for d in /sys/bus/usb/devices/*:*; do [ -r \"\$d/bInterfaceClass\" ] && [ \"\$(cat \"\$d/bInterfaceClass\")\" = \"08\" ] && echo \"\$d drv=\$(readlink \"\$d/driver\" 2>/dev/null || echo none) hosts=\$(echo \"\$d\"/host*)\"; done'" >"$RUN_DIR/live-usb-cidata.txt" 2>/dev/null || true
+}
+
 # Wait out an unattended cidata install to its reboot into the installed
 # system: SSH answering as the guest user is the success signal (cidata's
 # authorized_keys enables sshd there, and the live environment has no such
 # user, so there is no false positive from the installer phase). Presses the
 # Reboot Now prompt if one appears. Screenshot names take the given prefix so
-# each caller's artifacts stay apart; on a stopped install the live system's
-# log and state are saved best-effort (root SSH may not be authorized yet).
-# Given the VM's serial log, it also says when the install is over and the
-# first boot is what is being waited for.
+# each caller's artifacts stay apart; on a stopped install, greeter fallback,
+# or pre-reboot timeout the live system's log and state are saved best-effort
+# (root SSH may not be authorized yet). Given the VM's serial log, it also says
+# when the install is over and the first boot is what is being waited for.
 wait_for_unattended_install() {
   local prefix="$1" serial_log="${2:-}"
+  local started=$SECONDS elapsed=0 next_shot=0 next_note=0
   # shellcheck disable=SC2034 # answer_luks_prompt counts in blank_screens
-  local waited=0 text progress_name blank_screens=0 first_boot_at=""
+  local text progress_name blank_screens=0 greeter_screens=0 first_boot_at=""
 
   log "Waiting for the unattended install to finish (timeout ${INSTALL_TIMEOUT}s)"
   while true; do
@@ -967,22 +1021,57 @@ wait_for_unattended_install() {
       return 0
     fi
 
+    elapsed=$((SECONDS - started))
+
+    # Once the installed system has started, the install is over and what is
+    # being waited for is the first boot: say so, or a hung first boot reads
+    # as a slow install. Track this before timeout/greeter checks so a post-
+    # reboot timeout never tries to inspect the live ISO.
+    if [[ -n $serial_log && -z $first_boot_at ]] && installed_system_started "$serial_log"; then
+      first_boot_at=$elapsed
+      log "Install finished after about ${elapsed}s. Waiting for the installed system's first boot."
+    fi
+
     # Checked first, so every branch below that types and waits (the
     # passphrase prompts) counts against the budget too.
-    if ((waited >= INSTALL_TIMEOUT)); then
+    if ((elapsed >= INSTALL_TIMEOUT)); then
       capture_console "failure-$prefix-timeout"
+      if declare -F capture_vm_state >/dev/null; then
+        capture_vm_state "failure-$prefix-timeout" || true
+      fi
+      if [[ -z $first_boot_at ]] && declare -F collect_live_failure_artifacts >/dev/null; then
+        collect_live_failure_artifacts bounded
+      fi
       echo "Timed out after ${INSTALL_TIMEOUT}s waiting for install" >&2
       return 1
     fi
 
     text=$(ocr_screen)
 
-    # An encrypted install reboots into a passphrase prompt, which nothing
-    # else in an unattended run is there to answer.
-    if [[ $ENCRYPT == true ]] && answer_luks_prompt "$text" blank_screens install-luks-prompt; then
-      sleep 10
-      ((waited += 10))
-      continue
+    # If the live ISO missed the cidata drive it drops to the interactive
+    # greeter instead of starting an unattended install. Require two
+    # consecutive samples so a caller that just restarted the installer from a
+    # greeter screen (full-nvram) does not trip on stale text during poll 0.
+    if [[ -z $first_boot_at ]] && grep -qiE "Press Return to Start Install|Start Install|Linux by [DO]HH|Select keyboard layout" <<<"$text"; then
+      # shellcheck disable=SC2034 # answer_luks_prompt counts in blank_screens
+      blank_screens=0
+      if ((++greeter_screens >= 2)); then
+        capture_console "failure-$prefix-greeter"
+        if declare -F collect_live_failure_artifacts >/dev/null; then
+          collect_live_failure_artifacts
+        fi
+        echo "Unattended install fell back to the interactive greeter (cidata drive missed) — artifacts saved to ${RUN_DIR:-unknown}" >&2
+        return 1
+      fi
+    else
+      greeter_screens=0
+
+      # An encrypted install reboots into a passphrase prompt, which nothing
+      # else in an unattended run is there to answer.
+      if [[ $ENCRYPT == true ]] && answer_luks_prompt "$text" blank_screens install-luks-prompt; then
+        sleep 10
+        continue
+      fi
     fi
 
     if grep -qi "Reboot Now" <<<"$text"; then
@@ -993,18 +1082,10 @@ wait_for_unattended_install() {
 
     if grep -qi "installation stopped" <<<"$text"; then
       capture_console "failure-$prefix-stopped"
-      # The unattended path does not authorize root SSH on the live ISO, so
-      # without this the log copies below come back empty. The installer has
-      # exited to a shell on tty1; tty3 is free for the console login.
-      ssh_live_root true 2>/dev/null || bootstrap_live_root_ssh 2>/dev/null || true
-      ssh_live_root "cat /var/log/omarchy-install.log" >"$RUN_DIR/omarchy-install.log" 2>/dev/null || true
-      ssh_live_root "cat /run/omarchy-install/state.json" >"$RUN_DIR/state.json" 2>/dev/null || true
-      # What the kernel saw: an I/O error in the installer is only explainable
-      # with the block and filesystem messages behind it.
-      ssh_live_root "dmesg" >"$RUN_DIR/dmesg.txt" 2>/dev/null || true
-      ssh_live_root "journalctl -b --no-pager -o short-precise | tail -n 400" >"$RUN_DIR/journal-tail.txt" 2>/dev/null || true
-      ssh_live_root "lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS; df -h /mnt /mnt/boot 2>/dev/null; btrfs device stats /mnt 2>/dev/null" >"$RUN_DIR/target-state.txt" 2>/dev/null || true
-      echo "Install failed — artifacts saved to $RUN_DIR" >&2
+      if declare -F collect_live_failure_artifacts >/dev/null; then
+        collect_live_failure_artifacts
+      fi
+      echo "Install failed — artifacts saved to ${RUN_DIR:-unknown}" >&2
       return 1
     fi
 
@@ -1015,27 +1096,25 @@ wait_for_unattended_install() {
 
     # A line every 30 s so a slow runner never looks hung; a screenshot of
     # the installer's dashboard every 2 min, which is enough to see progress.
-    if ((waited % 120 == 0)); then
-      printf -v progress_name 'success-%s-progress-%04ds' "$prefix" "$waited"
+    if ((elapsed >= next_shot)); then
+      printf -v progress_name 'success-%s-progress-%04ds' "$prefix" "$elapsed"
       capture_console "$progress_name"
+      while ((next_shot <= elapsed)); do
+        ((next_shot += 120))
+      done
     fi
-    # Once the installed system has started, the install is over and what is
-    # being waited for is the first boot: say so, or a hung first boot reads
-    # as a slow install.
-    if [[ -n $serial_log && -z $first_boot_at ]] && installed_system_started "$serial_log"; then
-      first_boot_at=$waited
-      log "Install finished after about ${waited}s. Waiting for the installed system's first boot."
-    fi
-    if ((waited % 30 == 0)); then
+    if ((elapsed >= next_note)); then
       if [[ -n $first_boot_at ]]; then
-        echo "    ... first boot ($((waited - first_boot_at))s, install took about ${first_boot_at}s)"
+        echo "    ... first boot ($((elapsed - first_boot_at))s, install took about ${first_boot_at}s)"
       else
-        echo "    ... installing (${waited}s)"
+        echo "    ... installing (${elapsed}s)"
       fi
+      while ((next_note <= elapsed)); do
+        ((next_note += 30))
+      done
     fi
 
     sleep 10
-    ((waited += 10))
   done
 }
 

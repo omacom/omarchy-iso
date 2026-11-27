@@ -135,7 +135,7 @@ guest() { # a command, run on the installed system as its user
 
 # --- install and first boot ------------------------------------------------
 # The live ISO runs sshd too, but only the installed system has this user.
-start=$(date +%s) timeout=${TIMEOUT:-1500} tick=0
+start=$(date +%s) timeout=${TIMEOUT:-1500} tick=0 greeter_ticks=0
 until guest true 2>/dev/null; do
   elapsed=$(( $(date +%s) - start ))
   if ! kill -0 "$(cat "$state/qemu.pid")" 2>/dev/null; then
@@ -158,6 +158,15 @@ until guest true 2>/dev/null; do
       cp "$shot" "$out/shots/halted.png"
       echo "$text" >&2
       echo "arm64-install: the installer stopped after $elapsed s (shots/halted.png)" >&2; exit 1
+    fi
+    if grep -qiE 'Press Return to Start Install|Start Install|Linux by [DO]HH|Select keyboard layout' <<<"$text"; then
+      if (( ++greeter_ticks >= 2 )); then
+        cp "$shot" "$out/shots/greeter.png"
+        echo "$text" >&2
+        echo "arm64-install: fell back to interactive greeter (cidata drive missed) after $elapsed s (shots/greeter.png)" >&2; exit 1
+      fi
+    else
+      greeter_ticks=0
     fi
     if grep -qi 'Reboot Now' <<<"$text"; then
       echo "  $elapsed s: the installer is done; rebooting"

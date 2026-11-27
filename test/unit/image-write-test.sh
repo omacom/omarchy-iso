@@ -177,7 +177,7 @@ disk=$(mktemp -d -p /var/tmp)
 trap 'rm -rf "$work" "$disk"' EXIT
 cp "$image" "$disk/image.zst"
 cache() {
-  python3 - "$disk/image.zst" "$1" <<'PY'
+  python3 - "${2:-$disk/image.zst}" "$1" <<'PY'
 import os, sys
 fd = os.open(sys.argv[1], os.O_RDONLY)
 os.fsync(fd)
@@ -218,17 +218,14 @@ pass "uncached and partially cached writes report final progress cleanly"
 
 cp "$image" "$disk/corrupt.zst"
 printf '\xff' | dd of="$disk/corrupt.zst" bs=1 seek=1000 conv=notrunc status=none
-python3 - "$disk/corrupt.zst" <<'PY'
-import os, sys
-fd = os.open(sys.argv[1], os.O_RDONLY)
-os.fsync(fd)
-os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
-PY
-target "$work/target" 0
-run write "$disk/corrupt.zst" "$work/target" 4
-[[ $status == 1 ]] || fail "cold corrupt frame fails cleanly without hanging" "status $status: $(cat "$work/stderr")"
-grep -q "frame 0:" "$work/stderr" || fail "cold corrupt frame names frame 0" "$(cat "$work/stderr")"
-pass "cold corrupt frame fails cleanly without deadlocking"
+for state in none half; do
+  cache "$state" "$disk/corrupt.zst"
+  target "$work/target" 0
+  run write "$disk/corrupt.zst" "$work/target" 4
+  [[ $status == 1 ]] || fail "$state-cached corrupt frame fails cleanly without hanging" "status $status: $(cat "$work/stderr")"
+  grep -q "frame 0:" "$work/stderr" || fail "$state-cached corrupt frame names frame 0" "$(cat "$work/stderr")"
+done
+pass "cold and partial-cache corrupt frames fail cleanly without deadlocking"
 
 # Partial-cache runs drop source page cache (POSIX_FADV_DONTNEED) so low-RAM
 # machines do not fill RAM with already-consumed image pages; fully cached runs
@@ -461,6 +458,35 @@ run write-squashfs "$disk/image.sfs" "$work/target" 3
 [[ $status == 0 ]] && grep -q "(11 frames, 2 zero, 11 cached, 3 threads)" "$work/stderr" ||
   fail "write-squashfs orders by what the page cache holds of the squashfs" "$(cat "$work/stderr")"
 pass "write-squashfs orders by what the page cache holds of the squashfs"
+
+# Cold and partially cached SquashFS writes cover stored blocks (0-3), sparse
+# zero blocks (4-5), compressed blocks (6-10), final progress, timing bounds,
+# and POSIX_FADV_DONTNEED cache eviction through the two-stage reader path.
+for state in none half; do
+  cache "$state" "$disk/image.sfs"
+  target "$work/target" 170
+  rm -f "$work/progress-sfs-$state"
+  OMARCHY_IMAGE_WRITE_PROGRESS="$work/progress-sfs-$state" run write-squashfs "$disk/image.sfs" "$work/target" 4
+  [[ $status == 0 ]] || fail "write-squashfs with $state cached succeeds" "$(cat "$work/stderr")"
+  [[ $(cat "$work/progress-sfs-$state" 2>/dev/null) == "11 11" ]] ||
+    fail "write-squashfs with $state cached reports final progress" "progress '$(cat "$work/progress-sfs-$state" 2>/dev/null)'"
+  cached=$(sed -n 's/.* \([0-9]*\) cached,.*/\1/p' "$work/stderr")
+  ((cached < 11)) || fail "write-squashfs with $state cached enters uncached path" "$(cat "$work/stderr")"
+  python3 - "$work/target" "$raw" "$work/stderr" <<'PY' || fail "write-squashfs with $state cached output and timing valid" "$(cat "$work/stderr")"
+import re, sys
+frame = 256 * 1024
+target, raw, text = open(sys.argv[1], "rb").read(), open(sys.argv[2], "rb").read(), open(sys.argv[3]).read()
+assert target[4 * frame:6 * frame] == bytes([170]) * 2 * frame
+assert target[:4 * frame] == raw[:4 * frame] and target[6 * frame:] == raw[6 * frame:]
+m = re.search(r"thread-seconds decoding ([\d.]+), writing ([\d.]+), skipping ([\d.]+), of ([\d.]+)$", text, re.M)
+assert m, "no timing line"
+decoding, writing, skipping, available = map(float, m.groups())
+assert decoding + writing + skipping <= available + 0.02, m.group(0)
+PY
+  read -r res tot < <(resident_pages "$disk/image.sfs")
+  ((res <= 2)) || fail "write-squashfs with $state cached drops consumed pages" "got $res/$tot resident"
+done
+pass "cold and partial-cache write-squashfs reproduces stored/sparse blocks, reports progress, and drops cache"
 
 # Sparse blocks are left unwritten: over a target of 170s, frames 4 and 5 keep
 # the 170s and everything else is the image.

@@ -1021,12 +1021,14 @@ static void *worker(void *arg)
 			pthread_mutex_lock(&stage_mu);
 			while (!workers_ready && !atomic_load(&failed))
 				pthread_cond_wait(&stage_cv, &stage_mu);
+			if (atomic_load(&failed)) {
+				pthread_mutex_unlock(&stage_mu);
+				goto out;
+			}
 			stage1_done++;
 			if (stage1_done >= expected_workers && !stage2_start) {
-				if (!atomic_load(&failed)) {
-					posix_fadvise(src_fd, 0, 0, POSIX_FADV_DONTNEED);
-					posix_fadvise(src_fd, 0, 0, POSIX_FADV_SEQUENTIAL);
-				}
+				posix_fadvise(src_fd, 0, 0, POSIX_FADV_DONTNEED);
+				posix_fadvise(src_fd, 0, 0, POSIX_FADV_SEQUENTIAL);
 				stage2_start = 1;
 				pthread_cond_broadcast(&stage_cv);
 			} else {

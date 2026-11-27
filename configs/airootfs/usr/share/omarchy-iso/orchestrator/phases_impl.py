@@ -692,7 +692,7 @@ def arch_install_system(ctx: InstallContext) -> None:
         # starting Argon2id before F1.image_write evicts ~1 GiB of cached root
         # image pages back to the USB stick; start it right after instead, where
         # it still overlaps boot/system setup and finishes before @factory.
-        if _can_overlap_luks_with_image_write():
+        if ctx.state.get("luks_deferred_keyslots") and _can_overlap_luks_with_image_write():
             _start_luks_keyslot_enroll(ctx)
         with _time_step("STEP.install_root_image"):
             _install_root_image(ctx)
@@ -1111,15 +1111,15 @@ def _boot_medium_scheduler_path() -> Path | None:
     source = _findmnt_value(BOOT_MEDIUM_MOUNT, "SOURCE")
     if not source or not source.startswith("/dev/"):
         return None
-    dev = SYSFS_BLOCK / Path(source).resolve().name
-    direct = dev / "queue" / "scheduler"
-    if direct.is_file():
-        return direct
     try:
+        dev = SYSFS_BLOCK / Path(source.split("[", 1)[0]).resolve().name
+        direct = dev / "queue" / "scheduler"
+        if direct.is_file():
+            return direct
         parent = dev.resolve().parent / "queue" / "scheduler"
+        return parent if parent.is_file() else None
     except OSError:
         return None
-    return parent if parent.is_file() else None
 
 
 @contextmanager
@@ -1886,13 +1886,13 @@ def _can_overlap_luks_with_image_write() -> bool:
     headroom to avoid evicting the cached root image on low-RAM machines."""
     from . import luks_calibration
 
-    image_bytes = 0
     try:
         container = _root_image()
-        if container.is_file():
-            image_bytes = container.stat().st_size
+        image_bytes = container.stat().st_size
     except (OSError, RuntimeError):
-        image_bytes = 0
+        return False
+    if image_bytes <= 0:
+        return False
     return luks_calibration.can_overlap_image_write(image_bytes)
 
 

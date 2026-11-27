@@ -37,7 +37,7 @@ from archinstall.lib.log import debug
 # here: in the install VM the image write onto the virtio disk takes
 # 6.7-7.5 s with it and 5.0 s without, although a plain dd of zeros is
 # faster with it (2.3 s against 3.4 s).
-OPEN_FLAGS = ["--persistent", "--allow-discards", "--perf-no_read_workqueue"]
+from .luks_calibration import OPEN_FLAGS
 # The same options as the busybox encrypt hook and crypttab spell them.
 CMDLINE_OPTIONS = "allow-discards,no-read-workqueue"
 

@@ -56,6 +56,12 @@ from pathlib import Path
 from . import archinstall_adapter as arch
 from .command import capture, capture_identifier, require_text
 from .context import InstallContext, hw_platform, iso_kernel
+from .free_space import (
+    execute_free_space_plan,
+    free_space_plan,
+    rollback_free_space_parts,
+    validate_free_space_plan,
+)
 from .keyboard import configure_keyboard
 from .phases import write_state
 from .region import GLOBAL
@@ -334,6 +340,10 @@ def prepare_install_target(ctx: InstallContext) -> None:
     that leaves a wiped (or wiped and encrypted) disk with no system on it:
     so the image, its checksum and a layout the image can land on are all
     checked here, where failing costs nothing."""
+    if free_space_plan(ctx) is not None:
+        verify_install_medium(ctx)
+        validate_free_space_plan(ctx)
+        return
     if ctx.is_protected:
         verify_protected_mounts(ctx)
         # The protected layout exists already; check the real mounts.
@@ -639,7 +649,11 @@ def arch_install_system(ctx: InstallContext) -> None:
     config = handler.config
     pre_mounted = arch.is_pre_mount(config)
 
-    if not pre_mounted:
+    if free_space_plan(ctx) is not None:
+        info("› partitioning + formatting + encrypting (free space)")
+        with _time_step("STEP.perform_filesystem_operations"):
+            execute_free_space_plan(ctx)
+    elif not pre_mounted:
         replaced_guids: set[str] = set()
         if config.disk_config:
             for mod in getattr(config.disk_config, "device_modifications", ()):
@@ -5569,10 +5583,19 @@ def cleanup_protected_state(ctx: InstallContext) -> None:
     """Tear down protected-mode mounts and LUKS mapper after a failed install.
 
     Idempotent and safe to call multiple times. Successful protected installs
-    intentionally keep the target mounted until reboot.
+    intentionally keep the target mounted until reboot. For orchestrator-driven
+    free-space installs, also removes ONLY the partitions created in this run.
     """
     if not ctx.is_protected:
         return
+
+    btrfs_root = ctx.target / "btrfs-root"
+    if os.path.ismount(btrfs_root):
+        subprocess.run(["umount", str(btrfs_root)], check=False, capture_output=True)
+    try:
+        btrfs_root.rmdir()
+    except OSError:
+        pass
 
     # Swapoff, umount -R, and close of the mappers the mounts were backed by;
     # shared with the dashboard's pre-reboot release. omarchy_root is named
@@ -5587,3 +5610,5 @@ def cleanup_protected_state(ctx: InstallContext) -> None:
     )
     for line in (result.stderr or "").splitlines():
         info(f"release: {line}")
+
+    rollback_free_space_parts(ctx)

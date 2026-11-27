@@ -577,6 +577,92 @@ class DeferredKeyslot:
         self._done = True
 
 
+OPEN_FLAGS = ("--persistent", "--allow-discards", "--perf-no_read_workqueue")
+
+
+def format_and_open_luks(
+    device: str,
+    mapper_name: str,
+    passphrase: bytes,
+    *,
+    open_flags: tuple[str, ...] = OPEN_FLAGS,
+) -> DeferredKeyslot | None:
+    """Format `device` as LUKS2 (4096-byte sectors when size divides 4096) and
+    open it at `/dev/mapper/<mapper_name>` with the generated volume key.
+
+    When `can_defer_keyslot()` holds, formats with a fast temporary PBKDF2
+    slot 1 (~20 ms), opens via `--volume-key-file` (keeping the volume key
+    alive), and returns a `DeferredKeyslot` ready to enroll Argon2id slot 0
+    and kill slot 1 in the background. Otherwise runs calibrated synchronous
+    Argon2id `luksFormat`, opens via `--volume-key-file`, deletes the volume
+    key, and returns None.
+
+    Passphrase bytes are piped on stdin and never appear in argv. Temporary
+    key files are always unlinked on error before re-raising.
+    """
+    if not isinstance(passphrase, (bytes, bytearray)) or not passphrase:
+        raise RuntimeError("LUKS encryption requires a non-empty passphrase")
+    volume_key = new_volume_key()
+    temp_keyfile: Path | None = None
+    deferred_entry: DeferredKeyslot | None = None
+    try:
+        if can_defer_keyslot():
+            stop_calibration(wait=0)
+            base_cmd = [
+                "cryptsetup", "--type", "luks2", "--batch-mode",
+                "--pbkdf", "argon2id", "--key-size", str(KEY_SIZE),
+                "--iter-time", str(ITER_TIME), "luksFormat", device,
+            ]
+            temp_keyfile = new_volume_key(256)
+            split = deferred_format_command(base_cmd, volume_key, temp_keyfile)
+            if split is not None:
+                fast_cmd, enroll_cmd, kill_cmd = split
+                if not _has_fixed_iterations(enroll_cmd):
+                    stop_early_keyring()
+                subprocess.run(fast_cmd, check=True)
+                deferred_entry = DeferredKeyslot(
+                    device=device,
+                    volume_key=volume_key,
+                    temp_keyfile=temp_keyfile,
+                    enroll_cmd=enroll_cmd,
+                    kill_cmd=kill_cmd,
+                    passphrase=bytes(passphrase),
+                )
+            else:
+                temp_keyfile.unlink(missing_ok=True)
+                temp_keyfile = None
+        if deferred_entry is None:
+            stop_calibration()
+            sync_cmd = format_command(
+                [
+                    "cryptsetup", "luksFormat", device, "--type", "luks2",
+                    "--batch-mode", "--pbkdf", "argon2id",
+                    "--key-size", str(KEY_SIZE), "--iter-time", str(ITER_TIME), "-",
+                ],
+                volume_key,
+            )
+            pretouch_for_format(sync_cmd)
+            subprocess.run(sync_cmd, input=bytes(passphrase), check=True)
+        subprocess.run(
+            [
+                "cryptsetup", "open", *open_flags,
+                "--volume-key-file", str(volume_key), device, mapper_name,
+            ],
+            check=True,
+        )
+    except BaseException:
+        if deferred_entry is not None:
+            deferred_entry.abort()
+        else:
+            volume_key.unlink(missing_ok=True)
+            if temp_keyfile is not None:
+                temp_keyfile.unlink(missing_ok=True)
+        raise
+    if deferred_entry is None:
+        volume_key.unlink(missing_ok=True)
+    return deferred_entry
+
+
 def main() -> None:
     if sys.argv[1:] == ["calibrate"]:
         calibrate()

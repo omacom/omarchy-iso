@@ -745,8 +745,6 @@ get_root_disk() {
   fi
 }
 
-# partition_path lives in disk-partitioning.sh alongside the creation helpers.
-
 # BitLocker writes the "-FVE-FS-" signature at offset 3 of the partition.
 # tr drops the NUL bytes other partitions have there (LUKS, ext4, btrfs)
 # before bash reads them: bash drops them too, but warns on the installer's
@@ -897,24 +895,6 @@ else
             {"url": "https://geo.mirror.pkgbuild.com/$repo/os/$arch"}'
 fi
 
-# wait_for_device lives in disk-partitioning.sh: it now reports failure, and
-# every caller here aborts on it.
-
-# disk_step and create_partition fail through this rather than abort() so a
-# half-built layout is undone before the user is handed back their disk.
-disk_abort_hook() {
-  # A format or an open that failed leaves the volume key it was given.
-  [[ -z ${luks_volume_key:-} ]] || rm -f "$luks_volume_key"
-  # Release the target before reclaiming its partitions: a mounted filesystem
-  # or an open LUKS mapping would keep parted from removing them.
-  umount -R /mnt 2>/dev/null || true
-  umount /mnt/btrfs-root 2>/dev/null || true
-  rmdir /mnt/btrfs-root 2>/dev/null || true
-  cryptsetup close omarchy_root 2>/dev/null || true
-  rollback_created_parts "$disk"
-  abort "$1"
-}
-
 # Save the configurator answers the installer consumes: encryption choice as a
 # plain file, account details as archinstall credentials. The git identity is
 # asked for after first login rather than here.
@@ -987,8 +967,8 @@ not_enough_space() {
   return 1
 }
 
-# Decide half of the free-space install: checks, free-space analysis, and the
-# encryption confirm. Sets the globals run_partition_execute needs. Returns 1
+# Plan half of the free-space install: checks, free-space analysis, and the
+# encryption confirm. Sets the globals write_free_space_config needs. Returns 1
 # to fall back to the install-mode picker.
 run_partition_decide() {
   step "$(t bitlocker.checking "$disk")"
@@ -1024,7 +1004,7 @@ run_partition_decide() {
 
   step "$(t space.analyzing "$disk")"
   partprobe "$disk" 2>/dev/null || true
-  settle_devices
+  settle_devices "$disk"
 
   # An unlabeled disk has no partition table for parted to scan, so we
   # synthesize a whole-disk free region and mklabel gpt before mkpart.
@@ -1141,160 +1121,27 @@ run_partition_decide() {
 
   kernel_choice=$(detect_kernel)
 
-  # Partition numbers are not knowable until parted assigns them (it fills the
-  # lowest free GPT slot, and freeing space by deleting a partition leaves one
-  # below the highest). run_partition_execute reads them back after creation;
-  # a dry run has nothing to read.
-  efi_part_num=""
-  root_part_num=""
-  efi_dev="<assigned at creation>"
-  root_partition_device="<assigned at creation>"
-  root_mapper="<assigned at creation>"
-  if [[ "$encrypt_installation" == "true" ]]; then
-    root_mapper="/dev/mapper/omarchy_root"
-  fi
 }
 
-# Execute half of the free-space install: partition, format, mount, and write
-# the pre-mounted (protected) install configuration. Runs after the user step
-# so LUKS can be formatted with the user's password.
-run_partition_execute() {
-  local dry=false subvol
-  [[ "${1:-}" == "dry" ]] && dry=true
-
-  if $dry; then
+# Emit the pre-mounted (protected) install configuration carrying the
+# free-space partition plan. The orchestrator verifies the install medium,
+# validates the plan, and executes partitioning, LUKS, formatting, and mounts
+# under the install dashboard, matching full-disk sequencing and timing.
+write_free_space_config() {
+  if [[ "${1:-}" == "dry" ]]; then
     $needs_mklabel && say "[dry] would initialize GPT on $disk"
     say "[dry] would create an EFI partition and a root partition in the free region"
     say "[dry] partition numbers are assigned by parted at creation, then read back"
     say "[dry] encrypted=$encrypt_installation kernel=$kernel_choice"
-  else
-    step "$(t partitions.creating "$disk")"
-    if $needs_mklabel; then
-      disk_step "initializing GPT on $disk" parted --script "$disk" mklabel gpt
-      partprobe "$disk" 2>/dev/null || true
-      settle_devices
-    fi
-
-    # create_partition reports the number parted actually used; nothing here
-    # may assume it. It sets created_partition_number rather than printing so
-    # the rollback bookkeeping survives (a $(...) would subshell it away).
-    create_partition "$disk" "$EFI_START_B" "$EFI_END_B" fat32 OMARCHY_EFI ||
-      disk_abort_hook "$(t partitions.efiFailed "$disk")"
-    efi_part_num="$created_partition_number"
-
-    create_partition "$disk" "$ROOT_START_B" "$ROOT_END_B" btrfs OMARCHY_ROOT ||
-      disk_abort_hook "$(t partitions.rootFailed "$disk")"
-    root_part_num="$created_partition_number"
-
-    disk_step "flagging partition $efi_part_num as ESP" \
-      parted --script "$disk" set "$efi_part_num" esp on
-
-    efi_dev=$(partition_path "$disk" "$efi_part_num")
-    root_partition_device=$(partition_path "$disk" "$root_part_num")
-
-    # Its warnings go to stderr, which reaches the tty unpadded; keep them in
-    # the log.
-    partprobe "$disk" 2>>"${OMARCHY_INSTALL_LOG_FILE:-/dev/null}"
-    sync
-    settle_devices
-
-    wait_for_device "$efi_dev" || disk_abort_hook "$(t partitions.efiMissing "$efi_dev")"
-    wait_for_device "$root_partition_device" ||
-      disk_abort_hook "$(t partitions.rootMissing "$root_partition_device")"
-
-    # Both partitions are ours and brand new, but the space they occupy may
-    # carry signatures from whatever was deleted to free it.
-    disk_step "clearing stale signatures on $efi_dev" wipefs -af "$efi_dev"
-    disk_step "clearing stale signatures on $root_partition_device" wipefs -af "$root_partition_device"
-
-    if [[ "$encrypt_installation" == "true" ]]; then
-      step "$(t partitions.luks "$root_partition_device")"
-      # Through disk_step like the rest of the layout, so what cryptsetup and
-      # the calibration print lands in the install log, not unpadded on the
-      # screen. The passphrase comes from printf, a builtin, through a pipe:
-      # never an argv the process table can show, and no trailing newline,
-      # which cryptsetup would read as part of the key.
-      # The same persistent open flags as orchestrator/luks_tuning.py: the
-      # free-space path formats and opens here, before the orchestrator runs,
-      # so that tuning does not reach it.
-      # The open uses the volume key the format was given, in a root-only
-      # file on tmpfs, so it does not derive the passphrase's key a second
-      # time (2 s). The file goes once the volume is open, or when either
-      # step fails (disk_abort_hook).
-      luks_volume_key=$(omarchy-luks-calibrate volume-key)
-      disk_step "Formatting LUKS2 on $root_partition_device" \
-        omarchy-luks-calibrate format "$root_partition_device" "$luks_volume_key" < <(printf "%s" "$password")
-      disk_step "Opening the encrypted root on $root_partition_device" \
-        cryptsetup open --persistent --allow-discards --perf-no_read_workqueue \
-          --volume-key-file "$luks_volume_key" "$root_partition_device" omarchy_root
-      rm -f "$luks_volume_key"
-      luks_volume_key=""
-      root_mapper="/dev/mapper/omarchy_root"
-    else
-      root_mapper="$root_partition_device"
-    fi
-
-    step "$(t partitions.btrfs)"
-    # -K: no whole-device TRIM first. mkfs.btrfs discards the entire
-    # partition by default, which through dm-crypt takes seconds on a 1 TB
-    # SSD (and much longer on a DRAM-less one), before the install timer even
-    # starts. The root image is written over this filesystem anyway, and the
-    # orchestrator trims the filesystem's free space once the install timer
-    # has stopped (phases_impl.trim_target). The full-disk path passes -K too
-    # (archinstall_adapter).
-    disk_step "creating the Btrfs filesystem on $root_mapper" \
-      mkfs.btrfs -K -f -L OMARCHY "$root_mapper"
-    wait_for_device "$root_mapper" || disk_abort_hook "$(t partitions.deviceMissing "$root_mapper")"
-
-    mkdir -p /mnt/btrfs-root
-    disk_step "mounting $root_mapper" mount "$root_mapper" /mnt/btrfs-root
-    for subvol in @ @home @log @pkg; do
-      disk_step "creating subvolume $subvol" btrfs subvolume create "/mnt/btrfs-root/$subvol"
-    done
-    umount /mnt/btrfs-root 2>>"${OMARCHY_INSTALL_LOG_FILE:-/dev/null}"
-    rmdir /mnt/btrfs-root 2>>"${OMARCHY_INSTALL_LOG_FILE:-/dev/null}"
-
-    disk_step "mounting the target root" \
-      mount -o noatime,compress=zstd,subvol=@ "$root_mapper" /mnt
-    mkdir -p /mnt/home /mnt/var/log /mnt/var/cache/pacman/pkg /mnt"$esp_mount_in_target"
-    disk_step "mounting /home" \
-      mount -o noatime,compress=zstd,subvol=@home "$root_mapper" /mnt/home
-    disk_step "mounting /var/log" \
-      mount -o noatime,compress=zstd,subvol=@log "$root_mapper" /mnt/var/log
-    disk_step "mounting the package cache" \
-      mount -o noatime,compress=zstd,subvol=@pkg "$root_mapper" /mnt/var/cache/pacman/pkg
-
-    disk_step "creating the ESP filesystem on $efi_dev" mkfs.fat -F32 -n OMARCHY_EFI "$efi_dev"
-    # Typed, not probed: an unrecognised probe walks /proc/filesystems, and on
-    # the live ISO squashfs answers first.
-    disk_step "mounting the ESP" mount -t vfat "$efi_dev" /mnt"$esp_mount_in_target"
-
-    # The orchestrator's first act is to verify this handoff. Check it here so
-    # a failure names the step that broke rather than surfacing later as
-    # "protected mode: /mnt is not a mountpoint".
-    mountpoint -q /mnt ||
-      disk_abort_hook "$(t partitions.targetUnmounted)"
-    mountpoint -q "/mnt$esp_mount_in_target" ||
-      disk_abort_hook "$(t partitions.espUnmounted "/mnt$esp_mount_in_target")"
-  fi
-
-  local luks_uuid_json="null" luks_uuid
-  if [[ "$encrypt_installation" == "true" ]]; then
-    if $dry; then
-      luks_uuid="00000000-0000-0000-0000-000000000000"
-    else
-      luks_uuid=$(blkid -s UUID -o value "$root_partition_device")
-    fi
-    luks_uuid_json="\"$luks_uuid\""
   fi
 
   # enable_fallback writes the loader to EFI/BOOT/BOOTX64.EFI as well as
   # EFI/limine. That path is only ever claimed on the Omarchy ESP, which
-  # run_partition_execute just created, wipefs'd and mkfs.fat'd in free
-  # space; the Windows ESP is never mounted here. Firmware that drops or
-  # ignores the "Limine" NVRAM entry (some AMI/MSI boards) still finds the
-  # install through the removable-media path, which is the only route left
-  # when a boot variable does not survive.
+  # the orchestrator creates, wipefs's and mkfs.fat's in free space; the
+  # Windows ESP is never mounted here. Firmware that drops or ignores the
+  # "Limine" NVRAM entry (some AMI/MSI boards) still finds the install
+  # through the removable-media path, which is the only route left when a
+  # boot variable does not survive.
   cat <<-_EOF_ >user_configuration.json
 {
     "app_config": null,
@@ -1316,11 +1163,20 @@ run_partition_execute() {
             "enable_fallback": true
         },
         "storage": {
-            "esp_device": "$efi_dev",
-            "root_device": "$root_partition_device",
-            "root_mapper": "$root_mapper",
-            "luks_uuid": $luks_uuid_json,
+            "esp_device": null,
+            "root_device": null,
+            "root_mapper": null,
+            "luks_uuid": null,
             "kernel": "$kernel_choice"
+        },
+        "free_space_plan": {
+            "disk": "$disk",
+            "needs_mklabel": $needs_mklabel,
+            "efi_start_b": $EFI_START_B,
+            "efi_end_b": $EFI_END_B,
+            "root_start_b": $ROOT_START_B,
+            "root_end_b": $ROOT_END_B,
+            "encrypt": $encrypt_installation
         }
     },
     "disk_config": {
@@ -1413,7 +1269,7 @@ disk_form() {
 # The fixed sleeps that stood here (1-2 s each) waited longer than that on
 # every machine and not long enough on a slow one.
 settle_devices() {
-  udevadm settle --timeout=10 2>/dev/null || true
+  settle_disk_devices "${1:-}" 10
 }
 
 # STEP 4: INSTALL MODE
@@ -1430,7 +1286,7 @@ open_partition_tool() {
   cfdisk "$disk" || true
   partprobe "$disk" 2>/dev/null || true
   sync
-  settle_devices
+  settle_devices "$disk"
 }
 
 # If the disk has no partition table or no unallocated free space, the only
@@ -1680,25 +1536,7 @@ clear
 write_user_files
 
 if [[ $install_target == "free_space" ]]; then
-  # Refuse a corrupt or missing install medium before we partition or format
-  # anything. The full-disk path clears this in the orchestrator before
-  # archinstall formats; the free-space path formats here, in the configurator,
-  # so it runs the same gate first. omarchy-wait-root-image-verify collects the
-  # boot-time hasher's verdict, waiting for it if it is still running. (2>&1
-  # 1>/dev/null captures stderr, where the failure message is, and drops the
-  # boot-medium/scheduler line on stdout — the orchestrator logs that later.
-  # OMARCHY_VERIFY_PROGRESS routes a live percent line straight to the
-  # terminal while the hash is still running, so a wait on a slow medium
-  # shows movement instead of a frozen step header.)
-  if [[ ${1:-} != "dry" ]]; then
-    step "$(t verify.title)"
-    if ! verify_error=$(OMARCHY_VERIFY_PROGRESS=/dev/tty OMARCHY_VERIFY_PROGRESS_INDENT="$PADDING_LEFT" \
-      omarchy-wait-root-image-verify 2>&1 1>/dev/null); then
-      abort "$(head -1 <<<"$verify_error")"
-    fi
-  fi
-
-  run_partition_execute "$@"
+  write_free_space_config "$@"
 
   if [[ ${1:-} == "dry" ]]; then
     print_dry_run_files

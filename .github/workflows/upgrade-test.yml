@@ -57,9 +57,7 @@ jobs:
           # (4.5.0-rc2 onward) or omarchy-<version>rc<N>.iso (earlier candidates).
           [[ $version =~ ^[0-9]+(\.[0-9]+)+(-?rc[0-9]+)?$ ]] || { echo "::error::'$version' is not a release version"; exit 1; }
           echo "version=$version" | tee -a "$GITHUB_OUTPUT"
-          # Releases before 4.0.4 installed linux; their offline mirror has no linux-omarchy.
-          kernel=linux-omarchy
-          [[ $(printf '%s\n' "${version%%[-r]*}" 4.0.4 | sort -V | head -n 1) == "4.0.4" ]] || kernel=linux
+          kernel=$(./test/vm-image/release-kernel "$version")
           echo "kernel=$kernel" | tee -a "$GITHUB_OUTPUT"
 
       # Good only if the signature is the release key's, the one in this repo.

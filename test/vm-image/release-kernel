@@ -1,0 +1,17 @@
+#!/bin/bash
+# Prints the kernel a release's unattended install asks for.
+#
+#   release-kernel <version>
+#
+# Releases before 4.0.4 installed linux and carry no linux-omarchy in their
+# offline mirror. A release candidate counts as the release it leads to, under
+# either spelling (4.5.0-rc2, 4.6.0rc1).
+set -euo pipefail
+[[ $# -eq 1 ]] || { sed -n '2,8p' "$0" >&2; exit 2; }
+[[ $1 =~ ^[0-9]+(\.[0-9]+)+(-?rc[0-9]+)?$ ]] || { echo "release-kernel: '$1' is not a release version" >&2; exit 1; }
+release=${1%%[-r]*}
+if [[ $(printf '%s\n' "$release" 4.0.4 | sort -V | head -n 1) == "4.0.4" ]]; then
+  echo linux-omarchy
+else
+  echo linux
+fi

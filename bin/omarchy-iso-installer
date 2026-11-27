@@ -59,8 +59,7 @@ simulate_install() {
     "Preparing install target" 0.3
     "Installing Arch + Omarchy" 5.0
     "Configuring system" 1.2
-    "Finalizing Limine boot" 1.0
-    "Finalizing user" 1.0
+    "Finalizing boot and user" 2.0
     "Configuring login" 0.6
     "Configuring DNS resolver" 0.3
     "Validating boot setup" 0.8

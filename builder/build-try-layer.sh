@@ -715,6 +715,28 @@ if [[ -n $pacman_conf ]]; then
   pacstrap -C "$pacman_conf" -c -G -M "$merged" sof-firmware alsa-firmware >/dev/null
 fi
 
+# Try is an ephemeral live session that resets on reboot, so pre-installed
+# Neovim plugins need their working trees, not ~23 MiB of git history.
+rm -rf "$merged/home/$TRY_USER"/.local/share/nvim/lazy/*/.git
+
+# omarchy-provision-user copies the default theme's wallpapers and intro video
+# into the Try user's state directory. Replace files that match the image's
+# /usr/share/omarchy/themes/ copy byte-for-byte with symlinks so Try keeps
+# every wallpaper and intro (omarchy-theme-bg-next follows symlinks via find -L)
+# without duplicating ~16 MiB of media inside omarchy-try.sfs.
+try_theme_bgs="$merged/home/$TRY_USER/.local/state/omarchy/current/theme/backgrounds"
+if [[ -d $try_theme_bgs && -d $merged/usr/share/omarchy/themes ]]; then
+  while IFS= read -r -d '' bg; do
+    rel=${bg#"$try_theme_bgs/"}
+    for src in "$merged"/usr/share/omarchy/themes/*/backgrounds/"$rel"; do
+      if [[ -f $src && ! -L $src ]] && cmp -s "$bg" "$src"; then
+        ln -sfn "${src#"$merged"}" "$bg"
+        break
+      fi
+    done
+  done < <(find "$try_theme_bgs" -type f -print0)
+fi
+
 # Built on the build host's clock and identity; the session makes its own.
 : >"$merged/etc/machine-id"
 

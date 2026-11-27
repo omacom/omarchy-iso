@@ -249,6 +249,43 @@ class BuildTryLayerTest(unittest.TestCase):
         self.assertIn("omarchy-try-session", self.text)
         self.assertIn('sddm.login("$TRY_USER", "", root.sessionIndex)', self.text)
 
+    def test_strips_nvim_git_and_symlinks_duplicate_theme_backgrounds(self):
+        self.assertIn('rm -rf "$merged/home/$TRY_USER"/.local/share/nvim/lazy/*/.git', self.text)
+        snippet = re.search(
+            r'(try_theme_bgs="\$merged/home/\$TRY_USER/\.local/state/omarchy/current/theme/backgrounds".*?\nfi)',
+            self.text,
+            re.S,
+        )
+        self.assertIsNotNone(snippet)
+        with tempfile.TemporaryDirectory() as tmp:
+            merged = Path(tmp) / "merged"
+            bgs = merged / "home/omarchy/.local/state/omarchy/current/theme/backgrounds"
+            (bgs / "intros").mkdir(parents=True)
+            src_bgs = merged / "usr/share/omarchy/themes/tokyo-night/backgrounds"
+            (src_bgs / "intros").mkdir(parents=True)
+            (src_bgs / "0-liftoff.webp").write_bytes(b"wallpaper-bytes")
+            (src_bgs / "intros/0-liftoff.mp4").write_bytes(b"intro-video-bytes")
+            (bgs / "0-liftoff.webp").write_bytes(b"wallpaper-bytes")
+            (bgs / "intros/0-liftoff.mp4").write_bytes(b"intro-video-bytes")
+            (bgs / "custom.webp").write_bytes(b"custom-only")
+
+            subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", f'merged={merged}\nTRY_USER=omarchy\n{snippet.group(1)}'],
+                check=True,
+            )
+            self.assertTrue((bgs / "0-liftoff.webp").is_symlink())
+            self.assertEqual(
+                os.readlink(bgs / "0-liftoff.webp"),
+                "/usr/share/omarchy/themes/tokyo-night/backgrounds/0-liftoff.webp",
+            )
+            self.assertTrue((bgs / "intros/0-liftoff.mp4").is_symlink())
+            self.assertEqual(
+                os.readlink(bgs / "intros/0-liftoff.mp4"),
+                "/usr/share/omarchy/themes/tokyo-night/backgrounds/intros/0-liftoff.mp4",
+            )
+            self.assertFalse((bgs / "custom.webp").is_symlink())
+            self.assertEqual((bgs / "custom.webp").read_bytes(), b"custom-only")
+
 
 class LiveSystemLeavesTheMachineTest(unittest.TestCase):
     # Every boot runs the live installer first, Just try included.

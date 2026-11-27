@@ -3836,8 +3836,8 @@ def _n1x_prebuilt_uki(target: Path, arm_platform: str) -> Path | None:
     return uki if _initramfs_module_lines(target) == lines else None
 
 
-# Drop-ins shipped by the base image (omarchy-settings / installer), not added
-# by a Qualcomm laptop's hardware setup script.
+# Fallback list of drop-ins shipped by the base image when an older image
+# lacks prebuilt-uki-qualcomm.dropins.
 _SYSTEM_MKINITCPIO_DROPINS = frozenset({
     "00-omarchy-hooks.conf",
     "i2c_hid_of_module.conf",
@@ -3849,31 +3849,155 @@ _SYSTEM_MKINITCPIO_DROPINS = frozenset({
     "zz-omarchy-kernel-modules.conf",
 })
 
+# Non-boot-critical modprobe.d files that hardware setup may write on supported
+# laptops (top-row Fn-key defaults) without needing a fresh initramfs.
+_QUALCOMM_ALLOWED_MODPROBE_DIFFS = frozenset({
+    "etc/modprobe.d/omarchy-toprow.conf",
+})
+
+_QUALCOMM_UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.I,
+)
+_QUALCOMM_LOOP_FILE_TOKEN_RE = re.compile(
+    r'"?\$\{?directory\}?/\$\{?firmware\}?\$\{?suffix\}?"?'
+)
+
+
+def _live_smbios_chids() -> set[str]:
+    """CHID UUIDs reported by systemd-analyze chid on the running machine."""
+    try:
+        proc = subprocess.run(
+            ["systemd-analyze", "chid"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return set()
+    if proc.returncode != 0:
+        return set()
+    return {m.group(0).lower() for m in _QUALCOMM_UUID_RE.finditer(proc.stdout)}
+
 
 def _qualcomm_hwid_matches(
     target: Path,
     dt_compatible_path: Path = Path("/sys/firmware/devicetree/base/compatible"),
+    live_chids: set[str] | None = None,
 ) -> bool:
-    """True when the running board's device-tree compatible is listed in the
-    target's systemd-stub HWID database, so DeviceTreeAuto selects its DTB
-    without needing a machine-specific DeviceTree= fallback."""
+    """True when the running board's first (board-level) compatible is baked
+    into prebuilt-uki-qualcomm.efi AND has a matching devicetree HWID JSON whose
+    hwids intersect this machine's SMBIOS CHIDs, so systemd-stub's
+    DeviceTreeAuto will select the right DTB at boot."""
     hwids_dir = target / "usr" / "lib" / "systemd" / "boot" / "hwids" / "aa64"
     if not dt_compatible_path.is_file() or not hwids_dir.is_dir():
         return False
     try:
-        compatibles = {c for c in dt_compatible_path.read_bytes().decode("utf-8", errors="ignore").split("\x00") if c}
+        compatibles = [c for c in dt_compatible_path.read_bytes().decode("utf-8", errors="ignore").split("\x00") if c]
     except OSError:
         return False
     if not compatibles:
         return False
+    board_compatible = compatibles[0]
+
+    baked_compats_path = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-qualcomm.compatibles"
+    if baked_compats_path.is_file():
+        baked_compats = {line.strip() for line in baked_compats_path.read_text().splitlines() if line.strip()}
+        if board_compatible not in baked_compats:
+            return False
+
+    chids = _live_smbios_chids() if live_chids is None else {c.lower() for c in live_chids}
+    if not chids:
+        return False
+
     for path in hwids_dir.glob("*.json"):
         try:
             data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
         except (OSError, ValueError):
             continue
-        if data.get("compatible") in compatibles:
+        if not isinstance(data, dict):
+            continue
+        if data.get("type") != "devicetree" or data.get("compatible") != board_compatible:
+            continue
+        json_hwids = {
+            h.lower() for h in data.get("hwids", []) if isinstance(h, str)
+        }
+        if json_hwids & chids:
             return True
     return False
+
+
+def _qualcomm_has_pinned_devicetree(target: Path) -> bool:
+    """True when the target pins a machine-specific DeviceTree= outside
+    omarchy-update-qualcomm-device-trees's managed DeviceTreeAuto block."""
+    uki_conf = target / "etc" / "kernel" / "uki.conf"
+    if uki_conf.is_file():
+        in_managed = False
+        has_managed_auto = False
+        for raw_line in uki_conf.read_text(errors="ignore").splitlines():
+            line = raw_line.strip()
+            if line == "# BEGIN OMARCHY QUALCOMM DEVICE TREES":
+                in_managed = True
+                continue
+            if line == "# END OMARCHY QUALCOMM DEVICE TREES":
+                in_managed = False
+                continue
+            if in_managed:
+                if line.startswith("DeviceTreeAuto="):
+                    has_managed_auto = True
+                continue
+            if line.startswith("DeviceTree="):
+                return True
+        if not has_managed_auto and any(
+            l.strip().startswith("DeviceTree=")
+            for l in uki_conf.read_text(errors="ignore").splitlines()
+        ):
+            return True
+
+    uki_conf_d = target / "etc" / "kernel" / "uki.conf.d"
+    if uki_conf_d.is_dir():
+        for dropin in sorted(uki_conf_d.glob("*.conf")):
+            for raw_line in dropin.read_text(errors="ignore").splitlines():
+                if raw_line.strip().startswith("DeviceTree="):
+                    return True
+    return False
+
+
+def _qualcomm_initramfs_inputs(root: Path) -> dict[str, str]:
+    """Hash etc/mkinitcpio.conf, etc/initcpio, and etc/modprobe.d matching
+    build-root-image.sh's qualcomm_initramfs_inputs."""
+    inputs: dict[str, str] = {}
+    for rel_top in ("etc/mkinitcpio.conf", "etc/initcpio", "etc/modprobe.d"):
+        top = root / rel_top
+        if top.is_symlink() or top.is_file():
+            candidates = [top]
+        elif top.is_dir():
+            candidates = sorted(p for p in top.rglob("*") if p.is_symlink() or p.is_file())
+        else:
+            continue
+        for path in candidates:
+            rel = path.relative_to(root).as_posix()
+            if path.is_symlink():
+                digest = hashlib.sha256(os.readlink(path).encode("utf-8", errors="surrogateescape")).hexdigest()
+            else:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            inputs[rel] = digest
+    return inputs
+
+
+def _normalize_firmware_literal(token: str) -> str:
+    """Normalize an absolute firmware path like /usr/lib/firmware/qcom/foo.fw.zst
+    to its relative firmware name qcom/foo.fw for comparison against recorded
+    firmware entries."""
+    for prefix in ("/usr/lib/firmware/updates/", "/usr/lib/firmware/"):
+        if token.startswith(prefix):
+            rel = token[len(prefix):]
+            for suffix in (".zst", ".xz"):
+                if rel.endswith(suffix):
+                    rel = rel[:-len(suffix)]
+                    break
+            return rel
+    return token
 
 
 def _qualcomm_prebuilt_uki(
@@ -3881,30 +4005,50 @@ def _qualcomm_prebuilt_uki(
     platform_name: str,
     *,
     dt_compatible_path: Path = Path("/sys/firmware/devicetree/base/compatible"),
+    live_chids: set[str] | None = None,
 ) -> Path | None:
     """The image's Snapdragon UKI, for a Qualcomm laptop whose hardware setup
     stays within what build-root-image.sh baked into it: covered early modules
     (never qcom_q6v5_pas), no board-specific initcpio hooks beyond
-    omarchy-quiet-efivars (which is busybox-only), no board-specific or
-    Windows-extracted FILES beyond the baked Adreno microcode, no ADSP
-    blacklist modprobe override, and a matching HWID entry for DeviceTreeAuto.
+    omarchy-quiet-efivars (which is busybox-only), no extra BINARIES, no
+    board-specific or Windows-extracted FILES beyond the baked Adreno
+    microcode, no unexpected mkinitcpio.conf/initcpio/modprobe.d changes, no
+    pinned DeviceTree= override, and a matching HWID + CHID + baked DTB entry.
 
     Any machine needing extra hooks (Galaxy Book4 Edge 14), early DSP loading
     (Surface Laptop 8), board-specific initramfs files (Surface Pro 11,
-    qcom-firmware.conf zap shader), or a DeviceTree= fallback returns None and
-    builds its own UKI via limine-mkinitcpio as before."""
+    qcom-firmware.conf zap shader), or a pinned DeviceTree= fallback returns
+    None and builds its own UKI via limine-mkinitcpio as before."""
     uki = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-qualcomm.efi"
     recorded_mods_path = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-qualcomm.modules"
     recorded_files_path = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-qualcomm.files"
-    if platform_name != "aarch64-qualcomm" or not uki.is_file() or not recorded_mods_path.is_file():
+    recorded_dropins_path = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-qualcomm.dropins"
+    recorded_inputs_path = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-qualcomm.inputs"
+    if not uki.is_file() or not recorded_mods_path.is_file() or platform_name != "aarch64-qualcomm":
         return None
     if (target / "etc" / "mkinitcpio.conf.d" / "qcom-firmware.conf").exists():
         return None
     if (target / "etc" / "modprobe.d" / "qualcomm-adsp-nofw.conf").exists():
         return None
-    if not _qualcomm_hwid_matches(target, dt_compatible_path=dt_compatible_path):
+    if _qualcomm_has_pinned_devicetree(target):
+        return None
+    if not _qualcomm_hwid_matches(target, dt_compatible_path=dt_compatible_path, live_chids=live_chids):
         return None
 
+    if recorded_inputs_path.is_file():
+        recorded_inputs = _recorded_initramfs_inputs(recorded_inputs_path)
+        current_inputs = _qualcomm_initramfs_inputs(target)
+        diffs = {
+            k for k in set(recorded_inputs) | set(current_inputs)
+            if recorded_inputs.get(k) != current_inputs.get(k)
+        }
+        if diffs - _QUALCOMM_ALLOWED_MODPROBE_DIFFS:
+            return None
+
+    system_dropins = (
+        frozenset(line.strip() for line in recorded_dropins_path.read_text().splitlines() if line.strip())
+        if recorded_dropins_path.is_file() else _SYSTEM_MKINITCPIO_DROPINS
+    )
     covered_mods = {line.strip().replace("-", "_") for line in recorded_mods_path.read_text().splitlines() if line.strip()}
     covered_files = (
         {line.strip() for line in recorded_files_path.read_text().splitlines() if line.strip()}
@@ -3916,19 +4060,25 @@ def _qualcomm_prebuilt_uki(
     for conf in sorted(conf_dir.glob("*.conf")) if conf_dir.is_dir() else []:
         text = conf.read_text(errors="ignore")
         for match in re.finditer(r"^\s*MODULES\s*\+?=\(([^)]*)\)", text, re.M | re.S):
-            for tok in match.group(1).split():
+            body = "\n".join(line.split("#", 1)[0] for line in match.group(1).splitlines())
+            for tok in body.split():
                 tok = tok.strip("'\"")
-                if not tok or tok.startswith("$") or tok.startswith("#"):
+                if not tok or tok.startswith("$"):
                     continue
                 if tok.rstrip("?").replace("-", "_") not in covered_mods:
                     return None
-        if conf.name in _SYSTEM_MKINITCPIO_DROPINS:
+        if conf.name in system_dropins:
             continue
         for match in re.finditer(r"^\s*HOOKS\s*\+?=\(([^)]*)\)", text, re.M | re.S):
-            for tok in match.group(1).split():
+            body = "\n".join(line.split("#", 1)[0] for line in match.group(1).splitlines())
+            for tok in body.split():
                 tok = tok.strip("'\"")
-                if tok and not tok.startswith("#") and tok != "omarchy-quiet-efivars":
+                if tok and tok != "omarchy-quiet-efivars":
                     return None
+        for match in re.finditer(r"^\s*BINARIES\s*\+?=\(([^)]*)\)", text, re.M | re.S):
+            body = "\n".join(line.split("#", 1)[0] for line in match.group(1).splitlines())
+            if body.split():
+                return None
         if "FILES" in text:
             unwrapped = re.sub(r"\\\n", " ", text)
             loop_items: list[str] = []
@@ -3937,14 +4087,15 @@ def _qualcomm_prebuilt_uki(
             if loop_items and not all(item in covered_files for item in loop_items):
                 return None
             for match in re.finditer(r"^\s*FILES\s*\+?=\(([^)]*)\)", text, re.M | re.S):
-                for tok in match.group(1).split():
+                body = "\n".join(line.split("#", 1)[0] for line in match.group(1).splitlines())
+                for tok in body.split():
                     tok = tok.strip("'\"")
-                    if not tok or tok.startswith("#"):
+                    if not tok:
                         continue
                     if "$" in tok:
-                        if not loop_items:
+                        if not loop_items or not _QUALCOMM_LOOP_FILE_TOKEN_RE.fullmatch(tok):
                             return None
-                    elif tok not in allowed_literal_files:
+                    elif tok not in allowed_literal_files and _normalize_firmware_literal(tok) not in covered_files:
                         return None
     return uki
 
@@ -4360,10 +4511,15 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
         prebuilt_uki = n1x_uki
         added_modules = []
     # A Snapdragon ISO ships a Qualcomm UKI built with all Snapdragon DTBs
-    # (DeviceTreeAuto), shared Qualcomm early modules and Adreno microcode.
-    qualcomm_uki = _qualcomm_prebuilt_uki(ctx.target, hw_platform()) if not n1x_uki else None
+    # (DeviceTreeAuto + HWIDs), shared Qualcomm early modules and Adreno microcode.
+    qualcomm_uki_candidate = ctx.target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-qualcomm.efi"
+    qualcomm_uki = (
+        _qualcomm_prebuilt_uki(ctx.target, hw_platform())
+        if not n1x_uki and qualcomm_uki_candidate.is_file()
+        else None
+    )
     if qualcomm_uki:
-        info("› Qualcomm: using the image's Snapdragon UKI, built with this machine's initramfs modules and device trees")
+        info("› Qualcomm: using the image's Snapdragon UKI, built with shared Snapdragon modules and device trees")
         prebuilt_uki = qualcomm_uki
         added_modules = []
     if prebuilt_uki.is_file() and added_modules:

@@ -71,11 +71,12 @@ cleanup() {
 trap cleanup EXIT
 mkdir -p "$work/sfs" "$work/image"
 sfs_loop=$(attach_ro_loop "$sfs")
-mount -t squashfs -o ro "$sfs_loop" "$work/sfs"
+mount -t squashfs -o ro,threads=multi "$sfs_loop" "$work/sfs" 2>/dev/null || mount -t squashfs -o ro "$sfs_loop" "$work/sfs"
 img_loop=$(attach_ro_loop "$work/sfs/omarchy-root.img")
 mount -t btrfs -o ro,subvol=omarchy-root "$img_loop" "$work/image"
 
 python3 - "$airootfs" "$work/image" "$pseudo" <<'PY'
+from concurrent.futures import ThreadPoolExecutor
 import filecmp, os, stat, sys
 
 live, image, pseudo = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -124,9 +125,11 @@ for rel in KEEP:
 
 removed = kept_bytes = removed_bytes = whiteouts = 0
 pseudo_lines = []
+candidates = []
+whiteout_dir_stats = {}
 
 def dedup_whiteout_tree(rel):
-    global removed, kept_bytes, removed_bytes, whiteouts
+    global whiteouts
     live_dir = os.path.join(live, rel)
     image_dir = os.path.join(image, rel)
     if not os.path.lexists(live_dir):
@@ -141,7 +144,7 @@ def dedup_whiteout_tree(rel):
             pseudo_lines.append(f"{pseudo_path(rel)} x trusted.overlay.opaque=y\n")
         return
 
-    dir_stat = os.lstat(live_dir)
+    whiteout_dir_stats[live_dir] = os.lstat(live_dir)
     live_entries = sorted(os.listdir(live_dir))
     live_set = set(live_entries)
     image_entries = sorted(os.listdir(image_dir))
@@ -151,7 +154,6 @@ def dedup_whiteout_tree(rel):
             pseudo_lines.append(f"{pseudo_path(os.path.join(rel, name))} c 0000 0 0 0 0\n")
             whiteouts += 1
 
-    unlinked = False
     for name in live_entries:
         child_rel = os.path.join(rel, name)
         a = os.path.join(live_dir, name)
@@ -159,19 +161,7 @@ def dedup_whiteout_tree(rel):
         if is_real_dir(a):
             dedup_whiteout_tree(child_rel)
         else:
-            size = os.lstat(a).st_size
-            if same(a, b):
-                os.unlink(a)
-                removed += 1
-                removed_bytes += size
-                unlinked = True
-            else:
-                kept_bytes += size
-
-    # Preserving directory mtimes keeps prebuilt /var/cache/fontconfig caches
-    # valid after unlinking deduplicated font files.
-    if unlinked:
-        os.utime(live_dir, ns=(dir_stat.st_atime_ns, dir_stat.st_mtime_ns))
+            candidates.append((a, b, os.lstat(a).st_size, live_dir))
 
 for rel in WHITEOUT_TREES:
     dedup_whiteout_tree(rel)
@@ -186,13 +176,30 @@ for top, dirs, files in os.walk(live):
         continue
     for name in files:
         a, b = os.path.join(top, name), os.path.join(image, rel, name)
-        size = os.lstat(a).st_size
-        if same(a, b):
+        candidates.append((a, b, os.lstat(a).st_size, None))
+
+def check_candidate(item):
+    a, b, size, whiteout_dir = item
+    return a, size, whiteout_dir, same(a, b)
+
+workers = min(16, max(1, os.cpu_count() or 1))
+unlinked_dirs = set()
+with ThreadPoolExecutor(max_workers=workers) as pool:
+    for a, size, whiteout_dir, matched in pool.map(check_candidate, candidates, chunksize=32):
+        if matched:
             os.unlink(a)
             removed += 1
             removed_bytes += size
+            if whiteout_dir is not None:
+                unlinked_dirs.add(whiteout_dir)
         else:
             kept_bytes += size
+
+# Preserving directory mtimes keeps prebuilt /var/cache/fontconfig caches
+# valid after unlinking deduplicated font files.
+for live_dir in unlinked_dirs:
+    dir_stat = whiteout_dir_stats[live_dir]
+    os.utime(live_dir, ns=(dir_stat.st_atime_ns, dir_stat.st_mtime_ns))
 
 with open(pseudo, "w") as f:
     f.writelines(pseudo_lines)

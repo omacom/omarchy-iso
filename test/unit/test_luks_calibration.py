@@ -1002,6 +1002,48 @@ class UnifiedLuksFormatTest(unittest.TestCase):
                 self.assertEqual(self._leftover_keys(), [])
 
 
+class CancelCalibrationTest(unittest.TestCase):
+    def test_cancel_calibration_stops_only_luks_calibrate_no_block(self):
+        calls = []
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0)
+        with mock.patch.object(luks.subprocess, "run", side_effect=fake_run):
+            luks.cancel_calibration()
+        self.assertEqual(calls, [["systemctl", "stop", "--no-block", luks.UNIT]])
+
+    def test_prepare_live_cancels_calibration_only_when_unencrypted(self):
+        import types
+        sys.path.insert(0, str(ROOT / "configs/airootfs/usr/share/omarchy-iso"))
+        sys.modules.setdefault("orchestrator.archinstall_adapter", types.ModuleType("orchestrator.archinstall_adapter"))
+        phases_impl = importlib.import_module("orchestrator.phases_impl")
+        shared_luks = importlib.import_module("orchestrator.luks_calibration")
+
+        for label, encrypt, user_cfg, expect_cancel in (
+            ("plain unencrypted", False, {"disk_config": {}}, True),
+            ("encrypt file true", True, {"disk_config": {}}, False),
+            ("cidata disk_encryption", False, {"disk_config": {"disk_encryption": {"encryption_type": "luks"}}}, False),
+            ("free_space_plan encrypt", False, {"omarchy_install": {"free_space_plan": {"encrypt": True}}}, False),
+            ("free_space_plan unencrypted", False, {"omarchy_install": {"free_space_plan": {"encrypt": False}}}, True),
+        ):
+            with self.subTest(label=label):
+                ctx = types.SimpleNamespace(
+                    encrypt=encrypt,
+                    user_configuration=user_cfg,
+                    omarchy_install=user_cfg.get("omarchy_install", {}),
+                    is_protected=True,
+                    arch_config_path=Path("/nonexistent"),
+                    creds_path=Path("/nonexistent"),
+                    state={},
+                )
+                with mock.patch.object(shared_luks, "cancel_calibration") as cancel,                         mock.patch.object(phases_impl, "_live_keyrings_ready", return_value=False),                         mock.patch.object(phases_impl, "_stage_qualcomm_firmware"),                         mock.patch.object(phases_impl.arch, "load_arch_config", create=True, return_value=None),                         mock.patch.object(phases_impl.arch, "make_mirror_handler", create=True, return_value=None):
+                    phases_impl.prepare_live(ctx)
+                if expect_cancel:
+                    cancel.assert_called_once_with()
+                else:
+                    cancel.assert_not_called()
+
+
 class AdiantumWithoutAes(unittest.TestCase):
     """A CPU without AES instructions formats with Adiantum."""
     X86_AES = 'processor\t: 0\nflags\t\t: fpu sse2 ssse3 pclmulqdq aes avx avx2\n'

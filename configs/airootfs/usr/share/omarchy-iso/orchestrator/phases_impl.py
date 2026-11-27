@@ -284,7 +284,21 @@ def _copy_firmware_stage_into_target(ctx: InstallContext) -> None:
     shutil.copytree(LIVE_FIRMWARE_STAGE, dst, dirs_exist_ok=True)
 
 
+def _install_is_encrypted(ctx: InstallContext) -> bool:
+    if getattr(ctx, "encrypt", False):
+        return True
+    disk_cfg = (getattr(ctx, "user_configuration", None) or {}).get("disk_config") or {}
+    if disk_cfg.get("disk_encryption"):
+        return True
+    plan = free_space_plan(ctx)
+    return bool(plan and plan.get("encrypt"))
+
+
 def prepare_live(ctx: InstallContext) -> None:
+    if not _install_is_encrypted(ctx):
+        from .luks_calibration import cancel_calibration
+        cancel_calibration()
+
     # Start the target's per-machine pacman keyring in tmpfs right away so it
     # overlaps disk cleanup, medium verification, image writing, and setup.
     # The live ISO carries the same keyring packages as the root image; if a

@@ -41,6 +41,49 @@ grep -q '^RemainAfterExit=' "$LUKS_UNIT" \
   && fail "omarchy-luks-calibrate.service must not set RemainAfterExit (wait helpers check inactive state)"
 grep -q '^After=omarchy-greeter-ready\.service$' "$LUKS_UNIT" \
   || fail "omarchy-luks-calibrate.service must run immediately after omarchy-greeter-ready.service"
+grep -q '^ConditionPathExists=!/run/omarchy-iso/skip-luks-calibrate$' "$LUKS_UNIT" \
+  || fail "omarchy-luks-calibrate.service must skip when /run/omarchy-iso/skip-luks-calibrate exists"
+
+AUTO_SCRIPT="$ROOT/configs/airootfs/root/.automated_script.sh"
+cidata_line=$(grep -vnE '^[[:space:]]*#' "$AUTO_SCRIPT" | grep "omarchy-cidata-load" | head -1 | cut -d: -f1)
+skip_line=$(grep -vnE '^[[:space:]]*#' "$AUTO_SCRIPT" | grep "configure_luks_calibration_for_cidata" | tail -1 | cut -d: -f1)
+ready_line=$(awk -v s="$cidata_line" 'NR > s && !/^[[:space:]]*#/ && /signal_greeter_ready/ { print NR; exit }' "$AUTO_SCRIPT")
+(( cidata_line < skip_line && skip_line < ready_line )) \
+  || fail ".automated_script.sh must evaluate cidata encryption before signal_greeter_ready (cidata=$cidata_line skip=$skip_line ready=$ready_line)"
+
+cidata_dir="$fixture/cidata-root"
+mkdir -p "$cidata_dir"
+skip_file="$fixture/skip-luks-calibrate"
+helpers_file="$fixture/cidata-helpers.sh"
+awk '/^cidata_install_is_encrypted\(\)/,/^signal_greeter_ready\(\)/ { if (!/^signal_greeter_ready\(\)/) print }' "$AUTO_SCRIPT" >"$helpers_file"
+bash -euo pipefail -c '
+  source "$1"
+  cidata_dir=$2
+  export OMARCHY_SKIP_LUKS_CALIBRATE_FILE=$3
+  systemctl() { :; }
+
+  printf "false\n" >"$cidata_dir/user_encrypt_installation.txt"
+  printf "{\"disk_config\": {}}\n" >"$cidata_dir/user_configuration.json"
+  configure_luks_calibration_for_cidata "$cidata_dir"
+  [[ -e $OMARCHY_SKIP_LUKS_CALIBRATE_FILE ]] || { echo "expected skip marker for unencrypted cidata" >&2; exit 1; }
+
+  printf "true\n" >"$cidata_dir/user_encrypt_installation.txt"
+  configure_luks_calibration_for_cidata "$cidata_dir"
+  [[ ! -e $OMARCHY_SKIP_LUKS_CALIBRATE_FILE ]] || { echo "expected skip marker removed for encrypted cidata" >&2; exit 1; }
+
+  rm -f "$cidata_dir/user_encrypt_installation.txt"
+  printf "{\"disk_config\": {\"disk_encryption\": {\"encryption_type\": \"luks\"}}}\n" >"$cidata_dir/user_configuration.json"
+  configure_luks_calibration_for_cidata "$cidata_dir"
+  [[ ! -e $OMARCHY_SKIP_LUKS_CALIBRATE_FILE ]] || { echo "expected skip marker absent for disk_encryption cidata" >&2; exit 1; }
+
+  printf "{\"omarchy_install\": {\"free_space_plan\": {\"encrypt\": true}}}\n" >"$cidata_dir/user_configuration.json"
+  configure_luks_calibration_for_cidata "$cidata_dir"
+  [[ ! -e $OMARCHY_SKIP_LUKS_CALIBRATE_FILE ]] || { echo "expected skip marker absent for encrypted free_space_plan" >&2; exit 1; }
+
+  printf "{\"omarchy_install\": {\"free_space_plan\": {\"encrypt\": false}}}\n" >"$cidata_dir/user_configuration.json"
+  configure_luks_calibration_for_cidata "$cidata_dir"
+  [[ -e $OMARCHY_SKIP_LUKS_CALIBRATE_FILE ]] || { echo "expected skip marker for unencrypted free_space_plan" >&2; exit 1; }
+' _ "$helpers_file" "$cidata_dir" "$skip_file" || fail "cidata encryption detection failed"
 grep -q '^Before=omarchy-mirror-verify\.service omarchy-root-image-verify\.service$' "$LUKS_UNIT" \
   || fail "omarchy-luks-calibrate.service must finish before verify units start"
 grep -q '^After=omarchy-greeter-ready\.service omarchy-luks-calibrate\.service$' "$MIRROR_UNIT" \

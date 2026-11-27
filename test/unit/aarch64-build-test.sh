@@ -244,7 +244,7 @@ installable=$(
 # written, so a damaged signature has to fail that check, not the finished
 # install. The builder's own list, over a shipped mirror whose keyring
 # signature is then damaged.
-sums_block=$(sed -n '/^mirror_files() {/,/sha256sum) >"\$mirror_sums"$/p' "$ROOT/builder/build-iso.sh")
+sums_block=$(sed -n '/^mirror_files() {$/,/^}$/p; /^write_mirror_checksums() {$/,/^}$/p' "$ROOT/builder/build-iso.sh")
 [[ -n $sums_block ]] || fail "the builder no longer checksums the shipped mirror"
 shipped_mirror=$fixture/shipped-mirror
 mkdir -p "$shipped_mirror" "$fixture/sums-cache/airootfs/usr/share/omarchy-iso"
@@ -258,6 +258,7 @@ printf '%s\n' archlinuxarm-keyring-20240419-1-any.pkg.tar.xz linux-firmware-1-1-
 (
   offline_mirror_dir=$shipped_mirror shipped_list=$fixture/shipped.list build_cache_dir=$fixture/sums-cache
   eval "$sums_block"
+  write_mirror_checksums "$shipped_mirror" >/dev/null
 ) || fail "the builder's mirror checksum list did not run"
 shipped_sums=$fixture/sums-cache/airootfs/usr/share/omarchy-iso/offline-mirror.sha256
 (cd "$shipped_mirror" && sha256sum --check --strict --quiet "$shipped_sums") \

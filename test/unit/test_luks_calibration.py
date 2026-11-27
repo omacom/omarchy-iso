@@ -983,9 +983,6 @@ class UnifiedLuksFormatTest(unittest.TestCase):
                 self.assertEqual(self._leftover_keys(), [])
 
 
-if __name__ == '__main__': unittest.main()
-
-
 class CancelCalibrationTest(unittest.TestCase):
     def test_cancel_calibration_stops_only_luks_calibrate_no_block(self):
         calls = []
@@ -1026,3 +1023,6 @@ class CancelCalibrationTest(unittest.TestCase):
                     cancel.assert_called_once_with()
                 else:
                     cancel.assert_not_called()
+
+
+if __name__ == '__main__': unittest.main()

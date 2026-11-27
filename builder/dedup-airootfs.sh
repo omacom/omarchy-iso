@@ -15,10 +15,16 @@
 # Kept whole, and marked opaque so the image's copies stay out of the live
 # system: what makes a file act just by being there. /etc (unit enablement,
 # configuration), /var (the pacman database and the offline mirror), /root,
-# /boot, /usr/local, /usr/lib/firmware and /usr/share/fonts (both trimmed for
-# the live installer, with /var/cache/fontconfig prebuilt for that tree),
-# systemd's and udev's directories and the snippet directories systemd reads
-# at boot. Everywhere else a file goes when the
+# /boot, /usr/local, systemd's and udev's directories and the snippet
+# directories systemd reads at boot.
+#
+# /usr/lib/firmware and /usr/share/fonts are trimmed for the live installer
+# (customize_airootfs.sh), with /var/cache/fontconfig prebuilt for that tree.
+# Instead of marking those whole trees opaque (which duplicates ~194 MiB of
+# kept firmware and fonts already in the root image), identical kept files are
+# deduplicated while pruned image-only files/directories get overlayfs whiteout
+# pseudo entries (c 0000 0 0 0 0), and directory mtimes are preserved so the
+# prebuilt fontconfig caches remain valid. Everywhere else a file goes when the
 # image has the same path with the same type, mode, owner, xattrs and bytes,
 # or the same symlink.
 #
@@ -74,12 +80,26 @@ import filecmp, os, stat, sys
 
 live, image, pseudo = sys.argv[1], sys.argv[2], sys.argv[3]
 KEEP = ("etc", "var", "root", "boot", "usr/local", "usr/lib/systemd", "usr/lib/udev",
-        "usr/lib/firmware", "usr/share/fonts", "usr/share/dbus-1", "usr/share/polkit-1",
+        "usr/share/dbus-1", "usr/share/polkit-1",
         "usr/lib/tmpfiles.d", "usr/lib/sysusers.d", "usr/lib/sysctl.d", "usr/lib/modprobe.d",
         "usr/lib/modules-load.d", "usr/lib/binfmt.d", "usr/lib/environment.d", "usr/share/factory")
+WHITEOUT_TREES = ("usr/lib/firmware", "usr/share/fonts")
 
 def xattrs(path):
     return {k: os.getxattr(path, k, follow_symlinks=False) for k in os.listxattr(path, follow_symlinks=False)}
+
+def pseudo_path(rel):
+    p = "/" + rel
+    if any(ch.isspace() or ch in '"\\' for ch in p):
+        escaped = p.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return p
+
+def is_real_dir(path):
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except FileNotFoundError:
+        return False
 
 def same(a, b):
     try:
@@ -102,12 +122,66 @@ for rel in KEEP:
     if not os.path.lexists(live_dir) and os.path.isdir(image_dir):
         os.makedirs(live_dir, exist_ok=True)
 
-removed = kept_bytes = removed_bytes = 0
-opaque = []
+removed = kept_bytes = removed_bytes = whiteouts = 0
+pseudo_lines = []
+
+def dedup_whiteout_tree(rel):
+    global removed, kept_bytes, removed_bytes, whiteouts
+    live_dir = os.path.join(live, rel)
+    image_dir = os.path.join(image, rel)
+    if not os.path.lexists(live_dir):
+        if is_real_dir(image_dir):
+            os.makedirs(live_dir, exist_ok=True)
+            pseudo_lines.append(f"{pseudo_path(rel)} x trusted.overlay.opaque=y\n")
+        return
+    if not is_real_dir(live_dir):
+        return
+    if not is_real_dir(image_dir):
+        if os.path.lexists(image_dir):
+            pseudo_lines.append(f"{pseudo_path(rel)} x trusted.overlay.opaque=y\n")
+        return
+
+    dir_stat = os.lstat(live_dir)
+    live_entries = sorted(os.listdir(live_dir))
+    live_set = set(live_entries)
+    image_entries = sorted(os.listdir(image_dir))
+
+    for name in image_entries:
+        if name not in live_set:
+            pseudo_lines.append(f"{pseudo_path(os.path.join(rel, name))} c 0000 0 0 0 0\n")
+            whiteouts += 1
+
+    unlinked = False
+    for name in live_entries:
+        child_rel = os.path.join(rel, name)
+        a = os.path.join(live_dir, name)
+        b = os.path.join(image_dir, name)
+        if is_real_dir(a):
+            dedup_whiteout_tree(child_rel)
+        else:
+            size = os.lstat(a).st_size
+            if same(a, b):
+                os.unlink(a)
+                removed += 1
+                removed_bytes += size
+                unlinked = True
+            else:
+                kept_bytes += size
+
+    # Preserving directory mtimes keeps prebuilt /var/cache/fontconfig caches
+    # valid after unlinking deduplicated font files.
+    if unlinked:
+        os.utime(live_dir, ns=(dir_stat.st_atime_ns, dir_stat.st_mtime_ns))
+
+for rel in WHITEOUT_TREES:
+    dedup_whiteout_tree(rel)
+
+skip_trees = set(KEEP) | set(WHITEOUT_TREES)
 for top, dirs, files in os.walk(live):
     rel = os.path.relpath(top, live)
-    if rel in KEEP:
-        opaque.append(f"/{rel} x trusted.overlay.opaque=y\n")
+    if rel in skip_trees:
+        if rel in KEEP:
+            pseudo_lines.append(f"{pseudo_path(rel)} x trusted.overlay.opaque=y\n")
         dirs.clear()
         continue
     for name in files:
@@ -121,10 +195,10 @@ for top, dirs, files in os.walk(live):
             kept_bytes += size
 
 with open(pseudo, "w") as f:
-    f.writelines(opaque)
+    f.writelines(pseudo_lines)
 # The hook boots this tree over the image only when it finds this mark.
 with open(os.path.join(live, "etc", "omarchy-iso-live-over-image"), "w") as f:
     f.write("The live system is a layer over omarchy-root.sfs (builder/dedup-airootfs.sh).\n")
 print(f"dedup-airootfs: {removed} files ({removed_bytes / 1048576:.0f} MiB) are the image's; "
-      f"{kept_bytes / 1048576:.0f} MiB stay outside the kept directories")
+      f"{kept_bytes / 1048576:.0f} MiB stay outside the kept directories; {whiteouts} whiteouts")
 PY

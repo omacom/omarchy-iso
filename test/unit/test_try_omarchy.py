@@ -273,17 +273,24 @@ class DedupAndBuildIsoTest(unittest.TestCase):
             live = tmp / "live"
             image = tmp / "image"
             pseudo = tmp / "pseudo"
-            # Directory present in image and in KEEP, absent from live -> must become opaque!
+            # Missing WHITEOUT_TREES dir (usr/lib/firmware absent in live, present in image)
+            # must be created and marked opaque so image firmware stays out.
             (image / "usr/lib/firmware/iwlwifi").mkdir(parents=True)
             (image / "usr/lib/firmware/iwlwifi/test.ucode").write_bytes(b"fw")
-            # Identical file inside a KEEP directory (usr/share/fonts) must stay in live
-            # and the directory must be opaque so image-only fonts (noto/) stay out.
+            # Present WHITEOUT_TREES dir (usr/share/fonts): identical kept files are
+            # deduplicated, pruned image-only dirs/files get overlayfs whiteouts,
+            # live-only files stay, and directory mtime is preserved for fc-cache.
             (image / "usr/share/fonts/noto").mkdir(parents=True)
             (image / "usr/share/fonts/noto/NotoSans.ttf").write_bytes(b"noto")
             (image / "usr/share/fonts/TTF").mkdir(parents=True)
             (image / "usr/share/fonts/TTF/JetBrainsMono.ttf").write_bytes(b"jb")
+            (image / "usr/share/fonts/TTF/Pruned Font.ttf").write_bytes(b"pruned")
             (live / "usr/share/fonts/TTF").mkdir(parents=True)
             (live / "usr/share/fonts/TTF/JetBrainsMono.ttf").write_bytes(b"jb")
+            (live / "usr/share/fonts/TTF/LiveOnly.ttf").write_bytes(b"live-only")
+            font_epoch = 1700000000
+            os.utime(live / "usr/share/fonts", (font_epoch, font_epoch))
+            os.utime(live / "usr/share/fonts/TTF", (font_epoch, font_epoch))
             (live / "etc").mkdir(parents=True)
             # Identical file outside KEEP -> must be deduplicated!
             (live / "usr/bin").mkdir(parents=True)
@@ -293,7 +300,7 @@ class DedupAndBuildIsoTest(unittest.TestCase):
             (live / "usr/bin/diff").write_bytes(b"live-version")
             (image / "usr/bin/diff").write_bytes(b"image-version")
 
-            res = subprocess.run(
+            subprocess.run(
                 ["python3", "-c", py_src, str(live), str(image), str(pseudo)],
                 capture_output=True,
                 text=True,
@@ -303,11 +310,31 @@ class DedupAndBuildIsoTest(unittest.TestCase):
             self.assertTrue((live / "usr/bin/diff").exists())
             self.assertTrue((live / "usr/lib/firmware").is_dir())
             pseudo_lines = pseudo.read_text().splitlines()
-            self.assertTrue((live / "usr/share/fonts/TTF/JetBrainsMono.ttf").is_file())
+            self.assertFalse((live / "usr/share/fonts/TTF/JetBrainsMono.ttf").exists())
+            self.assertTrue((live / "usr/share/fonts/TTF/LiveOnly.ttf").is_file())
+            self.assertEqual(int((live / "usr/share/fonts/TTF").stat().st_mtime), font_epoch)
             self.assertIn("/usr/lib/firmware x trusted.overlay.opaque=y", pseudo_lines)
-            self.assertIn("/usr/share/fonts x trusted.overlay.opaque=y", pseudo_lines)
+            self.assertNotIn("/usr/share/fonts x trusted.overlay.opaque=y", pseudo_lines)
+            self.assertIn("/usr/share/fonts/noto c 0000 0 0 0 0", pseudo_lines)
+            self.assertIn('"/usr/share/fonts/TTF/Pruned Font.ttf" c 0000 0 0 0 0', pseudo_lines)
             self.assertIn("/etc x trusted.overlay.opaque=y", pseudo_lines)
             self.assertTrue((live / "etc/omarchy-iso-live-over-image").is_file())
+
+            # When present, usr/lib/firmware also deduplicates kept files and whiteouts pruned dirs.
+            (live / "usr/lib/firmware/amdgpu").mkdir(parents=True)
+            (image / "usr/lib/firmware/amdgpu").mkdir(parents=True)
+            (live / "usr/lib/firmware/amdgpu/gc.bin.zst").write_bytes(b"amd")
+            (image / "usr/lib/firmware/amdgpu/gc.bin.zst").write_bytes(b"amd")
+            subprocess.run(
+                ["python3", "-c", py_src, str(live), str(image), str(pseudo)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            pseudo_lines = pseudo.read_text().splitlines()
+            self.assertFalse((live / "usr/lib/firmware/amdgpu/gc.bin.zst").exists())
+            self.assertNotIn("/usr/lib/firmware x trusted.overlay.opaque=y", pseudo_lines)
+            self.assertIn("/usr/lib/firmware/iwlwifi c 0000 0 0 0 0", pseudo_lines)
 
     def test_customize_airootfs_clamps_font_dir_mtimes_before_fc_cache(self):
         text = (ROOT / "configs/airootfs/root/customize_airootfs.sh").read_text()

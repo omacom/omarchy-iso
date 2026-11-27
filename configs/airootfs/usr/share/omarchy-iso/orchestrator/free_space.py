@@ -395,7 +395,7 @@ def execute_free_space_plan(ctx) -> None:
 
     with _time_step("FS.free_space_mkfs_and_mount"):
         # -K skips whole-device TRIM on this throwaway btrfs (the root image overwrites
-        # it moments later, and trim_target trims free space once the install timer stops).
+        # it moments later, and stage_first_boot_trim trims free space on first boot).
         _run_disk_cmd(["mkfs.btrfs", "-K", "-f", "-L", "OMARCHY", root_mapper], f"creating Btrfs on {root_mapper}")
         wait_for_device(root_mapper)
 

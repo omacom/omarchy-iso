@@ -211,8 +211,9 @@ def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
     dm-crypt it takes seconds, and much longer on a DRAM-less drive. When a
     root image is about to be written over that filesystem the TRIM only
     delays the install: the image lands two seconds later, and the
-    orchestrator trims the filesystem's free space once the install timer has
-    stopped (phases_impl.trim_target). Nothing else about the step changes.
+    orchestrator stages a one-time first-boot trim for the filesystem's free
+    space (phases_impl.stage_first_boot_trim). Nothing else about the step
+    changes.
 
     archinstall's partition() runs wipefs on each new partition the moment
     parted's commit returns. parted closing the disk after writing the table

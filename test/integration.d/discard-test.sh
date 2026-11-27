@@ -1,10 +1,10 @@
 #!/bin/bash
 #
-# The installer tells the drive which blocks of the new root are free, with an
-# fstrim of the target once the install timer has stopped
-# (phases_impl.trim_target). Nothing else would: mkfs.btrfs runs with -K, the
-# root image fills only the start of the partition, the installed btrfs only
-# discards what it frees after mount, and archinstall leaves fstrim.timer off.
+# The installer tells the drive which blocks of the new root are free by
+# staging a one-time first-boot fstrim unit (phases_impl.stage_first_boot_trim).
+# Nothing else would: mkfs.btrfs runs with -K, the root image fills only the
+# start of the partition, the installed btrfs only discards what it frees after
+# mount, and archinstall leaves fstrim.timer off.
 #
 # Boots the live ISO once to fill the last 8 GiB of the disk with random data,
 # as a previous install would have left it, then installs unattended over it
@@ -71,15 +71,20 @@ if ! OMARCHY_DISK_DRIVE_OPTS=discard=unmap install_unattended "$DISCARD_DISK" "$
   tail -n 40 "$RUN_DIR/install-serial.log" >&2 2>/dev/null || true
   exit 1
 fi
+ssh_sudo 'i=0; while [ -e /etc/systemd/system/omarchy-first-boot-trim.service ] && [ "$i" -lt 240 ]; do sleep 0.5; i=$((i + 1)); done' || true
+ssh_sudo "journalctl -u omarchy-first-boot-trim.service --no-pager -o cat" >"$RUN_DIR/discard.txt" 2>&1 || true
+unit_left=$(ssh_sudo 'test -e /etc/systemd/system/omarchy-first-boot-trim.service -o -L /etc/systemd/system/multi-user.target.wants/omarchy-first-boot-trim.service && echo yes || echo no' 2>/dev/null | tr -d '\r' || echo yes)
 ssh_sudo "cat /var/log/omarchy-install.log" >"$RUN_DIR/omarchy-install.log" 2>/dev/null || true
 capture_console "success-discard"
 stop_vm
 
 after=$(allocated_in "$DISCARD_DISK" $((fill_start_gib * gib)) $((fill_gib * gib)))
 log "After the install: $((after / 1024 / 1024)) MiB of the last ${fill_gib} GiB hold data"
-grep -a '› trim: ' "$RUN_DIR/omarchy-install.log" >"$RUN_DIR/discard.txt" || true
-check "the installer trimmed the new root ($(head -n 1 "$RUN_DIR/discard.txt"))" \
-  grep -q 'trimmed in ' "$RUN_DIR/discard.txt"
+trim_line=$(grep -E '^/: .* trimmed$' "$RUN_DIR/discard.txt" | head -n 1 || true)
+check "first-boot trim ran on / (${trim_line:-no trim output})" \
+  test -n "$trim_line"
+check "first-boot trim unit removed itself after running" \
+  test "$unit_left" = no
 check "the old data at the end of the disk is gone from the disk image ($((before / 1024 / 1024)) MiB before, $((after / 1024 / 1024)) MiB after)" \
   test "$after" -lt $((64 * 1024 * 1024))
 

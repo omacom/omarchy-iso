@@ -160,65 +160,49 @@ def _with_calibration(original_encrypt):
         from archinstall.lib.disk import luks
         from .luks_calibration import (
             DeferredKeyslot,
-            can_defer_keyslot,
-            deferred_format_command,
-            format_command,
             new_volume_key,
-            pretouch_for_format,
-            stop_calibration,
-            stop_early_keyring,
+            run_luks_format,
         )
-        # When deferring Argon2id enrollment, stop any in-flight calibration
-        # immediately rather than waiting ~2-3s for it: fast_cmd uses minimal
-        # PBKDF2, and the background enrollment after image-write uses either
-        # the cached result (if calibration already finished) or --iter-time.
-        if _deferred_keyslots is not None and can_defer_keyslot():
-            stop_calibration(wait=0)
-        else:
-            stop_calibration()
         original_run = luks.run
         volume_key = new_volume_key()
-        temp_keyfile: Path | None = None
         deferred_entry: DeferredKeyslot | None = None
+        calibration_stopped = False
 
         # Keep archinstall's passphrase/key-file handling, return value and
         # error handling intact. Only adjust its format argv, for this call.
         def calibrated_run(command, *run_args, **run_kwargs):
-            nonlocal temp_keyfile, deferred_entry
+            nonlocal deferred_entry, calibration_stopped
             input_data = run_kwargs.get("input_data")
-            if (_deferred_keyslots is not None and deferred_entry is None
-                    and isinstance(input_data, (bytes, bytearray)) and input_data):
-                candidate_temp = new_volume_key(256)
-                split = deferred_format_command(command, volume_key, candidate_temp)
-                if split is not None:
-                    fast_cmd, enroll_cmd, kill_cmd = split
-                    if not any(a == "--pbkdf-force-iterations" or a.startswith("--pbkdf-force-iterations=") for a in enroll_cmd):
-                        stop_early_keyring()
-                    temp_keyfile = candidate_temp
-                    device = command[command.index("luksFormat") + 1]
-                    no_input_kwargs = {k: v for k, v in run_kwargs.items() if k != "input_data"}
-                    result = original_run(fast_cmd, *run_args, **no_input_kwargs)
-                    deferred_entry = DeferredKeyslot(
-                        device=device,
-                        volume_key=volume_key,
-                        temp_keyfile=temp_keyfile,
-                        enroll_cmd=enroll_cmd,
-                        kill_cmd=kill_cmd,
-                        passphrase=bytes(input_data),
-                    )
-                    return result
-                candidate_temp.unlink(missing_ok=True)
-            argv = format_command(command, volume_key)
-            pretouch_for_format(argv)
-            return original_run(argv, *run_args, **run_kwargs)
+
+            def run_deferred(cmd: list[str]):
+                no_input_kwargs = {k: v for k, v in run_kwargs.items() if k != "input_data"}
+                return original_run(cmd, *run_args, **no_input_kwargs)
+
+            def run_sync(cmd: list[str]):
+                return original_run(cmd, *run_args, **run_kwargs)
+
+            result, entry = run_luks_format(
+                command,
+                volume_key=volume_key,
+                passphrase=input_data if isinstance(input_data, (bytes, bytearray)) else None,
+                run_deferred=run_deferred,
+                run_sync=run_sync,
+                allow_defer=_deferred_keyslots is not None and deferred_entry is None,
+                stop_calibration_first=not calibration_stopped,
+            )
+            calibration_stopped = True
+            if entry is not None:
+                deferred_entry = entry
+            return result
 
         luks.run = calibrated_run
         try:
             result = original_encrypt(self, *args, **kwargs)
         except BaseException:
-            volume_key.unlink(missing_ok=True)
-            if temp_keyfile is not None:
-                temp_keyfile.unlink(missing_ok=True)
+            if deferred_entry is not None:
+                deferred_entry.abort()
+            else:
+                volume_key.unlink(missing_ok=True)
             raise
         finally:
             luks.run = original_run

@@ -719,4 +719,268 @@ class KeyslotEnrollmentCpusTest(unittest.TestCase):
         self.assertEqual(steps, [["enroll"], ["kill"]])
 
 
+class UnifiedLuksFormatTest(unittest.TestCase):
+    """Both full-disk (luks_tuning._with_calibration) and free-space
+    (format_and_open_luks) share run_luks_format with identical semantics."""
+
+    def setUp(self):
+        self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.state = self.directory / "result.json"
+        self.data = dict(schema=1, iter_time=2000, key_size=512, cpus=4,
+                         iterations=13, memory=1048576, parallel=4)
+        self.state.write_text(json.dumps(self.data))
+        self.state.chmod(0o600)
+        self.image = self.directory / "disk.img"
+        with self.image.open("wb") as stream:
+            stream.truncate(64 * 1024 * 1024)
+        self.real_fstat = os.fstat
+
+    def _root_stat(self, fd):
+        st = self.real_fstat(fd)
+        return types.SimpleNamespace(st_uid=0, st_mode=st.st_mode, st_size=st.st_size)
+
+    def _leftover_keys(self):
+        return [p for p in self.directory.iterdir() if p.name.startswith("omarchy-volume-key-")]
+
+    def _run_full_disk(self, command, *, defer_ctx=True, can_defer=True, cached=True,
+                       runner=None, after_run=None, patch_deferred_cmd=None):
+        sys.path.insert(0, str(Path(__file__).parent))
+        from archinstall_fakes import orchestrator_module
+        import importlib
+
+        calls = []
+        if runner is None:
+            def runner(cmd, input_data=None):
+                calls.append((list(cmd), input_data))
+                return types.SimpleNamespace(stdout=b"")
+
+        class Luks2:
+            def lock(self):
+                pass
+
+            def encrypt(self, key_file=None):
+                from archinstall.lib.disk import luks as real
+                real.run(command, input_data=b"passphrase")
+                if after_run is not None:
+                    after_run()
+                return key_file
+
+        names = {
+            "archinstall.lib.disk.luks": {"Luks2": Luks2, "run": runner},
+            "archinstall.lib.command": {"run": runner},
+            "archinstall.lib.exceptions": {"DiskError": RuntimeError},
+            "archinstall.lib.log": {"debug": lambda *_: None},
+        }
+        if not cached:
+            self.state.unlink(missing_ok=True)
+        with orchestrator_module("luks_tuning", names) as tuning:
+            from contextlib import ExitStack
+            shared = importlib.import_module("orchestrator.luks_calibration")
+            real = importlib.import_module("archinstall.lib.disk.luks")
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.object(shared, "VOLUME_KEY_DIR", self.directory))
+                stack.enter_context(mock.patch.object(shared, "STATE", self.state))
+                stack.enter_context(mock.patch.object(shared, "memory_total", return_value=8 * 1024 * 1024))
+                stack.enter_context(mock.patch.object(shared, "memory_available", return_value=4 * 1024 * 1024))
+                stack.enter_context(mock.patch.object(shared, "memory_free", return_value=4 * 1024 * 1024))
+                stack.enter_context(mock.patch.object(shared.os, "cpu_count", return_value=4))
+                stack.enter_context(mock.patch.object(shared.os, "fstat", side_effect=self._root_stat))
+                stack.enter_context(mock.patch.object(shared, "can_defer_keyslot", return_value=can_defer))
+                stop = stack.enter_context(mock.patch.object(shared, "stop_calibration"))
+                stop_keyring = stack.enter_context(mock.patch.object(shared, "stop_early_keyring"))
+                if patch_deferred_cmd is not None:
+                    stack.enter_context(
+                        mock.patch.object(shared, "deferred_format_command", side_effect=patch_deferred_cmd)
+                    )
+                try:
+                    wrapped = tuning._with_calibration(Luks2.encrypt)
+                    handler = Luks2()
+                    deferred_list = []
+                    if defer_ctx:
+                        with tuning.defer_argon2_keyslot() as deferred:
+                            wrapped(handler)
+                            deferred_list = list(deferred)
+                    else:
+                        wrapped(handler)
+                    return handler, calls, deferred_list, stop, stop_keyring
+                finally:
+                    self.assertIs(real.run, runner)
+
+    def test_dead_on_all_cpus_helper_is_removed(self):
+        self.assertFalse(hasattr(luks.DeferredKeyslot, "_on_all_cpus"))
+
+    def test_full_disk_deferred_cached_and_uncached_keyring_policy(self):
+        cmd = COMMAND[:-1] + [str(self.image)]
+        handler, calls, deferred, stop, stop_keyring = self._run_full_disk(cmd, cached=True)
+        stop.assert_called_once_with(wait=0)
+        stop_keyring.assert_not_called()
+        self.assertEqual(len(deferred), 1)
+        self.assertEqual(calls[0][1], None)
+        self.assertEqual(calls[0][0][calls[0][0].index("--key-slot") + 1], "1")
+        self.assertEqual(calls[0][0][calls[0][0].index("--sector-size") + 1], "4096")
+        self.assertIn("--pbkdf-force-iterations", deferred[0].enroll_cmd)
+        self.assertTrue(handler.omarchy_keep_volume_key)
+        deferred[0].abort()
+        self.assertEqual(self._leftover_keys(), [])
+
+        handler, calls, deferred, stop, stop_keyring = self._run_full_disk(cmd, cached=False)
+        stop.assert_called_once_with(wait=0)
+        stop_keyring.assert_called_once_with()
+        self.assertEqual(len(deferred), 1)
+        self.assertIn("--iter-time", deferred[0].enroll_cmd)
+        deferred[0].abort()
+        self.assertEqual(self._leftover_keys(), [])
+
+    def test_free_space_deferred_cached_and_uncached_keyring_policy(self):
+        for cached in (True, False):
+            with self.subTest(cached=cached):
+                if cached:
+                    self.state.write_text(json.dumps(self.data))
+                    self.state.chmod(0o600)
+                else:
+                    self.state.unlink(missing_ok=True)
+                ran = []
+                def fake_run(cmd, **kwargs):
+                    ran.append((list(cmd), kwargs))
+                    return subprocess.CompletedProcess(cmd, 0)
+                with mock.patch.object(luks, "VOLUME_KEY_DIR", self.directory), \
+                        mock.patch.object(luks, "STATE", self.state), \
+                        mock.patch.object(luks, "memory_total", return_value=8 * 1024 * 1024), \
+                        mock.patch.object(luks, "memory_available", return_value=4 * 1024 * 1024), \
+                        mock.patch.object(luks, "memory_free", return_value=4 * 1024 * 1024), \
+                        mock.patch.object(luks.os, "cpu_count", return_value=4), \
+                        mock.patch.object(luks.os, "fstat", side_effect=self._root_stat), \
+                        mock.patch.object(luks, "stop_calibration") as stop, \
+                        mock.patch.object(luks, "stop_early_keyring") as stop_keyring, \
+                        mock.patch.object(luks.subprocess, "run", side_effect=fake_run):
+                    entry = luks.format_and_open_luks(str(self.image), "omarchy_root", b"secret")
+                stop.assert_called_once_with(wait=0)
+                self.assertIsNotNone(entry)
+                if cached:
+                    stop_keyring.assert_not_called()
+                    self.assertIn("--pbkdf-force-iterations", entry.enroll_cmd)
+                else:
+                    stop_keyring.assert_called_once_with()
+                    self.assertIn("--iter-time", entry.enroll_cmd)
+                self.assertEqual(ran[1][0][:5], [
+                    "cryptsetup", "open", "--persistent", "--allow-discards", "--perf-no_read_workqueue",
+                ])
+                entry.abort()
+                self.assertEqual(self._leftover_keys(), [])
+
+    def test_sync_calibrated_fallback_matches_for_both_callers(self):
+        # Full-disk fallback when can_defer_keyslot() is False.
+        cmd = COMMAND[:-1] + [str(self.image)]
+        handler, calls, deferred, stop, stop_keyring = self._run_full_disk(cmd, can_defer=False, cached=True)
+        stop.assert_called_once_with()
+        stop_keyring.assert_not_called()
+        self.assertEqual(deferred, [])
+        self.assertFalse(getattr(handler, "omarchy_keep_volume_key", False))
+        self.assertEqual(calls[0][1], b"passphrase")
+        self.assertIn("--pbkdf-force-iterations", calls[0][0])
+        self.assertIn("--sector-size", calls[0][0])
+        self.assertEqual(calls[0][0][1:3], ["--volume-key-file", str(handler.omarchy_volume_key)])
+        handler.omarchy_volume_key.unlink()
+        self.assertEqual(self._leftover_keys(), [])
+
+        # Free-space fallback when can_defer_keyslot() is False.
+        ran = []
+        def fake_run(argv, **kwargs):
+            ran.append((list(argv), kwargs))
+            return subprocess.CompletedProcess(argv, 0)
+        with mock.patch.object(luks, "VOLUME_KEY_DIR", self.directory), \
+                mock.patch.object(luks, "STATE", self.state), \
+                mock.patch.object(luks, "memory_total", return_value=8 * 1024 * 1024), \
+                mock.patch.object(luks, "memory_available", return_value=4 * 1024 * 1024), \
+                mock.patch.object(luks, "memory_free", return_value=4 * 1024 * 1024), \
+                mock.patch.object(luks.os, "cpu_count", return_value=4), \
+                mock.patch.object(luks.os, "fstat", side_effect=self._root_stat), \
+                mock.patch.object(luks, "can_defer_keyslot", return_value=False), \
+                mock.patch.object(luks, "stop_calibration") as stop, \
+                mock.patch.object(luks, "stop_early_keyring") as stop_keyring, \
+                mock.patch.object(luks.subprocess, "run", side_effect=fake_run):
+            entry = luks.format_and_open_luks(str(self.image), "omarchy_root", b"sync-pw")
+        stop.assert_called_once_with()
+        stop_keyring.assert_not_called()
+        self.assertIsNone(entry)
+        self.assertEqual(ran[0][0][3:7], ["luksFormat", str(self.image), "--sector-size", "4096"])
+        self.assertIn("--pbkdf-force-iterations", ran[0][0])
+        self.assertEqual(ran[0][0][-1], "-")
+        self.assertEqual(ran[0][1]["input"], b"sync-pw")
+        self.assertEqual(self._leftover_keys(), [])
+
+    def test_pbkdf_force_iterations_bypasses_deferral_and_unlinks_temp_keyfile(self):
+        for flag in (["--pbkdf-force-iterations", "9"], ["--pbkdf-force-iterations=9"]):
+            with self.subTest(flag=flag):
+                fixed_cmd = COMMAND[:-1] + [str(self.image)]
+                idx = fixed_cmd.index("--iter-time")
+                fixed_cmd = fixed_cmd[:idx] + flag + fixed_cmd[idx + 2:]
+                handler, calls, deferred, stop, stop_keyring = self._run_full_disk(
+                    fixed_cmd, defer_ctx=True, can_defer=True, cached=True,
+                )
+                stop.assert_called_once_with(wait=0)
+                stop_keyring.assert_not_called()
+                self.assertEqual(deferred, [])
+                self.assertEqual(calls[0][1], b"passphrase")
+                self.assertNotIn("--key-slot", calls[0][0])
+                self.assertEqual(self._leftover_keys(), [handler.omarchy_volume_key])
+                handler.omarchy_volume_key.unlink()
+
+    def test_full_disk_unlinks_all_keyfiles_on_runtime_error_and_keyboard_interrupt(self):
+        cmd = COMMAND[:-1] + [str(self.image)]
+        for exc_cls in (RuntimeError, KeyboardInterrupt):
+            with self.subTest(phase="fast_cmd", exc=exc_cls.__name__):
+                def boom(_cmd, **_kw):
+                    raise exc_cls("boom")
+                with self.assertRaises(exc_cls):
+                    self._run_full_disk(cmd, runner=boom)
+                self.assertEqual(self._leftover_keys(), [])
+
+            with self.subTest(phase="deferred_format_command", exc=exc_cls.__name__):
+                with self.assertRaises(exc_cls):
+                    self._run_full_disk(cmd, patch_deferred_cmd=exc_cls("interrupted"))
+                self.assertEqual(self._leftover_keys(), [])
+
+            with self.subTest(phase="post_format_encrypt", exc=exc_cls.__name__):
+                def fail_after():
+                    raise exc_cls("after format")
+                with self.assertRaises(exc_cls):
+                    self._run_full_disk(cmd, after_run=fail_after)
+                self.assertEqual(self._leftover_keys(), [])
+
+    def test_free_space_unlinks_all_keyfiles_on_runtime_error_and_keyboard_interrupt(self):
+        for exc_cls in (RuntimeError, KeyboardInterrupt):
+            for fail_on in ("luksFormat", "open"):
+                with self.subTest(mode="deferred", fail_on=fail_on, exc=exc_cls.__name__):
+                    def fake_run(cmd, **_kw):
+                        if fail_on in cmd:
+                            raise exc_cls("boom")
+                        return subprocess.CompletedProcess(cmd, 0)
+                    with mock.patch.object(luks, "VOLUME_KEY_DIR", self.directory), \
+                            mock.patch.object(luks, "STATE", self.state), \
+                            mock.patch.object(luks, "memory_total", return_value=8 * 1024 * 1024), \
+                            mock.patch.object(luks, "memory_available", return_value=4 * 1024 * 1024), \
+                            mock.patch.object(luks, "memory_free", return_value=4 * 1024 * 1024), \
+                            mock.patch.object(luks.os, "cpu_count", return_value=4), \
+                            mock.patch.object(luks.os, "fstat", side_effect=self._root_stat), \
+                            mock.patch.object(luks, "stop_calibration"), \
+                            mock.patch.object(luks.subprocess, "run", side_effect=fake_run):
+                        with self.assertRaises(exc_cls):
+                            luks.format_and_open_luks(str(self.image), "omarchy_root", b"secret")
+                    self.assertEqual(self._leftover_keys(), [])
+
+            with self.subTest(mode="sync", exc=exc_cls.__name__):
+                def fail_sync(cmd, **_kw):
+                    raise exc_cls("boom")
+                with mock.patch.object(luks, "VOLUME_KEY_DIR", self.directory), \
+                        mock.patch.object(luks, "STATE", self.state), \
+                        mock.patch.object(luks, "can_defer_keyslot", return_value=False), \
+                        mock.patch.object(luks, "stop_calibration"), \
+                        mock.patch.object(luks, "pretouch_for_format"), \
+                        mock.patch.object(luks.subprocess, "run", side_effect=fail_sync):
+                    with self.assertRaises(exc_cls):
+                        luks.format_and_open_luks(str(self.image), "omarchy_root", b"secret")
+                self.assertEqual(self._leftover_keys(), [])
+
+
 if __name__ == '__main__': unittest.main()

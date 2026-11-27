@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import tempfile
@@ -1133,6 +1134,19 @@ class AdiantumWithoutAes(unittest.TestCase):
         self.assertEqual(fast_cmd[fast_cmd.index('--pbkdf') + 1], 'pbkdf2')
         self.assertNotIn('--cipher', enroll_cmd)
 
+    @staticmethod
+    def _no_kernel_adiantum() -> str | None:
+        """Why the kernel's AF_ALG cannot give cryptsetup Adiantum, or None."""
+        family = getattr(socket, 'AF_ALG', None)
+        if family is None:
+            return 'this Python has no AF_ALG'
+        try:
+            with socket.socket(family, socket.SOCK_SEQPACKET) as alg:
+                alg.bind(('skcipher', 'adiantum(xchacha12,aes)'))
+        except OSError as err:
+            return str(err)
+        return None
+
     def test_real_cryptsetup_adiantum_deferred_format_enroll_and_unlock(self):
         import shutil
         if not shutil.which('cryptsetup'):
@@ -1145,7 +1159,16 @@ class AdiantumWithoutAes(unittest.TestCase):
                     '--pbkdf-force-iterations', '4', '--pbkdf-memory', '65536', '--pbkdf-parallel', '2']):
             fast_cmd, enroll_cmd, kill_cmd = luks.deferred_format_command(
                 COMMAND[:-1] + [str(image)], vk, tk)
-        subprocess.run(fast_cmd, check=True, capture_output=True)
+        try:
+            subprocess.run(fast_cmd, check=True, capture_output=True)
+        except subprocess.CalledProcessError:
+            # OpenSSL has no Adiantum, so cryptsetup encrypts the keyslots
+            # through the kernel's AF_ALG, which a container's seccomp
+            # profile may deny. Only that is a reason to skip.
+            reason = self._no_kernel_adiantum()
+            if reason:
+                self.skipTest(f'the kernel offers no Adiantum to cryptsetup: {reason}')
+            raise
         entry = luks.DeferredKeyslot(str(image), vk, tk, enroll_cmd, kill_cmd, b'test-passphrase')
         entry.start()
         entry.join()

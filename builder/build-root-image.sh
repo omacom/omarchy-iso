@@ -611,9 +611,6 @@ cat >"$root/etc/kernel/cmdline" <<'CMDLINE'
 zswap.enabled=0 rootflags=subvol=@ rw rootfstype=btrfs initramfs_async=0 quiet splash loglevel=0 systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 systemd.tty.term.console=dumb
 CMDLINE
 
-# The preset names the kernel version explicitly: mkinitcpio treats a glob in
-# ALL_kver as a literal path. It sets no ALL_microcode, which is deprecated;
-# the microcode hook in mkinitcpio.conf adds the microcode.
 # shellcheck disable=SC2010 # kernel version directories, named by pacman
 image_kver=$(ls -1 "$root/usr/lib/modules/" | grep -E '^[0-9]+\.' | head -1)
 # The output directory persists between builds: no layer from an older one.
@@ -647,13 +644,6 @@ else
   # shellcheck source=/dev/null # the image's own vconsole.conf
   ( [ -f "$root/etc/vconsole.conf" ] && . "$root/etc/vconsole.conf"; printf '%s\n' "${KEYMAP:-}" ) \
     >"$root/var/lib/omarchy-iso/prebuilt-uki.keymap"
-  cat >"$root/etc/mkinitcpio.d/${image_kernel}.preset" <<PRESET
-ALL_config="/etc/mkinitcpio.conf"
-ALL_kver="/usr/lib/modules/${image_kver}/vmlinuz"
-PRESETS=('default')
-default_uki="/var/lib/omarchy-iso/prebuilt-uki.efi"
-default_options="-S autodetect"
-PRESET
 
   # The pre-built UKI's own config. Naming a config with -c makes mkinitcpio
   # skip /etc/mkinitcpio.conf.d, which is where omarchy_hooks.conf sets the
@@ -875,9 +865,10 @@ fi
 
 # The Try layer is built against the finished image, before copying into the
 # compressed btrfs filesystem: it only reads the image, through an overlay whose
-# upper directory it keeps.
+# upper directory it keeps. Pass effective_pacman_conf so deferred boot hooks
+# (mkinitcpio/Limine) stay masked when pacstrap installs Try packages.
 if [[ -n ${OMARCHY_TRY_LAYER:-} ]]; then
-  bash /builder/build-try-layer.sh "$root" "$OMARCHY_TRY_LAYER" "${OMARCHY_TRY_CHANNEL:-stable}" "$pacman_conf"
+  bash /builder/build-try-layer.sh "$root" "$OMARCHY_TRY_LAYER" "${OMARCHY_TRY_CHANNEL:-stable}" "$effective_pacman_conf"
 fi
 
 if [[ ${OMARCHY_FAST_COMPRESSION:-} != 1 ]]; then

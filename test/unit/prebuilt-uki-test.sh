@@ -105,3 +105,14 @@ grep -Fq -- "-U /var/lib/omarchy-iso/prebuilt-uki.efi" "$work/chroot-ordinary.lo
 [[ $(cat "$work/root-ordinary/var/lib/omarchy-iso/prebuilt-uki.efi") == "built-uki" ]] ||
   fail "ordinary build did not write prebuilt-uki.efi"
 echo "ok - Snapdragon builds remove stale generic UKI without calling mkinitcpio, ordinary builds still build it"
+
+# The builder invokes mkinitcpio -c/-U directly and never through a preset.
+# Leaving an orphaned mkinitcpio preset pointing at prebuilt-uki.efi caused
+# unmasked 90-mkinitcpio-install.hook runs inside build-try-layer.sh to build
+# ~239 MiB kms UKIs into both omarchy-try.sfs and omarchy-try-nvidia-open.sfs.
+if grep -Fq 'default_uki="/var/lib/omarchy-iso/prebuilt-uki.efi"' "$builder"; then
+  fail "build-root-image.sh still writes an orphaned mkinitcpio preset for prebuilt-uki.efi"
+fi
+grep -Fq 'bash /builder/build-try-layer.sh "$root" "$OMARCHY_TRY_LAYER" "${OMARCHY_TRY_CHANNEL:-stable}" "$effective_pacman_conf"' "$builder" ||
+  fail "build-root-image.sh must pass effective_pacman_conf (with boot hooks masked) to build-try-layer.sh"
+echo "ok - build-root-image.sh writes no orphaned UKI preset and masks boot hooks for build-try-layer.sh"

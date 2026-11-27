@@ -46,6 +46,27 @@ if [[ $ENCRYPT == true ]]; then
   sector=$(awk '$1 == "sector:" { print $2; exit }' "$RUN_DIR/luks-dump.txt")
   check "the root's LUKS sectors are 4096 bytes (got: ${sector:-nothing})" test "$sector" = 4096
 
+  cipher=$(awk '$1 == "cipher:" { print $2; exit }' "$RUN_DIR/luks-dump.txt")
+  key_bits=$(awk '$1 == "Key:" { print $2; exit }' "$RUN_DIR/luks-dump.txt")
+  guest_has_aes=false
+  if ssh_guest 'grep -qE "^(flags|Features)[[:space:]]*:.*\baes\b" /proc/cpuinfo'; then
+    guest_has_aes=true
+  fi
+  if [[ ",$CPU_FLAGS," == *,-aes,* ]]; then
+    check "the guest CPU has no AES flag in /proc/cpuinfo" test "$guest_has_aes" = false
+  fi
+  if [[ $guest_has_aes == true ]]; then
+    check "the root's LUKS cipher is aes-xts-plain64 with hardware AES (got: ${cipher:-nothing})" \
+      test "$cipher" = aes-xts-plain64
+    check "the root's LUKS key size is 512 bits for AES-XTS (got: ${key_bits:-nothing})" \
+      test "$key_bits" = 512
+  else
+    check "the root's LUKS cipher is xchacha12,aes-adiantum-plain64 without hardware AES (got: ${cipher:-nothing})" \
+      test "$cipher" = xchacha12,aes-adiantum-plain64
+    check "the root's LUKS key size is 256 bits for Adiantum (got: ${key_bits:-nothing})" \
+      test "$key_bits" = 256
+  fi
+
   # TRIM has to reach the drive through dm-crypt, which drops every discard
   # unless the mapping allows them (omacom/omarchy#5332). The installer stores
   # allow-discards in the LUKS2 header, so every activation applies it; the

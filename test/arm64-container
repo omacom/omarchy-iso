@@ -15,7 +15,7 @@ image=$(sed -n 's/^ *CONTAINER_IMAGE=\(ghcr\.io\/menci\/archlinuxarm@sha256:[0-9
 
 docker=(docker)
 docker version >/dev/null 2>&1 || docker=(sudo docker)
-"${docker[@]}" run --rm --device /dev/kvm -v "$PWD:/w" -w /w -e KERNEL -e PLATFORM -e MEM -e MACHINE "$image" bash -euo pipefail -c '
+"${docker[@]}" run --rm --device /dev/kvm -v "$PWD:/w" -w /w -e KERNEL -e PLATFORM -e MEM -e MACHINE -e NO_TRY "$image" bash -euo pipefail -c '
   # A runner kernel without Landlock: pacman cannot fence its downloads there.
   # Arch'"'"'s own x86_64 image ships this line; Arch Linux ARM'"'"'s does not.
   sed -i "/^\[options\]/a DisableSandboxFilesystem" /etc/pacman.conf

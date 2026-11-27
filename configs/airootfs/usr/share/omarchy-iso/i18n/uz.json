@@ -20,8 +20,6 @@
   "summary.keyboard": "Klaviatura",
   "summary.language": "Til",
   "summary.prompt": "Hammasi toʻgʻrimi?",
-  "firmware.title": "Qualcomm proshivkasi Windowsdan saqlanmoqda",
-  "firmware.saved": "Oʻrnatish uchun Windowsdan %1 ta proshivka fayli saqlandi.",
   "firmware.partial": "Windowsdan %2 ta fayldan %1 tasi saqlandi; qolganlari drayverlar omborida yoʻq.",
   "firmware.none": "Bu kompyuterda Windows proshivkasi topilmadi.",
   "firmware.bitlocker": "Windows boʻlimi BitLocker bilan shifrlangan.",

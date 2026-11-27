@@ -249,6 +249,76 @@ class BuildTryLayerTest(unittest.TestCase):
         self.assertIn("omarchy-try-session", self.text)
         self.assertIn('sddm.login("$TRY_USER", "", root.sessionIndex)', self.text)
 
+    def test_strips_nvim_git_and_symlinks_duplicate_theme_backgrounds(self):
+        snippet = re.search(
+            r'(rm -rf "\$merged/home/\$TRY_USER"/\.local/share/nvim/lazy/\*/\.git'
+            r'.*?try_theme_bgs="\$merged/home/\$TRY_USER/\.local/state/omarchy/current/theme/backgrounds".*?\nfi)',
+            self.text,
+            re.S,
+        )
+        self.assertIsNotNone(snippet)
+        # Cleanup must run after user provisioning populates the Try home
+        # directory and before mksquashfs packs the layer.
+        provision_pos = self.text.index("omarchy-provision-user")
+        pack_pos = self.text.index("mksquashfs")
+        self.assertLess(provision_pos, snippet.start())
+        self.assertLess(snippet.end(), pack_pos)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            merged = Path(tmp) / "merged"
+            lazy = merged / "home/omarchy/.local/share/nvim/lazy"
+            for plugin, rel_file, content in (
+                ("lazy.nvim", "lua/lazy/init.lua", b"return {}"),
+                ("tokyonight.nvim", "colors/tokyonight.lua", b"vim.g.colors_name = 'tokyonight'"),
+            ):
+                (lazy / plugin / ".git/objects").mkdir(parents=True)
+                (lazy / plugin / ".git/HEAD").write_text("ref: refs/heads/main\n")
+                (lazy / plugin / ".git/objects/pack").write_bytes(b"pack-data")
+                plugin_file = lazy / plugin / rel_file
+                plugin_file.parent.mkdir(parents=True, exist_ok=True)
+                plugin_file.write_bytes(content)
+
+            unrelated_git = merged / "home/omarchy/.local/share/other/.git/HEAD"
+            unrelated_git.parent.mkdir(parents=True)
+            unrelated_git.write_text("ref: refs/heads/main\n")
+
+            bgs = merged / "home/omarchy/.local/state/omarchy/current/theme/backgrounds"
+            (bgs / "intros").mkdir(parents=True)
+            src_bgs = merged / "usr/share/omarchy/themes/tokyo-night/backgrounds"
+            (src_bgs / "intros").mkdir(parents=True)
+            (src_bgs / "0-liftoff.webp").write_bytes(b"wallpaper-bytes")
+            (src_bgs / "intros/0-liftoff.mp4").write_bytes(b"intro-video-bytes")
+            (bgs / "0-liftoff.webp").write_bytes(b"wallpaper-bytes")
+            (bgs / "intros/0-liftoff.mp4").write_bytes(b"intro-video-bytes")
+            (bgs / "custom.webp").write_bytes(b"custom-only")
+
+            subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", f'merged={merged}\nTRY_USER=omarchy\n{snippet.group(1)}'],
+                check=True,
+            )
+
+            self.assertFalse((lazy / "lazy.nvim/.git").exists())
+            self.assertFalse((lazy / "tokyonight.nvim/.git").exists())
+            self.assertEqual((lazy / "lazy.nvim/lua/lazy/init.lua").read_bytes(), b"return {}")
+            self.assertEqual(
+                (lazy / "tokyonight.nvim/colors/tokyonight.lua").read_bytes(),
+                b"vim.g.colors_name = 'tokyonight'",
+            )
+            self.assertTrue(unrelated_git.is_file())
+
+            self.assertTrue((bgs / "0-liftoff.webp").is_symlink())
+            self.assertEqual(
+                os.readlink(bgs / "0-liftoff.webp"),
+                "/usr/share/omarchy/themes/tokyo-night/backgrounds/0-liftoff.webp",
+            )
+            self.assertTrue((bgs / "intros/0-liftoff.mp4").is_symlink())
+            self.assertEqual(
+                os.readlink(bgs / "intros/0-liftoff.mp4"),
+                "/usr/share/omarchy/themes/tokyo-night/backgrounds/intros/0-liftoff.mp4",
+            )
+            self.assertFalse((bgs / "custom.webp").is_symlink())
+            self.assertEqual((bgs / "custom.webp").read_bytes(), b"custom-only")
+
 
 class LiveSystemLeavesTheMachineTest(unittest.TestCase):
     # Every boot runs the live installer first, Just try included.
@@ -273,17 +343,24 @@ class DedupAndBuildIsoTest(unittest.TestCase):
             live = tmp / "live"
             image = tmp / "image"
             pseudo = tmp / "pseudo"
-            # Directory present in image and in KEEP, absent from live -> must become opaque!
+            # Missing WHITEOUT_TREES dir (usr/lib/firmware absent in live, present in image)
+            # must be created and marked opaque so image firmware stays out.
             (image / "usr/lib/firmware/iwlwifi").mkdir(parents=True)
             (image / "usr/lib/firmware/iwlwifi/test.ucode").write_bytes(b"fw")
-            # Identical file inside a KEEP directory (usr/share/fonts) must stay in live
-            # and the directory must be opaque so image-only fonts (noto/) stay out.
+            # Present WHITEOUT_TREES dir (usr/share/fonts): identical kept files are
+            # deduplicated, pruned image-only dirs/files get overlayfs whiteouts,
+            # live-only files stay, and directory mtime is preserved for fc-cache.
             (image / "usr/share/fonts/noto").mkdir(parents=True)
             (image / "usr/share/fonts/noto/NotoSans.ttf").write_bytes(b"noto")
             (image / "usr/share/fonts/TTF").mkdir(parents=True)
             (image / "usr/share/fonts/TTF/JetBrainsMono.ttf").write_bytes(b"jb")
+            (image / "usr/share/fonts/TTF/Pruned Font.ttf").write_bytes(b"pruned")
             (live / "usr/share/fonts/TTF").mkdir(parents=True)
             (live / "usr/share/fonts/TTF/JetBrainsMono.ttf").write_bytes(b"jb")
+            (live / "usr/share/fonts/TTF/LiveOnly.ttf").write_bytes(b"live-only")
+            font_epoch = 1700000000
+            os.utime(live / "usr/share/fonts", (font_epoch, font_epoch))
+            os.utime(live / "usr/share/fonts/TTF", (font_epoch, font_epoch))
             (live / "etc").mkdir(parents=True)
             # Identical file outside KEEP -> must be deduplicated!
             (live / "usr/bin").mkdir(parents=True)
@@ -293,7 +370,7 @@ class DedupAndBuildIsoTest(unittest.TestCase):
             (live / "usr/bin/diff").write_bytes(b"live-version")
             (image / "usr/bin/diff").write_bytes(b"image-version")
 
-            res = subprocess.run(
+            subprocess.run(
                 ["python3", "-c", py_src, str(live), str(image), str(pseudo)],
                 capture_output=True,
                 text=True,
@@ -303,11 +380,31 @@ class DedupAndBuildIsoTest(unittest.TestCase):
             self.assertTrue((live / "usr/bin/diff").exists())
             self.assertTrue((live / "usr/lib/firmware").is_dir())
             pseudo_lines = pseudo.read_text().splitlines()
-            self.assertTrue((live / "usr/share/fonts/TTF/JetBrainsMono.ttf").is_file())
+            self.assertFalse((live / "usr/share/fonts/TTF/JetBrainsMono.ttf").exists())
+            self.assertTrue((live / "usr/share/fonts/TTF/LiveOnly.ttf").is_file())
+            self.assertEqual(int((live / "usr/share/fonts/TTF").stat().st_mtime), font_epoch)
             self.assertIn("/usr/lib/firmware x trusted.overlay.opaque=y", pseudo_lines)
-            self.assertIn("/usr/share/fonts x trusted.overlay.opaque=y", pseudo_lines)
+            self.assertNotIn("/usr/share/fonts x trusted.overlay.opaque=y", pseudo_lines)
+            self.assertIn("/usr/share/fonts/noto c 0000 0 0 0 0", pseudo_lines)
+            self.assertIn('"/usr/share/fonts/TTF/Pruned Font.ttf" c 0000 0 0 0 0', pseudo_lines)
             self.assertIn("/etc x trusted.overlay.opaque=y", pseudo_lines)
             self.assertTrue((live / "etc/omarchy-iso-live-over-image").is_file())
+
+            # When present, usr/lib/firmware also deduplicates kept files and whiteouts pruned dirs.
+            (live / "usr/lib/firmware/amdgpu").mkdir(parents=True)
+            (image / "usr/lib/firmware/amdgpu").mkdir(parents=True)
+            (live / "usr/lib/firmware/amdgpu/gc.bin.zst").write_bytes(b"amd")
+            (image / "usr/lib/firmware/amdgpu/gc.bin.zst").write_bytes(b"amd")
+            subprocess.run(
+                ["python3", "-c", py_src, str(live), str(image), str(pseudo)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            pseudo_lines = pseudo.read_text().splitlines()
+            self.assertFalse((live / "usr/lib/firmware/amdgpu/gc.bin.zst").exists())
+            self.assertNotIn("/usr/lib/firmware x trusted.overlay.opaque=y", pseudo_lines)
+            self.assertIn("/usr/lib/firmware/iwlwifi c 0000 0 0 0 0", pseudo_lines)
 
     def test_customize_airootfs_clamps_font_dir_mtimes_before_fc_cache(self):
         text = (ROOT / "configs/airootfs/root/customize_airootfs.sh").read_text()
@@ -373,7 +470,7 @@ class DedupAndBuildIsoTest(unittest.TestCase):
     def test_oem_iso_skips_try_layer(self):
         # Without the layer the installer never asks Install or Try.
         text = BUILD_ISO.read_text()
-        self.assertIn('[[ $OMARCHY_ARCH == x86_64 && ${OMARCHY_OEM_INSTALL:-} != "1" ]]', text)
+        self.assertIn('[[ ${OMARCHY_OEM_INSTALL:-} != "1" ]] && try_layer=', text)
 
     def test_iso_size_gate_checks_only_newly_built_isos_after_chown(self):
         text = BUILD_ISO.read_text()

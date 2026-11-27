@@ -57,6 +57,9 @@ ENCRYPT="${OMARCHY_INTEGRATION_ENCRYPT:-false}"
 # prompt runs from (upstream omarchy#8196); it needs a non-us value here to
 # assert anything.
 KB_LAYOUT="${OMARCHY_INTEGRATION_KB_LAYOUT:-us}"
+# Extra QEMU -cpu flags appended to `-cpu host` (e.g. `-aes` to test LUKS
+# Adiantum on a CPU without AES-NI).
+CPU_FLAGS="${OMARCHY_INTEGRATION_CPU_FLAGS:-}"
 
 # type_text sends key positions over QMP and the guest reads them through its
 # own keymap: KB_LAYOUT at the installed system's console, LUKS prompt and
@@ -107,6 +110,9 @@ if [[ $UKI == true ]]; then
 fi
 if [[ $DISK_GB != 40 ]]; then
   BASE_DIR+="-${DISK_GB}g"
+fi
+if [[ -n $CPU_FLAGS ]]; then
+  BASE_DIR+="-cpu${CPU_FLAGS//[^a-zA-Z0-9_-]/}"
 fi
 RUN_DIR="$BASE_DIR/runs/$(date +%Y%m%d-%H%M%S)-$SCENARIO"
 BASE_DISK="$BASE_DIR/base.qcow2"
@@ -304,7 +310,7 @@ start_vm() {
   fi
 
   qemu-system-x86_64 \
-    -cpu host -enable-kvm -machine q35,accel=kvm \
+    -cpu "host${CPU_FLAGS:+,$CPU_FLAGS}" -enable-kvm -machine q35,accel=kvm \
     -smp "$(nproc)" \
     -m "$MEMORY" \
     "${firmware_args[@]}" \

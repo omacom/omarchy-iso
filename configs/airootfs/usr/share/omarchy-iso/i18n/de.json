@@ -20,8 +20,6 @@
   "summary.keyboard": "Tastatur",
   "summary.language": "Sprache",
   "summary.prompt": "Sieht das richtig aus?",
-  "firmware.title": "Sichere Qualcomm-Firmware aus Windows",
-  "firmware.saved": "%1 Firmware-Dateien aus Windows für die Installation gesichert.",
   "firmware.partial": "%1 von %2 Firmware-Dateien aus Windows gesichert; der Rest fehlte im Treiberspeicher.",
   "firmware.none": "Keine Windows-Firmware auf diesem Rechner gefunden.",
   "firmware.bitlocker": "Die Windows-Partition ist mit BitLocker verschlüsselt.",

@@ -20,8 +20,6 @@
   "summary.keyboard": "Tipkovnica",
   "summary.language": "Jezik",
   "summary.prompt": "Je vse pravilno?",
-  "firmware.title": "Shranjevanje strojne programske opreme Qualcomm iz Windows",
-  "firmware.saved": "Za namestitev shranjenih %1 datotek strojne programske opreme iz Windows.",
   "firmware.partial": "Shranjenih %1 od %2 datotek iz Windows; ostalih ni bilo v shrambi gonilnikov.",
   "firmware.none": "Na tem računalniku ni strojne programske opreme iz Windows.",
   "firmware.bitlocker": "Particija Windows je šifrirana z BitLockerjem.",

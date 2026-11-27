@@ -20,8 +20,6 @@
   "summary.keyboard": "Tipkovnica",
   "summary.language": "Jezik",
   "summary.prompt": "Je li sve točno?",
-  "firmware.title": "Spremanje Qualcomm firmvera iz Windowsa",
-  "firmware.saved": "Za instalaciju spremljeno je %1 datoteka firmvera iz Windowsa.",
   "firmware.partial": "Spremljeno %1 od %2 datoteka firmvera iz Windowsa; ostalih nije bilo u spremištu.",
   "firmware.none": "Na ovom računalu nije pronađen firmver iz Windowsa.",
   "firmware.bitlocker": "Particija sa sustavom Windows šifrirana je BitLockerom.",

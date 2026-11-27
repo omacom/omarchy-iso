@@ -20,8 +20,6 @@
   "summary.keyboard": "Klaviatuur",
   "summary.language": "Keel",
   "summary.prompt": "Kas see on õige?",
-  "firmware.title": "Salvestan Qualcommi püsivara Windowsist",
-  "firmware.saved": "Salvestasin paigalduseks Windowsist %1 püsivarafaili.",
   "firmware.partial": "Salvestasin Windowsist %1 püsivarafaili %2-st; ülejäänuid draiverihoidlas polnud.",
   "firmware.none": "Selles arvutis Windowsi püsivara ei leitud.",
   "firmware.bitlocker": "Windowsi partitsioon on BitLockeriga krüpteeritud.",

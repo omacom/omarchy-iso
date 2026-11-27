@@ -20,8 +20,6 @@
   "summary.keyboard": "Tastatură",
   "summary.language": "Limbă",
   "summary.prompt": "Este totul corect?",
-  "firmware.title": "Se salvează firmware-ul Qualcomm din Windows",
-  "firmware.saved": "S-au salvat %1 fișiere de firmware din Windows pentru instalare.",
   "firmware.partial": "S-au salvat %1 din %2 fișiere de firmware din Windows; restul lipseau din drivere.",
   "firmware.none": "Nu s-a găsit firmware Windows pe acest calculator.",
   "firmware.bitlocker": "Partiția Windows este criptată cu BitLocker.",

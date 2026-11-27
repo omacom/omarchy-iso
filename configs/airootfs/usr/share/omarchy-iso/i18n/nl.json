@@ -20,8 +20,6 @@
   "summary.keyboard": "Toetsenbord",
   "summary.language": "Taal",
   "summary.prompt": "Klopt dit?",
-  "firmware.title": "Qualcomm-firmware uit Windows bewaren",
-  "firmware.saved": "%1 firmwarebestanden uit Windows bewaard voor de installatie.",
   "firmware.partial": "%1 van %2 firmwarebestanden uit Windows bewaard; de rest stond niet in de driveropslag.",
   "firmware.none": "Geen Windows-firmware gevonden op deze computer.",
   "firmware.bitlocker": "De Windows-partitie is versleuteld met BitLocker.",

@@ -18,3 +18,20 @@ qcom_oem_firmware_packages() {
     }
   ' | sort -u
 }
+
+# Copy any qcom-firmware-extract/provided.d/*.list files shipped by the
+# resolved Snapdragon OEM firmware packages into the live ISO. Only packages
+# the install itself will bring are passed here, so provided.d cannot hide
+# firmware for a package the install omits and huge linux-firmware-* archives
+# are never scanned.
+stage_live_qcom_provided_lists() {
+  local target_airootfs=$1 pkg entries
+  local -a lists=()
+  shift
+  for pkg in "$@"; do
+    entries=$(bsdtar -tf "$pkg") || return 1
+    mapfile -t lists < <(printf '%s\n' "$entries" | grep -E '^usr/share/qcom-firmware-extract/provided\.d/[^/]+\.list$' || true)
+    (( ${#lists[@]} > 0 )) || continue
+    bsdtar -xf "$pkg" -C "$target_airootfs" "${lists[@]}" || return 1
+  done
+}

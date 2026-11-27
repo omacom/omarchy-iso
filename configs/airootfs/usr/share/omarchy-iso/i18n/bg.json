@@ -20,8 +20,6 @@
   "summary.keyboard": "Клавиатура",
   "summary.language": "Език",
   "summary.prompt": "Всичко наред ли е?",
-  "firmware.title": "Запазване на фърмуер на Qualcomm от Windows",
-  "firmware.saved": "Запазени са %1 файла с фърмуер от Windows за инсталацията.",
   "firmware.partial": "Запазени са %1 от %2 файла с фърмуер; останалите ги няма в драйверите на Windows.",
   "firmware.none": "На този компютър не е открит фърмуер от Windows.",
   "firmware.bitlocker": "Дялът на Windows е криптиран с BitLocker.",

@@ -24,8 +24,6 @@
   "summary.keyboard": "Keyboard",
   "summary.language": "Language",
   "summary.prompt": "Does this look right?",
-  "firmware.title": "Saving Qualcomm firmware from Windows",
-  "firmware.saved": "Saved %1 firmware files from Windows for the install.",
   "firmware.partial": "Saved %1 of %2 firmware files from Windows; the rest were not in the driver store.",
   "firmware.none": "No Windows firmware found on this machine.",
   "firmware.bitlocker": "The Windows partition is BitLocker-encrypted.",

@@ -20,8 +20,6 @@
   "summary.keyboard": "Teclado",
   "summary.language": "Idioma",
   "summary.prompt": "Está tudo certo?",
-  "firmware.title": "A guardar o firmware Qualcomm do Windows",
-  "firmware.saved": "Guardados %1 ficheiros de firmware do Windows para a instalação.",
   "firmware.partial": "Guardados %1 de %2 ficheiros de firmware do Windows; faltavam os restantes.",
   "firmware.none": "Não foi encontrado firmware do Windows neste computador.",
   "firmware.bitlocker": "A partição do Windows está encriptada com BitLocker.",

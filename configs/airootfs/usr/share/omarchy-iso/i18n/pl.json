@@ -20,8 +20,6 @@
   "summary.keyboard": "Klawiatura",
   "summary.language": "Język",
   "summary.prompt": "Czy wszystko się zgadza?",
-  "firmware.title": "Zapisywanie firmware Qualcomm z systemu Windows",
-  "firmware.saved": "Zapisano %1 plików firmware z Windows na potrzeby instalacji.",
   "firmware.partial": "Zapisano %1 z %2 plików firmware z Windows; reszty nie było w magazynie sterowników.",
   "firmware.none": "Nie znaleziono firmware Windows na tym komputerze.",
   "firmware.bitlocker": "Partycja Windows jest zaszyfrowana funkcją BitLocker.",

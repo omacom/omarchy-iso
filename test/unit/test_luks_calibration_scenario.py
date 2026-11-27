@@ -61,7 +61,9 @@ class FormatCoverage(unittest.TestCase):
         self.state = self.directory / 'result.json'
         self.cost = dict(iterations=13, memory=1048576, parallel=4)
         self.calibration = types.SimpleNamespace(STATE=self.state, MIN_MEMORY=65536, MAX_MEMORY=1048576,
-                                                cached_options=lambda *_: ['costs'] if self.state.exists() else [])
+                                                cached_options=lambda *_: ['costs'] if self.state.exists() else [],
+                                                has_aes_acceleration=lambda: True,
+                                                volume_key_size=lambda: 512)
         self.report = {'runs': []}
         self.calls = []
         self.iterations, self.unlock = {}, {}

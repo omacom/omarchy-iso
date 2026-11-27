@@ -685,12 +685,18 @@ def arch_install_system(ctx: InstallContext) -> None:
         with _time_step("STEP.sanity_check"):
             arch.sanity_check(installer)
 
-        # Start Argon2id slot-0 enrollment now, right after LUKS opens and on
-        # E-cores where available, so the 2 s KDF overlaps the O_DIRECT image
-        # write without slowing F1.image_write and finishes before the snapshot.
-        _start_luks_keyslot_enroll(ctx)
+        # Start Argon2id slot-0 enrollment now on machines with enough RAM to
+        # hold the cached root image alongside Argon2id's 1 GiB arena (and on
+        # E-cores where available), so the 2 s KDF overlaps the O_DIRECT image
+        # write without slowing F1.image_write. On low-RAM machines (e.g. 8 GiB),
+        # starting Argon2id before F1.image_write evicts ~1 GiB of cached root
+        # image pages back to the USB stick; start it right after instead, where
+        # it still overlaps boot/system setup and finishes before @factory.
+        if (getattr(ctx, "state", None) or {}).get("luks_deferred_keyslots") and _can_overlap_luks_with_image_write():
+            _start_luks_keyslot_enroll(ctx)
         with _time_step("STEP.install_root_image"):
             _install_root_image(ctx)
+        _start_luks_keyslot_enroll(ctx)
         if config.auth_config and config.auth_config.users:
             _start_skel_warmup(ctx)
         # Overlap platform/hardware layer extraction with setup steps that never
@@ -1100,6 +1106,55 @@ def _wait_for_blkid_uuid(device: str, attempts: int = 50) -> None:
 SYSFS_BLOCK = Path("/sys/class/block")
 
 
+def _boot_medium_scheduler_path() -> Path | None:
+    """Path to the boot medium whole disk's queue/scheduler sysfs file, or None."""
+    source = _findmnt_value(BOOT_MEDIUM_MOUNT, "SOURCE")
+    if not source or not source.startswith("/dev/"):
+        return None
+    try:
+        dev = SYSFS_BLOCK / Path(source.split("[", 1)[0]).resolve().name
+        direct = dev / "queue" / "scheduler"
+        if direct.is_file():
+            return direct
+        parent = dev.resolve().parent / "queue" / "scheduler"
+        return parent if parent.is_file() else None
+    except OSError:
+        return None
+
+
+@contextmanager
+def _boot_medium_scheduler_for_image_write():
+    """Temporarily switch the boot medium off BFQ during the root image write.
+
+    BFQ is set at boot so the idle-class verification hash yields to live
+    squashfs page-ins. By the time _place_root_image runs, verification is
+    complete; switching BFQ to mq-deadline (or none) avoids BFQ slice idling
+    and overhead on USB flash media when low-RAM machines read uncached image
+    blocks, with negligible (~0.05 ms) cost when the image is fully cached."""
+    sched_path = _boot_medium_scheduler_path()
+    previous: str | None = None
+    if sched_path is not None:
+        try:
+            tokens = sched_path.read_text().split()
+            active = next((t[1:-1] for t in tokens if t.startswith("[") and t.endswith("]")), None)
+            available = {t.strip("[]") for t in tokens}
+            if active == "bfq":
+                target = "mq-deadline" if "mq-deadline" in available else ("none" if "none" in available else None)
+                if target is not None:
+                    sched_path.write_text(f"{target}\n")
+                    previous = active
+        except OSError:
+            previous = None
+    try:
+        yield
+    finally:
+        if sched_path is not None and previous is not None:
+            try:
+                sched_path.write_text(f"{previous}\n")
+            except OSError:
+                pass
+
+
 def _medium_bytes_read() -> int | None:
     """Bytes the kernel has read from the boot medium's block device so far
     (sectors read, from /sys/class/block/<dev>/stat), or None when there is no
@@ -1240,12 +1295,13 @@ def _place_root_image(ctx: InstallContext) -> None:
     with _flock_whole_disk(device):
         # The rest of the placement after the write takes moments; it gets the
         # last few percent.
-        if not _write_root_image_parallel(container, device,
-                                          lambda done: _write_phase_progress(ctx, 0.95 * done)):
-            try:
-                _write_root_image_dd(_mount_root_image(container), device)
-            finally:
-                _umount_root_image()
+        with _boot_medium_scheduler_for_image_write():
+            if not _write_root_image_parallel(container, device,
+                                              lambda done: _write_phase_progress(ctx, 0.95 * done)):
+                try:
+                    _write_root_image_dd(_mount_root_image(container), device)
+                finally:
+                    _umount_root_image()
         medium_after = _medium_bytes_read()
         if medium_before is not None and medium_after is not None:
             info(f"› read {(medium_after - medium_before) / 1048576:.0f} MiB of the "
@@ -1823,6 +1879,21 @@ def stop_library_warmup(ctx: InstallContext) -> None:
         if proc.poll() is None:
             proc.kill()
         proc.wait()
+
+
+def _can_overlap_luks_with_image_write() -> bool:
+    """Whether starting deferred Argon2id before F1.image_write has enough RAM
+    headroom to avoid evicting the cached root image on low-RAM machines."""
+    from . import luks_calibration
+
+    try:
+        container = _root_image()
+        image_bytes = container.stat().st_size
+    except (OSError, RuntimeError):
+        return False
+    if image_bytes <= 0:
+        return False
+    return luks_calibration.can_overlap_image_write(image_bytes)
 
 
 def _start_luks_keyslot_enroll(ctx: InstallContext) -> None:
@@ -3765,6 +3836,270 @@ def _n1x_prebuilt_uki(target: Path, arm_platform: str) -> Path | None:
     return uki if _initramfs_module_lines(target) == lines else None
 
 
+# Fallback list of drop-ins shipped by the base image when an older image
+# lacks prebuilt-uki-qualcomm.dropins.
+_SYSTEM_MKINITCPIO_DROPINS = frozenset({
+    "00-omarchy-hooks.conf",
+    "i2c_hid_of_module.conf",
+    "omarchy_compression.conf",
+    "omarchy_hooks.conf",
+    "omarchy_mount_events.conf",
+    "omarchy_vconsole.conf",
+    "thunderbolt_module.conf",
+    "zz-omarchy-kernel-modules.conf",
+})
+
+# Non-boot-critical modprobe.d files that hardware setup may write on supported
+# laptops (top-row Fn-key defaults) without needing a fresh initramfs.
+_QUALCOMM_ALLOWED_MODPROBE_DIFFS = frozenset({
+    "etc/modprobe.d/omarchy-toprow.conf",
+})
+
+_QUALCOMM_UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.I,
+)
+_QUALCOMM_LOOP_FILE_TOKEN_RE = re.compile(
+    r'"?\$\{?directory\}?/\$\{?firmware\}?\$\{?suffix\}?"?'
+)
+
+
+def _live_smbios_chids() -> set[str]:
+    """CHID UUIDs reported by systemd-analyze chid on the running machine."""
+    try:
+        proc = subprocess.run(
+            ["systemd-analyze", "chid"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return set()
+    if proc.returncode != 0:
+        return set()
+    return {m.group(0).lower() for m in _QUALCOMM_UUID_RE.finditer(proc.stdout)}
+
+
+def _qualcomm_hwid_matches(
+    target: Path,
+    dt_compatible_path: Path = Path("/sys/firmware/devicetree/base/compatible"),
+    live_chids: set[str] | None = None,
+) -> bool:
+    """True when the running board's first (board-level) compatible is baked
+    into prebuilt-uki-qualcomm.efi AND has a matching devicetree HWID JSON whose
+    hwids intersect this machine's SMBIOS CHIDs, so systemd-stub's
+    DeviceTreeAuto will select the right DTB at boot."""
+    hwids_dir = target / "usr" / "lib" / "systemd" / "boot" / "hwids" / "aa64"
+    if not dt_compatible_path.is_file() or not hwids_dir.is_dir():
+        return False
+    try:
+        compatibles = [c for c in dt_compatible_path.read_bytes().decode("utf-8", errors="ignore").split("\x00") if c]
+    except OSError:
+        return False
+    if not compatibles:
+        return False
+    board_compatible = compatibles[0]
+
+    baked_compats_path = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-qualcomm.compatibles"
+    if baked_compats_path.is_file():
+        baked_compats = {line.strip() for line in baked_compats_path.read_text().splitlines() if line.strip()}
+        if board_compatible not in baked_compats:
+            return False
+
+    chids = _live_smbios_chids() if live_chids is None else {c.lower() for c in live_chids}
+    if not chids:
+        return False
+
+    for path in hwids_dir.glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if data.get("type") != "devicetree" or data.get("compatible") != board_compatible:
+            continue
+        json_hwids = {
+            h.lower() for h in data.get("hwids", []) if isinstance(h, str)
+        }
+        if json_hwids & chids:
+            return True
+    return False
+
+
+def _qualcomm_has_pinned_devicetree(target: Path) -> bool:
+    """True when the target pins a machine-specific DeviceTree= outside
+    omarchy-update-qualcomm-device-trees's managed DeviceTreeAuto block."""
+    uki_conf = target / "etc" / "kernel" / "uki.conf"
+    if uki_conf.is_file():
+        in_managed = False
+        has_managed_auto = False
+        for raw_line in uki_conf.read_text(errors="ignore").splitlines():
+            line = raw_line.strip()
+            if line == "# BEGIN OMARCHY QUALCOMM DEVICE TREES":
+                in_managed = True
+                continue
+            if line == "# END OMARCHY QUALCOMM DEVICE TREES":
+                in_managed = False
+                continue
+            if in_managed:
+                if line.startswith("DeviceTreeAuto="):
+                    has_managed_auto = True
+                continue
+            if line.startswith("DeviceTree="):
+                return True
+        if not has_managed_auto and any(
+            l.strip().startswith("DeviceTree=")
+            for l in uki_conf.read_text(errors="ignore").splitlines()
+        ):
+            return True
+
+    uki_conf_d = target / "etc" / "kernel" / "uki.conf.d"
+    if uki_conf_d.is_dir():
+        for dropin in sorted(uki_conf_d.glob("*.conf")):
+            for raw_line in dropin.read_text(errors="ignore").splitlines():
+                if raw_line.strip().startswith("DeviceTree="):
+                    return True
+    return False
+
+
+def _qualcomm_initramfs_inputs(root: Path) -> dict[str, str]:
+    """Hash etc/mkinitcpio.conf, etc/initcpio, and etc/modprobe.d matching
+    build-root-image.sh's qualcomm_initramfs_inputs."""
+    inputs: dict[str, str] = {}
+    for rel_top in ("etc/mkinitcpio.conf", "etc/initcpio", "etc/modprobe.d"):
+        top = root / rel_top
+        if top.is_symlink() or top.is_file():
+            candidates = [top]
+        elif top.is_dir():
+            candidates = sorted(p for p in top.rglob("*") if p.is_symlink() or p.is_file())
+        else:
+            continue
+        for path in candidates:
+            rel = path.relative_to(root).as_posix()
+            if path.is_symlink():
+                digest = hashlib.sha256((os.readlink(path) + "\n").encode("utf-8", errors="surrogateescape")).hexdigest()
+            else:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            inputs[rel] = digest
+    return inputs
+
+
+def _normalize_firmware_literal(token: str) -> str:
+    """Normalize an absolute firmware path like /usr/lib/firmware/qcom/foo.fw.zst
+    to its relative firmware name qcom/foo.fw for comparison against recorded
+    firmware entries."""
+    for prefix in ("/usr/lib/firmware/updates/", "/usr/lib/firmware/"):
+        if token.startswith(prefix):
+            rel = token[len(prefix):]
+            for suffix in (".zst", ".xz"):
+                if rel.endswith(suffix):
+                    rel = rel[:-len(suffix)]
+                    break
+            return rel
+    return token
+
+
+def _qualcomm_prebuilt_uki(
+    target: Path,
+    platform_name: str,
+    *,
+    dt_compatible_path: Path = Path("/sys/firmware/devicetree/base/compatible"),
+    live_chids: set[str] | None = None,
+) -> Path | None:
+    """The image's Snapdragon UKI, for a Qualcomm laptop whose hardware setup
+    stays within what build-root-image.sh baked into it: covered early modules
+    (never qcom_q6v5_pas), no board-specific initcpio hooks beyond
+    omarchy-quiet-efivars (which is busybox-only), no extra BINARIES, no
+    board-specific or Windows-extracted FILES beyond the baked Adreno
+    microcode, no unexpected mkinitcpio.conf/initcpio/modprobe.d changes, no
+    pinned DeviceTree= override, and a matching HWID + CHID + baked DTB entry.
+
+    Any machine needing extra hooks (Galaxy Book4 Edge 14), early DSP loading
+    (Surface Laptop 8), board-specific initramfs files (Surface Pro 11,
+    qcom-firmware.conf zap shader), or a pinned DeviceTree= fallback returns
+    None and builds its own UKI via limine-mkinitcpio as before."""
+    uki = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-qualcomm.efi"
+    recorded_mods_path = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-qualcomm.modules"
+    recorded_files_path = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-qualcomm.files"
+    recorded_dropins_path = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-qualcomm.dropins"
+    recorded_inputs_path = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-qualcomm.inputs"
+    if not uki.is_file() or not recorded_mods_path.is_file() or platform_name != "aarch64-qualcomm":
+        return None
+    if (target / "etc" / "mkinitcpio.conf.d" / "qcom-firmware.conf").exists():
+        return None
+    if (target / "etc" / "modprobe.d" / "qualcomm-adsp-nofw.conf").exists():
+        return None
+    if _qualcomm_has_pinned_devicetree(target):
+        return None
+    if not _qualcomm_hwid_matches(target, dt_compatible_path=dt_compatible_path, live_chids=live_chids):
+        return None
+
+    if recorded_inputs_path.is_file():
+        recorded_inputs = _recorded_initramfs_inputs(recorded_inputs_path)
+        current_inputs = _qualcomm_initramfs_inputs(target)
+        diffs = {
+            k for k in set(recorded_inputs) | set(current_inputs)
+            if recorded_inputs.get(k) != current_inputs.get(k)
+        }
+        if diffs - _QUALCOMM_ALLOWED_MODPROBE_DIFFS:
+            return None
+
+    system_dropins = (
+        frozenset(line.strip() for line in recorded_dropins_path.read_text().splitlines() if line.strip())
+        if recorded_dropins_path.is_file() else _SYSTEM_MKINITCPIO_DROPINS
+    )
+    covered_mods = {line.strip().replace("-", "_") for line in recorded_mods_path.read_text().splitlines() if line.strip()}
+    covered_files = (
+        {line.strip() for line in recorded_files_path.read_text().splitlines() if line.strip()}
+        if recorded_files_path.is_file() else set()
+    )
+    allowed_literal_files = covered_files | {"/etc/vconsole.conf", "/etc/systemd/system.conf.d/20-mount-events.conf"}
+
+    conf_dir = target / "etc" / "mkinitcpio.conf.d"
+    for conf in sorted(conf_dir.glob("*.conf")) if conf_dir.is_dir() else []:
+        text = conf.read_text(errors="ignore")
+        for match in re.finditer(r"^\s*MODULES\s*\+?=\(([^)]*)\)", text, re.M | re.S):
+            body = "\n".join(line.split("#", 1)[0] for line in match.group(1).splitlines())
+            for tok in body.split():
+                tok = tok.strip("'\"")
+                if not tok or tok.startswith("$"):
+                    continue
+                if tok.rstrip("?").replace("-", "_") not in covered_mods:
+                    return None
+        if conf.name in system_dropins:
+            continue
+        for match in re.finditer(r"^\s*HOOKS\s*\+?=\(([^)]*)\)", text, re.M | re.S):
+            body = "\n".join(line.split("#", 1)[0] for line in match.group(1).splitlines())
+            for tok in body.split():
+                tok = tok.strip("'\"")
+                if tok and tok != "omarchy-quiet-efivars":
+                    return None
+        for match in re.finditer(r"^\s*BINARIES\s*\+?=\(([^)]*)\)", text, re.M | re.S):
+            body = "\n".join(line.split("#", 1)[0] for line in match.group(1).splitlines())
+            if body.split():
+                return None
+        if "FILES" in text:
+            unwrapped = re.sub(r"\\\n", " ", text)
+            loop_items: list[str] = []
+            for match in re.finditer(r"\bfor\s+firmware\s+in\s+([^;\n]+);", unwrapped):
+                loop_items.extend(t.strip("'\"") for t in match.group(1).split() if t.strip("'\""))
+            if loop_items and not all(item in covered_files for item in loop_items):
+                return None
+            for match in re.finditer(r"^\s*FILES\s*\+?=\(([^)]*)\)", text, re.M | re.S):
+                body = "\n".join(line.split("#", 1)[0] for line in match.group(1).splitlines())
+                for tok in body.split():
+                    tok = tok.strip("'\"")
+                    if not tok:
+                        continue
+                    if "$" in tok:
+                        if not loop_items or not _QUALCOMM_LOOP_FILE_TOKEN_RE.fullmatch(tok):
+                            return None
+                    elif tok not in allowed_literal_files and _normalize_firmware_literal(tok) not in covered_files:
+                        return None
+    return uki
+
+
 def _keymap_of(vconsole: Path) -> str:
     """KEYMAP= from a vconsole.conf, or "" when unset or unreadable."""
     if not vconsole.is_file():
@@ -4175,6 +4510,18 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
         info("› N1x: using the image's N1x UKI, built with this machine's initramfs modules")
         prebuilt_uki = n1x_uki
         added_modules = []
+    # A Snapdragon ISO ships a Qualcomm UKI built with all Snapdragon DTBs
+    # (DeviceTreeAuto + HWIDs), shared Qualcomm early modules and Adreno microcode.
+    qualcomm_uki_candidate = ctx.target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-qualcomm.efi"
+    qualcomm_uki = (
+        _qualcomm_prebuilt_uki(ctx.target, hw_platform())
+        if not n1x_uki and qualcomm_uki_candidate.is_file()
+        else None
+    )
+    if qualcomm_uki:
+        info("› Qualcomm: using the image's Snapdragon UKI, built with shared Snapdragon modules and device trees")
+        prebuilt_uki = qualcomm_uki
+        added_modules = []
     if prebuilt_uki.is_file() and added_modules:
         info(f"› hardware setup added initramfs modules ({'; '.join(added_modules)}); "
              "building the UKI on this machine instead of using the pre-built one")
@@ -4235,7 +4582,7 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
                 check=True,
             )
 
-    if prebuilt_uki.is_file() and not skip_prebuilt and arch.has_uefi() and (n1x_uki or not _arm_platform_boot()):
+    if prebuilt_uki.is_file() and not skip_prebuilt and arch.has_uefi() and (n1x_uki or qualcomm_uki or not _arm_platform_boot()):
         used_prebuilt_uki = True
         limine_err: list[BaseException] = []
 
@@ -5473,65 +5820,60 @@ def restore_cpu_governors(saved: dict[Path, str]) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# trim_target: invoked from main() once run() has stopped the install timer.
+# stage_first_boot_trim: invoked from main() once run() has finished.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Seconds the trim may take before it is stopped. A drive that discards
-# slowly (SATA without queued TRIM, eMMC) must not hold the finish screen for
-# minutes. What it did not reach stays as it was.
-TRIM_BUDGET = 120
+# Non-zero epoch timestamp (1970-01-02 UTC) for stamp-fstrim.timer: systemd
+# treats 0 as unset, while any past timestamp >1 week old makes fstrim.timer's
+# Persistent=true fire fstrim.service once after first boot (after its built-in
+# RandomizedDelaySec=100min) instead of waiting up to a week for Monday.
+FSTRIM_OVERDUE_STAMP_EPOCH = 86400
 
 
-def trim_target(ctx: InstallContext) -> None:
-    """Tell the drive which blocks of the new root are free: fstrim on the
-    mounted target, once the install is done and its timer has stopped.
+def stage_first_boot_trim(ctx: InstallContext) -> None:
+    """Enable Arch's built-in fstrim.timer with an overdue stamp file so
+    fstrim.service trims unallocated SSD space in the background after first
+    boot instead of blocking the end of the install.
 
-    Nothing else ever does. mkfs.btrfs runs with -K on both paths, the root
-    image fills only the start of the partition, and btrfs's discard=async
-    trims only what it frees after mount. archinstall leaves fstrim.timer
-    disabled on btrfs, so a full-disk install never trims the space btrfs has
-    not allocated. Whatever that space held (an earlier install, Windows)
-    stays live data to the drive's flash translation layer: on a Samsung 990
-    PRO, the installer's LUKS2 mapping wrote 40 GiB at 2.07 GB/s onto such
-    space, and at 6.57 GB/s after a discard.
+    Nothing else trims the unallocated space on a fresh root. mkfs.btrfs runs
+    with -K on both paths, the root image fills only the start of the
+    partition, and btrfs's discard=async trims only what it frees after mount.
+    archinstall leaves fstrim.timer disabled on btrfs, so a full-disk install
+    would otherwise never trim the space btrfs has not allocated. Whatever that
+    space held (an earlier install, Windows) stays live data to the drive's
+    flash translation layer: on a Samsung 990 PRO, the installer's LUKS2
+    mapping wrote 40 GiB at 2.07 GB/s onto such space, and at 6.57 GB/s after
+    a discard.
 
-    btrfs's FITRIM trims the free space in its block groups and then the
-    unallocated space on the device (btrfs_trim_fs), so one call covers the
-    whole partition, through dm-crypt, which the installer opens with
-    allow-discards. It holds the chunk mutex for each range it discards, so
-    it runs after the install instead of alongside it: main() calls it once
-    run() has written finished_at, while the target is still mounted (the
-    dashboard releases it before the finish screen). It runs in the
-    installer's process group, so cancelling the install stops it too.
+    Using util-linux's stock fstrim.timer + fstrim.service avoids maintaining a
+    custom self-deleting unit: fstrim.service already passes --quiet-unsupported
+    and --verbose, runs under timers.target without delaying login, and keeps
+    periodic weekly TRIM enabled afterward.
 
-    Best effort: it never fails the install, which is complete by now. A
-    failed, unsupported or interrupted trim is logged. A slow one is killed
-    after TRIM_BUDGET seconds: btrfs sends at most 1 GiB per discard request
-    (BTRFS_MAX_DISCARD_CHUNK_SIZE) and checks for a fatal signal after each,
-    so it stops within one request."""
-    target = str(ctx.target)
-    started = time.monotonic()
+    Best effort: it never fails a completed install."""
+    timer_unit = ctx.target / "usr/lib/systemd/system/fstrim.timer"
+    if not timer_unit.exists():
+        info("› trim: WARNING: fstrim.timer not found on target; continuing without it")
+        return
+
     try:
-        result = subprocess.run(["fstrim", "--verbose", target], stdin=subprocess.DEVNULL,
-                                capture_output=True, text=True, timeout=TRIM_BUDGET)
-    except subprocess.TimeoutExpired:
-        info(f"› trim: WARNING: fstrim {target} was still running after {TRIM_BUDGET}s; "
-             "stopped it, the rest of the free space is left as it was")
-        return
+        wants_dir = ctx.target / "etc/systemd/system/timers.target.wants"
+        wants_dir.mkdir(parents=True, exist_ok=True)
+        link = wants_dir / "fstrim.timer"
+        link.unlink(missing_ok=True)
+        link.symlink_to("/usr/lib/systemd/system/fstrim.timer")
+
+        stamp = ctx.target / "var/lib/systemd/timers/stamp-fstrim.timer"
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.unlink(missing_ok=True)
+        stamp.write_bytes(b"")
+        stamp.chmod(0o644)
+        os.utime(stamp, (FSTRIM_OVERDUE_STAMP_EPOCH, FSTRIM_OVERDUE_STAMP_EPOCH))
     except OSError as exc:
-        info(f"› trim: WARNING: could not run fstrim on {target} ({exc}); continuing without it")
+        info(f"› trim: WARNING: could not enable fstrim.timer ({exc}); continuing without it")
         return
-    except KeyboardInterrupt:
-        # subprocess.run has killed fstrim and waited for it.
-        info(f"› trim: WARNING: fstrim {target} was interrupted; the install itself is complete")
-        return
-    elapsed = time.monotonic() - started
-    output = " ".join((result.stdout + result.stderr).split())
-    if result.returncode == 0:
-        info(f"› trim: {output} in {elapsed:.2f}s")
-    else:
-        info(f"› trim: WARNING: fstrim {target} exited {result.returncode} after {elapsed:.2f}s "
-             f"({output}); continuing without it")
+
+    info("› trim: enabled fstrim.timer with overdue stamp for first-boot trim")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

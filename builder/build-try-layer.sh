@@ -471,12 +471,19 @@ ln -sf ../run/systemd/resolve/stub-resolv.conf "$merged/etc/resolv.conf"
 # install gets both at its end. The channel's pacman.conf and mirrorlist come
 # from the step that gives an install them, the image's own
 # install/post-install/pacman.sh, which renders them from Omarchy's templates
-# with no network, whichever runtime the channel carries.
+# with no network, whichever runtime the channel carries. On aarch64 that
+# step also makes the keyring, which here is the session's own job (below):
+# OMARCHY_KEYRING_MANAGED_BY_ISO=1 leaves it out, as build-root-image.sh
+# patches the image's pacman-keyring.sh to allow.
 in_try env OMARCHY_PATH=/usr/share/omarchy OMARCHY_INSTALL=/usr/share/omarchy/install \
-  OMARCHY_MIRROR="$channel" \
+  OMARCHY_MIRROR="$channel" OMARCHY_KEYRING_MANAGED_BY_ISO=1 \
   PATH=/usr/share/omarchy/bin:/usr/bin \
   OMARCHY_PCI_DEVICES_PATH=/dev/null \
   bash -c 'source "$OMARCHY_INSTALL/post-install/pacman.sh"' >/dev/null
+if [[ -e $merged/etc/pacman.d/gnupg/trustdb.gpg ]]; then
+  echo "build-try-layer.sh: the Try layer would carry a pacman keyring, which every session would share" >&2
+  exit 1
+fi
 for bound_stub in "${bound_stubs[@]}"; do
   umount "$bound_stub"
 done
@@ -715,6 +722,28 @@ if [[ -n $pacman_conf ]]; then
   pacstrap -C "$pacman_conf" -c -G -M "$merged" sof-firmware alsa-firmware >/dev/null
 fi
 
+# Try is an ephemeral live session that resets on reboot, so pre-installed
+# Neovim plugins need their working trees, not ~23 MiB of git history.
+rm -rf "$merged/home/$TRY_USER"/.local/share/nvim/lazy/*/.git
+
+# omarchy-provision-user copies the default theme's wallpapers and intro video
+# into the Try user's state directory. Replace files that match the image's
+# /usr/share/omarchy/themes/ copy byte-for-byte with symlinks so Try keeps
+# every wallpaper and intro (omarchy-theme-bg-next follows symlinks via find -L)
+# without duplicating ~16 MiB of media inside omarchy-try.sfs.
+try_theme_bgs="$merged/home/$TRY_USER/.local/state/omarchy/current/theme/backgrounds"
+if [[ -d $try_theme_bgs && -d $merged/usr/share/omarchy/themes ]]; then
+  while IFS= read -r -d '' bg; do
+    rel=${bg#"$try_theme_bgs/"}
+    for src in "$merged"/usr/share/omarchy/themes/*/backgrounds/"$rel"; do
+      if [[ -f $src && ! -L $src ]] && cmp -s "$bg" "$src"; then
+        ln -sfn "${src#"$merged"}" "$bg"
+        break
+      fi
+    done
+  done < <(find "$try_theme_bgs" -type f -print0)
+fi
+
 # Built on the build host's clock and identity; the session makes its own.
 : >"$merged/etc/machine-id"
 
@@ -793,5 +822,12 @@ driver_layer() { # name, script, lspci line, PCI vendor, device, class
 # apple/fix-t2.sh and nvidia.sh look for. Not the 580xx driver for Maxwell to
 # Volta (its layer is about 0.55 GB, which the ISO's size limit has no room
 # for): those cards run Try on nouveau, and an install still gets 580xx.
-driver_layer t2 apple/fix-t2.sh "00:00.0 Non-VGA unclassified device [0000]: Apple Inc. T2 Bridge Controller [106b:1801]" 0x106b 0x1801 0x088000
-driver_layer nvidia-open nvidia.sh "01:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD102 [10de:2684]" 0x10de 0x2684 0x030000
+#
+# x86_64 only. A T2 Mac is an Intel machine, and linux-t2 and t2fanrd have no
+# aarch64 build. The ARM machines with an NVIDIA GPU (N1x, GB10) take their
+# driver from their platform's own setup, not from nvidia.sh, so on aarch64
+# Try runs on the generic display driver.
+if [[ ${OMARCHY_ARCH:-$(uname -m)} == "x86_64" ]]; then
+  driver_layer t2 apple/fix-t2.sh "00:00.0 Non-VGA unclassified device [0000]: Apple Inc. T2 Bridge Controller [106b:1801]" 0x106b 0x1801 0x088000
+  driver_layer nvidia-open nvidia.sh "01:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD102 [10de:2684]" 0x10de 0x2684 0x030000
+fi

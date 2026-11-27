@@ -20,8 +20,6 @@
   "summary.keyboard": "Keyboard",
   "summary.language": "Bahasa",
   "summary.prompt": "Apakah ini sudah benar?",
-  "firmware.title": "Menyimpan firmware Qualcomm dari Windows",
-  "firmware.saved": "%1 berkas firmware dari Windows disimpan untuk pemasangan.",
   "firmware.partial": "%1 dari %2 berkas firmware dari Windows disimpan; sisanya tidak ada di penyimpanan driver.",
   "firmware.none": "Tidak ada firmware Windows di komputer ini.",
   "firmware.bitlocker": "Partisi Windows dienkripsi dengan BitLocker.",

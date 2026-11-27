@@ -246,9 +246,7 @@ def _root_image_required_packages() -> list[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# prepare_live: ready the live ISO for the install — tear down any previous
-# holders on the install disk (via the bash helper), then parse the
-# configurator output.
+# prepare_live starts the target keyring in tmpfs and stages hardware data.
 #
 # The live pacman keyring is deliberately NOT waited on. The offline repo is
 # SigLevel = Never (see configs/pacman-offline.conf for why that is required:
@@ -294,7 +292,12 @@ def prepare_live(ctx: InstallContext) -> None:
         _start_target_keyring_init(ctx, keyrings_dir=LIVE_KEYRINGS_DIR)
 
     _stage_qualcomm_firmware()
-    if ctx.is_protected:
+
+
+def _prepare_archinstall_config(ctx: InstallContext) -> None:
+    # The cleanup helper also wipes filesystem signatures. Release the disk
+    # only after the medium and layout checks, then let archinstall probe it.
+    if ctx.is_protected or free_space_plan(ctx) is not None:
         info("› protected mode: skipping whole-disk cleanup")
     else:
         disk = _install_disk(ctx)
@@ -335,23 +338,20 @@ def _install_disk(ctx: InstallContext) -> str | None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def prepare_install_target(ctx: InstallContext) -> None:
-    """Everything that can fail before the disk is touched. The next phase
-    partitions, formats and encrypts as its first step, and a failure after
-    that leaves a wiped (or wiped and encrypted) disk with no system on it:
-    so the image, its checksum and a layout the image can land on are all
-    checked here, where failing costs nothing."""
+    """Verify the layout and install media before releasing the target disk."""
     if free_space_plan(ctx) is not None:
         verify_install_medium(ctx)
         validate_free_space_plan(ctx)
-        return
-    if ctx.is_protected:
-        verify_protected_mounts(ctx)
-        # The protected layout exists already; check the real mounts.
-        _, device = _root_image_target_mounts(ctx.target)
-        verify_pre_mounted_root_empty(ctx, device)
     else:
-        verify_root_image_layout(ctx.user_configuration.get("disk_config") or {})
-    verify_install_medium(ctx)
+        if ctx.is_protected:
+            verify_protected_mounts(ctx)
+            # The protected layout exists already; check the real mounts.
+            _, device = _root_image_target_mounts(ctx.target)
+            verify_pre_mounted_root_empty(ctx, device)
+        else:
+            verify_root_image_layout(ctx.user_configuration.get("disk_config") or {})
+        verify_install_medium(ctx)
+    _prepare_archinstall_config(ctx)
 
 
 def verify_root_image_layout(disk_config: dict) -> None:

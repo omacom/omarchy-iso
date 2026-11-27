@@ -281,7 +281,7 @@ class PrepareInstallTargetTest(unittest.TestCase):
     def setUp(self):
         self.calls = []
         for name in ("verify_protected_mounts", "verify_install_medium",
-                     "verify_root_image_layout", "verify_pre_mounted_root_empty"):
+                     "verify_root_image_layout", "verify_pre_mounted_root_empty", "_prepare_archinstall_config"):
             patch = mock.patch.object(
                 phases_impl, name, side_effect=lambda *a, _n=name, **k: self.calls.append(_n)
             )
@@ -300,7 +300,7 @@ class PrepareInstallTargetTest(unittest.TestCase):
             user_configuration={"disk_config": btrfs_root_layout()},
         )
         phases_impl.prepare_install_target(ctx)
-        self.assertEqual(self.calls, ["verify_root_image_layout", "verify_install_medium"])
+        self.assertEqual(self.calls, ["verify_root_image_layout", "verify_install_medium", "_prepare_archinstall_config"])
 
     def test_protected_checks_real_mounts_then_image(self):
         ctx = types.SimpleNamespace(
@@ -311,7 +311,7 @@ class PrepareInstallTargetTest(unittest.TestCase):
         self.assertEqual(
             self.calls,
             ["verify_protected_mounts", "_root_image_target_mounts",
-             "verify_pre_mounted_root_empty", "verify_install_medium"],
+             "verify_pre_mounted_root_empty", "verify_install_medium", "_prepare_archinstall_config"],
         )
 
 
@@ -330,7 +330,7 @@ class VerifyPreMountedRootEmptyTest(unittest.TestCase):
             user_configuration={"disk_config": {"config_type": "pre_mounted_config"}},
         )
         self.calls = []
-        for name in ("verify_protected_mounts", "verify_install_medium"):
+        for name in ("verify_protected_mounts", "verify_install_medium", "_prepare_archinstall_config"):
             patch = mock.patch.object(phases_impl, name)
             patch.start()
             self.addCleanup(patch.stop)
@@ -544,6 +544,8 @@ class TargetKeyringUnitTest(unittest.TestCase):
         with (
             mock.patch.object(phases_impl, "LIVE_KEYRINGS_DIR", live_keyrings),
             mock.patch.object(phases_impl, "_stage_qualcomm_firmware"),
+            mock.patch.object(phases_impl, "verify_install_medium"),
+            mock.patch.object(phases_impl, "verify_root_image_layout"),
             mock.patch.object(
                 phases_impl, "_start_target_keyring_init",
                 side_effect=lambda c, *, keyrings_dir=None: events.append(("keyring", keyrings_dir)),
@@ -556,6 +558,8 @@ class TargetKeyringUnitTest(unittest.TestCase):
             mock.patch.object(phases_impl.arch, "make_mirror_handler", return_value=object(), create=True),
         ):
             phases_impl.prepare_live(ctx)
+            self.assertEqual(events, [("keyring", live_keyrings)])
+            phases_impl.prepare_install_target(ctx)
 
         self.assertEqual(events[0], ("keyring", live_keyrings))
         self.assertEqual(events[1][0], "cleanup")
@@ -577,6 +581,8 @@ class TargetKeyringUnitTest(unittest.TestCase):
         with (
             mock.patch.object(phases_impl, "LIVE_KEYRINGS_DIR", missing_keyrings),
             mock.patch.object(phases_impl, "_stage_qualcomm_firmware"),
+            mock.patch.object(phases_impl, "verify_install_medium"),
+            mock.patch.object(phases_impl, "verify_root_image_layout"),
             mock.patch.object(
                 phases_impl, "_start_target_keyring_init",
                 side_effect=lambda c, *, keyrings_dir=None: events.append(("keyring", keyrings_dir)),
@@ -589,6 +595,8 @@ class TargetKeyringUnitTest(unittest.TestCase):
             mock.patch.object(phases_impl.arch, "make_mirror_handler", return_value=object(), create=True),
         ):
             phases_impl.prepare_live(ctx)
+            self.assertEqual(events, [])
+            phases_impl.prepare_install_target(ctx)
 
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0][0], "cleanup")

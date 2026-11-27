@@ -1,0 +1,47 @@
+# shellcheck shell=bash disable=SC2034
+#
+# Modern hybrid Intel laptops (Alder Lake through Panther/Wildcat Lake) with
+# Intel graphics and SOF audio, without the IPU7 camera stack covered by
+# intel-ptl-ipu7.layer. The ISO build packs these packages as a layer over the
+# root image (builder/build-root-image.sh), and the installer extracts it in the
+# background right after the image write where layer_matches passes
+# (phases_impl._hardware_layer). Because _hardware_layer picks the first passing
+# layer in name order, intel-ptl-ipu7.layer sorts before this file and still
+# wins on Panther Lake laptops with the OV08F4 camera.
+#
+# layer_matches passes only where every script named below installs its
+# packages, so a machine never gets one its scripts would not install. It runs
+# in the target, as the scripts do. Change it with the scripts it follows.
+
+layer_arch=x86_64
+
+layer_packages=(
+  intel-media-driver libvpl vpl-gpu-rt  # intel/video-acceleration.sh
+  vulkan-intel                          # vulkan.sh
+  intel-lpmd                            # intel/lpmd.sh
+  thermald                              # intel/thermald.sh
+  sof-firmware                          # intel/sof-firmware.sh
+)
+
+# OMARCHY_PROC_ROOT and OMARCHY_SYS_ROOT let tests stand in for /proc and /sys,
+# as for Omarchy's own detectors.
+layer_matches() {
+  local proc=${OMARCHY_PROC_ROOT:-/proc} sys=${OMARCHY_SYS_ROOT:-/sys} model
+
+  # video-acceleration.sh and vulkan.sh: an Intel GPU. Every hybrid CPU model
+  # matched below is Gen12+ (Alder Lake or newer), so its Intel display adapter
+  # always uses intel-media-driver + VPL rather than legacy libva-intel-driver.
+  omarchy-hw-pci --class 03 8086:* || return 1
+
+  # lpmd.sh: an Intel CPU, a battery and a CPU model in its list (Alder Lake
+  # through Wildcat Lake). thermald.sh: model >= 42 (satisfied by all models
+  # below), a battery, and not a ThinkPad whose firmware manages it.
+  omarchy-hw-intel || return 1
+  omarchy-battery-present || return 1
+  model=$(grep -m1 '^model\s*:' "$proc/cpuinfo" | cut -d: -f2 | tr -d ' ')
+  [[ $model =~ ^(151|154|170|172|181|183|186|189|191|204|213)$ ]] || return 1
+  [[ ! -e $sys/devices/platform/thinkpad_acpi/dytc_lapmode ]] || return 1
+
+  # sof-firmware.sh: Intel audio that needs SOF firmware.
+  omarchy-hw-intel-sof
+}

@@ -39,5 +39,74 @@ class MediumBytesReadTest(unittest.TestCase):
         self.assertIsNone(self.read("/dev/sda1", "garbage\n"))
 
 
+class BootMediumSchedulerForImageWriteTest(unittest.TestCase):
+    def _setup_sysfs(self, tmp: Path, sched_text: str, *, partition: bool = True) -> Path:
+        disk = tmp / "sda"
+        (disk / "queue").mkdir(parents=True)
+        sched = disk / "queue" / "scheduler"
+        sched.write_text(sched_text)
+        if partition:
+            part = disk / "sda1"
+            part.mkdir()
+            (tmp / "sda1").symlink_to(part)
+        return sched
+
+    def test_switches_bfq_to_mq_deadline_and_restores(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sched = self._setup_sysfs(Path(tmp), "none mq-deadline kyber [bfq]\n")
+            with mock.patch.object(phases_impl, "SYSFS_BLOCK", Path(tmp)), \
+                 mock.patch.object(phases_impl, "_findmnt_value", return_value="/dev/sda1"):
+                with phases_impl._boot_medium_scheduler_for_image_write():
+                    self.assertEqual(sched.read_text().strip(), "mq-deadline")
+            self.assertEqual(sched.read_text().strip(), "bfq")
+
+    def test_falls_back_to_none_and_restores_on_exception(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sched = self._setup_sysfs(Path(tmp), "none [bfq]\n", partition=False)
+            with mock.patch.object(phases_impl, "SYSFS_BLOCK", Path(tmp)), \
+                 mock.patch.object(phases_impl, "_findmnt_value", return_value="/dev/sda"):
+                with self.assertRaises(RuntimeError):
+                    with phases_impl._boot_medium_scheduler_for_image_write():
+                        self.assertEqual(sched.read_text().strip(), "none")
+                        raise RuntimeError("boom")
+            self.assertEqual(sched.read_text().strip(), "bfq")
+
+    def test_leaves_non_bfq_scheduler_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sched = self._setup_sysfs(Path(tmp), "none [mq-deadline] bfq\n")
+            with mock.patch.object(phases_impl, "SYSFS_BLOCK", Path(tmp)), \
+                 mock.patch.object(phases_impl, "_findmnt_value", return_value="/dev/sda1"):
+                with phases_impl._boot_medium_scheduler_for_image_write():
+                    self.assertEqual(sched.read_text(), "none [mq-deadline] bfq\n")
+            self.assertEqual(sched.read_text(), "none [mq-deadline] bfq\n")
+
+    def test_resolves_nvme_partition_and_handles_missing_or_unreadable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            disk = Path(tmp) / "nvme0n1"
+            (disk / "queue").mkdir(parents=True)
+            sched = disk / "queue" / "scheduler"
+            sched.write_text("none mq-deadline [bfq]\n")
+            part = disk / "nvme0n1p1"
+            part.mkdir()
+            (Path(tmp) / "nvme0n1p1").symlink_to(part)
+            with mock.patch.object(phases_impl, "SYSFS_BLOCK", Path(tmp)), \
+                 mock.patch.object(phases_impl, "_findmnt_value", return_value="/dev/nvme0n1p1"):
+                with phases_impl._boot_medium_scheduler_for_image_write():
+                    self.assertEqual(sched.read_text().strip(), "mq-deadline")
+            self.assertEqual(sched.read_text().strip(), "bfq")
+
+            # NFS, None, missing scheduler, and PermissionError must be silent no-ops.
+            for source in (None, "10.0.2.2:/srv/omarchy", "/dev/missing1"):
+                with mock.patch.object(phases_impl, "SYSFS_BLOCK", Path(tmp)), \
+                     mock.patch.object(phases_impl, "_findmnt_value", return_value=source):
+                    with phases_impl._boot_medium_scheduler_for_image_write():
+                        pass
+
+            with mock.patch.object(phases_impl, "_findmnt_value", return_value="/dev/sda1"), \
+                 mock.patch.object(Path, "is_file", side_effect=PermissionError("denied")):
+                with phases_impl._boot_medium_scheduler_for_image_write():
+                    pass
+
+
 if __name__ == "__main__":
     unittest.main()

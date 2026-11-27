@@ -685,12 +685,18 @@ def arch_install_system(ctx: InstallContext) -> None:
         with _time_step("STEP.sanity_check"):
             arch.sanity_check(installer)
 
-        # Start Argon2id slot-0 enrollment now, right after LUKS opens and on
-        # E-cores where available, so the 2 s KDF overlaps the O_DIRECT image
-        # write without slowing F1.image_write and finishes before the snapshot.
-        _start_luks_keyslot_enroll(ctx)
+        # Start Argon2id slot-0 enrollment now on machines with enough RAM to
+        # hold the cached root image alongside Argon2id's 1 GiB arena (and on
+        # E-cores where available), so the 2 s KDF overlaps the O_DIRECT image
+        # write without slowing F1.image_write. On low-RAM machines (e.g. 8 GiB),
+        # starting Argon2id before F1.image_write evicts ~1 GiB of cached root
+        # image pages back to the USB stick; start it right after instead, where
+        # it still overlaps boot/system setup and finishes before @factory.
+        if (getattr(ctx, "state", None) or {}).get("luks_deferred_keyslots") and _can_overlap_luks_with_image_write():
+            _start_luks_keyslot_enroll(ctx)
         with _time_step("STEP.install_root_image"):
             _install_root_image(ctx)
+        _start_luks_keyslot_enroll(ctx)
         if config.auth_config and config.auth_config.users:
             _start_skel_warmup(ctx)
         # Overlap platform/hardware layer extraction with setup steps that never
@@ -1100,6 +1106,55 @@ def _wait_for_blkid_uuid(device: str, attempts: int = 50) -> None:
 SYSFS_BLOCK = Path("/sys/class/block")
 
 
+def _boot_medium_scheduler_path() -> Path | None:
+    """Path to the boot medium whole disk's queue/scheduler sysfs file, or None."""
+    source = _findmnt_value(BOOT_MEDIUM_MOUNT, "SOURCE")
+    if not source or not source.startswith("/dev/"):
+        return None
+    try:
+        dev = SYSFS_BLOCK / Path(source.split("[", 1)[0]).resolve().name
+        direct = dev / "queue" / "scheduler"
+        if direct.is_file():
+            return direct
+        parent = dev.resolve().parent / "queue" / "scheduler"
+        return parent if parent.is_file() else None
+    except OSError:
+        return None
+
+
+@contextmanager
+def _boot_medium_scheduler_for_image_write():
+    """Temporarily switch the boot medium off BFQ during the root image write.
+
+    BFQ is set at boot so the idle-class verification hash yields to live
+    squashfs page-ins. By the time _place_root_image runs, verification is
+    complete; switching BFQ to mq-deadline (or none) avoids BFQ slice idling
+    and overhead on USB flash media when low-RAM machines read uncached image
+    blocks, with negligible (~0.05 ms) cost when the image is fully cached."""
+    sched_path = _boot_medium_scheduler_path()
+    previous: str | None = None
+    if sched_path is not None:
+        try:
+            tokens = sched_path.read_text().split()
+            active = next((t[1:-1] for t in tokens if t.startswith("[") and t.endswith("]")), None)
+            available = {t.strip("[]") for t in tokens}
+            if active == "bfq":
+                target = "mq-deadline" if "mq-deadline" in available else ("none" if "none" in available else None)
+                if target is not None:
+                    sched_path.write_text(f"{target}\n")
+                    previous = active
+        except OSError:
+            previous = None
+    try:
+        yield
+    finally:
+        if sched_path is not None and previous is not None:
+            try:
+                sched_path.write_text(f"{previous}\n")
+            except OSError:
+                pass
+
+
 def _medium_bytes_read() -> int | None:
     """Bytes the kernel has read from the boot medium's block device so far
     (sectors read, from /sys/class/block/<dev>/stat), or None when there is no
@@ -1240,12 +1295,13 @@ def _place_root_image(ctx: InstallContext) -> None:
     with _flock_whole_disk(device):
         # The rest of the placement after the write takes moments; it gets the
         # last few percent.
-        if not _write_root_image_parallel(container, device,
-                                          lambda done: _write_phase_progress(ctx, 0.95 * done)):
-            try:
-                _write_root_image_dd(_mount_root_image(container), device)
-            finally:
-                _umount_root_image()
+        with _boot_medium_scheduler_for_image_write():
+            if not _write_root_image_parallel(container, device,
+                                              lambda done: _write_phase_progress(ctx, 0.95 * done)):
+                try:
+                    _write_root_image_dd(_mount_root_image(container), device)
+                finally:
+                    _umount_root_image()
         medium_after = _medium_bytes_read()
         if medium_before is not None and medium_after is not None:
             info(f"› read {(medium_after - medium_before) / 1048576:.0f} MiB of the "
@@ -1823,6 +1879,21 @@ def stop_library_warmup(ctx: InstallContext) -> None:
         if proc.poll() is None:
             proc.kill()
         proc.wait()
+
+
+def _can_overlap_luks_with_image_write() -> bool:
+    """Whether starting deferred Argon2id before F1.image_write has enough RAM
+    headroom to avoid evicting the cached root image on low-RAM machines."""
+    from . import luks_calibration
+
+    try:
+        container = _root_image()
+        image_bytes = container.stat().st_size
+    except (OSError, RuntimeError):
+        return False
+    if image_bytes <= 0:
+        return False
+    return luks_calibration.can_overlap_image_write(image_bytes)
 
 
 def _start_luks_keyslot_enroll(ctx: InstallContext) -> None:

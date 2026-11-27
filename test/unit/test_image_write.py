@@ -189,5 +189,28 @@ class WriteRootImageDdTest(unittest.TestCase):
         self.assertEqual(caught.exception.cmd[0], "dd")
 
 
+class OverlapLuksWithImageWriteTest(unittest.TestCase):
+    def test_fails_closed_when_image_unavailable_and_honors_memory_headroom(self):
+        from orchestrator import luks_calibration
+
+        with mock.patch.object(phases_impl, "_root_image", side_effect=RuntimeError("no image")):
+            self.assertFalse(phases_impl._can_overlap_luks_with_image_write())
+        with tempfile.TemporaryDirectory() as tmp:
+            empty = Path(tmp) / "empty.sfs"
+            empty.write_bytes(b"")
+            with mock.patch.object(phases_impl, "_root_image", return_value=empty):
+                self.assertFalse(phases_impl._can_overlap_luks_with_image_write())
+            sized = Path(tmp) / "root.sfs"
+            sized.write_bytes(b"\0" * 4096)
+            with mock.patch.object(phases_impl, "_root_image", return_value=sized), \
+                 mock.patch.object(luks_calibration, "memory_available",
+                                   return_value=luks_calibration.ASYNC_MIN_MEMORY + 4):
+                self.assertTrue(phases_impl._can_overlap_luks_with_image_write())
+            with mock.patch.object(phases_impl, "_root_image", return_value=sized), \
+                 mock.patch.object(luks_calibration, "memory_available",
+                                   return_value=luks_calibration.ASYNC_MIN_MEMORY):
+                self.assertFalse(phases_impl._can_overlap_luks_with_image_write())
+
+
 if __name__ == "__main__":
     unittest.main()

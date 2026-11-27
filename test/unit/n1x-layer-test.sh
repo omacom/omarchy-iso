@@ -30,7 +30,7 @@ echo "ok - the N1x layer is written next to the root image as omarchy-layer.aarc
 upper="$work/upper"
 mkdir -p "$upper/usr/lib/modules/7.3.0-62-omarchy/extramodules" "$upper/var/lib/pacman/local/nvidia-utils-615.78.08-3" \
   "$upper/etc" "$upper/boot/EFI/Linux" "$upper/var/cache/pacman/pkg" "$upper/var/log" "$upper/var/lib/pacman/sync" \
-  "$upper/etc/pacman.d/gnupg" "$upper/tmp" "$upper/run"
+  "$upper/etc/pacman.d/gnupg" "$upper/tmp" "$upper/run" "$upper/usr/include/libcamhal" "$upper/usr/src/debug/intel-ipu7"
 echo module >"$upper/usr/lib/modules/7.3.0-62-omarchy/extramodules/nvidia.ko.zst"
 echo index >"$upper/usr/lib/modules/7.3.0-62-omarchy/modules.dep"
 echo desc >"$upper/var/lib/pacman/local/nvidia-utils-615.78.08-3/desc"
@@ -42,6 +42,8 @@ echo log >"$upper/var/log/pacman.log"
 echo db >"$upper/var/lib/pacman/sync/extra.db"
 echo key >"$upper/etc/pacman.d/gnupg/pubring.gpg"
 echo tmp >"$upper/tmp/scratch"
+echo header >"$upper/usr/include/libcamhal/ICamera.h"
+echo debug >"$upper/usr/src/debug/intel-ipu7/foo.c"
 
 write_layer "$upper" aarch64-n1x >/dev/null || fail "write_layer failed on a plain upper directory"
 layer=$(layer_path aarch64-n1x)
@@ -54,10 +56,10 @@ for kept in ./usr/lib/modules/7.3.0-62-omarchy/extramodules/nvidia.ko.zst ./usr/
 done
 echo "ok - the layer carries the packages, their database entries, the module index, linker cache and users"
 
-for left in ./boot ./var/cache ./var/log ./var/lib/pacman/sync ./etc/pacman.d/gnupg ./tmp ./run; do
+for left in ./boot ./var/cache ./var/log ./var/lib/pacman/sync ./etc/pacman.d/gnupg ./tmp ./run ./usr/include ./usr/src/debug; do
   if grep -q "^${left}\(/\|$\)" <<<"$listing"; then fail "the layer carries $left"; fi
 done
-echo "ok - the layer leaves out the ESP, caches, logs, sync databases, the keyring and mount points"
+echo "ok - the layer leaves out the ESP, caches, logs, sync databases, the keyring, headers, debug sources and mount points"
 
 # Extracted the way the installer does, over a root whose /lib is the usrmerge
 # symlink, the files land and the symlink stays one.

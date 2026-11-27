@@ -159,8 +159,9 @@ layer_path() {
 # are left out: mount points, caches and logs, the sync databases (the image
 # ships its own), and the keyring the installer creates per machine.
 write_layer() {
-  local upper=$1 name=$2 layer zstd_level=15
-  [[ ${OMARCHY_FAST_COMPRESSION:-} == 1 ]] && zstd_level=1
+  local upper=$1 name=$2 layer
+  local -a zstd_args=(-q -T0 --ultra -22 --long=27)
+  [[ ${OMARCHY_FAST_COMPRESSION:-} == 1 ]] && zstd_args=(-q -T0 -1)
   layer=$(layer_path "$name")
 
   # tar has no way to say "delete": an overlay whiteout (a 0:0 character
@@ -178,7 +179,8 @@ write_layer() {
     --exclude=./run --exclude=./tmp --exclude=./var/cache --exclude=./var/log \
     --exclude=./var/tmp --exclude=./var/lib/pacman/sync \
     --exclude=./etc/pacman.d/gnupg \
-    -cf - . | zstd -q -T0 "-$zstd_level" -o "$layer" || return 1
+    --exclude=./usr/include --exclude=./usr/src/debug \
+    -cf - . | zstd "${zstd_args[@]}" -o "$layer" || return 1
   echo "Layer $name: $(du -h "$layer" | cut -f1) at $layer"
 }
 

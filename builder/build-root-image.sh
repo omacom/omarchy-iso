@@ -1029,7 +1029,7 @@ CONF
   printf '%s%s\n' "$prebuilt_cmdline" "$(printf '%*s' $((1800 - ${#prebuilt_cmdline})) '' | tr ' ' 0)" \
     >"$root/etc/kernel/cmdline.prebuilt-uki"
 
-  if [[ -n ${OMARCHY_SNAPDRAGON:-} && $(uname -m) == aarch64 ]]; then
+  if [[ -n ${OMARCHY_SNAPDRAGON:-} ]]; then
     # A Snapdragon ISO installs only Snapdragon laptops, so skip the generic
     # UKI and pre-build the Snapdragon UKI (all Snapdragon DTBs via
     # DeviceTreeAuto + HWIDs + shared Qualcomm early modules + Adreno microcode)
@@ -1037,7 +1037,7 @@ CONF
     # running mkinitcpio + ukify on the target.
     rm -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" \
       "$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm".{efi,modules,files,dropins,compatibles,inputs}
-    if ! build_qualcomm_prebuilt_uki; then
+    if [[ $(uname -m) == aarch64 ]] && ! build_qualcomm_prebuilt_uki; then
       echo "WARNING: no Qualcomm pre-built UKI; Snapdragon installs will build their own"
       rm -f "$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm".{efi,modules,files,dropins,compatibles,inputs}
     fi

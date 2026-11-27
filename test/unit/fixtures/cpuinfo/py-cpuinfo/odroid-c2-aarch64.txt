@@ -1,0 +1,38 @@
+processor	: 0
+BogoMIPS	: 2.00
+Features	: fp asimd crc32
+CPU implementer	: 0x41
+CPU architecture: 8
+CPU variant	: 0x0
+CPU part	: 0xd03
+CPU revision	: 4
+
+processor	: 1
+BogoMIPS	: 2.00
+Features	: fp asimd crc32
+CPU implementer	: 0x41
+CPU architecture: 8
+CPU variant	: 0x0
+CPU part	: 0xd03
+CPU revision	: 4
+
+processor	: 2
+BogoMIPS	: 2.00
+Features	: fp asimd crc32
+CPU implementer	: 0x41
+CPU architecture: 8
+CPU variant	: 0x0
+CPU part	: 0xd03
+CPU revision	: 4
+
+processor	: 3
+BogoMIPS	: 2.00
+Features	: fp asimd crc32
+CPU implementer	: 0x41
+CPU architecture: 8
+CPU variant	: 0x0
+CPU part	: 0xd03
+CPU revision	: 4
+
+Hardware	: ODROID-C2
+Revision	: 020c

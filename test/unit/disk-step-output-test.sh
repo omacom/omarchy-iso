@@ -2,10 +2,12 @@
 #
 # disk_step() must keep a successful command off the screen. The installer
 # tees stdout to the tty as well as to the install log, so printing the output
-# of mkfs.btrfs, four "btrfs subvolume create" and mkfs.fat flashes ~27 lines
-# of text between two configurator screens. On success the
+# of disk helpers flashes text between configurator screens. On success the
 # output belongs in the log only; on failure it belongs in both, because the
 # next screen is the abort message and the user needs to see why.
+#
+# Also asserts the configurator no longer runs LUKS format/open directly now
+# that free-space execution lives inside orchestrator/free_space.py.
 
 set -uo pipefail
 
@@ -48,37 +50,20 @@ check "failure output is padded like the configurator" "    first|    second" "$
 screen=$( (COLUMNS=30 PADDING_LEFT=4 disk_step "a long failure" sh -c "echo abcdefghijklmnopqrstuvwxyz0123456789 >&2; exit 3") 2>/dev/null)
 check "a long failure line wraps inside the padding" "    abcdefghijklmnopqrstuvwxyz|    0123456789" "$(tr "\n" "|" <<<"$screen" | sed "s/|\$//")"
 
-# The free-space path formats and opens LUKS through disk_step, the
-# passphrase on stdin from printf: the command reads it byte for byte, with no
-# newline, and what it prints stays off the screen.
+# disk_step passes stdin through byte for byte without trailing newlines and
+# keeps command output off the screen on success.
 : >"$OMARCHY_INSTALL_LOG_FILE"
 screen=$(disk_step "reads a passphrase" sh -c 'printf "got %s bytes\n" "$(wc -c | tr -d " ")"; echo notice >&2' < <(printf "%s" "s3cret"))
 check "a passphrase on stdin leaves the screen alone" "" "$screen"
 check "the command read it without a newline" "got 6 bytes notice" \
   "$(tr "\n" " " <"$OMARCHY_INSTALL_LOG_FILE" | sed "s/ \$//")"
 
-# Nothing in the free-space path prints straight to the terminal: the LUKS
-# format and open run under disk_step, not as bare pipes folding stderr into
-# the screen.
-# Each statement (continuation lines joined) that runs one of them must
-# start with disk_step.
+# Free-space LUKS execution moved into orchestrator/free_space.py; configurator
+# must not run omarchy-luks-calibrate format or cryptsetup open directly.
 configurator="$ROOT/configs/airootfs/root/configurator"
-statements=$(awk '{ if (sub(/\\$/, "")) { line = line $0; next } print line $0; line = "" }' "$configurator" |
-  grep -E 'omarchy-luks-calibrate format|cryptsetup open ')
-check "both LUKS commands are in the free-space path" "2" "$(grep -c . <<<"$statements")"
-check "no LUKS command writes to the terminal" "0" "$(grep -cvE '^[[:space:]]*disk_step ' <<<"$statements")"
-
-# The open after the format is given the volume key in a file. A format or an
-# open that fails ends in disk_abort_hook, which must not leave that key behind.
-check "both LUKS commands take the key the abort removes" "2" "$(grep -c '"\$luks_volume_key"' <<<"$statements")"
-eval "$(awk '/^disk_abort_hook\(\) \{/,/^\}/' "$configurator")"
-umount() { :; }; rmdir() { :; }; cryptsetup() { :; }; rollback_created_parts() { :; }
-abort() { exit 1; }
-disk=/dev/null luks_volume_key="$WORK/volume-key"
-echo secret >"$luks_volume_key"
-(disk_step "Opening the encrypted root" false) >/dev/null 2>&1
-check "a failed LUKS step removes the volume key" "gone" "$([[ -e $WORK/volume-key ]] && echo left || echo gone)"
-unset -f umount rmdir cryptsetup rollback_created_parts abort disk_abort_hook
+statements=$(grep -vE '^[[:space:]]*#' "$configurator" |
+  grep -E 'omarchy-luks-calibrate format|cryptsetup open ' || true)
+check "configurator has no direct LUKS format/open commands" "0" "$(grep -c . <<<"$statements" || true)"
 
 unset OMARCHY_INSTALL_LOG_FILE
 screen=$(disk_step "no log file" echo visible)

@@ -189,6 +189,7 @@ Every ISO passes the PR install test, and x86_64 channels also pass `test/vm-ima
 
 ## Guides
 
+- [USB boot](docs/usb-boot.md) — the ISO's partition layout, which firmware offers a fixed-disk stick, and what to do when a stick doesn't boot.
 - [VM images](docs/vm-images.md) — booting nightly and release `.qcow2` images with QEMU, `vm-boot`, or libvirt, and injecting SSH keys via SMBIOS credentials.
 - [Autoinstall](docs/autoinstall.md) — unattended installs from a `cidata` drive, SSH and Tailscale provisioning, region selection, and Proxmox setup.
 - [OEM ISO](docs/oem.md) — factory installation media, OEM branding/logo/EULA bundles, and post-install setup scripts.

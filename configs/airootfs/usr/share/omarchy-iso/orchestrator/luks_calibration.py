@@ -613,10 +613,9 @@ def format_and_open_luks(
                 "--pbkdf", "argon2id", "--key-size", str(KEY_SIZE),
                 "--iter-time", str(ITER_TIME), "luksFormat", device,
             ]
-            candidate_temp = new_volume_key(256)
-            split = deferred_format_command(base_cmd, volume_key, candidate_temp)
+            temp_keyfile = new_volume_key(256)
+            split = deferred_format_command(base_cmd, volume_key, temp_keyfile)
             if split is not None:
-                temp_keyfile = candidate_temp
                 fast_cmd, enroll_cmd, kill_cmd = split
                 if not _has_fixed_iterations(enroll_cmd):
                     stop_early_keyring()
@@ -630,7 +629,8 @@ def format_and_open_luks(
                     passphrase=bytes(passphrase),
                 )
             else:
-                candidate_temp.unlink(missing_ok=True)
+                temp_keyfile.unlink(missing_ok=True)
+                temp_keyfile = None
         if deferred_entry is None:
             stop_calibration()
             sync_cmd = format_command(

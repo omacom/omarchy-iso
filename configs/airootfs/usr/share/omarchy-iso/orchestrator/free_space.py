@@ -361,6 +361,20 @@ def _create_partition(
     return part_num
 
 
+def _run_disk_cmd(cmd: list[str], desc: str) -> None:
+    """Run a disk command; on failure, log its output and raise with detail."""
+    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if res.returncode != 0:
+        combined = "\n".join(
+            line for part in (res.stdout, res.stderr) for line in (part or "").splitlines() if line.strip()
+        )
+        if combined:
+            for line in combined.splitlines():
+                info(f"  {line}")
+            raise RuntimeError(f"{desc} failed (exit {res.returncode}): {combined.splitlines()[-1]}")
+        raise RuntimeError(f"{desc} failed (exit {res.returncode})")
+
+
 def execute_free_space_plan(ctx) -> None:
     """Execute `omarchy_install.free_space_plan`: partition, settle, wipefs,
     optional in-process deferred LUKS2, mkfs.btrfs -K + subvolumes + mounts,
@@ -391,14 +405,12 @@ def execute_free_space_plan(ctx) -> None:
 
     with _time_step("FS.free_space_partition"):
         if needs_mklabel:
-            subprocess.run(["parted", "--script", disk, "mklabel", "gpt"], check=True, capture_output=True, text=True)
+            _run_disk_cmd(["parted", "--script", disk, "mklabel", "gpt"], f"initializing GPT on {disk}")
         efi_num = _create_partition(disk, efi_start, efi_end, "fat32", "OMARCHY_EFI", created_parts)
         root_num = _create_partition(disk, root_start, root_end, "btrfs", "OMARCHY_ROOT", created_parts)
-        subprocess.run(
+        _run_disk_cmd(
             ["parted", "--script", disk, "set", str(efi_num), "esp", "on"],
-            check=True,
-            capture_output=True,
-            text=True,
+            f"flagging partition {efi_num} as ESP on {disk}",
         )
         efi_dev = partition_path(disk, efi_num)
         root_dev = partition_path(disk, root_num)
@@ -411,8 +423,8 @@ def execute_free_space_plan(ctx) -> None:
         wait_for_device(root_dev)
 
     with _time_step("FS.free_space_wipefs"):
-        subprocess.run(["wipefs", "-af", efi_dev], check=True, capture_output=True, text=True)
-        subprocess.run(["wipefs", "-af", root_dev], check=True, capture_output=True, text=True)
+        _run_disk_cmd(["wipefs", "-af", efi_dev], f"clearing stale signatures on {efi_dev}")
+        _run_disk_cmd(["wipefs", "-af", root_dev], f"clearing stale signatures on {root_dev}")
 
     luks_uuid: str | None = None
     if encrypt:
@@ -431,19 +443,17 @@ def execute_free_space_plan(ctx) -> None:
     with _time_step("FS.free_space_mkfs_and_mount"):
         # -K skips whole-device TRIM on this throwaway btrfs (the root image overwrites
         # it moments later, and trim_target trims free space once the install timer stops).
-        subprocess.run(["mkfs.btrfs", "-K", "-f", "-L", "OMARCHY", root_mapper], check=True, capture_output=True, text=True)
+        _run_disk_cmd(["mkfs.btrfs", "-K", "-f", "-L", "OMARCHY", root_mapper], f"creating Btrfs on {root_mapper}")
         wait_for_device(root_mapper)
 
         btrfs_root = ctx.target / "btrfs-root"
         btrfs_root.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["mount", root_mapper, str(btrfs_root)], check=True, capture_output=True, text=True)
+        _run_disk_cmd(["mount", root_mapper, str(btrfs_root)], f"mounting {root_mapper}")
         try:
             for subvol in ("@", "@home", "@log", "@pkg"):
-                subprocess.run(
+                _run_disk_cmd(
                     ["btrfs", "subvolume", "create", str(btrfs_root / subvol)],
-                    check=True,
-                    capture_output=True,
-                    text=True,
+                    f"creating subvolume {subvol}",
                 )
         finally:
             subprocess.run(["umount", str(btrfs_root)], check=False, capture_output=True, text=True)
@@ -452,11 +462,9 @@ def execute_free_space_plan(ctx) -> None:
             except OSError:
                 pass
 
-        subprocess.run(
+        _run_disk_cmd(
             ["mount", "-o", "noatime,compress=zstd,subvol=@", root_mapper, str(ctx.target)],
-            check=True,
-            capture_output=True,
-            text=True,
+            f"mounting target root {ctx.target}",
         )
         esp_target = ctx.target / esp_mount.lstrip("/")
         for rel in ("home", "var/log", "var/cache/pacman/pkg"):
@@ -464,16 +472,14 @@ def execute_free_space_plan(ctx) -> None:
         esp_target.mkdir(parents=True, exist_ok=True)
 
         for subvol, rel in (("@home", "home"), ("@log", "var/log"), ("@pkg", "var/cache/pacman/pkg")):
-            subprocess.run(
+            _run_disk_cmd(
                 ["mount", "-o", f"noatime,compress=zstd,subvol={subvol}", root_mapper, str(ctx.target / rel)],
-                check=True,
-                capture_output=True,
-                text=True,
+                f"mounting /{rel}",
             )
 
-        subprocess.run(["mkfs.fat", "-F32", "-n", "OMARCHY_EFI", efi_dev], check=True, capture_output=True, text=True)
+        _run_disk_cmd(["mkfs.fat", "-F32", "-n", "OMARCHY_EFI", efi_dev], f"creating ESP filesystem on {efi_dev}")
         # Typed mount (-t vfat): avoids /proc/filesystems probing squashfs before udev finishes.
-        subprocess.run(["mount", "-t", "vfat", efi_dev, str(esp_target)], check=True, capture_output=True, text=True)
+        _run_disk_cmd(["mount", "-t", "vfat", efi_dev, str(esp_target)], f"mounting ESP at {esp_target}")
 
     storage = ctx.omarchy_install.setdefault("storage", {})
     storage["esp_device"] = efi_dev

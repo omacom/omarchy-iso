@@ -745,8 +745,6 @@ get_root_disk() {
   fi
 }
 
-# partition_path lives in disk-partitioning.sh alongside the creation helpers.
-
 # BitLocker writes the "-FVE-FS-" signature at offset 3 of the partition.
 # tr drops the NUL bytes other partitions have there (LUKS, ext4, btrfs)
 # before bash reads them: bash drops them too, but warns on the installer's

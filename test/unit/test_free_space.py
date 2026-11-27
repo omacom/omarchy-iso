@@ -496,5 +496,35 @@ class PhasesIntegrationTests(unittest.TestCase):
             v_empty.assert_called_once_with(ctx, "/dev/mapper/omarchy_root")
 
 
+
+class DiskCmdErrorAndKeyCleanupTest(unittest.TestCase):
+    def test_run_disk_cmd_logs_and_raises_stderr_detail(self):
+        logged = []
+        failed = subprocess.CompletedProcess(
+            ["mkfs.btrfs", "-K"], 1, stdout="", stderr="ERROR: device is too small\n"
+        )
+        with mock.patch.object(fs.subprocess, "run", return_value=failed), \
+                mock.patch.object(fs, "info", side_effect=logged.append):
+            with self.assertRaises(RuntimeError) as cm:
+                fs._run_disk_cmd(["mkfs.btrfs", "-K"], "creating Btrfs on /dev/nvme0n1p4")
+        self.assertIn("device is too small", str(cm.exception))
+        self.assertTrue(any("device is too small" in line for line in logged))
+
+    def test_format_and_open_luks_unlinks_temp_keyfile_on_interrupt_in_deferred_cmd(self):
+        with tempfile.TemporaryDirectory() as td:
+            vk = Path(td) / "vk"
+            tk = Path(td) / "tk"
+            vk.write_bytes(b"v" * 64)
+            tk.write_bytes(b"t" * 64)
+            keys = iter([vk, tk])
+            with mock.patch.object(luks, "can_defer_keyslot", return_value=True), \
+                    mock.patch.object(luks, "stop_calibration"), \
+                    mock.patch.object(luks, "new_volume_key", side_effect=lambda *a, **k: next(keys)), \
+                    mock.patch.object(luks, "deferred_format_command", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    luks.format_and_open_luks("/dev/nvme0n1p4", "omarchy_root", b"secret")
+            self.assertFalse(vk.exists())
+            self.assertFalse(tk.exists())
+
 if __name__ == "__main__":
     unittest.main()

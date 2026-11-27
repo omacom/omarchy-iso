@@ -20,8 +20,6 @@
   "summary.keyboard": "Keyboard",
   "summary.language": "Wika",
   "summary.prompt": "Tama ba ito?",
-  "firmware.title": "Sine-save ang Qualcomm firmware mula sa Windows",
-  "firmware.saved": "Na-save ang %1 firmware file mula sa Windows para sa install.",
   "firmware.partial": "Na-save ang %1 sa %2 firmware file mula sa Windows; wala sa driver store ang iba.",
   "firmware.none": "Walang nakitang Windows firmware sa makinang ito.",
   "firmware.bitlocker": "Naka-encrypt sa BitLocker ang Windows partition.",

@@ -20,8 +20,6 @@
   "summary.keyboard": "Billentyűzet",
   "summary.language": "Nyelv",
   "summary.prompt": "Minden rendben?",
-  "firmware.title": "Qualcomm firmware mentése a Windowsból",
-  "firmware.saved": "%1 firmware-fájl mentve a Windowsból a telepítéshez.",
   "firmware.partial": "%2 firmware-fájlból %1 mentve a Windowsból; a többi nem volt az illesztőprogram-tárban.",
   "firmware.none": "Ezen a gépen nem található Windows firmware.",
   "firmware.bitlocker": "A Windows partíció BitLockerrel titkosított.",

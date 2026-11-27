@@ -20,8 +20,6 @@
   "summary.keyboard": "Tangentbord",
   "summary.language": "Språk",
   "summary.prompt": "Ser det här rätt ut?",
-  "firmware.title": "Sparar Qualcomm-firmware från Windows",
-  "firmware.saved": "Sparade %1 firmwarefiler från Windows för installationen.",
   "firmware.partial": "Sparade %1 av %2 firmwarefiler från Windows; resten fanns inte i drivrutinsarkivet.",
   "firmware.none": "Ingen Windows-firmware hittades på den här datorn.",
   "firmware.bitlocker": "Windows-partitionen är krypterad med BitLocker.",

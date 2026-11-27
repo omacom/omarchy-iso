@@ -20,8 +20,6 @@
   "summary.keyboard": "Klavye",
   "summary.language": "Dil",
   "summary.prompt": "Bu bilgiler doğru mu?",
-  "firmware.title": "Qualcomm donanım yazılımı Windows'tan alınıyor",
-  "firmware.saved": "Kurulum için Windows'tan %1 donanım yazılımı dosyası alındı.",
   "firmware.partial": "Windows'tan %2 donanım yazılımı dosyasının %1 tanesi alındı; kalanı sürücü deposunda yoktu.",
   "firmware.none": "Bu makinede Windows donanım yazılımı bulunamadı.",
   "firmware.bitlocker": "Windows bölümü BitLocker ile şifrelenmiş.",

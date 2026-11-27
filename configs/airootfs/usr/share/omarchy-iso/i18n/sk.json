@@ -20,8 +20,6 @@
   "summary.keyboard": "Klávesnica",
   "summary.language": "Jazyk",
   "summary.prompt": "Je všetko v poriadku?",
-  "firmware.title": "Ukladanie firmvéru Qualcomm z Windows",
-  "firmware.saved": "Pre inštaláciu uložených %1 súborov firmvéru z Windows.",
   "firmware.partial": "Uložených %1 z %2 súborov firmvéru z Windows; zvyšok v úložisku ovládačov nebol.",
   "firmware.none": "Na tomto počítači sa nenašiel firmvér z Windows.",
   "firmware.bitlocker": "Oddiel Windows je zašifrovaný nástrojom BitLocker.",

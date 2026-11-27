@@ -20,8 +20,6 @@
   "summary.keyboard": "キーボード",
   "summary.language": "言語",
   "summary.prompt": "この内容でよろしいですか？",
-  "firmware.title": "Windows から Qualcomm ファームウェアを保存しています",
-  "firmware.saved": "インストール用に Windows からファームウェア %1 個を保存しました。",
   "firmware.partial": "Windows からファームウェア %2 個中 %1 個を保存しました。残りはドライバーストアにありませんでした。",
   "firmware.none": "このマシンに Windows のファームウェアが見つかりませんでした。",
   "firmware.bitlocker": "Windows パーティションは BitLocker で暗号化されています。",

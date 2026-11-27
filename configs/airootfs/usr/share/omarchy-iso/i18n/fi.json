@@ -20,8 +20,6 @@
   "summary.keyboard": "Näppäimistö",
   "summary.language": "Kieli",
   "summary.prompt": "Näyttääkö tämä oikealta?",
-  "firmware.title": "Tallennetaan Qualcommin laiteohjelmistoa Windowsista",
-  "firmware.saved": "Tallennettiin %1 laiteohjelmistotiedostoa Windowsista asennusta varten.",
   "firmware.partial": "Tallennettiin %1/%2 laiteohjelmistotiedostoa Windowsista; loput puuttuivat ajurivarastosta.",
   "firmware.none": "Koneelta ei löytynyt Windowsin laiteohjelmistoa.",
   "firmware.bitlocker": "Windows-osio on salattu BitLockerilla.",

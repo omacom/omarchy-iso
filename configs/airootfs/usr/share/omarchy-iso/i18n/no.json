@@ -20,8 +20,6 @@
   "summary.keyboard": "Tastatur",
   "summary.language": "Språk",
   "summary.prompt": "Ser dette riktig ut?",
-  "firmware.title": "Lagrer Qualcomm-fastvare fra Windows",
-  "firmware.saved": "Lagret %1 fastvarefiler fra Windows for installasjonen.",
   "firmware.partial": "Lagret %1 av %2 fastvarefiler fra Windows; resten fantes ikke i driverlageret.",
   "firmware.none": "Fant ingen Windows-fastvare på denne maskinen.",
   "firmware.bitlocker": "Windows-partisjonen er kryptert med BitLocker.",

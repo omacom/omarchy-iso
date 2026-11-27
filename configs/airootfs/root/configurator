@@ -791,7 +791,14 @@ qualcomm_firmware_uncovered() {
 # Save vendor-signed Qualcomm firmware before a full-disk install removes Windows.
 # Missing firmware does not abort installation. Firmware a maker's package
 # covers is not missing: the install brings that package.
+#
+# Runs silently and records any warning in firmware_notice_lines so the
+# overwrite confirmation renders it inline instead of flashing a transient
+# screen that confirm_disk_overwrite immediately clears.
+firmware_notice_lines=()
+
 stage_qualcomm_firmware() {
+  firmware_notice_lines=()
   command -v qcom-firmware-extract >/dev/null 2>&1 || return 0
   [[ -d /sys/firmware/devicetree/base ]] || return 0
 
@@ -803,7 +810,6 @@ stage_qualcomm_firmware() {
   missing=${#uncovered[@]}
   ((missing > 0)) || return 0
 
-  step "$(t firmware.title)"
   # The redirection needs /run/omarchy; without it the shell never ran the
   # staging and every machine read "No Windows firmware found".
   mkdir -p "${log%/*}"
@@ -823,18 +829,39 @@ stage_qualcomm_firmware() {
     fi
   done
   if ((saved >= missing)); then
-    say "$(t firmware.saved "$saved")"
+    return 0
   elif ((saved > 0)); then
-    say "$(t firmware.partial "$saved" "$missing")"
+    firmware_notice_lines=(
+      "$(t firmware.partial "$saved" "$missing")"
+      "$(t firmware.degraded)"
+      "$(t firmware.extract "\`sudo qcom-firmware-extract\`")"
+    )
   else
-    say --foreground 1 "$(t firmware.none)"
+    firmware_notice_lines=("$(t firmware.none)")
     if grep -q BitLocker "$log" 2>/dev/null; then
-      say "$(t firmware.bitlocker)"
-      say "$(t firmware.bitlockerHint)"
+      firmware_notice_lines+=(
+        "$(t firmware.bitlocker)"
+        "$(t firmware.bitlockerHint)"
+      )
     fi
-    say "$(t firmware.degraded)"
-    say "$(t firmware.extract "\`sudo qcom-firmware-extract\`")"
+    firmware_notice_lines+=(
+      "$(t firmware.degraded)"
+      "$(t firmware.extract "\`sudo qcom-firmware-extract\`")"
+    )
   fi
+  printf '%s\n' "${firmware_notice_lines[@]}" >>"$log"
+}
+
+render_firmware_notice() {
+  (( ${#firmware_notice_lines[@]} > 0 )) || return 0
+  local i
+  for i in "${!firmware_notice_lines[@]}"; do
+    if (( i == 0 )); then
+      say --foreground 1 "${firmware_notice_lines[i]}"
+    else
+      say "${firmware_notice_lines[i]}"
+    fi
+  done
   echo
 }
 
@@ -995,12 +1022,13 @@ largest_free_region() {
 # toggling between encrypted and unencrypted. Sets encrypt_installation and
 # returns 0 on confirm, 1 on decline, or aborts on unexpected gum exit codes.
 confirm_install_encryption() {
-  local heading="$1" prompt="$2"
+  local heading="$1" prompt="$2" notice="${3:-}"
   local mode="encrypted" affirmative confirm_status
 
   while true; do
     clear_logo
     echo
+    [[ $notice == "with-firmware-notice" ]] && render_firmware_notice
     say "$heading"
 
     if [[ $mode == "encrypted" ]]; then
@@ -1350,7 +1378,7 @@ confirm_disk_overwrite() {
   # machine with one disk now reaches without seeing that list. It is what the
   # confirmation names.
   disk_details=$(get_disk_info "$disk")
-  confirm_install_encryption "$(t overwrite.warning)" "$(t overwrite.prompt "$disk_details")"
+  confirm_install_encryption "$(t overwrite.warning)" "$(t overwrite.prompt "$disk_details")" with-firmware-notice
 }
 
 # Decide what and how to install: sets install_target (full_disk|free_space)

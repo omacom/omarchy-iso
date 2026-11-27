@@ -28,19 +28,75 @@ partition_path() {
   fi
 }
 
-# Partition numbers as the on-disk GPT reports them. parted rather than lsblk
-# on purpose: this is the table parted itself is about to modify, so discovery
-# never depends on the kernel having re-read the partition table yet — and the
-# same code works against an image file in tests, where lsblk sees nothing.
+# Overridable predicate: use O_RDONLY sfdisk on real block devices so reading
+# the partition table never opens the disk/partitions O_RDWR (parted -ms print
+# triggers ~11 udev events per call on a 4-partition disk; sfdisk -d triggers 0).
+# Regular image files (e.g. partition-numbering-test.sh) keep parted -ms print.
+_partition_table_use_sfdisk() {
+  [[ -b "$1" ]] && command -v sfdisk >/dev/null 2>&1
+}
+
+# Read partition table metadata from disk: prints "LABEL <type>" on line 1
+# followed by "<num> <size_bytes>" for each partition.
+_read_partition_table() {
+  local disk="$1" dump table
+  if _partition_table_use_sfdisk "$disk"; then
+    dump=$(sfdisk -d "$disk" 2>/dev/null) || return 1
+    printf '%s\n' "$dump" | awk -v d="$disk" '
+      BEGIN { sec = 512; label = "" }
+      /^label:[[:space:]]*/ {
+        label = $0
+        sub(/^label:[[:space:]]*/, "", label)
+        sub(/[[:space:]]*$/, "", label)
+        next
+      }
+      /^sector-size:[[:space:]]*[0-9]+/ {
+        s = $0
+        sub(/^sector-size:[[:space:]]*/, "", s)
+        sec = s + 0
+        next
+      }
+      index($0, d) == 1 && index($0, " : ") > 0 {
+        node = $1
+        num = substr(node, length(d) + 1)
+        sub(/^p/, "", num)
+        if (num ~ /^[0-9]+$/ && match($0, /size=[[:space:]]*[0-9]+/)) {
+          sz = substr($0, RSTART, RLENGTH)
+          sub(/^size=[[:space:]]*/, "", sz)
+          rows[++n] = sprintf("%s %.0f", num, (sz + 0) * sec)
+        }
+      }
+      END {
+        printf "LABEL %s\n", label
+        for (i = 1; i <= n; i++) print rows[i]
+      }
+    '
+  else
+    table=$(parted -ms "$disk" unit B print 2>/dev/null) || return 1
+    printf '%s\n' "$table" | awk -F: '
+      NR == 2 { printf "LABEL %s\n", $6; next }
+      NR >= 3 && $1 ~ /^[0-9]+$/ {
+        sz = $4
+        gsub(/B/, "", sz)
+        printf "%s %s\n", $1, sz
+      }
+    '
+  fi
+}
+
+# Partition numbers as the on-disk table reports them. Read straight from disk
+# (sfdisk -d O_RDONLY on block devices, parted -ms print on image files) so
+# discovery never depends on udev or the kernel having re-read the table yet.
 partition_numbers() {
   local table
-  table=$(parted -ms "$1" unit B print 2>/dev/null) || return 1
-  printf '%s\n' "$table" | tail -n +3 | cut -d: -f1
+  table=$(_read_partition_table "$1") || return 1
+  printf '%s\n' "$table" | awk 'NR > 1 { print $1 }'
 }
 
 partition_size_bytes() {
-  parted -ms "$1" unit B print 2>/dev/null |
-    awk -F: -v n="$2" '$1 == n { gsub(/B/, "", $4); print $4; exit }'
+  local table
+  table=$(_read_partition_table "$1") || return 1
+  printf '%s\n' "$table" | awk -v n="$2" 'NR > 1 && $1 == n { print $2; exit }'
 }
 
 # The disk's partition table type ("gpt", "msdos", ...), or nothing on a disk
@@ -64,12 +120,85 @@ partition_table_type() {
 # Fail loudly. The former version looped over sleep and returned its status,
 # so a device that never appeared was indistinguishable from one that did.
 wait_for_device() {
-  for _ in $(seq 1 10); do
+  for _ in $(seq 1 50); do
     [[ -b "$1" ]] && return 0
     udevadm settle 2>/dev/null || true
-    sleep 1
+    [[ -b "$1" ]] && return 0
+    sleep 0.2
   done
   return 1
+}
+
+# Overridable predicate so unit tests can exercise settle_disk_devices without
+# root or real block device nodes.
+_is_block_device() {
+  [[ -b "$1" ]]
+}
+
+# True while pid is still running (and not an unreaped zombie).
+_pid_running() {
+  local pid="$1" stat_line rest
+  kill -0 "$pid" 2>/dev/null || return 1
+  if [[ -r /proc/$pid/stat ]]; then
+    read -r stat_line <"/proc/$pid/stat" 2>/dev/null || return 1
+    rest="${stat_line##*) }"
+    [[ ${rest%% *} != Z ]] || return 1
+  fi
+  return 0
+}
+
+# Wait for udev to finish processing events on a disk without stalling on
+# systemd-udevd's (udev-synth) LOCK_EX vs (udev-worker) TRY_AGAIN=1 race.
+# Closing a whole disk O_RDWR makes udevd fork (udev-synth), which takes
+# LOCK_EX while partition workers try LOCK_SH. Workers that hit EAGAIN enter
+# EVENT_LOCKED on udevd's 200 ms + 1 s retry timer, and (udev-synth) closes
+# O_RDONLY (emitting no IN_CLOSE_WRITE), stranding udevadm settle until the
+# timer fires. Probing with a non-blocking flock on an O_RDONLY descriptor
+# (whose close never emits IN_CLOSE_WRITE or forks udev-synth) detects when
+# no synth or worker holds the disk lock; if settle is still waiting, one
+# `udevadm trigger --action=change "$disk"` runs a whole-disk worker whose
+# completion immediately requeues the locked partition events.
+# Wait up to $2 * 10 ms for $1 to exit; returns 0 once it exits, 1 if still alive.
+_wait_pid_ticks() {
+  local pid="$1" ticks="$2"
+  while (( ticks > 0 )); do
+    _pid_running "$pid" || return 0
+    sleep 0.01
+    ticks=$((ticks - 1))
+  done
+  _pid_running "$pid" || return 0
+  return 1
+}
+
+settle_disk_devices() {
+  local disk="${1:-}" timeout="${2:-10}"
+  if [[ -z $disk ]] || ! _is_block_device "$disk"; then
+    udevadm settle --timeout="$timeout" 2>/dev/null || true
+    return 0
+  fi
+
+  udevadm settle --timeout="$timeout" 2>/dev/null &
+  local settle_pid=$!
+  local ticks probe_fd
+
+  # Backoff schedule (60 ms, 120 ms, 250 ms, 250 ms, 250 ms) lets healthy
+  # drains finish with zero extra events, while breaking a 200 ms + 1 s
+  # EVENT_LOCKED timer stall once no synth/worker holds the whole-disk lock.
+  for ticks in 6 12 25 25 25; do
+    _wait_pid_ticks "$settle_pid" "$ticks" && break
+    if { exec {probe_fd}<"$disk"; } 2>/dev/null; then
+      if flock -x -n "$probe_fd" 2>/dev/null; then
+        exec {probe_fd}<&-
+        if _pid_running "$settle_pid"; then
+          udevadm trigger --action=change "$disk" 2>/dev/null || true
+        fi
+      else
+        exec {probe_fd}<&-
+      fi
+    fi
+  done
+
+  wait "$settle_pid" 2>/dev/null || true
 }
 
 _disk_abort() {
@@ -116,25 +245,37 @@ disk_step() {
 # the caller decides how loudly to fail.
 create_partition() {
   local disk="$1" start="$2" end="$3" fstype="$4" name="$5"
-  local before after num actual want tolerance
+  local before_table before label mkpart_arg after_table after num actual want tolerance
 
   created_partition_number=""
 
   # Both reads must succeed. If only the first failed, every existing
   # partition would look new, and one the size of the requested partition (an
   # earlier install's 2GiB ESP) would be taken for it and formatted.
-  before=$(partition_numbers "$disk") || return 1
+  before_table=$(_read_partition_table "$disk") || return 1
+  label=$(printf '%s\n' "$before_table" | awk 'NR == 1 { print $2 }')
+  before=$(printf '%s\n' "$before_table" | awk 'NR > 1 { print $1 }')
+
+  # On GPT, parted's first mkpart argument is the partition name itself, so
+  # passing $name sets it in the same call instead of a second O_RDWR parted
+  # invocation. On MBR (dos/msdos) the argument is the partition type ("primary").
+  if [[ $label == gpt && -n $name ]]; then
+    mkpart_arg="$name"
+  else
+    mkpart_arg="primary"
+  fi
 
   # parted's end is the last byte of the partition, so end - 1: the partition
   # is exactly end - start, which LUKS needs to use 4096-byte sectors. Its
   # warnings and errors go to the install log, not unpadded to the screen;
-  # the caller's abort says what failed.
-  parted --script "$disk" mkpart primary "$fstype" "${start}B" "$((end - 1))B" \
+  # the caller's abort says what failed. We do not run partprobe or udevadm
+  # settle between partitions: reading back the on-disk table does not depend
+  # on udev, and the caller settles once after all partitions and flags are set.
+  parted --script "$disk" mkpart "$mkpart_arg" "$fstype" "${start}B" "$((end - 1))B" \
     >>"${OMARCHY_INSTALL_LOG_FILE:-/dev/null}" 2>&1 || return 1
-  partprobe "$disk" 2>/dev/null || true
-  udevadm settle 2>/dev/null || true
 
-  after=$(partition_numbers "$disk") || return 1
+  after_table=$(_read_partition_table "$disk") || return 1
+  after=$(printf '%s\n' "$after_table" | awk 'NR > 1 { print $1 }')
   # Exactly one partition more than before, or something else moved.
   (( $(grep -c . <<<"$after") == $(grep -c . <<<"$before") + 1 )) || return 1
 
@@ -149,13 +290,15 @@ create_partition() {
   # which would false-positive on remnants left in freed space.
   grep -qx "$num" <<<"$before" && return 1
 
-  actual=$(partition_size_bytes "$disk" "$num")
+  actual=$(printf '%s\n' "$after_table" | awk -v n="$num" 'NR > 1 && $1 == n { print $2; exit }')
   [[ -n $actual ]] || return 1
   want=$((end - start))
   tolerance=$((1024 * 1024))
   (( actual >= want - tolerance && actual <= want + tolerance )) || return 1
 
-  parted --script "$disk" name "$num" "$name" >>"${OMARCHY_INSTALL_LOG_FILE:-/dev/null}" 2>&1 || true
+  if [[ $label != gpt && -n $name ]]; then
+    parted --script "$disk" name "$num" "$name" >>"${OMARCHY_INSTALL_LOG_FILE:-/dev/null}" 2>&1 || true
+  fi
 
   created_parts+=("$num")
   # shellcheck disable=SC2034 # the caller reads it once this returns

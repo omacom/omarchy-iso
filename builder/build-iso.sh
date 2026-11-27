@@ -1391,6 +1391,7 @@ finalize_root_image_metadata() {
     [[ -n $qcom_kernel_file ]] || { echo "ERROR: $OMARCHY_KERNEL is not in the offline mirror" >&2; exit 1; }
     bash /builder/qualcomm/stage-medium-firmware.sh "${qcom_tree_packages[@]}" "$offline_mirror_dir/$qcom_kernel_file" \
       "$root_image_dir/qcom-firmware" "${qcom_firmware_files[@]}"
+    stage_live_qcom_provided_lists "$offline_mirror_dir" "$target_airootfs"
   fi
 
   # Bound the boot-time hash: Type=oneshot units are exempt from systemd's

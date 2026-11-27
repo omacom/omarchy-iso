@@ -20,8 +20,6 @@
   "summary.keyboard": "Méarchlár",
   "summary.language": "Teanga",
   "summary.prompt": "An bhfuil sé seo ceart?",
-  "firmware.title": "Ag sábháil dochtearraí Qualcomm ó Windows",
-  "firmware.saved": "Sábháladh %1 comhad dochtearraí ó Windows don suiteáil.",
   "firmware.partial": "Sábháladh %1 as %2 comhad dochtearraí ó Windows; ní raibh an chuid eile ar fáil.",
   "firmware.none": "Níor aimsíodh dochtearraí Windows ar an ríomhaire seo.",
   "firmware.bitlocker": "Tá an deighilt Windows criptithe le BitLocker.",

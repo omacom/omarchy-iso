@@ -338,7 +338,7 @@ fi
             tar.addfile(info,io.BytesIO(desc))
         code=(ROOT/'configs/airootfs/root/configurator').read_text()
         functions=''.join(re.search(r'^'+name+r'\(\) \{\n.*?^\}\n', code, re.S|re.M).group(0)
-                          for name in ('qualcomm_firmware_uncovered','stage_qualcomm_firmware'))
+                          for name in ('qualcomm_firmware_uncovered','stage_qualcomm_firmware','render_firmware_notice'))
         for old,new in (('/var/cache/omarchy/mirror/offline',str(self.root/'mirror')),('/run/omarchy',str(self.root/'run/omarchy')),
                         ('/sys/firmware/devicetree/base',str(self.root/'dt'))):
             functions=functions.replace(old,new)
@@ -357,30 +357,70 @@ fi
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(result.stdout,'qcom/x1e80100/VENDOR/laptop/qcadsp8380.mbn\n')
 
-    def test_staging_runs_before_run_omarchy_exists(self):
+    def test_staging_runs_silently_before_run_omarchy_exists(self):
         self.assertFalse((self.root/'run/omarchy').exists())
         result=self.run_bash('stage_qualcomm_firmware')
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertNotIn('No such file',result.stderr)
+        self.assertEqual(result.stdout,'','stage_qualcomm_firmware must not draw or flash a transient screen')
         self.assertTrue((self.root/'stage-ran').exists())
         self.assertTrue((self.root/'run/omarchy/firmware-stage.log').exists())
 
     def test_only_uncovered_firmware_from_windows_counts_as_saved(self):
         covered='qcom/x1p42100/ASUSTeK/zenbook-14-ux3480qa/qcadsp8380.mbn'
         uncovered='qcom/x1e80100/VENDOR/laptop/qcadsp8380.mbn'
-        # Windows supplied only the file a package covers: still missing.
+        # Windows supplied only the file a package covers: still missing, queued for overwrite confirm.
         self.env['STAGED']=covered
-        result=self.run_bash('stage_qualcomm_firmware')
+        result=self.run_bash('stage_qualcomm_firmware; render_firmware_notice')
         self.assertEqual(result.returncode,0,result.stderr)
-        self.assertIn('firmware.none',result.stdout)
-        self.assertNotIn('firmware.saved',result.stdout)
-        # Windows supplied the uncovered file: saved.
+        self.assertIn('say --foreground 1 firmware.none',result.stdout)
+        self.assertIn('say firmware.degraded',result.stdout)
+        self.assertIn('say firmware.extract',result.stdout)
+        # Windows supplied the uncovered file: no warning rendered.
         (self.root/'run/omarchy/firmware/manifest').unlink()
         self.env['STAGED']=uncovered
-        result=self.run_bash('stage_qualcomm_firmware')
+        result=self.run_bash('stage_qualcomm_firmware; render_firmware_notice')
         self.assertEqual(result.returncode,0,result.stderr)
-        self.assertIn('firmware.saved 1',result.stdout)
-        self.assertNotIn('firmware.none',result.stdout)
+        self.assertEqual(result.stdout,'')
+
+    def test_confirm_disk_overwrite_renders_firmware_notice_inline(self):
+        code=(ROOT/'configs/airootfs/root/configurator').read_text()
+        overwrite_fn=re.search(r'^confirm_disk_overwrite\(\) \{\n.*?^\}\n', code, re.S|re.M).group(0)
+        self.assertRegex(
+            overwrite_fn,
+            r'confirm_install_encryption[^\n]*with-firmware-notice',
+        )
+        confirm_fn=re.search(r'^confirm_install_encryption\(\) \{\n.*?^\}\n', code, re.S|re.M).group(0)
+        self.assertRegex(
+            confirm_fn,
+            r'clear_logo\n\s*echo\n\s*\[\[ \$notice == "with-firmware-notice" \]\] && render_firmware_notice',
+        )
+
+    def test_stage_live_qcom_provided_lists_extracts_board_lists_into_live_airootfs(self):
+        mirror=self.root/'pkg-mirror'; mirror.mkdir()
+        airootfs=self.root/'live-airootfs'; airootfs.mkdir()
+        # Package with a provided.d board list (like asus-zenbook-a16-firmware).
+        with tarfile.open(mirror/'asus-zenbook-a16-firmware-1-2-aarch64.pkg.tar.gz','w:gz') as tar:
+            body=b'qcom/glymur/ASUSTeK/UX3607OA/qcadsp8480.mbn\n'
+            info=tarfile.TarInfo('usr/share/qcom-firmware-extract/provided.d/asus,zenbook-a16-ux3607oa.list')
+            info.size=len(body); tar.addfile(info,io.BytesIO(body))
+            other=b'binary'
+            info=tarfile.TarInfo('usr/lib/firmware/qcom/glymur/ASUSTeK/UX3607OA/qcadsp8480.mbn.xz')
+            info.size=len(other); tar.addfile(info,io.BytesIO(other))
+        # Detached signature and a firmware package without provided.d must be ignored cleanly.
+        (mirror/'asus-zenbook-a16-firmware-1-2-aarch64.pkg.tar.gz.sig').write_bytes(b'sig')
+        with tarfile.open(mirror/'other-firmware-1-1-aarch64.pkg.tar.gz','w:gz') as tar:
+            other=b'fw'
+            info=tarfile.TarInfo('usr/lib/firmware/other.bin'); info.size=len(other); tar.addfile(info,io.BytesIO(other))
+        script=(f'set -euo pipefail\nsource "{ROOT/"builder/qcom-oem-firmware.sh"}"\n'
+                f'stage_live_qcom_provided_lists "{mirror}" "{airootfs}"\n')
+        result=subprocess.run(['bash','-c',script],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        extracted=airootfs/'usr/share/qcom-firmware-extract/provided.d/asus,zenbook-a16-ux3607oa.list'
+        self.assertTrue(extracted.is_file())
+        self.assertEqual(extracted.read_text(),'qcom/glymur/ASUSTeK/UX3607OA/qcadsp8480.mbn\n')
+        self.assertFalse((airootfs/'usr/lib/firmware').exists())
+
 
 
 if __name__=='__main__': unittest.main()

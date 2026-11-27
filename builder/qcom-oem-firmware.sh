@@ -18,3 +18,17 @@ qcom_oem_firmware_packages() {
     }
   ' | sort -u
 }
+
+# Copy any qcom-firmware-extract/provided.d/*.list files shipped by firmware
+# packages in the offline mirror into the live ISO. That lets the live ISO's
+# qcom-firmware-extract recognize board-packaged firmware even when a package
+# predates the qcom-firmware-<folder> provides convention.
+stage_live_qcom_provided_lists() {
+  local mirror_dir=$1 target_airootfs=$2 pkg
+  shopt -s nullglob
+  for pkg in "$mirror_dir"/*-firmware-*.pkg.tar.*; do
+    [[ $pkg == *.sig ]] && continue
+    bsdtar -xf "$pkg" -C "$target_airootfs" --include='usr/share/qcom-firmware-extract/provided.d/*.list' 2>/dev/null || true
+  done
+  shopt -u nullglob
+}

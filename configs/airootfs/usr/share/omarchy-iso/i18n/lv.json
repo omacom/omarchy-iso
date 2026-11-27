@@ -20,8 +20,6 @@
   "summary.keyboard": "Tastatūra",
   "summary.language": "Valoda",
   "summary.prompt": "Vai viss ir pareizi?",
-  "firmware.title": "Saglabā Qualcomm aparātprogrammatūru no Windows",
-  "firmware.saved": "Instalēšanai no Windows saglabāti %1 aparātprogrammatūras faili.",
   "firmware.partial": "No Windows saglabāti %1 no %2 aparātprogrammatūras failiem; pārējo nebija draiveru krātuvē.",
   "firmware.none": "Šajā datorā Windows aparātprogrammatūra netika atrasta.",
   "firmware.bitlocker": "Windows nodalījums ir šifrēts ar BitLocker.",

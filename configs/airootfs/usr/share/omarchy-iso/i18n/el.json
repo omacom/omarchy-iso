@@ -20,8 +20,6 @@
   "summary.keyboard": "Πληκτρολόγιο",
   "summary.language": "Γλώσσα",
   "summary.prompt": "Είναι όλα σωστά;",
-  "firmware.title": "Αποθήκευση υλικολογισμικού Qualcomm από τα Windows",
-  "firmware.saved": "Αποθηκεύτηκαν %1 αρχεία υλικολογισμικού από τα Windows για την εγκατάσταση.",
   "firmware.partial": "Αποθηκεύτηκαν %1 από %2 αρχεία υλικολογισμικού· τα υπόλοιπα λείπουν από τα Windows.",
   "firmware.none": "Δεν βρέθηκε υλικολογισμικό Windows σε αυτόν τον υπολογιστή.",
   "firmware.bitlocker": "Το διαμέρισμα των Windows είναι κρυπτογραφημένο με BitLocker.",

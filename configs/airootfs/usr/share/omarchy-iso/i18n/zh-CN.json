@@ -21,8 +21,6 @@
   "summary.keyboard": "键盘",
   "summary.language": "语言",
   "summary.prompt": "以上信息正确吗？",
-  "firmware.title": "正在从 Windows 保存高通固件",
-  "firmware.saved": "已从 Windows 保存 %1 个固件文件供安装使用。",
   "firmware.partial": "已从 Windows 保存 %1/%2 个固件文件；其余不在驱动存储中。",
   "firmware.none": "这台电脑上没有找到 Windows 固件。",
   "firmware.bitlocker": "Windows 分区已启用 BitLocker 加密。",

@@ -20,8 +20,6 @@
   "summary.keyboard": "Tastatur",
   "summary.language": "Sprog",
   "summary.prompt": "Ser det rigtigt ud?",
-  "firmware.title": "Gemmer Qualcomm-firmware fra Windows",
-  "firmware.saved": "Gemte %1 firmwarefiler fra Windows til installationen.",
   "firmware.partial": "Gemte %1 af %2 firmwarefiler fra Windows; resten fandtes ikke i driverlageret.",
   "firmware.none": "Ingen Windows-firmware fundet på denne maskine.",
   "firmware.bitlocker": "Windows-partitionen er krypteret med BitLocker.",

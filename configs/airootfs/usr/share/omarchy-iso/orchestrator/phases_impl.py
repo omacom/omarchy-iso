@@ -692,7 +692,7 @@ def arch_install_system(ctx: InstallContext) -> None:
         # starting Argon2id before F1.image_write evicts ~1 GiB of cached root
         # image pages back to the USB stick; start it right after instead, where
         # it still overlaps boot/system setup and finishes before @factory.
-        if ctx.state.get("luks_deferred_keyslots") and _can_overlap_luks_with_image_write():
+        if (getattr(ctx, "state", None) or {}).get("luks_deferred_keyslots") and _can_overlap_luks_with_image_write():
             _start_luks_keyslot_enroll(ctx)
         with _time_step("STEP.install_root_image"):
             _install_root_image(ctx)

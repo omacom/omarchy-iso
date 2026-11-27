@@ -1,6 +1,7 @@
 """Boot-local Argon2id calibration; never stores a passphrase or a header."""
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
 import mmap
 import os
@@ -12,6 +13,9 @@ import sys
 import tempfile
 import threading
 import time
+from typing import TypeVar
+
+_T = TypeVar("_T")
 
 STATE = Path("/run/omarchy-luks-calibration/result.json")
 # The live system's other boot-time install jobs, stopped before luksFormat
@@ -381,8 +385,9 @@ def deferred_format_command(
     if not can_defer_keyslot():
         return None
     if (not command or command[0] != "cryptsetup" or "luksFormat" not in command
+            or _has_fixed_iterations(command)
             or any(flag in command for flag in (
-                "--pbkdf-force-iterations", "--pbkdf-memory", "--pbkdf-parallel",
+                "--pbkdf-memory", "--pbkdf-parallel",
                 "--key-slot", "--key-file", "-d"))):
         return None
     luks_index = command.index("luksFormat")
@@ -503,22 +508,12 @@ class DeferredKeyslot:
             pass
         return ""
 
-    @classmethod
-    def _on_all_cpus(cls, cmd: list[str]) -> list[str]:
-        """The command, on efficiency cores where a hybrid CPU has enough of
-        them online, or else on every CPU the installer started with.
-
-        On a hybrid CPU omarchy-iso-install pins the installer to performance
-        cores and records the original mask in OMARCHY_INSTALLER_ALL_CPUS.
-        Running the four Argon2id threads on cpu_atom keeps the P-cores free
-        for omarchy-image-write and setup with 0 ms penalty on F1.image_write."""
-        cpus = os.environ.get("OMARCHY_INSTALLER_ALL_CPUS")
-        if not cpus:
-            return cmd
-        atom = cls._online_atom_cpus(cmd, cpus)
-        return ["taskset", "-c", atom or cpus, *cmd]
-
     def _worker(self) -> None:
+        # On a hybrid CPU omarchy-iso-install pins the installer to performance
+        # cores and records the original mask in OMARCHY_INSTALLER_ALL_CPUS.
+        # Running the Argon2id threads on cpu_atom (when enough E-cores are
+        # online) keeps P-cores free for image write and setup; otherwise fall
+        # back to all installer CPUs (and retry there if taskset fails affinity).
         try:
             all_cpus = os.environ.get("OMARCHY_INSTALLER_ALL_CPUS")
             atom = self._online_atom_cpus(self.enroll_cmd, all_cpus) if all_cpus else ""
@@ -580,6 +575,75 @@ class DeferredKeyslot:
 OPEN_FLAGS = ("--persistent", "--allow-discards", "--perf-no_read_workqueue")
 
 
+def run_luks_format(
+    command: list[str],
+    *,
+    volume_key: Path,
+    passphrase: bytes | bytearray | None,
+    run_deferred: Callable[[list[str]], _T],
+    run_sync: Callable[[list[str]], _T],
+    allow_defer: bool = True,
+    sync_command: list[str] | None = None,
+    stop_calibration_first: bool = True,
+) -> tuple[_T, DeferredKeyslot | None]:
+    """Run a LUKS2 format on either the deferred or calibrated synchronous path.
+
+    Shared by both full-disk (`luks_tuning._with_calibration`) and free-space
+    (`format_and_open_luks`) installers.
+
+    When `allow_defer` is True, `passphrase` is non-empty bytes, and
+    `can_defer_keyslot()` holds, stops calibration without waiting and attempts
+    `deferred_format_command()`. On success, stops the early keyring when the
+    deferred enrollment will run an uncached benchmark, executes `fast_cmd` via
+    `run_deferred`, and returns `(result, DeferredKeyslot)`. If anything raises
+    (including `KeyboardInterrupt`) before `DeferredKeyslot` takes ownership,
+    the temporary slot-1 keyfile is unlinked before re-raising.
+
+    Otherwise stops calibration (if not already stopped), formats via
+    `format_command()` + `pretouch_for_format()` using `run_sync`, and returns
+    `(result, None)`.
+    """
+    calibration_stopped = False
+    can_try_defer = (
+        allow_defer
+        and isinstance(passphrase, (bytes, bytearray))
+        and bool(passphrase)
+        and can_defer_keyslot()
+    )
+    if can_try_defer:
+        if stop_calibration_first:
+            stop_calibration(wait=0)
+            calibration_stopped = True
+        temp_keyfile = new_volume_key(256)
+        try:
+            split = deferred_format_command(command, volume_key, temp_keyfile)
+            if split is not None:
+                fast_cmd, enroll_cmd, kill_cmd = split
+                if not _has_fixed_iterations(enroll_cmd):
+                    stop_early_keyring()
+                device = command[command.index("luksFormat") + 1]
+                result = run_deferred(fast_cmd)
+                entry = DeferredKeyslot(
+                    device=device,
+                    volume_key=volume_key,
+                    temp_keyfile=temp_keyfile,
+                    enroll_cmd=enroll_cmd,
+                    kill_cmd=kill_cmd,
+                    passphrase=bytes(passphrase),
+                )
+                return result, entry
+        except BaseException:
+            temp_keyfile.unlink(missing_ok=True)
+            raise
+        temp_keyfile.unlink(missing_ok=True)
+
+    if stop_calibration_first and not calibration_stopped:
+        stop_calibration()
+    argv = format_command(command if sync_command is None else sync_command, volume_key)
+    pretouch_for_format(argv)
+    return run_sync(argv), None
+
+
 def format_and_open_luks(
     device: str,
     mapper_name: str,
@@ -602,47 +666,28 @@ def format_and_open_luks(
     """
     if not isinstance(passphrase, (bytes, bytearray)) or not passphrase:
         raise RuntimeError("LUKS encryption requires a non-empty passphrase")
+    passphrase_bytes = bytes(passphrase)
     volume_key = new_volume_key()
-    temp_keyfile: Path | None = None
     deferred_entry: DeferredKeyslot | None = None
     try:
-        if can_defer_keyslot():
-            stop_calibration(wait=0)
-            base_cmd = [
-                "cryptsetup", "--type", "luks2", "--batch-mode",
-                "--pbkdf", "argon2id", "--key-size", str(KEY_SIZE),
-                "--iter-time", str(ITER_TIME), "luksFormat", device,
-            ]
-            temp_keyfile = new_volume_key(256)
-            split = deferred_format_command(base_cmd, volume_key, temp_keyfile)
-            if split is not None:
-                fast_cmd, enroll_cmd, kill_cmd = split
-                if not _has_fixed_iterations(enroll_cmd):
-                    stop_early_keyring()
-                subprocess.run(fast_cmd, check=True)
-                deferred_entry = DeferredKeyslot(
-                    device=device,
-                    volume_key=volume_key,
-                    temp_keyfile=temp_keyfile,
-                    enroll_cmd=enroll_cmd,
-                    kill_cmd=kill_cmd,
-                    passphrase=bytes(passphrase),
-                )
-            else:
-                temp_keyfile.unlink(missing_ok=True)
-                temp_keyfile = None
-        if deferred_entry is None:
-            stop_calibration()
-            sync_cmd = format_command(
-                [
-                    "cryptsetup", "luksFormat", device, "--type", "luks2",
-                    "--batch-mode", "--pbkdf", "argon2id",
-                    "--key-size", str(KEY_SIZE), "--iter-time", str(ITER_TIME), "-",
-                ],
-                volume_key,
-            )
-            pretouch_for_format(sync_cmd)
-            subprocess.run(sync_cmd, input=bytes(passphrase), check=True)
+        base_cmd = [
+            "cryptsetup", "--type", "luks2", "--batch-mode",
+            "--pbkdf", "argon2id", "--key-size", str(KEY_SIZE),
+            "--iter-time", str(ITER_TIME), "luksFormat", device,
+        ]
+        sync_base_cmd = [
+            "cryptsetup", "luksFormat", device, "--type", "luks2",
+            "--batch-mode", "--pbkdf", "argon2id",
+            "--key-size", str(KEY_SIZE), "--iter-time", str(ITER_TIME), "-",
+        ]
+        _, deferred_entry = run_luks_format(
+            base_cmd,
+            volume_key=volume_key,
+            passphrase=passphrase_bytes,
+            run_deferred=lambda cmd: subprocess.run(cmd, check=True),
+            run_sync=lambda cmd: subprocess.run(cmd, input=passphrase_bytes, check=True),
+            sync_command=sync_base_cmd,
+        )
         subprocess.run(
             [
                 "cryptsetup", "open", *open_flags,
@@ -655,8 +700,6 @@ def format_and_open_luks(
             deferred_entry.abort()
         else:
             volume_key.unlink(missing_ok=True)
-            if temp_keyfile is not None:
-                temp_keyfile.unlink(missing_ok=True)
         raise
     if deferred_entry is None:
         volume_key.unlink(missing_ok=True)

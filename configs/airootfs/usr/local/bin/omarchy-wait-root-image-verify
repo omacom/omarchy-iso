@@ -167,7 +167,7 @@ await_verdict() {
         # and the size-based timeout behind it is minutes away: tens of them
         # for a 4 GB image. When the hasher's offset has not moved for a
         # minute while an install waits on it, say so now. A slow medium moves
-        # (the slow-medium scenario's 64 KB/s does); a read hung in the driver
+        # (the slow-medium scenario's 256 KB/s does); a read hung in the driver
         # does not. No offset to read (between files, /proc gone) is not a
         # stall: the timeout still stands behind it.
         if where=$(hash_where); then

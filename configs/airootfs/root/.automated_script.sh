@@ -21,6 +21,34 @@ set -euo pipefail
 
 # The N1x recovery boot entry is a diagnostic shell, never the installer: record
 # the hardware probe, show how to reach the machine, and leave tty1 at a prompt.
+cidata_install_is_encrypted() {
+  local root=${1:-/root}
+  local encrypt_flag=""
+  if [[ -r $root/user_encrypt_installation.txt ]]; then
+    read -r encrypt_flag <"$root/user_encrypt_installation.txt" 2>/dev/null || true
+    case ${encrypt_flag,,} in
+      true|yes|1) return 0 ;;
+    esac
+  fi
+  if [[ -r $root/user_configuration.json ]]; then
+    if jq -e '(.disk_config.disk_encryption != null) or (.omarchy_install.free_space_plan.encrypt == true)'       "$root/user_configuration.json" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+configure_luks_calibration_for_cidata() {
+  local skip_marker=${OMARCHY_SKIP_LUKS_CALIBRATE_FILE:-/run/omarchy-iso/skip-luks-calibrate}
+  if cidata_install_is_encrypted "${1:-/root}"; then
+    rm -f "$skip_marker" 2>/dev/null || true
+  else
+    mkdir -p "${skip_marker%/*}" 2>/dev/null || true
+    : >"$skip_marker" 2>/dev/null || true
+    systemctl stop --no-block omarchy-luks-calibrate.service 2>/dev/null || true
+  fi
+}
+
 signal_greeter_ready() {
   local marker=${OMARCHY_GREETER_READY_FILE:-/run/omarchy-iso/greeter-ready}
   [[ -e $marker ]] && return 0
@@ -108,6 +136,7 @@ if [[ -f /usr/share/omarchy-iso/oem-install ]]; then
   set_tokyo_night_colors
   ./configurator --oem
 elif [[ ${OMARCHY_KMSCON:-} != 1 || -n ${OMARCHY_KMSCON_SHELL:-} ]] && /usr/local/bin/omarchy-cidata-load; then
+  configure_luks_calibration_for_cidata
   signal_greeter_ready
   # Looked for by the tty1 run and by a rerun from the shell an abort left,
   # where a cidata drive may have been plugged in since. Not by the run kmscon

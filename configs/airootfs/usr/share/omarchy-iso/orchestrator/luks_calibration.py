@@ -212,6 +212,21 @@ def _calibration_pending() -> bool:
     return state.get("ActiveState") in ("active", "activating") or bool(state.get("Job"))
 
 
+def cancel_calibration() -> None:
+    """Stop an in-flight LUKS calibration for an unencrypted install without
+    disturbing the early target keyring or page-cache warm-up."""
+    try:
+        subprocess.run(
+            ["systemctl", "stop", "--no-block", UNIT],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 def stop_calibration(wait: float = 20) -> None:
     """Before the format: let a benchmark that is under way finish, then stop
     the unit, so the format's own PBKDF never allocates memory beside it.

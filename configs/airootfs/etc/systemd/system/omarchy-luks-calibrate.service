@@ -13,6 +13,7 @@ Description=Calibrate LUKS Argon2id while the installer wizard is open
 After=omarchy-greeter-ready.service
 Before=omarchy-mirror-verify.service omarchy-root-image-verify.service
 ConditionPathExists=/run/archiso/bootmnt
+ConditionPathExists=!/run/omarchy-iso/skip-luks-calibrate
 
 [Service]
 Type=oneshot

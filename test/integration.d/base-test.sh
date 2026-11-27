@@ -22,6 +22,10 @@ NO_PREVIEW="${OMARCHY_INTEGRATION_NO_PREVIEW:-false}"
 # true when the ISO is a shipped release rather than a build of this tree:
 # what only this tree's installer does is then noted instead of checked.
 RELEASE_ISO="${OMARCHY_INTEGRATION_RELEASE_ISO:-false}"
+# The kernel the install asks for: releases before 4.0.4 installed linux, and
+# their offline mirror has no linux-omarchy.
+INSTALL_KERNEL="${OMARCHY_INTEGRATION_KERNEL:-linux-omarchy}"
+[[ $INSTALL_KERNEL =~ ^[a-z0-9-]+$ ]] || { echo "OMARCHY_INTEGRATION_KERNEL is not a package name: $INSTALL_KERNEL" >&2; exit 2; }
 # shellcheck disable=SC2034 # read by the scenarios that source this file
 BOOT_TIMEOUT=600
 
@@ -85,6 +89,9 @@ TYPE_LAYOUT=$KB_LAYOUT
 BASE_DIR="$ROOT/test-runs/$(basename "$ISO" .iso)-integration"
 if [[ $FIRMWARE == bios ]]; then
   BASE_DIR+="-bios"
+fi
+if [[ $INSTALL_KERNEL != linux-omarchy ]]; then
+  BASE_DIR+="-kernel-$INSTALL_KERNEL"
 fi
 if [[ $VARIANT != default ]]; then
   BASE_DIR="$BASE_DIR-$VARIANT"
@@ -851,7 +858,7 @@ EOF
             "efi_binary": "limine_x64.efi",
             "enable_fallback": true
         },
-        "storage": { "kernel": "linux-omarchy" }
+        "storage": { "kernel": "$INSTALL_KERNEL" }
     },
     "disk_config": {
         "config_type": "default_layout",
@@ -896,7 +903,7 @@ EOF
         ]$encryption_config
     },
     "hostname": "$GUEST_HOSTNAME",
-    "kernels": [ "linux-omarchy" ],
+    "kernels": [ "$INSTALL_KERNEL" ],
     "network_config": { "type": "iso" },
     "ntp": true,
     "parallel_downloads": 8,

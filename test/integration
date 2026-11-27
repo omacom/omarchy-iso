@@ -19,6 +19,9 @@
 #   --no-preview   Do not open the collected screenshots in imv
 #   --release-iso  The ISO is a shipped release, not a build of this tree:
 #                  what only this tree's installer does is noted, not checked
+#
+# OMARCHY_INTEGRATION_KERNEL picks the kernel the install asks for: the default
+# linux-omarchy, or linux for a release before 4.0.4.
 
 set -euo pipefail
 

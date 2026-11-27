@@ -29,9 +29,23 @@ trap 'chmod -R u+w "$work"; rm -rf "$work"' EXIT
 stub_dir="$work/stubs"
 mkdir -p "$stub_dir"
 
+REAL_SLEEP=$(type -P sleep)
+
 cat >"$stub_dir/udevadm" <<'STUB'
 #!/bin/bash
 printf 'udevadm %s\n' "$*" >>"$TEST_LOG"
+if [[ -n ${UDEV_ON_SETTLE_HOOK:-} ]]; then
+  bash -c "$UDEV_ON_SETTLE_HOOK"
+fi
+if [[ -n ${UDEV_CREATE_LABEL:-} && -e ${UDEV_TRIGGER_PATH:-} ]]; then
+  ln -sfn "$UDEV_TARGET" "$UDEV_CREATE_LABEL"
+fi
+STUB
+
+cat >"$stub_dir/sleep" <<STUB
+#!/bin/bash
+printf 'sleep %s\n' "\$*" >>"\$TEST_LOG"
+exec "$REAL_SLEEP" "\$@"
 STUB
 
 cat >"$stub_dir/mount" <<'STUB'
@@ -220,3 +234,190 @@ mkdir "$sandbox/root/user_credentials.json"
 [[ ! -e $sandbox/root/user_configuration.json ]] || fail "partial copy removes what it copied"
 [[ ! -e $sandbox/root/authorized_keys ]] || fail "partial copy leaves no authorized_keys behind"
 pass "partial copy cleans up what it copied"
+
+add_usb_interface() {
+  local name="$1"
+  local iclass="$2"
+  local driver="${3:-}"
+  local intf="$sandbox/sys/bus/usb/devices/$name"
+  mkdir -p "$intf"
+  printf '%s\n' "$iclass" >"$intf/bInterfaceClass"
+  if [[ -n $driver ]]; then
+    mkdir -p "$sandbox/sys/bus/usb/drivers/$driver"
+    ln -s "$sandbox/sys/bus/usb/drivers/$driver" "$intf/driver"
+  fi
+}
+
+wait_for_sleep_call() {
+  local _
+  for _ in $(seq 1 100); do
+    grep -q '^sleep ' "$TEST_LOG" 2>/dev/null && return 0
+    "$REAL_SLEEP" 0.02
+  done
+}
+
+# A USB mass-storage drive sitting in usb-storage's delay_use timer (host0
+# exists, no target*/LUN yet): wait until the SCSI block device appears, settle
+# udev so the by-label symlink lands, and load the cidata pair.
+new_sandbox
+write_required_pair
+add_usb_interface 1-2:1.0 08 usb-storage
+mkdir -p "$sandbox/sys/bus/usb/devices/1-2:1.0/host0"
+(
+  wait_for_sleep_call
+  mkdir -p "$sandbox/sys/bus/usb/devices/1-2:1.0/host0/target0:0:0/0:0:0:0"
+  printf '0\n' >"$sandbox/sys/bus/usb/devices/1-2:1.0/host0/target0:0:0/0:0:0:0/type"
+  mkdir -p "$sandbox/sys/bus/usb/devices/1-2:1.0/host0/target0:0:0/0:0:0:0/block/sda"
+) &
+helper=$!
+OMARCHY_CIDATA_WAIT_TIMEOUT=3 OMARCHY_CIDATA_WAIT_POLL=0.05 \
+  UDEV_TRIGGER_PATH="$sandbox/sys/bus/usb/devices/1-2:1.0/host0/target0:0:0/0:0:0:0/block/sda" \
+  UDEV_CREATE_LABEL="$sandbox/dev/disk/by-label/CIDATA" \
+  UDEV_TARGET="$sandbox/media" \
+  run_load || { kill "$helper" 2>/dev/null || true; wait "$helper" 2>/dev/null || true; fail "pending usb-storage interface waits and loads"; }
+wait "$helper"
+grep -q '^sleep ' "$TEST_LOG" || fail "pending usb-storage interface waited before settling"
+grep -q '^udevadm settle$' "$TEST_LOG" || fail "pending usb-storage interface settled udev"
+[[ -f $sandbox/root/user_configuration.json && -f $sandbox/root/user_credentials.json ]] || fail "pending usb-storage interface copied required pair"
+pass "pending usb-storage interface waits, settles udev, and loads"
+
+# A USB mass-storage interface whose driver module has not bound yet (no driver
+# symlink): wait through driver bind, host/LUN probe, and block device creation.
+new_sandbox
+write_required_pair
+add_usb_interface 1-2:1.0 08
+(
+  wait_for_sleep_call
+  mkdir -p "$sandbox/sys/bus/usb/drivers/usb-storage"
+  ln -s "$sandbox/sys/bus/usb/drivers/usb-storage" "$sandbox/sys/bus/usb/devices/1-2:1.0/driver"
+  "$REAL_SLEEP" 0.05
+  mkdir -p "$sandbox/sys/bus/usb/devices/1-2:1.0/host0/target0:0:0/0:0:0:0"
+  printf '0\n' >"$sandbox/sys/bus/usb/devices/1-2:1.0/host0/target0:0:0/0:0:0:0/type"
+  mkdir -p "$sandbox/sys/bus/usb/devices/1-2:1.0/host0/target0:0:0/0:0:0:0/block/sda"
+) &
+helper=$!
+OMARCHY_CIDATA_WAIT_TIMEOUT=3 OMARCHY_CIDATA_WAIT_POLL=0.05 \
+  UDEV_TRIGGER_PATH="$sandbox/sys/bus/usb/devices/1-2:1.0/host0/target0:0:0/0:0:0:0/block/sda" \
+  UDEV_CREATE_LABEL="$sandbox/dev/disk/by-label/CIDATA" \
+  UDEV_TARGET="$sandbox/media" \
+  run_load || { kill "$helper" 2>/dev/null || true; wait "$helper" 2>/dev/null || true; fail "unbound USB mass-storage interface waits and loads"; }
+wait "$helper"
+grep -q '^sleep ' "$TEST_LOG" || fail "unbound USB mass-storage interface waited"
+[[ -f $sandbox/root/user_configuration.json && -f $sandbox/root/user_credentials.json ]] || fail "unbound USB mass-storage interface copied required pair"
+pass "unbound USB mass-storage interface waits for driver, LUN, block device, and loads"
+
+# An already-enumerated USB stick (like the live boot medium) with no cidata
+# label must fall back immediately without sleeping.
+new_sandbox
+add_usb_interface 1-1:1.0 08 usb-storage
+mkdir -p "$sandbox/sys/bus/usb/devices/1-1:1.0/host0/target0:0:0/0:0:0:0/block/sda"
+printf '0\n' >"$sandbox/sys/bus/usb/devices/1-1:1.0/host0/target0:0:0/0:0:0:0/type"
+! OMARCHY_CIDATA_WAIT_TIMEOUT=10 run_load || fail "enumerated USB stick without cidata exits non-zero"
+! grep -q '^sleep ' "$TEST_LOG" || fail "enumerated USB stick without cidata does not sleep"
+pass "already-enumerated USB stick without cidata exits immediately without sleeping"
+
+# Non-storage USB (HID class 03), unauthorized class-08 USB (authorized=0),
+# class-08 USB bound to a non-storage driver (usbfs), and non-block SCSI LUNs
+# (type 13 enclosure with no block/ child) must not trigger any wait.
+new_sandbox
+add_usb_interface 1-1:1.0 03
+add_usb_interface 1-2:1.0 08
+printf '0\n' >"$sandbox/sys/bus/usb/devices/1-2:1.0/authorized"
+add_usb_interface 1-3:1.0 08 usbfs
+add_usb_interface 1-4:1.0 08 usb-storage
+mkdir -p "$sandbox/sys/bus/usb/devices/1-4:1.0/host0/target0:0:0/0:0:0:0"
+printf '13\n' >"$sandbox/sys/bus/usb/devices/1-4:1.0/host0/target0:0:0/0:0:0:0/type"
+! OMARCHY_CIDATA_WAIT_TIMEOUT=10 run_load || fail "non-storage/unauthorized/enclosure USB exits non-zero"
+! grep -q '^sleep ' "$TEST_LOG" || fail "non-storage/unauthorized/enclosure USB does not sleep"
+pass "non-storage, unauthorized, non-storage-driver, and enclosure USB devices do not wait"
+
+# A hung 0-LUN USB mass-storage device must not hang the boot: wait is bounded
+# by OMARCHY_CIDATA_WAIT_TIMEOUT and falls back cleanly to the wizard. Use 2 s
+# so an integer SECONDS tick right after startup cannot skip the first sleep.
+new_sandbox
+add_usb_interface 1-2:1.0 08 usb-storage
+mkdir -p "$sandbox/sys/bus/usb/devices/1-2:1.0/host0"
+! OMARCHY_CIDATA_WAIT_TIMEOUT=2 OMARCHY_CIDATA_WAIT_POLL=0.05 run_load || fail "hung 0-LUN USB device exits non-zero"
+grep -q '^sleep ' "$TEST_LOG" || fail "hung 0-LUN USB device waited until timeout"
+! grep -q '^mount ' "$TEST_LOG" || fail "hung 0-LUN USB device mounts nothing"
+(( $(grep -c '^udevadm settle$' "$TEST_LOG") == 1 )) || fail "hung 0-LUN USB device settles udev once after deadline"
+pass "hung 0-LUN USB mass-storage device times out cleanly and falls back"
+
+# When CIDATA is already present, an unrelated hung 0-LUN USB mass-storage
+# device must not delay loading it.
+new_sandbox
+attach_drive CIDATA
+write_required_pair
+add_usb_interface 1-2:1.0 08 usb-storage
+mkdir -p "$sandbox/sys/bus/usb/devices/1-2:1.0/host0"
+OMARCHY_CIDATA_WAIT_TIMEOUT=10 run_load || fail "already-present CIDATA loads alongside hung USB device"
+! grep -q '^sleep ' "$TEST_LOG" || fail "already-present CIDATA does not sleep for hung USB device"
+[[ -f $sandbox/root/user_configuration.json && -f $sandbox/root/user_credentials.json ]] || fail "already-present CIDATA copied required pair"
+pass "already-present CIDATA loads immediately without waiting on hung USB device"
+
+# A USB mass-storage interface (uas) that arrives during the initial udevadm
+# settle is caught on the follow-up pass, waited on, and settled again.
+new_sandbox
+write_required_pair
+(
+  for _ in $(seq 1 150); do
+    [[ -e $sandbox/step-b-settled ]] && break
+    "$REAL_SLEEP" 0.02
+  done
+  wait_for_sleep_call
+  mkdir -p "$sandbox/sys/bus/usb/devices/1-3:1.0/host1/target1:0:0/1:0:0:0"
+  printf '0\n' >"$sandbox/sys/bus/usb/devices/1-3:1.0/host1/target1:0:0/1:0:0:0/type"
+  mkdir -p "$sandbox/sys/bus/usb/devices/1-3:1.0/host1/target1:0:0/1:0:0:0/block/sdb"
+) &
+helper=$!
+OMARCHY_CIDATA_WAIT_TIMEOUT=3 OMARCHY_CIDATA_WAIT_POLL=0.05 \
+  UDEV_ON_SETTLE_HOOK="if [[ ! -e '$sandbox/step-b-settled' ]]; then mkdir -p '$sandbox/sys/bus/usb/devices/1-3:1.0/host1' '$sandbox/sys/bus/usb/drivers/uas'; printf '08\n' >'$sandbox/sys/bus/usb/devices/1-3:1.0/bInterfaceClass'; ln -s '$sandbox/sys/bus/usb/drivers/uas' '$sandbox/sys/bus/usb/devices/1-3:1.0/driver'; : >'$sandbox/step-b-settled'; fi" \
+  UDEV_TRIGGER_PATH="$sandbox/sys/bus/usb/devices/1-3:1.0/host1/target1:0:0/1:0:0:0/block/sdb" \
+  UDEV_CREATE_LABEL="$sandbox/dev/disk/by-label/CIDATA" \
+  UDEV_TARGET="$sandbox/media" \
+  run_load || { kill "$helper" 2>/dev/null || true; wait "$helper" 2>/dev/null || true; fail "late-arriving uas interface waits and loads"; }
+wait "$helper"
+grep -q '^sleep ' "$TEST_LOG" || fail "late-arriving uas interface waited"
+(( $(grep -c '^udevadm settle$' "$TEST_LOG") == 2 )) || fail "late-arriving uas interface settled udev twice"
+[[ -f $sandbox/root/user_configuration.json && -f $sandbox/root/user_credentials.json ]] || fail "late-arriving uas interface copied required pair"
+pass "late-arriving uas interface during udev settle is caught and loads"
+
+# device_add_disk() creates block/<dev> with uevent_suppress=1 before scanning
+# partitions and emitting KOBJ_ADD: when /run/udev/data exists, wait until
+# udevd has written b<maj>:<min> for the disk (and its partitions) rather than
+# settling while KOBJ_ADD is still suppressed.
+new_sandbox
+write_required_pair
+mkdir -p "$sandbox/run/udev/data"
+add_usb_interface 1-2:1.0 08 usb-storage
+mkdir -p "$sandbox/sys/bus/usb/devices/1-2:1.0/host0/target0:0:0/0:0:0:0/block/sda/sda1"
+printf '0\n' >"$sandbox/sys/bus/usb/devices/1-2:1.0/host0/target0:0:0/0:0:0:0/type"
+printf '8:0\n' >"$sandbox/sys/bus/usb/devices/1-2:1.0/host0/target0:0:0/0:0:0:0/block/sda/dev"
+printf '8:1\n' >"$sandbox/sys/bus/usb/devices/1-2:1.0/host0/target0:0:0/0:0:0:0/block/sda/sda1/dev"
+(
+  wait_for_sleep_call
+  : >"$sandbox/run/udev/data/b8:0"
+  "$REAL_SLEEP" 0.05
+  : >"$sandbox/run/udev/data/b8:1"
+  ln -s "$sandbox/media" "$sandbox/dev/disk/by-label/CIDATA"
+) &
+helper=$!
+OMARCHY_CIDATA_WAIT_TIMEOUT=3 OMARCHY_CIDATA_WAIT_POLL=0.05 \
+  run_load || { kill "$helper" 2>/dev/null || true; wait "$helper" 2>/dev/null || true; fail "suppressed KOBJ_ADD waits for udev db and loads"; }
+wait "$helper"
+grep -q '^sleep ' "$TEST_LOG" || fail "suppressed KOBJ_ADD waited for /run/udev/data/b8:1"
+[[ -f $sandbox/root/user_configuration.json && -f $sandbox/root/user_credentials.json ]] || fail "suppressed KOBJ_ADD copied required pair"
+pass "block device with suppressed KOBJ_ADD waits for udev database entry before settling"
+
+# When /run/udev/data already has b<maj>:<min> for an enumerated non-cidata USB
+# stick, no sleep happens.
+new_sandbox
+mkdir -p "$sandbox/run/udev/data"
+add_usb_interface 1-1:1.0 08 usb-storage
+mkdir -p "$sandbox/sys/bus/usb/devices/1-1:1.0/host0/target0:0:0/0:0:0:0/block/sda"
+printf '0\n' >"$sandbox/sys/bus/usb/devices/1-1:1.0/host0/target0:0:0/0:0:0:0/type"
+printf '8:0\n' >"$sandbox/sys/bus/usb/devices/1-1:1.0/host0/target0:0:0/0:0:0:0/block/sda/dev"
+: >"$sandbox/run/udev/data/b8:0"
+! OMARCHY_CIDATA_WAIT_TIMEOUT=10 run_load || fail "udev-recorded non-cidata USB exits non-zero"
+! grep -q '^sleep ' "$TEST_LOG" || fail "udev-recorded non-cidata USB does not sleep"
+pass "udev-recorded USB stick without cidata exits immediately without sleeping"

@@ -176,6 +176,70 @@ grep -qx ret "$work/pressed" || fail "the passphrase was never typed at the prom
 ((slept <= INSTALL_TIMEOUT + 10)) || fail "a ${INSTALL_TIMEOUT}s budget took ${slept}s at the passphrase prompt"
 echo "ok - typing at the passphrase prompt counts against the install timeout"
 
+# Wall-clock budget: each poll's SSH/OCR time counts against INSTALL_TIMEOUT,
+# not only the loop's sleep 10. (ssh_guest runs directly in the loop rather
+# than in a subshell, so advancing SECONDS via sleep 5 mirrors ConnectTimeout
+# and OCR latency in wall time.)
+ssh_guest() { sleep 5; false; }
+ocr_screen() { echo "Installing Omarchy"; }
+
+echo 0 >"$work/slept"
+: >"$work/pressed"
+run wait_for_unattended_install install
+slept=$(<"$work/slept")
+((status == 1)) || fail "a slow install wait did not time out (status $status): $(tail -n3 "$work/out")"
+grep -q "Timed out after ${INSTALL_TIMEOUT}s" "$work/out" || fail "no timeout message: $(tail -n3 "$work/out")"
+((slept <= INSTALL_TIMEOUT + 15)) || fail "a ${INSTALL_TIMEOUT}s budget took ${slept}s with 5 s polls"
+echo "ok - wait_for_unattended_install keeps to its wall-clock budget when polls take time"
+
+# Dropping to the interactive greeter (cidata drive missed) fails fast on two
+# consecutive polls, without typing the LUKS passphrase blind into the greeter.
+ssh_guest() { false; }
+ocr_screen() { printf '%s\n' "Beautiful, Fun & Agentic Linux by OHH" "Press Return to Start Install"; }
+capture_console() { echo "$1" >>"$work/shots"; }
+
+echo 0 >"$work/slept"
+: >"$work/pressed"
+: >"$work/shots"
+run wait_for_unattended_install install
+slept=$(<"$work/slept")
+((status == 1)) || fail "falling back to the interactive greeter did not fail (status $status): $(cat "$work/out")"
+((slept <= 20)) || fail "the greeter fallback waited ${slept}s instead of failing fast"
+[[ ! -s $work/pressed ]] || fail "the passphrase was typed into the interactive greeter: $(paste -sd' ' "$work/pressed")"
+grep -qx "failure-install-greeter" "$work/shots" || fail "no greeter failure screenshot captured: $(cat "$work/shots")"
+grep -q "Unattended install fell back to the interactive greeter" "$work/out" ||
+  fail "no greeter-fallback message: $(cat "$work/out")"
+echo "ok - wait_for_unattended_install fails fast on interactive greeter fallback without typing"
+
+# A single transient greeter screen on poll 0 (as after full-nvram restarts
+# the installer over a stale kmscon screen) does not abort the install.
+poll_count="$work/poll-count"
+rm -f "$poll_count"
+ssh_guest() {
+  local n
+  n=$(cat "$poll_count" 2>/dev/null || echo 0)
+  ((n >= 2))
+}
+ocr_screen() {
+  local n=$(($(cat "$poll_count" 2>/dev/null || echo 0) + 1))
+  echo "$n" >"$poll_count"
+  if ((n == 1)); then
+    echo "Press Return to Start Install"
+  else
+    echo "Installing Omarchy"
+  fi
+}
+
+echo 0 >"$work/slept"
+: >"$work/pressed"
+: >"$work/shots"
+run wait_for_unattended_install install
+((status == 0)) || fail "a single transient greeter screen aborted the install (status $status): $(cat "$work/out")"
+! grep -qx "failure-install-greeter" "$work/shots" || fail "captured a greeter failure on a transient screen"
+grep -qx "success-install-first-boot" "$work/shots" || fail "did not reach first-boot success: $(cat "$work/shots")"
+capture_console() { :; }
+echo "ok - wait_for_unattended_install tolerates a single transient greeter screen"
+
 # -------------------------------------------- typing under the guest's layout
 #
 # type_text sends key positions, which the guest reads through the layout

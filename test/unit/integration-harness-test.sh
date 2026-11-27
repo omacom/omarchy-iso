@@ -623,7 +623,7 @@ naming=$(sed -n '/^BASE_DIR="/,/^RUN_DIR=/p' "$harness")
 [[ -n $naming ]] || fail "the harness no longer names its base folder with BASE_DIR"
 base_dir() { # [VAR=value]...
   local ROOT=/r ISO=/i/omarchy-9.9.9.iso FIRMWARE=uefi VARIANT=default KB_LAYOUT=us \
-    ENCRYPT=false UKI=false DISK_GB=40 SCENARIO=boot setting BASE_DIR RUN_DIR
+    ENCRYPT=false UKI=false DISK_GB=40 CPU_FLAGS="" SCENARIO=boot setting BASE_DIR RUN_DIR
   for setting; do eval "local $setting"; done
   eval "$naming"
   echo "$BASE_DIR"
@@ -632,7 +632,7 @@ base_dir() { # [VAR=value]...
 [[ $(base_dir) == /r/test-runs/omarchy-9.9.9-integration ]] ||
   fail "the default install's base folder moved to $(base_dir), so the saved ones are not reused"
 declare -A seen=([$(base_dir)]="the default settings")
-for setting in FIRMWARE=bios VARIANT=small KB_LAYOUT=uk ENCRYPT=true UKI=true DISK_GB=24; do
+for setting in FIRMWARE=bios VARIANT=small KB_LAYOUT=uk ENCRYPT=true UKI=true DISK_GB=24 CPU_FLAGS=-aes; do
   dir=$(base_dir "$setting")
   [[ ! -v seen[$dir] ]] || fail "$setting reuses the base of ${seen[$dir]} ($dir)"
   seen[$dir]=$setting

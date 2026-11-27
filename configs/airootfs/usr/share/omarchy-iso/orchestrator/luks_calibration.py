@@ -35,6 +35,13 @@ ASYNC_MIN_CPUS = 4
 ASYNC_MIN_MEMORY = 2560 * 1024  # 2.5 GiB available so 1 GiB Argon2id never pressures install
 ATOM_CPUS_PATH = Path("/sys/devices/cpu_atom/cpus")
 ONLINE_CPUS_PATH = Path("/sys/devices/system/cpu/online")
+CPUINFO_PATH = Path("/proc/cpuinfo")
+# Without AES instructions, AES-XTS runs in software at a fraction of the
+# disk's speed and through table lookups that leak timing. Adiantum is built
+# for those CPUs: XChaCha12 and NH do the bulk work, and AES runs once per
+# sector. Its key is 256 bits; aes-xts-plain64 takes 512.
+ADIANTUM_CIPHER = "xchacha12,aes-adiantum-plain64"
+ADIANTUM_KEY_SIZE = 256
 
 
 def _parse_cpu_set(spec: str) -> set[int]:
@@ -304,13 +311,61 @@ def with_sector_size(command: list[str]) -> list[str]:
     return command[:index + 1] + ["--sector-size", str(SECTOR_SIZE)] + command[index + 1:]
 
 
-def new_volume_key(key_size: int = KEY_SIZE) -> Path:
+def has_aes_acceleration() -> bool:
+    """Whether every CPU has AES instructions: `aes` in `flags` (x86 AES-NI)
+    or `Features` (arm64 crypto extensions), or `zknd`+`zkne` / `zvkned` in
+    `isa` (RISC-V crypto extensions). Unreadable cpuinfo or other
+    architectures count as accelerated and keep cryptsetup's default."""
+    try:
+        text = CPUINFO_PATH.read_text(errors="replace")
+    except OSError:
+        return True
+    for line in text.splitlines():
+        field, sep, value = line.partition(":")
+        if not sep:
+            continue
+        field, value = field.strip(), value.strip()
+        if field in ("flags", "Features") and "aes" not in value.split():
+            return False
+        if field == "isa" and value.lower().startswith("rv"):
+            exts = set(value.lower().split("_")[1:])
+            if not ({"zknd", "zkne"} <= exts or exts & {"zkn", "zk", "zvkned", "zvkn", "zvk"}):
+                return False
+    return True
+
+
+def volume_key_size() -> int:
+    """Bits of the volume key the installer's format uses on this CPU."""
+    return KEY_SIZE if has_aes_acceleration() else ADIANTUM_KEY_SIZE
+
+
+def with_cipher(command: list[str]) -> list[str]:
+    """Format with Adiantum (256-bit key) on CPUs without AES instructions.
+    Leaves commands with an explicit cipher and non-format commands unchanged."""
+    if (not command or command[0] != "cryptsetup" or "luksFormat" not in command
+            or any(arg in ("--cipher", "-c") or arg.startswith("--cipher=") for arg in command)
+            or has_aes_acceleration()):
+        return command
+    print(f"No AES instructions on this CPU: formatting with {ADIANTUM_CIPHER}", file=sys.stderr)
+    out = [command[0], "--cipher", ADIANTUM_CIPHER, "--key-size", str(ADIANTUM_KEY_SIZE)]
+    args = iter(command[1:])
+    for arg in args:
+        if arg in ("--key-size", "-s"):
+            next(args, None)
+        elif not arg.startswith("--key-size="):
+            out.append(arg)
+    return out
+
+
+def new_volume_key(key_size: int | None = None) -> Path:
     """A random volume key in a root-only file on tmpfs, for luksFormat
     --volume-key-file. Opening the new volume with the same file takes no key
     derivation, where opening it by passphrase repeats the Argon2id the
     format just did (2 s at the installer's iter-time). The kernel's
     generator, as luksFormat --use-urandom would use; the caller removes the
-    file once the volume is open."""
+    file once the volume is open. Sized for this CPU's cipher by default."""
+    if key_size is None:
+        key_size = volume_key_size()
     fd, name = tempfile.mkstemp(dir=VOLUME_KEY_DIR, prefix="omarchy-volume-key-")
     with os.fdopen(fd, "wb") as stream:
         stream.write(os.urandom(key_size // 8))
@@ -319,8 +374,10 @@ def new_volume_key(key_size: int = KEY_SIZE) -> Path:
 
 def format_command(command: list[str], volume_key: Path | None = None) -> list[str]:
     """The installer's luksFormat: 4096-byte sectors, this boot's Argon2id
-    calibration, and the volume key the open will use."""
-    command = calibrated_command(with_sector_size(command))
+    calibration, Adiantum on a CPU without AES instructions, and the volume
+    key the open will use. The cipher comes after the calibration, whose
+    cache is keyed on the request's 512-bit --key-size."""
+    command = with_cipher(calibrated_command(with_sector_size(command)))
     if volume_key is not None:
         command = command[:1] + ["--volume-key-file", str(volume_key)] + command[1:]
     return command
@@ -413,7 +470,7 @@ def deferred_format_command(
     options = cached_options(iter_time, key_size) or ["--iter-time", str(iter_time)]
 
     hash_alg = value("--hash")
-    fast_cmd = with_sector_size(command)
+    fast_cmd = with_cipher(with_sector_size(command))
     pbkdf_idx = fast_cmd.index("--pbkdf")
     fast_cmd = fast_cmd[:pbkdf_idx] + ["--pbkdf", "pbkdf2"] + fast_cmd[pbkdf_idx + 2:]
     iter_idx = fast_cmd.index("--iter-time")

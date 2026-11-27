@@ -27,6 +27,7 @@ class Calibration(unittest.TestCase):
         self.enterContext(mock.patch.object(luks, 'memory_available', return_value=4*1024*1024))
         self.enterContext(mock.patch.object(luks, 'memory_free', return_value=4*1024*1024))
         self.enterContext(mock.patch.object(luks.os, 'cpu_count', return_value=4))
+        self.enterContext(mock.patch.object(luks, 'has_aes_acceleration', return_value=True))
         self.data = dict(schema=1, iter_time=2000, key_size=512, cpus=4,
                          iterations=13, memory=1048576, parallel=4)
         # The production reader requires root ownership; unit tests run as an
@@ -362,6 +363,9 @@ class ArchinstallBoundary(unittest.TestCase):
 
 
 class VolumeKey(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(mock.patch.object(luks, 'has_aes_acceleration', return_value=True))
+
     def test_the_key_is_random_root_only_and_the_cipher_keys_size(self):
         directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
         with mock.patch.object(luks, 'VOLUME_KEY_DIR', directory):
@@ -394,6 +398,7 @@ class SectorSize(unittest.TestCase):
     def setUp(self):
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.object(luks, 'STATE', self.directory / 'none.json'))
+        self.enterContext(mock.patch.object(luks, 'has_aes_acceleration', return_value=True))
 
     def device(self, size):
         path = self.directory / f'disk-{size}'
@@ -466,6 +471,7 @@ class DeferredArgon2Keyslot(unittest.TestCase):
         self.enterContext(mock.patch.object(luks, 'memory_available', return_value=4*1024*1024))
         self.enterContext(mock.patch.object(luks.os, 'cpu_count', return_value=4))
         self.enterContext(mock.patch.object(luks.os, 'fstat', side_effect=root_stat))
+        self.enterContext(mock.patch.object(luks, 'has_aes_acceleration', return_value=True))
 
     def test_splits_calibrated_format_into_fast_slot1_and_argon2_slot0(self):
         vk = self.directory / 'vk'
@@ -981,6 +987,196 @@ class UnifiedLuksFormatTest(unittest.TestCase):
                     with self.assertRaises(exc_cls):
                         luks.format_and_open_luks(str(self.image), "omarchy_root", b"secret")
                 self.assertEqual(self._leftover_keys(), [])
+
+
+class AdiantumWithoutAes(unittest.TestCase):
+    """A CPU without AES instructions formats with Adiantum."""
+    X86_AES = 'processor\t: 0\nflags\t\t: fpu sse2 ssse3 pclmulqdq aes avx avx2\n'
+    X86_NO_AES = 'processor\t: 0\nflags\t\t: fpu sse2 ssse3 movbe avx\n'
+    ARM_AES = 'processor\t: 0\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 cpuid\n'
+    ARM_NO_AES = 'processor\t: 0\nFeatures\t: fp asimd evtstrm crc32 cpuid\n'
+
+    def setUp(self):
+        self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.cpuinfo = self.directory / 'cpuinfo'
+        self.enterContext(mock.patch.object(luks, 'CPUINFO_PATH', self.cpuinfo))
+        self.enterContext(mock.patch.object(luks, 'STATE', self.directory / 'none.json'))
+        self.cpuinfo.write_text(self.X86_NO_AES)
+
+    def device(self, size=64 * 1024 * 1024):
+        path = self.directory / f'disk-{size}'
+        with open(path, 'wb') as stream:
+            stream.truncate(size)
+        return str(path)
+
+    def test_detects_aes_on_x86_arm64_and_riscv(self):
+        for text, expected in ((self.X86_AES, True), (self.X86_NO_AES, False),
+                               (self.ARM_AES, True), (self.ARM_NO_AES, False),
+                               ('flags\t\t: fpu vaes\n', False),
+                               # every CPU must have it, not just the first
+                               (self.X86_AES + '\n' + self.X86_NO_AES, False),
+                               # RISC-V crypto extensions in `isa`
+                               ('processor\t: 0\nisa\t\t: rv64imafdvcsu\n', False),
+                               ('processor\t: 0\nisa\t\t: rv64imafdc_zknd\n', False),
+                               ('processor\t: 0\nisa\t\t: rv64imafdc_zknd_zkne\n', True),
+                               ('processor\t: 0\nisa\t\t: rv64imafdvc_zvkned\n', True),
+                               # no flags/Features/isa line at all: unknown, keep the default
+                               ('processor\t: 0\nvendor_id\t: Unknown\n', True), ('', True)):
+            with self.subTest(text=text):
+                self.cpuinfo.write_text(text)
+                self.assertIs(luks.has_aes_acceleration(), expected)
+        self.cpuinfo.unlink()
+        self.assertTrue(luks.has_aes_acceleration())
+
+    def test_real_machine_cpuinfo_fixtures(self):
+        fixtures_dir = ROOT / 'test/unit/fixtures/cpuinfo'
+        expected = {
+            # Captured from real lab machines
+            'lab/amd-a6-7310.txt': True,
+            'lab/amd-a8-6600k.txt': True,
+            'lab/amd-ryzen-7-pro-5850u.txt': True,
+            'lab/apple-m1.txt': True,
+            'lab/arm-cortex-a53-aes.txt': True,
+            'lab/intel-celeron-n2840.txt': False,
+            'lab/intel-core2-p8400.txt': False,
+            'lab/intel-core2-t5500.txt': False,
+            'lab/intel-core-ultra-7-155h.txt': True,
+            'lab/intel-i5-3337u.txt': True,
+            'lab/intel-i5-4260u.txt': True,
+            'lab/intel-i5-5300u.txt': True,
+            'lab/intel-i5-8265u.txt': True,
+            'lab/intel-i7-6600u.txt': True,
+            'lab/qualcomm-oryon.txt': True,
+            'lab/riscv64-sg2002.txt': False,
+            'lab/rpi5-cortex-a76.txt': True,
+            # Extracted from workhorsy/py-cpuinfo
+            'py-cpuinfo/intel-i7-nehalem.txt': False,
+            'py-cpuinfo/intel-pentium-g640.txt': False,
+            'py-cpuinfo/loongarch64-old-world.txt': True,
+            'py-cpuinfo/mips64el-loongson3a3000.txt': True,
+            'py-cpuinfo/odroid-c2-aarch64.txt': False,
+            'py-cpuinfo/odroid-xu3-armv7.txt': False,
+            'py-cpuinfo/ppc64le-power8.txt': True,
+            # Extracted from util-linux tests/ts/lscpu/dumps
+            'util-linux/arm-a510-a710-a715-x3.txt': True,
+            'util-linux/intel-i5-m560.txt': True,
+            'util-linux/rv64-visionfive2.txt': False,
+        }
+        actual_files = {p.relative_to(fixtures_dir).as_posix() for p in fixtures_dir.rglob('*.txt')}
+        self.assertEqual(actual_files, set(expected))
+        for name, has_aes in sorted(expected.items()):
+            with self.subTest(fixture=name), mock.patch.object(luks, 'CPUINFO_PATH', fixtures_dir / name):
+                self.assertIs(luks.has_aes_acceleration(), has_aes)
+                self.assertEqual(luks.volume_key_size(), 512 if has_aes else 256)
+                changed = luks.with_cipher(COMMAND)
+                if has_aes:
+                    self.assertEqual(changed, COMMAND)
+                else:
+                    self.assertEqual(changed[changed.index('--cipher') + 1], luks.ADIANTUM_CIPHER)
+                    self.assertEqual(changed[changed.index('--key-size') + 1], '256')
+
+    def test_aes_cpu_keeps_the_default_cipher(self):
+        self.cpuinfo.write_text(self.X86_AES)
+        self.assertEqual(luks.with_cipher(COMMAND), COMMAND)
+        self.assertEqual(luks.format_command(COMMAND), COMMAND)
+        self.assertEqual(luks.volume_key_size(), 512)
+
+    def test_format_gets_adiantum_and_a_256_bit_key(self):
+        changed = luks.with_cipher(COMMAND)
+        self.assertEqual(changed[:3], ['cryptsetup', '--cipher', 'xchacha12,aes-adiantum-plain64'])
+        self.assertEqual(changed[changed.index('--key-size') + 1], '256')
+        self.assertEqual(changed.count('--key-size'), 1)
+        self.assertEqual(COMMAND[COMMAND.index('--key-size') + 1], '512')  # not mutated
+        bare = ['cryptsetup', 'luksFormat', '/dev/vda2', '-']
+        expected_bare = ['cryptsetup', '--cipher', 'xchacha12,aes-adiantum-plain64',
+                         '--key-size', '256', 'luksFormat', '/dev/vda2', '-']
+        self.assertEqual(luks.with_cipher(bare), expected_bare)
+        self.assertEqual(luks.with_cipher(bare[:1] + ['--key-size=512'] + bare[1:]), expected_bare)
+
+    def test_own_cipher_and_other_commands_are_left_alone(self):
+        for command in (COMMAND[:1] + ['--cipher', 'aes-xts-plain64'] + COMMAND[1:],
+                        COMMAND[:1] + ['-c', 'serpent-xts-plain64'] + COMMAND[1:],
+                        COMMAND[:1] + ['--cipher=aes-xts-plain64'] + COMMAND[1:],
+                        ['cryptsetup', 'open', '/dev/vda2', 'root'],
+                        ['cryptsetup', '--batch-mode', 'luksAddKey', '--key-slot', '0', '/dev/vda2', '-']):
+            with self.subTest(command=command):
+                self.assertEqual(luks.with_cipher(command), command)
+
+    def test_volume_key_matches_the_cipher(self):
+        self.assertEqual(luks.volume_key_size(), 256)
+        with mock.patch.object(luks, 'VOLUME_KEY_DIR', self.directory):
+            self.assertEqual(len(luks.new_volume_key().read_bytes()), 32)
+            self.assertEqual(len(luks.new_volume_key(256).read_bytes()), 32)
+
+    def test_calibration_still_applies_and_sector_size_stays(self):
+        device = self.device()
+        state = self.directory / 'result.json'
+        state.write_text(json.dumps(dict(schema=1, iter_time=2000, key_size=512, cpus=4,
+                                         iterations=13, memory=1048576, parallel=4)))
+        state.chmod(0o600)
+        fstat = os.fstat
+        def root_stat(fd):
+            st = fstat(fd)
+            return types.SimpleNamespace(st_uid=0, st_mode=st.st_mode, st_size=st.st_size)
+        with mock.patch.object(luks, 'STATE', state), \
+                mock.patch.object(luks, 'memory_total', return_value=8*1024*1024), \
+                mock.patch.object(luks, 'memory_available', return_value=4*1024*1024), \
+                mock.patch.object(luks.os, 'cpu_count', return_value=4), \
+                mock.patch.object(luks.os, 'fstat', side_effect=root_stat):
+            changed = luks.format_command(COMMAND[:-1] + [device], Path('/run/key'))
+        self.assertEqual(changed[:3], ['cryptsetup', '--volume-key-file', '/run/key'])
+        self.assertEqual(changed[changed.index('--cipher') + 1], 'xchacha12,aes-adiantum-plain64')
+        self.assertEqual(changed[changed.index('--key-size') + 1], '256')
+        self.assertEqual(changed[changed.index('--pbkdf-force-iterations') + 1], '13')
+        self.assertNotIn('--iter-time', changed)
+        self.assertEqual(changed[-2:], ['--sector-size', '4096'])
+
+    def test_free_space_format_gets_adiantum(self):
+        device = self.device()
+        with mock.patch.object(luks.sys, 'argv', ['omarchy-luks-calibrate', 'format', device]), \
+                mock.patch.object(luks, 'stop_calibration'), \
+                mock.patch.object(luks.os, 'execvp') as execvp:
+            luks.main()
+        argv = execvp.call_args.args[1]
+        self.assertEqual(argv[1:3], ['--cipher', 'xchacha12,aes-adiantum-plain64'])
+        self.assertEqual(argv[argv.index('--key-size') + 1], '256')
+        self.assertEqual(argv[argv.index('--sector-size') + 1], '4096')
+        self.assertEqual(argv[-1], '-')
+
+    def test_deferred_fast_format_gets_adiantum_and_the_enrollment_does_not(self):
+        with mock.patch.object(luks, 'can_defer_keyslot', return_value=True):
+            fast_cmd, enroll_cmd, _ = luks.deferred_format_command(
+                COMMAND, self.directory / 'vk', self.directory / 'tk')
+        self.assertEqual(fast_cmd[fast_cmd.index('--cipher') + 1], 'xchacha12,aes-adiantum-plain64')
+        self.assertEqual(fast_cmd[fast_cmd.index('--key-size') + 1], '256')
+        self.assertEqual(fast_cmd[fast_cmd.index('--pbkdf') + 1], 'pbkdf2')
+        self.assertNotIn('--cipher', enroll_cmd)
+
+    def test_real_cryptsetup_adiantum_deferred_format_enroll_and_unlock(self):
+        import shutil
+        if not shutil.which('cryptsetup'):
+            self.skipTest('cryptsetup not installed')
+        image = Path(self.device(32 * 1024 * 1024))
+        with mock.patch.object(luks, 'VOLUME_KEY_DIR', self.directory):
+            vk, tk = luks.new_volume_key(), luks.new_volume_key(256)
+        with mock.patch.object(luks, 'can_defer_keyslot', return_value=True), \
+                mock.patch.object(luks, 'cached_options', return_value=[
+                    '--pbkdf-force-iterations', '4', '--pbkdf-memory', '65536', '--pbkdf-parallel', '2']):
+            fast_cmd, enroll_cmd, kill_cmd = luks.deferred_format_command(
+                COMMAND[:-1] + [str(image)], vk, tk)
+        subprocess.run(fast_cmd, check=True, capture_output=True)
+        entry = luks.DeferredKeyslot(str(image), vk, tk, enroll_cmd, kill_cmd, b'test-passphrase')
+        entry.start()
+        entry.join()
+        dump = json.loads(subprocess.check_output(
+            ['cryptsetup', 'luksDump', '--dump-json-metadata', str(image)]))
+        segment = dump['segments']['0']
+        self.assertEqual((segment['encryption'], segment['sector_size']),
+                         ('xchacha12,aes-adiantum-plain64', 4096))
+        self.assertEqual(list(dump['keyslots']), ['0'])
+        self.assertEqual(dump['keyslots']['0']['key_size'], 32)
+        subprocess.run(['cryptsetup', 'open', '--test-passphrase', str(image)],
+                       input=b'test-passphrase', check=True, capture_output=True)
 
 
 if __name__ == '__main__': unittest.main()

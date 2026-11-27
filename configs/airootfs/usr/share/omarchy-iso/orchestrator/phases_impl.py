@@ -3836,6 +3836,119 @@ def _n1x_prebuilt_uki(target: Path, arm_platform: str) -> Path | None:
     return uki if _initramfs_module_lines(target) == lines else None
 
 
+# Drop-ins shipped by the base image (omarchy-settings / installer), not added
+# by a Qualcomm laptop's hardware setup script.
+_SYSTEM_MKINITCPIO_DROPINS = frozenset({
+    "00-omarchy-hooks.conf",
+    "i2c_hid_of_module.conf",
+    "omarchy_compression.conf",
+    "omarchy_hooks.conf",
+    "omarchy_mount_events.conf",
+    "omarchy_vconsole.conf",
+    "thunderbolt_module.conf",
+    "zz-omarchy-kernel-modules.conf",
+})
+
+
+def _qualcomm_hwid_matches(
+    target: Path,
+    dt_compatible_path: Path = Path("/sys/firmware/devicetree/base/compatible"),
+) -> bool:
+    """True when the running board's device-tree compatible is listed in the
+    target's systemd-stub HWID database, so DeviceTreeAuto selects its DTB
+    without needing a machine-specific DeviceTree= fallback."""
+    hwids_dir = target / "usr" / "lib" / "systemd" / "boot" / "hwids" / "aa64"
+    if not dt_compatible_path.is_file() or not hwids_dir.is_dir():
+        return False
+    try:
+        compatibles = {c for c in dt_compatible_path.read_bytes().decode("utf-8", errors="ignore").split("\x00") if c}
+    except OSError:
+        return False
+    if not compatibles:
+        return False
+    for path in hwids_dir.glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+        except (OSError, ValueError):
+            continue
+        if data.get("compatible") in compatibles:
+            return True
+    return False
+
+
+def _qualcomm_prebuilt_uki(
+    target: Path,
+    platform_name: str,
+    *,
+    dt_compatible_path: Path = Path("/sys/firmware/devicetree/base/compatible"),
+) -> Path | None:
+    """The image's Snapdragon UKI, for a Qualcomm laptop whose hardware setup
+    stays within what build-root-image.sh baked into it: covered early modules
+    (never qcom_q6v5_pas), no board-specific initcpio hooks beyond
+    omarchy-quiet-efivars (which is busybox-only), no board-specific or
+    Windows-extracted FILES beyond the baked Adreno microcode, no ADSP
+    blacklist modprobe override, and a matching HWID entry for DeviceTreeAuto.
+
+    Any machine needing extra hooks (Galaxy Book4 Edge 14), early DSP loading
+    (Surface Laptop 8), board-specific initramfs files (Surface Pro 11,
+    qcom-firmware.conf zap shader), or a DeviceTree= fallback returns None and
+    builds its own UKI via limine-mkinitcpio as before."""
+    uki = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-qualcomm.efi"
+    recorded_mods_path = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-qualcomm.modules"
+    recorded_files_path = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-qualcomm.files"
+    if platform_name != "aarch64-qualcomm" or not uki.is_file() or not recorded_mods_path.is_file():
+        return None
+    if (target / "etc" / "mkinitcpio.conf.d" / "qcom-firmware.conf").exists():
+        return None
+    if (target / "etc" / "modprobe.d" / "qualcomm-adsp-nofw.conf").exists():
+        return None
+    if not _qualcomm_hwid_matches(target, dt_compatible_path=dt_compatible_path):
+        return None
+
+    covered_mods = {line.strip().replace("-", "_") for line in recorded_mods_path.read_text().splitlines() if line.strip()}
+    covered_files = (
+        {line.strip() for line in recorded_files_path.read_text().splitlines() if line.strip()}
+        if recorded_files_path.is_file() else set()
+    )
+    allowed_literal_files = covered_files | {"/etc/vconsole.conf", "/etc/systemd/system.conf.d/20-mount-events.conf"}
+
+    conf_dir = target / "etc" / "mkinitcpio.conf.d"
+    for conf in sorted(conf_dir.glob("*.conf")) if conf_dir.is_dir() else []:
+        text = conf.read_text(errors="ignore")
+        for match in re.finditer(r"^\s*MODULES\s*\+?=\(([^)]*)\)", text, re.M | re.S):
+            for tok in match.group(1).split():
+                tok = tok.strip("'\"")
+                if not tok or tok.startswith("$") or tok.startswith("#"):
+                    continue
+                if tok.rstrip("?").replace("-", "_") not in covered_mods:
+                    return None
+        if conf.name in _SYSTEM_MKINITCPIO_DROPINS:
+            continue
+        for match in re.finditer(r"^\s*HOOKS\s*\+?=\(([^)]*)\)", text, re.M | re.S):
+            for tok in match.group(1).split():
+                tok = tok.strip("'\"")
+                if tok and not tok.startswith("#") and tok != "omarchy-quiet-efivars":
+                    return None
+        if "FILES" in text:
+            unwrapped = re.sub(r"\\\n", " ", text)
+            loop_items: list[str] = []
+            for match in re.finditer(r"\bfor\s+firmware\s+in\s+([^;\n]+);", unwrapped):
+                loop_items.extend(t.strip("'\"") for t in match.group(1).split() if t.strip("'\""))
+            if loop_items and not all(item in covered_files for item in loop_items):
+                return None
+            for match in re.finditer(r"^\s*FILES\s*\+?=\(([^)]*)\)", text, re.M | re.S):
+                for tok in match.group(1).split():
+                    tok = tok.strip("'\"")
+                    if not tok or tok.startswith("#"):
+                        continue
+                    if "$" in tok:
+                        if not loop_items:
+                            return None
+                    elif tok not in allowed_literal_files:
+                        return None
+    return uki
+
+
 def _keymap_of(vconsole: Path) -> str:
     """KEYMAP= from a vconsole.conf, or "" when unset or unreadable."""
     if not vconsole.is_file():
@@ -4246,6 +4359,13 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
         info("› N1x: using the image's N1x UKI, built with this machine's initramfs modules")
         prebuilt_uki = n1x_uki
         added_modules = []
+    # A Snapdragon ISO ships a Qualcomm UKI built with all Snapdragon DTBs
+    # (DeviceTreeAuto), shared Qualcomm early modules and Adreno microcode.
+    qualcomm_uki = _qualcomm_prebuilt_uki(ctx.target, hw_platform()) if not n1x_uki else None
+    if qualcomm_uki:
+        info("› Qualcomm: using the image's Snapdragon UKI, built with this machine's initramfs modules and device trees")
+        prebuilt_uki = qualcomm_uki
+        added_modules = []
     if prebuilt_uki.is_file() and added_modules:
         info(f"› hardware setup added initramfs modules ({'; '.join(added_modules)}); "
              "building the UKI on this machine instead of using the pre-built one")
@@ -4306,7 +4426,7 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
                 check=True,
             )
 
-    if prebuilt_uki.is_file() and not skip_prebuilt and arch.has_uefi() and (n1x_uki or not _arm_platform_boot()):
+    if prebuilt_uki.is_file() and not skip_prebuilt and arch.has_uefi() and (n1x_uki or qualcomm_uki or not _arm_platform_boot()):
         used_prebuilt_uki = True
         limine_err: list[BaseException] = []
 

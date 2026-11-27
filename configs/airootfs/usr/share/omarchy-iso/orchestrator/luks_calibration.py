@@ -366,6 +366,21 @@ def can_defer_keyslot() -> bool:
     )
 
 
+def can_overlap_image_write(image_bytes: int) -> bool:
+    """Whether MemAvailable can hold the root image cache alongside Argon2id's
+    1 GiB memory arena without evicting cached image pages back to slow media.
+
+    Linux's MemAvailable includes reclaimable page cache (including the cached
+    root image), so requiring image_bytes + ASYNC_MIN_MEMORY keeps 16+ GiB
+    machines starting Argon2id before the image write while holding low-RAM
+    machines (e.g. 8 GiB) until right after F1.image_write finishes."""
+    try:
+        image_kib = max(0, image_bytes) // 1024
+        return memory_available() >= image_kib + ASYNC_MIN_MEMORY
+    except OSError:
+        return False
+
+
 def deferred_format_command(
     command: list[str],
     volume_key: Path,

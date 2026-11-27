@@ -203,6 +203,74 @@ for state in none half all; do
   pass "with $state of the image cached, write reproduces the image and counts $cached cached"
 done
 
+# Uncached and partially cached runs also report final progress and fail cleanly
+# (without deadlocking the reader/worker pool) on corrupt frames.
+for state in none half; do
+  cache "$state"
+  target "$work/target" 0
+  rm -f "$work/progress-$state"
+  OMARCHY_IMAGE_WRITE_PROGRESS="$work/progress-$state" run write "$disk/image.zst" "$work/target" 3
+  [[ $status == 0 && $(cat "$work/progress-$state" 2>/dev/null) == "11 11" ]] ||
+    fail "write with $state cached reports final progress" "status $status, progress '$(cat "$work/progress-$state" 2>/dev/null)'"
+  cmp -s "$work/target" "$raw" || fail "write with $state cached and progress reproduces the raw image"
+done
+pass "uncached and partially cached writes report final progress cleanly"
+
+cp "$image" "$disk/corrupt.zst"
+printf '\xff' | dd of="$disk/corrupt.zst" bs=1 seek=1000 conv=notrunc status=none
+python3 - "$disk/corrupt.zst" <<'PY'
+import os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+os.fsync(fd)
+os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+PY
+target "$work/target" 0
+run write "$disk/corrupt.zst" "$work/target" 4
+[[ $status == 1 ]] || fail "cold corrupt frame fails cleanly without hanging" "status $status: $(cat "$work/stderr")"
+grep -q "frame 0:" "$work/stderr" || fail "cold corrupt frame names frame 0" "$(cat "$work/stderr")"
+pass "cold corrupt frame fails cleanly without deadlocking"
+
+# Partial-cache runs drop source page cache (POSIX_FADV_DONTNEED) so low-RAM
+# machines do not fill RAM with already-consumed image pages; fully cached runs
+# take the fast path without touching page cache eviction.
+resident_pages() {
+  python3 - "$1" <<'PY'
+import ctypes, mmap, os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+size = os.fstat(fd).st_size
+page = os.sysconf("SC_PAGE_SIZE")
+npages = (size + page - 1) // page
+libc = ctypes.CDLL(None)
+libc.mmap.restype = ctypes.c_void_p
+libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+libc.munmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+addr = libc.mmap(None, size, mmap.PROT_READ, mmap.MAP_PRIVATE, fd, 0)
+assert addr != ctypes.c_void_p(-1).value
+vec = (ctypes.c_ubyte * npages)()
+assert libc.mincore(ctypes.c_void_p(addr), ctypes.c_size_t(size), vec) == 0
+resident = sum(b & 1 for b in vec)
+libc.munmap(ctypes.c_void_p(addr), size)
+os.close(fd)
+print(resident, npages)
+PY
+}
+
+cache half
+target "$work/target" 0
+run write "$disk/image.zst" "$work/target" 3
+[[ $status == 0 ]] || fail "partial-cache write for cache-drop check succeeds" "$(cat "$work/stderr")"
+read -r res tot < <(resident_pages "$disk/image.zst")
+((res <= 2)) || fail "partial-cache write drops consumed source pages" "got $res/$tot resident"
+pass "partial-cache write drops consumed source pages"
+
+cache all
+target "$work/target" 0
+run write "$disk/image.zst" "$work/target" 3
+[[ $status == 0 ]] || fail "full-cache write for residency check succeeds" "$(cat "$work/stderr")"
+read -r res tot < <(resident_pages "$disk/image.zst")
+((res == tot)) || fail "full-cache fast path leaves cached pages untouched" "got $res/$tot resident"
+pass "full-cache fast path leaves cached pages untouched"
+
 # Frames 4-5 decode to zeros and are never written, like dd conv=sparse:
 # whatever the target held there survives. Everything else must match.
 target "$work/target" 255

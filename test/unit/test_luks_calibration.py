@@ -711,6 +711,18 @@ class KeyslotEnrollmentCpusTest(unittest.TestCase):
         body = source[source.index("def arch_install_system("):]
         self.assertLess(body.index("_start_luks_keyslot_enroll(ctx)"), body.index("_install_root_image(ctx)"))
 
+    def test_can_overlap_image_write_requires_image_plus_headroom(self):
+        four_gib = 4 * 1024 * 1024 * 1024
+        # 16 GiB laptop (~13.5 GiB available): plenty of room for 4 GiB image + 1 GiB Argon2id.
+        with mock.patch.object(luks, "memory_available", return_value=13500 * 1024):
+            self.assertTrue(luks.can_overlap_image_write(four_gib))
+        # 8 GiB laptop (~5.5 GiB available): overlapping Argon2id would evict cached image pages.
+        with mock.patch.object(luks, "memory_available", return_value=5500 * 1024):
+            self.assertFalse(luks.can_overlap_image_write(four_gib))
+        # Exactly at boundary (4 GiB + ASYNC_MIN_MEMORY): allowed.
+        with mock.patch.object(luks, "memory_available", return_value=4 * 1024 * 1024 + luks.ASYNC_MIN_MEMORY):
+            self.assertTrue(luks.can_overlap_image_write(four_gib))
+
     def test_an_installer_that_was_not_moved_runs_it_as_before(self):
         env = {k: v for k, v in os.environ.items() if k != "OMARCHY_INSTALLER_ALL_CPUS"}
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, env, clear=True):

@@ -187,8 +187,10 @@ if [[ $OMARCHY_ARCH == aarch64 ]]; then
   pacman-key --populate archlinuxarm
   # Arch Linux ARM does not publish archiso. Install its runtime dependencies
   # and run the repository's pinned submodule copy, patched for arm64-efi GRUB.
-  pacman --noconfirm -Syu \
-    arch-install-scripts dosfstools e2fsprogs erofs-utils libarchive libisoburn \
+  # Databases were just synced above; -Su --needed skips redundant DB syncs and
+  # avoids reinstalling already-current packages like e2fsprogs.
+  pacman --noconfirm -Su --needed \
+    arch-install-scripts dosfstools e2fsprogs libarchive libisoburn \
     mtools squashfs-tools gcc patch jq grub btrfs-progs python \
     "${local_build_packages[@]}"
   mkarchiso_command=/tmp/mkarchiso-aarch64
@@ -232,7 +234,8 @@ fi
   # shellcheck disable=SC2086,SC2154 # makepkg.conf sets the flag lists, which are meant to split
   gcc -std=gnu11 $CFLAGS -Wall -Wextra -pthread $LDFLAGS \
     -o /usr/local/bin/omarchy-image-write /builder/omarchy-image-write.c -lzstd
-)
+) &
+image_write_gcc_pid=$!
 
 # Pre-import the omarchy signing key (so pacman trusts our [omarchy] repo
 # during the build without keyserver lookups).
@@ -242,6 +245,7 @@ pacman-key --lsign-key 40DFB630FF42BCFFB047046CF0134EE680CAC571
 # omarchy-keyring is needed inside the offline mirror too; its post_install
 # scriptlet already runs pacman-key --populate omarchy.
 pacman --config "$online_pacman_conf" --noconfirm -Sy omarchy-keyring
+wait "$image_write_gcc_pid"
 
 # Put OPR first in the container too so makepkg resolves the same overrides
 # as the online installer configuration.
@@ -496,10 +500,24 @@ printf '%s\n' "${arch_packages[@]}" >> "$live_packages_file"
 # Anchored so linux-omarchy, linux-t2 and linux-firmware are untouched.
 sed -i -E '/^(linux|broadcom-wl)$/d' "$live_packages_file"
 
-# Sync the online databases once for both the bootstrap runtime lookup and the
-# offline mirror resolution/download below.
-mkdir -p /tmp/offlinedb
-pacman --config "$online_pacman_conf" --noconfirm -Sy --dbpath /tmp/offlinedb >/dev/null
+# Seed /tmp/offlinedb/sync from the databases just synced above for
+# omarchy-keyring (same $online_pacman_conf), falling back to pacman -Sy if any
+# repository database is missing.
+rm -rf /tmp/offlinedb/sync
+mkdir -p /tmp/offlinedb/sync
+offlinedb_seeded=1
+while IFS= read -r repo; do
+  if [[ -f /var/lib/pacman/sync/$repo.db ]]; then
+    cp -p "/var/lib/pacman/sync/$repo.db" "/tmp/offlinedb/sync/$repo.db"
+    [[ ! -f /var/lib/pacman/sync/$repo.db.sig ]] || cp -p "/var/lib/pacman/sync/$repo.db.sig" "/tmp/offlinedb/sync/$repo.db.sig"
+  else
+    offlinedb_seeded=0
+    break
+  fi
+done < <(sed -n 's/^\[\([^]]*\)\][[:space:]]*$/\1/p' "$online_pacman_conf" | grep -vx options)
+if (( ! offlinedb_seeded )); then
+  pacman --config "$online_pacman_conf" --noconfirm -Sy --dbpath /tmp/offlinedb >/dev/null
+fi
 
 # Build the offline mirror: everything pacstrap might want during the target
 # install. With --local-source, the omarchy* packages we just built are
@@ -1333,6 +1351,16 @@ run_root_image_build() {
 # pacstrap asks. Both x86 microcodes already live in the image, and aarch64
 # has none. phases.py records expected and actual in the timing JSON, so drift
 # shows up in acceptance runs.
+prepare_expected_packages_root() {
+  local resolve_root=/tmp/omarchy-expected-packages
+  rm -rf "$resolve_root"
+  mkdir -p "$resolve_root/var/lib/pacman"
+  cp -a "$image_localdb/local" "$resolve_root/var/lib/pacman/"
+  pacman --config "$build_cache_dir/pacman-offline.conf" \
+    --root "$resolve_root" --dbpath "$resolve_root/var/lib/pacman" \
+    --noconfirm -Sy >/dev/null || return 1
+}
+
 resolve_expected_packages() {
   # $1, if given: a platform's own default set, whose packages the installer
   # adds to the image's plain set on that platform.
@@ -1348,14 +1376,15 @@ resolve_expected_packages() {
     )
   fi
 
-  rm -rf "$resolve_root"
-  mkdir -p "$resolve_root/var/lib/pacman"
-  cp -a "$image_localdb/local" "$resolve_root/var/lib/pacman/"
+  if [[ ${expected_packages_root_ready:-0} != 1 ]]; then
+    rm -rf "$resolve_root"
+    mkdir -p "$resolve_root/var/lib/pacman"
+    cp -a "$image_localdb/local" "$resolve_root/var/lib/pacman/"
+    pacman --config "$build_cache_dir/pacman-offline.conf" \
+      --root "$resolve_root" --dbpath "$resolve_root/var/lib/pacman" \
+      --noconfirm -Sy >/dev/null || return 1
+  fi
   image_count=$(find "$resolve_root/var/lib/pacman/local" -mindepth 1 -maxdepth 1 -type d | wc -l)
-
-  pacman --config "$build_cache_dir/pacman-offline.conf" \
-    --root "$resolve_root" --dbpath "$resolve_root/var/lib/pacman" \
-    --noconfirm -Sy >/dev/null || return 1
 
   # Capture before counting: no pipefail here, so a pacman failure inside a
   # pipeline would become a plausible partial count, which never trips the
@@ -1461,6 +1490,14 @@ finalize_root_image_metadata() {
 [Service]
 TimeoutStartSec=$((root_image_bytes / (2 * 1024 * 1024) + 600))
 EOF
+
+  # Prepare and sync /tmp/omarchy-expected-packages once for the generic and
+  # per-platform target package resolutions below.
+  if ! prepare_expected_packages_root; then
+    echo "ERROR: could not prepare the offline package database for target count resolution." >&2
+    exit 1
+  fi
+  local expected_packages_root_ready=1
 
   # Both failures are worth the build: -S --print only aborts when a target is
   # missing from the offline repo, which would fail the delta pacstrap the same

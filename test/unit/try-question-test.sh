@@ -534,6 +534,8 @@ echo "systemctl $*" >>"$HW/calls"
 if [[ " $* " == *" is-active -q graphical-session.target "* ]]; then
   echo >>"$HW/session-checks"
   (($(wc -l <"$HW/session-checks") > ${SESSION_AFTER:-0}))
+elif [[ " $* " == *" is-active -q wireplumber.service "* || " $* " == *" is-active -q pipewire.service "* ]]; then
+  [[ -n ${AUDIO_ACTIVE:-} ]]
 fi
 EOF
 chmod +x "$hw/omarchy/bin/systemctl"
@@ -554,6 +556,10 @@ if [[ -n ${CHANGE:-} ]]; then
   if [[ -n ${IPU:-} ]]; then
     mkdir -p "$HW/root/usr/lib/firmware/intel/ipu"
     : >"$HW/root/usr/lib/firmware/intel/ipu/ipu7ptl_fw.bin"
+  fi
+  if [[ -n ${UCM:-} ]]; then
+    mkdir -p "$HW/root/usr/share/alsa/ucm2/conf.d/x1e80100"
+    echo "SectionUseCase.HiFi {}" >"$HW/root/usr/share/alsa/ucm2/conf.d/x1e80100/board.conf"
   fi
   if [[ -n ${USERUNIT:-} ]]; then
     # A drop-in in a folder that was there before.
@@ -595,7 +601,7 @@ mkdir -p "$hw/root/etc/systemd/system/graphical.target.wants" "$hw/root/usr/lib/
   "$hw/root/usr/lib/systemd/user/pipewire.service.d"
 ln -sfn /usr/lib/systemd/system/greetd.service "$hw/root/etc/systemd/system/graphical.target.wants/greetd.service"
 run_hardware env CHANGE=1 bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system || fail "the session's hardware setup failed"
-[[ $(<"$hw/calls") == "pacman -Sy --noconfirm
+[[ $(<"$hw/calls") == "pacman -Syy --noconfirm
 omarchy-apply-hardware --install-user $(id -un)
 systemctl daemon-reload
 udevadm control --reload
@@ -644,9 +650,54 @@ grep -qx 'udevadm trigger --action=add --subsystem-match=usb --attr-match=idVend
 grep -qx 'udevadm trigger --action=add --subsystem-match=usb --attr-match=idVendor=04b4 --attr-match=idVendor=05ac' "$hw/calls" ||
   fail "pipe-separated idVendor values were not split: $(cat "$hw/calls")"
 rm -f "$hw/root/etc/udev/rules.d/90-multiline.rules"
+# Pure GOTO/LABEL flow-control guards (such as 90-asus-zenbook-14-ux3480qa-power.rules)
+# are skipped silently, while action-bearing rules without SUBSYSTEM/KERNEL still warn.
+: >"$hw/err"
+cat >"$hw/omarchy/bin/omarchy-apply-hardware-goto" <<'EOF'
+#!/bin/bash
+cat >"$HW/root/etc/udev/rules.d/90-goto.rules" <<'RULES'
+ATTR{[dmi/id]sys_vendor}=="ASUS*", ATTR{[dmi/id]board_name}=="UX3480QA*", GOTO="ux_start"
+GOTO = "ux_end", ENV{FOO}=="1"
+SUBSYSTEM=="pci", ENV{FOO}==i"bar", GOTO="ux_end"
+LABEL="ux_start"
+ACTION=="add|change", SUBSYSTEM=="pci", ATTR{power/control}="auto"
+LABEL="ux_end"
+RULES
+EOF
+chmod +x "$hw/omarchy/bin/omarchy-apply-hardware-goto"
+mv "$hw/omarchy/bin/omarchy-apply-hardware" "$hw/omarchy/bin/omarchy-apply-hardware.orig"
+mv "$hw/omarchy/bin/omarchy-apply-hardware-goto" "$hw/omarchy/bin/omarchy-apply-hardware"
+run_hardware bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system 2>"$hw/err" ||
+  fail "the session's hardware setup failed on GOTO/LABEL rules"
+mv "$hw/omarchy/bin/omarchy-apply-hardware.orig" "$hw/omarchy/bin/omarchy-apply-hardware"
+[[ ! -s $hw/err ]] || fail "GOTO/LABEL flow-control lines printed unexpected warnings: $(cat "$hw/err")"
+grep -qx 'udevadm trigger --action=add --subsystem-match=pci' "$hw/calls" ||
+  fail "guarded PCI rule after LABEL was not replayed: $(cat "$hw/calls")"
+rm -f "$hw/root/etc/udev/rules.d/90-goto.rules"
+# Action-bearing rules combined with GOTO (without SUBSYSTEM/KERNEL) must still warn.
+: >"$hw/err"
+cat >"$hw/omarchy/bin/omarchy-apply-hardware-goto-act" <<'EOF'
+#!/bin/bash
+cat >"$HW/root/etc/udev/rules.d/90-goto-act.rules" <<'RULES'
+RUN{program}+="/usr/bin/true", GOTO="ux_end"
+SYSCTL{kernel/sysrq}="1", GOTO="ux_end"
+IMPORT{builtin}=="hwdb", GOTO="ux_end"
+PROGRAM!="/usr/bin/false", GOTO="ux_end"
+ENV{FOO} = "bar", GOTO="ux_end"
+RULES
+EOF
+chmod +x "$hw/omarchy/bin/omarchy-apply-hardware-goto-act"
+mv "$hw/omarchy/bin/omarchy-apply-hardware" "$hw/omarchy/bin/omarchy-apply-hardware.orig"
+mv "$hw/omarchy/bin/omarchy-apply-hardware-goto-act" "$hw/omarchy/bin/omarchy-apply-hardware"
+run_hardware bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system 2>"$hw/err" ||
+  fail "the session's hardware setup failed on action+GOTO rules"
+mv "$hw/omarchy/bin/omarchy-apply-hardware.orig" "$hw/omarchy/bin/omarchy-apply-hardware"
+[[ $(grep -c '90-goto-act.rules names no device' "$hw/err") == 5 ]] ||
+  fail "action-bearing GOTO rules were silently skipped: $(cat "$hw/err")"
+rm -f "$hw/root/etc/udev/rules.d/90-goto-act.rules"
 rm -rf "$hw/root/etc/systemd/system/multi-user.target.wants" "$hw/root/etc/systemd/system/hibernate.target.wants"
 run_hardware bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system || fail "the session's hardware setup failed with nothing to do"
-[[ $(<"$hw/calls") == "pacman -Sy --noconfirm
+[[ $(<"$hw/calls") == "pacman -Syy --noconfirm
 omarchy-apply-hardware --install-user $(id -un)
 systemctl daemon-reload
 omarchy-try-reprobe" ]] || fail "a hardware setup that changed nothing still reloaded or started: $(cat "$hw/calls")"
@@ -692,6 +743,18 @@ run_hardware env CHANGE=1 USERUNIT=1 SESSION_AFTER=1 bash "$LAYER_SCRIPTS/omarch
 [[ $(grep -c "^systemctl --user -M $(id -un)@ " "$hw/calls") == 3 &&
   $(grep "^systemctl --user -M $(id -un)@ " "$hw/calls" | tail -1) == "systemctl --user -M $(id -un)@ daemon-reload" ]] ||
   fail "the user manager was not reloaded after the session came up: $(cat "$hw/calls")"
+# Board ALSA UCM2 / audio configs brought after WirePlumber starts trigger a
+# user audio restart once the session is up so real speakers replace Dummy Output.
+run_hardware env CHANGE=1 UCM=1 SESSION_AFTER=1 bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system ||
+  fail "the session's hardware setup failed with an ALSA UCM2 profile"
+[[ $(grep "^systemctl --user -M $(id -un)@ " "$hw/calls" | tail -1) == "systemctl --user -M $(id -un)@ try-restart pipewire.service wireplumber.service" ]] ||
+  fail "pipewire/wireplumber were not restarted after ALSA UCM2 came: $(cat "$hw/calls")"
+rm -rf "$hw/root/usr/share/alsa/ucm2"
+# Even if graphical-session.target is inactive, active wireplumber/pipewire still gets restarted.
+run_hardware env CHANGE=1 UCM=1 SESSION_AFTER=999 AUDIO_ACTIVE=1 bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system ||
+  fail "the session's hardware setup failed when audio was active without graphical-session.target"
+[[ $(grep "^systemctl --user -M $(id -un)@ " "$hw/calls" | tail -1) == "systemctl --user -M $(id -un)@ try-restart pipewire.service wireplumber.service" ]] ||
+  fail "pipewire/wireplumber were not restarted without graphical-session.target: $(cat "$hw/calls")"
 run_hardware bash "$LAYER_SCRIPTS/omarchy-try-hardware" --user || fail "the session's user hardware setup failed"
 [[ $(<"$hw/calls") == "runuser $hw/omarchy/install/user/hardware/asus/fix-mic.sh
 runuser $hw/omarchy/install/user/hardware/dell/xps13-text-scaling.sh" ]] ||

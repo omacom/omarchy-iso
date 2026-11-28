@@ -39,6 +39,11 @@ def _stream_tar(pkg, handler):
             with tarfile.open(fileobj=proc.stdout, mode="r|") as tf:
                 for member in tf:
                     handler(tf, member)
+            # tarfile stops at the two zero EOF blocks, before bsdtar flushes
+            # the rest of its 10 KiB output block; drain so bsdtar never sees EPIPE.
+            if proc.stdout:
+                while proc.stdout.read(65536):
+                    pass
         finally:
             if proc.stdout:
                 proc.stdout.close()

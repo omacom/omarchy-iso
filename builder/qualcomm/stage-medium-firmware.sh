@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Usage: stage-medium-firmware.sh [--trees PACKAGE]... KERNEL-PACKAGE OUTPUT-DIR FIRMWARE-PACKAGE...
+# Usage: stage-medium-firmware.sh [--trees PACKAGE]... [--zap-out DIR] [--zap-manifest FILE] KERNEL-PACKAGE OUTPUT-DIR FIRMWARE-PACKAGE...
 #
 # Stages on the medium, with a SHA256SUMS list, the firmware each Snapdragon
 # laptop needs to start its ADSP in the live initramfs (qualcomm/early-startup
@@ -13,8 +13,14 @@
 set -euo pipefail
 
 tree_packages=()
-while [[ ${1:-} == --trees ]]; do
-  tree_packages+=("$2")
+zap_out=""
+zap_manifest=""
+while [[ ${1:-} == --trees || ${1:-} == --zap-out || ${1:-} == --zap-manifest ]]; do
+  case $1 in
+    --trees) tree_packages+=("$2") ;;
+    --zap-out) zap_out=$2 ;;
+    --zap-manifest) zap_manifest=$2 ;;
+  esac
   shift 2
 done
 kernel_package=$1
@@ -65,3 +71,21 @@ mv "$work/SHA256SUMS" "$out/SHA256SUMS"
 staged=$(wc -l <"$out/SHA256SUMS")
 (( staged )) || { echo "stage-medium-firmware: no package ships a file the device trees require" >&2; exit 1; }
 echo "stage-medium-firmware: $staged files, $(du -sm "$out" | cut -f1) MiB, for ${#dtbs[@]} device trees"
+
+if [[ -n $zap_out ]]; then
+  python3 "$here/early-firmware.py" --zap-shaders "$work/dtbs.list" >"$work/wanted-zap"
+  mkdir -p "$work/zap-staged" "$zap_out"
+  if [[ -s $work/wanted-zap ]] && (( $# > 0 )); then
+    mkdir -p "$work/zap-work"
+    python3 "$here/extract-firmware.py" firmware "$work/wanted-zap" "$work/zap-work" "$work/zap-staged" "$@"
+  fi
+  mapfile -t zap_files < <(cd "$work/zap-staged" && find . -type f -printf '%P\n' | sort)
+  for rel in "${zap_files[@]}"; do
+    install -Dm0644 "$work/zap-staged/$rel" "$zap_out/$rel"
+  done
+  if [[ -n $zap_manifest ]]; then
+    mkdir -p "$(dirname "$zap_manifest")"
+    printf '%s\n' "${zap_files[@]}" >"$zap_manifest"
+  fi
+  echo "stage-medium-firmware: ${#zap_files[@]} GPU zap-shader files staged for live Try Omarchy"
+fi

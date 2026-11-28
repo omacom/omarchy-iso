@@ -1,0 +1,10 @@
+# Match the units masked in configs/airootfs/etc/systemd/system/ so systemd's
+# first-boot preset-all does not log "Failed to preset all unit: Unit ... is masked."
+disable systemd-firstboot.service
+disable systemd-homed.service
+disable systemd-homed-activate.service
+disable systemd-mountfsd.service
+disable systemd-mountfsd.socket
+disable systemd-nsresourced.service
+disable systemd-nsresourced.socket
+disable systemd-vconsole-setup.service

@@ -65,6 +65,46 @@ rules_files() {
   done | sort
 }
 
+# True when a udev rule line contains only GOTO=/LABEL= flow control and pure
+# match comparisons (== or !=, excluding command-running PROGRAM/IMPORT keys).
+is_flow_control_rule() {
+  local rest=$1 has_flow=0 tok="" ch in_quote=0 escaped=0 i len=${#1}
+  local -a tokens=()
+  for ((i = 0; i < len; i++)); do
+    ch=${rest:i:1}
+    if ((escaped)); then
+      tok+=$ch
+      escaped=0
+    elif ((in_quote)) && [[ $ch == \\ ]]; then
+      tok+=$ch
+      escaped=1
+    elif [[ $ch == \" ]]; then
+      tok+=$ch
+      in_quote=$((1 - in_quote))
+    elif [[ $ch == , ]] && ((!in_quote)); then
+      tokens+=("$tok")
+      tok=""
+    else
+      tok+=$ch
+    fi
+  done
+  ((!in_quote)) || return 1
+  tokens+=("$tok")
+  for tok in "${tokens[@]}"; do
+    [[ $tok =~ ^[[:space:]]*$ ]] && continue
+    if [[ $tok =~ ^[[:space:]]*(GOTO|LABEL)[[:space:]]*=[[:space:]]*\"[^\"]+\"[[:space:]]*$ ]]; then
+      has_flow=1
+    elif [[ $tok =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)(\{[^}]+\})?[[:space:]]*(==|!=)[[:space:]]*[ie]?\"[^\"]*\"[[:space:]]*$ ]]; then
+      case ${BASH_REMATCH[1]} in
+        PROGRAM | IMPORT) return 1 ;;
+      esac
+    else
+      return 1
+    fi
+  done
+  ((has_flow))
+}
+
 # An add event for the devices a rules file's lines name, by SUBSYSTEM== and
 # KERNEL==, one trigger per line, as udevadm's matches for one call combine
 # across lines. Only lines an add event reaches: no ACTION==, or one that lists
@@ -93,6 +133,12 @@ replay_add() {
     [[ $line =~ (^|[[:space:],])KERNEL==\"([^\"]+)\" ]] && kernel=${BASH_REMATCH[2]}
     [[ $line =~ (^|[[:space:],])ATTR\{idVendor\}==\"([^\"]+)\" ]] && vendor=${BASH_REMATCH[2]}
     [[ $line =~ (^|[[:space:],])ATTR\{idProduct\}==\"([^\"]+)\" ]] && product=${BASH_REMATCH[2]}
+    # Pure flow-control lines (LABEL="..." or match-only ... GOTO="...") apply
+    # no device setting on their own; the device rules inside the jump target
+    # are replayed individually below.
+    if is_flow_control_rule "$line"; then
+      continue
+    fi
     if [[ -z $subsystem && -z $kernel ]]; then
       echo "Try Omarchy: a rule in ${1##*/} names no device by SUBSYSTEM or KERNEL; it applies at the next boot" >&2
       continue
@@ -156,7 +202,7 @@ digest() {
 }
 
 system_setup() {
-  local status=0 units_before rules_before modules_before sysctl_before user_units_before started device stamp file waited up release i name
+  local status=0 units_before rules_before modules_before sysctl_before user_units_before audio_cfg_before user_units_changed=0 audio_cfg_changed=0 started device stamp file waited up release i name
   local -a firmware=()
   local -a rules_added=()
 
@@ -166,9 +212,13 @@ system_setup() {
   modules_before=$(digest /etc/modules-load.d /usr/lib/modules-load.d)
   sysctl_before=$(digest /etc/sysctl.d /usr/lib/sysctl.d)
   user_units_before=$(digest /etc/systemd/user /usr/lib/systemd/user)
+  audio_cfg_before=$(digest /usr/share/alsa/ucm2 /etc/wireplumber /usr/share/wireplumber /etc/pipewire /usr/share/pipewire)
 
-  # The offline repository's database, for the pacman.conf this unit reads.
-  pacman -Sy --noconfirm >/dev/null || status=1
+  # Force-refresh the offline repository's database: recompress-offline-mirror.sh
+  # updates offline.db.tar.gz in the staged mirror while build-try-layer.sh may
+  # have written an older-content sync/offline.db with a newer mtime, so a
+  # single -Sy can skip refreshing it and fail package checksum verification.
+  pacman -Syy --noconfirm >/dev/null || status=1
   omarchy-apply-hardware --install-user "$user" || status=1
 
   systemctl daemon-reload || status=1
@@ -219,19 +269,31 @@ system_setup() {
   fi
   rm -f "$stamp"
 
-  if [[ $(digest /etc/systemd/user /usr/lib/systemd/user) != "$user_units_before" ]]; then
+  [[ $(digest /etc/systemd/user /usr/lib/systemd/user) != "$user_units_before" ]] && user_units_changed=1
+  [[ $(digest /usr/share/alsa/ucm2 /etc/wireplumber /usr/share/wireplumber /etc/pipewire /usr/share/pipewire) != "$audio_cfg_before" ]] && audio_cfg_changed=1
+  if ((user_units_changed || audio_cfg_changed)); then
     up=false
     for ((waited = 0; waited <= 300; waited += 2)); do
       if systemctl --user -M "$user@" is-active -q graphical-session.target; then
         up=true
         break
       fi
+      if ((!user_units_changed)) && (systemctl --user -M "$user@" is-active -q wireplumber.service 2>/dev/null ||
+        systemctl --user -M "$user@" is-active -q pipewire.service 2>/dev/null); then
+        up=true
+        break
+      fi
       sleep 2
     done
     if $up; then
-      systemctl --user -M "$user@" daemon-reload || status=1
+      if ((user_units_changed)); then
+        systemctl --user -M "$user@" daemon-reload || status=1
+      fi
+      if ((audio_cfg_changed)); then
+        systemctl --user -M "$user@" try-restart pipewire.service wireplumber.service || status=1
+      fi
     else
-      echo "Try Omarchy: no session for $user yet; its user manager reads the new user units when it starts"
+      echo "Try Omarchy: no session for $user yet; its user manager reads the new user config when it starts"
     fi
   fi
   return "$status"

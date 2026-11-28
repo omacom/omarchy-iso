@@ -66,9 +66,11 @@ rm -f /etc/udev/rules.d/60-omarchy-io-scheduler.rules
 # screen from the firmware framebuffer, and nouveau needs nvidia/ for GSP),
 # audio, microcode, and wired NICs.
 # Under qcom/, keep only the top-level Adreno GPU microcode blobs (~2.4 MiB
-# uncompressed across Adreno generations) and drop the large ADSP/CDSP/modem/
-# video subdirectories: msm requests Adreno microcode during early bind / DRM
-# open, and Try Omarchy soft-reboots with the already-bound msm driver. The DSP
+# uncompressed across Adreno generations) and the tiny per-board GPU zap shaders
+# (qcdxkmsuc*.mbn*, gen*_zap.mbn*; ~2-12 KiB each), dropping the large
+# ADSP/CDSP/modem/video blobs: msm requests both microcode and the board zap
+# shader during early bind / DRM open, and Try Omarchy soft-reboots with the
+# already-bound msm driver. The DSP
 # firmware a Snapdragon live boot needs before the medium appears is in its
 # UKI's own initramfs, which build-iso.sh has this script build before it gets
 # here.
@@ -87,11 +89,23 @@ if [[ -d $fw ]]; then
     "$fw"/imx "$fw"/meson "$fw"/rockchip "$fw"/arm "$fw"/powervr "$fw"/nvidia/tegra* \
     "$fw"/amlogic "$fw"/cnm "$fw"/cadence "$fw"/ti-keystone "$fw"/microchip
   if [[ -d $fw/qcom ]]; then
-    find "$fw/qcom" -mindepth 1 -maxdepth 1 \
-      ! \( \( -type f -o -type l \) \( \
-        -name 'gen*_sqe.fw*' -o -name 'gen*_gmu.bin*' -o -name 'gen*_aqe.fw*' \
-        -o -name 'a*_sqe.fw*' -o -name 'a*_gmu.bin*' -o -name 'gmu_gen*.bin*' \
-      \) \) -exec rm -rf {} +
+    zap_keep_list=${OMARCHY_QCOM_ZAP_MANIFEST:-/usr/share/omarchy-iso/qcom-live-zap.list}
+    zap_keep_args=()
+    if [[ -f $zap_keep_list ]]; then
+      while IFS= read -r rel; do
+        [[ -n $rel ]] && zap_keep_args+=(-o -path "$fw/$rel")
+      done <"$zap_keep_list"
+    fi
+    find "$fw/qcom" -mindepth 1 \( -type f -o -type l \) \
+      ! \( \
+        \( -path "$fw/qcom/*" ! -path "$fw/qcom/*/*" \( \
+          -name 'gen*_sqe.fw*' -o -name 'gen*_gmu.bin*' -o -name 'gen*_aqe.fw*' \
+          -o -name 'a*_sqe.fw*' -o -name 'a*_gmu.bin*' -o -name 'gmu_gen*.bin*' \
+        \) \) \
+        -o -name 'qcdxkmsuc*.mbn*' -o -name 'gen*_zap.mbn*' \
+        "${zap_keep_args[@]}" \
+      \) -delete
+    find "$fw/qcom" -mindepth 1 -depth -type d -empty -delete
   fi
   echo "Live firmware: ${before} MB -> $(du -sm "$fw" | cut -f1) MB (no radio, datacenter NIC, camera or SoC firmware)."
 fi

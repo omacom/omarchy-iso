@@ -77,86 +77,6 @@ n1x_module_lines() {
   grep -hE '^\s*MODULES\s*\+?=' "$1" | sed -E 's/\s+/ /g; s/^ //; s/ $//' | sort -u
 }
 
-# The pre-built initramfs becomes the boot image of every systemd-boot install
-# that keeps the defaults, with the kernel next to it on the ESP, so it gets
-# the UKI's ceiling. Without kms it measures about 50 MiB.
-prebuilt_initramfs_size_ok() {
-  local bytes limit=$((128 * 1024 * 1024))
-  bytes=$(stat -c %s "$1")
-  if ((bytes > limit)); then
-    echo "ERROR: the pre-built initramfs is $bytes bytes, over the $limit limit" >&2
-    return 1
-  fi
-}
-
-# What mkinitcpio builds an initramfs from besides the packages: its
-# configuration, the hooks a hardware script adds under /etc/initcpio, and the
-# module options its modconf hook copies in. One "sha256  path" line per file
-# under the root $1, paths relative to it, sorted; a symlink is hashed as the
-# name it points to. The installer reads the target's the same way
-# (phases_impl._initramfs_inputs) and builds the initramfs on the machine when
-# they differ.
-initramfs_inputs() {
-  local root=$1 path hash
-  while IFS= read -r -d '' path; do
-    if [[ -L $root/$path ]]; then
-      hash=$(readlink "$root/$path" | sha256sum)
-    else
-      hash=$(sha256sum <"$root/$path")
-    fi
-    printf '%s  %s\n' "${hash%% *}" "$path"
-  done < <(cd "$root" && find etc/mkinitcpio.conf etc/mkinitcpio.conf.d etc/initcpio etc/modprobe.d usr/lib/modprobe.d \
-    \( -type f -o -type l \) -print0 2>/dev/null | LC_ALL=C sort -z)
-}
-
-# Build /var/lib/omarchy-iso/prebuilt-initramfs.img in the image at $1 (default
-# $root) for its kernel $image_kver, writing outputs to $2 (default
-# $root/var/lib/omarchy-iso). Each step returns on failure: set -e does not
-# apply in a function whose status the caller tests.
-build_prebuilt_initramfs() {
-  local target_root=${1:-$root}
-  local out_dir=${2:-$root/var/lib/omarchy-iso}
-  local dir=/var/lib/omarchy-iso hook
-  local image=$dir/prebuilt-initramfs.img
-
-  # /usr/bin/mkinitcpio, as omarchy-boot-rebuild calls it: the one first in
-  # PATH is limine-mkinitcpio-hook's wrapper, which answers for plain
-  # mkinitcpio whatever this did.
-  arch-chroot "$target_root" /usr/bin/mkinitcpio -k "$image_kver" -g "$image" -S autodetect,kms 2>&1 | tail -25 || return 1
-  [[ -s $target_root$image ]] || return 1
-
-  # The hook set is the platform's baseline (00-omarchy-hooks.conf), read on
-  # the build host: make sure it is the busybox one systemd-boot needs, with
-  # the encrypt hook for cryptdevice= and Omarchy's snapshot and restore hooks.
-  arch-chroot "$target_root" lsinitcpio "$image" >"$work/prebuilt-initramfs.list" || return 1
-  for hook in encrypt omarchy-snapshot-overlay omarchy-restore; do
-    if ! grep -qx "hooks/$hook" "$work/prebuilt-initramfs.list"; then
-      echo "WARNING: the pre-built initramfs has no $hook hook" >&2
-      return 1
-    fi
-  done
-
-  if [[ $out_dir != "$target_root$dir" ]]; then
-    cp -p "$target_root$image" "$out_dir/prebuilt-initramfs.img" || return 1
-  fi
-  printf '%s\n' "$image_kernel" >"$out_dir/prebuilt-initramfs.kernel"
-  printf '%s\n' "$image_kver" >"$out_dir/prebuilt-initramfs.kver"
-  # The console keymap the keymap hook compiled in, which the hashed inputs
-  # below don't cover (vconsole.conf).
-  # shellcheck source=/dev/null # the image's own vconsole.conf
-  ( [ -f "$root/etc/vconsole.conf" ] && . "$root/etc/vconsole.conf"; printf '%s\n' "${KEYMAP:-}" ) \
-    >"$out_dir/prebuilt-initramfs.keymap"
-  initramfs_inputs "$root" >"$out_dir/prebuilt-initramfs.inputs"
-}
-
-build_prebuilt_initramfs_in() {
-  local merged=$1 _upper=$2 out_dir=$3
-  echo "Pre-building systemd-boot's initramfs in the image (kver=$image_kver, the image's hooks, no autodetect, no kms)"
-  build_prebuilt_initramfs "$merged" "$out_dir" || return 1
-  echo "Pre-built initramfs: $(du -h "$out_dir/prebuilt-initramfs.img" | cut -f1)"
-  prebuilt_initramfs_size_ok "$out_dir/prebuilt-initramfs.img" || return 2
-}
-
 install_uki_tmp_files() {
   local dst=$1
   install -Dm0755 "$uki_tmp/omarchy-vconsole-room" "$dst/usr/lib/initcpio/install/omarchy-vconsole-room" || return 1
@@ -1314,7 +1234,7 @@ CONF
   printf '%s%s\n' "$prebuilt_cmdline" "$(printf '%*s' $((1800 - ${#prebuilt_cmdline})) '' | tr ' ' 0)" \
     >"$root/etc/kernel/cmdline.prebuilt-uki"
 
-  # Once the staging tree is ready, pre-built UKIs/initramfs, hardware layers,
+  # Once the staging tree is ready, pre-built UKIs, hardware layers,
   # Try layers, and the parallel btrfs copy are all independent read-only
   # consumers of $root. Stage the four temporary UKI build files outside $root
   # and remove them from $root before mounting any overlay so $root stays
@@ -1327,7 +1247,7 @@ CONF
       stage_async=1
     fi
     # Require >= 16 GiB free on top of $stage + mirror recompression before
-    # launching concurrent UKI/N1x/initramfs overlays so 32 GiB runners never
+    # launching concurrent UKI/N1x overlays so 32 GiB runners never
     # approach OOM, while 64 GiB hosts overlap the full ~210 s UKI chain.
     if (( stage_mem_avail_kb >= 16 * 1024 * 1024 )); then
       prebuilt_async=1
@@ -1341,11 +1261,9 @@ CONF
   generic_uki_pid=""
   qcom_uki_pid=""
   n1x_uki_pid=""
-  initramfs_pid=""
   generic_uki_log="$work/prebuilt-uki.log"
   qcom_uki_log="$work/prebuilt-uki-qualcomm.log"
   n1x_uki_log="$work/prebuilt-uki-n1x.log"
-  initramfs_log="$work/prebuilt-initramfs.log"
   if (( prebuilt_async )); then
     uki_tmp="$work/uki-tmp"
     mkdir -p "$uki_tmp" "$prebuilt_out"
@@ -1357,8 +1275,7 @@ CONF
       "$root/etc/vconsole.conf.prebuilt-uki" "$root/usr/lib/initcpio/install/omarchy-vconsole-room" \
       "$root/var/lib/omarchy-iso/prebuilt-uki.efi" \
       "$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm".{efi,modules,files,dropins,compatibles,inputs} \
-      "$root/var/lib/omarchy-iso/prebuilt-uki-n1x".{efi,modules} \
-      "$root"/var/lib/omarchy-iso/prebuilt-initramfs.*
+      "$root/var/lib/omarchy-iso/prebuilt-uki-n1x".{efi,modules}
     if [[ ${OMARCHY_FAST_COMPRESSION:-} == 1 ]]; then
       btrfs filesystem sync "$mnt"
     fi
@@ -1379,13 +1296,6 @@ CONF
         n1x_overlay_direct=1 build_n1x_prebuilt_uki "$n1x_script" "$prebuilt_out" >"$n1x_uki_log" 2>&1 &
         n1x_uki_pid=$!
         prebuilt_pids+=("$n1x_uki_pid")
-      fi
-      if ! grep -q -- '--initramfs' "$root/usr/bin/omarchy-boot-rebuild" 2>/dev/null; then
-        echo "omarchy-boot-rebuild takes no pre-built initramfs; none is built"
-      else
-        with_image_overlay build_prebuilt_initramfs_in "$prebuilt_out" >"$initramfs_log" 2>&1 &
-        initramfs_pid=$!
-        prebuilt_pids+=("$initramfs_pid")
       fi
     fi
   fi
@@ -1447,37 +1357,6 @@ CONF
       rm -f "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.modules" \
         "$(layer_path aarch64-n1x)"
     }
-  fi
-
-  # systemd-boot's fast path, as the UKI is Limine's: the initramfs
-  # omarchy-boot-switch install builds on the target, 4 s of the install, built
-  # here once. The UKI's systemd hook set can't stand in: systemd-boot's boot
-  # images need Omarchy's busybox hooks for snapshots and restores. So this is
-  # the image's own mkinitcpio configuration, as the target would read it, made
-  # generic the way the UKI is: autodetect skipped, and kms with it, which
-  # without autodetect bundles every GPU's firmware (237 MB measured). The LUKS
-  # prompt then draws on the firmware framebuffer, and the first kernel update
-  # builds the machine's own, with both. The installer passes it to
-  # omarchy-boot-switch install (--initramfs) where nothing it is built from
-  # changed on the machine (phases_impl._prebuilt_initramfs), and builds one
-  # otherwise. A Snapdragon ISO installs only Snapdragon laptops, whose
-  # platform builds its own, so it ships none.
-  if (( ! prebuilt_async )); then
-    rm -f "$root"/var/lib/omarchy-iso/prebuilt-initramfs.*
-    # An image whose omarchy-boot-rebuild can't take it (an older omarchy) gets
-    # none: installs build theirs, as before.
-    if ! grep -q -- '--initramfs' "$root/usr/bin/omarchy-boot-rebuild" 2>/dev/null; then
-      echo "omarchy-boot-rebuild takes no pre-built initramfs; none is built"
-    elif [[ -z ${OMARCHY_SNAPDRAGON:-} ]]; then
-      echo "Pre-building systemd-boot's initramfs in the image (kver=$image_kver, the image's hooks, no autodetect, no kms)"
-      if build_prebuilt_initramfs; then
-        echo "Pre-built initramfs: $(du -h "$root/var/lib/omarchy-iso/prebuilt-initramfs.img" | cut -f1)"
-        prebuilt_initramfs_size_ok "$root/var/lib/omarchy-iso/prebuilt-initramfs.img" || exit 1
-      else
-        echo "WARNING: no pre-built initramfs; systemd-boot installs build theirs"
-        rm -f "$root"/var/lib/omarchy-iso/prebuilt-initramfs.*
-      fi
-    fi
   fi
 
   # Only this build uses these; the installed system has no use for them.
@@ -1547,7 +1426,7 @@ join_stage_consumers() {
 
 join_prebuilt_boot_images() {
   local target_root=$1
-  local qcom_status=0 generic_status=0 n1x_status=0 initramfs_status=0
+  local qcom_status=0 generic_status=0 n1x_status=0
   local f pid copy_rc=0
   local -a copy_pids=()
   (( prebuilt_async )) || return 0
@@ -1587,17 +1466,6 @@ join_prebuilt_boot_images() {
     fi
   fi
 
-  if [[ -n $initramfs_pid ]]; then
-    wait "$initramfs_pid" || initramfs_status=$?
-    [[ -f $initramfs_log ]] && cat "$initramfs_log"
-    rm -f "$initramfs_log"
-    if (( initramfs_status == 2 )); then
-      exit 1
-    elif (( initramfs_status != 0 )); then
-      echo "WARNING: no pre-built initramfs; systemd-boot installs build theirs"
-      rm -f "$prebuilt_out"/prebuilt-initramfs.*
-    fi
-  fi
   prebuilt_pids=()
 
   # Copy the finished prebuilt boot artifacts into the btrfs image in parallel

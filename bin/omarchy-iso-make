@@ -182,6 +182,9 @@ if [[ -n $REHEARSAL ]]; then
   : "${OMARCHY_LOCAL_PACKAGES:=$rehearsal_packages}"
 fi
 
+[[ -z ${OMARCHY_EXTRA_LOCAL_PACKAGES:-} || -n $LOCAL_OMARCHY_PATH ]] ||
+  { echo "Error: OMARCHY_EXTRA_LOCAL_PACKAGES builds from --local-source, which is missing" >&2; exit 1; }
+
 if [[ -n $LOCAL_OMARCHY_PATH ]]; then
   [[ -d $LOCAL_OMARCHY_PATH ]] || { echo "Error: Omarchy checkout not found at $LOCAL_OMARCHY_PATH" >&2; exit 1; }
   [[ -d $LOCAL_PKGS_PATH ]]    || { echo "Error: pkgs checkout not found at $LOCAL_PKGS_PATH" >&2; exit 1; }
@@ -329,6 +332,11 @@ DOCKER_ARGS=(
   -e "OMARCHY_SETTINGS_PACKAGE=${OMARCHY_SETTINGS_PACKAGE:-}"
   # Which of them --local-source builds; all of them unless this names fewer.
   -e "OMARCHY_LOCAL_PACKAGES=${OMARCHY_LOCAL_PACKAGES:-}"
+  # Further packages built from the --local-source pkgs checkout, in place of
+  # their published builds, e.g. a patched dependency under test. Each goes
+  # into the image, so onto every machine. In order: a dependency first, and
+  # what builds against it after.
+  -e "OMARCHY_EXTRA_LOCAL_PACKAGES=${OMARCHY_EXTRA_LOCAL_PACKAGES:-}"
   -e "HOST_UID=$(id -u)"
   -e "HOST_GID=$(id -g)"
   -v "$BUILD_RELEASE_PATH/:/out/"

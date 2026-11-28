@@ -106,5 +106,43 @@ class MiseOfflineTest(unittest.TestCase):
             )
 
 
+    def test_sync_offline_target_db_replaces_stale_image_db(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mirror = Path(tmp) / "mirror"
+            target = Path(tmp) / "target"
+            mirror.mkdir()
+            sync_dir = target / "var" / "lib" / "pacman" / "sync"
+            sync_dir.mkdir(parents=True)
+
+            (mirror / "offline.db.tar.gz").write_bytes(b"recompressed-db-bytes")
+            (mirror / "offline.db").symlink_to("offline.db.tar.gz")
+            (sync_dir / "offline.db").write_bytes(b"stale-pre-recompress-db")
+
+            phases_impl._sync_offline_target_db(mirror, target)
+            dst = sync_dir / "offline.db"
+            self.assertFalse(dst.is_symlink())
+            self.assertEqual(dst.read_bytes(), b"recompressed-db-bytes")
+
+    def test_prepare_target_setup_syncs_db_and_bind_mounts_mirror_readonly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mirror = Path(tmp) / "mirror"
+            mirror.mkdir()
+            (mirror / "offline.db.tar.gz").write_bytes(b"fresh-db")
+            (mirror / "offline.db").symlink_to("offline.db.tar.gz")
+            live_conf = Path(tmp) / "pacman.conf"
+            live_conf.write_text("[options]\n[offline]\nServer = file:///var/cache/omarchy/mirror/offline/\n")
+            target = Path(tmp) / "target"
+            ctx = mock.Mock(target=target, state={})
+
+            with mock.patch.object(phases_impl, "OFFLINE_MIRROR_DIR", str(mirror)),                     mock.patch.object(phases_impl, "NODE_PACKAGES_DIR", Path(tmp) / "no-node"),                     mock.patch.object(phases_impl, "_write_offline_target_pacman_conf"),                     mock.patch.object(phases_impl, "_copy_firmware_stage_into_target"),                     mock.patch.object(phases_impl.subprocess, "run") as run_mock:
+                phases_impl._prepare_target_setup(ctx)
+
+            self.assertEqual((target / "var/lib/pacman/sync/offline.db").read_bytes(), b"fresh-db")
+            cmds = [call.args[0] for call in run_mock.call_args_list]
+            target_mirror = str(target / str(mirror).lstrip("/"))
+            self.assertIn(["mount", "--bind", str(mirror), target_mirror], cmds)
+            self.assertIn(["mount", "-o", "remount,ro,bind", target_mirror], cmds)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3344,6 +3344,24 @@ def _write_offline_target_pacman_conf(source: Path, dest: Path) -> None:
     dest.write_text(text)
 
 
+def _sync_offline_target_db(source_mirror: Path, target: Path) -> None:
+    """Copy the live medium's offline.db into the target's pacman sync dir.
+
+    omarchy-root-image is built against the un-recompressed build cache while
+    stage_shipped_mirror recompresses the shipped offline mirror packages and
+    rewrites offline.db.tar.gz. Refreshing the target's cached offline.db keeps
+    omarchy-pkg-add checksums aligned with the shipped packages on the medium.
+    """
+    offline_db = source_mirror / "offline.db"
+    if not offline_db.is_file():
+        offline_db = source_mirror / "offline.db.tar.gz"
+    if not offline_db.is_file():
+        return
+    sync_dir = target / "var" / "lib" / "pacman" / "sync"
+    sync_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(offline_db, sync_dir / "offline.db")
+
+
 def _prepare_target_setup(ctx: InstallContext) -> None:
     if ctx.state.get("target_setup_prepared"):
         return
@@ -3351,20 +3369,26 @@ def _prepare_target_setup(ctx: InstallContext) -> None:
     _write_offline_target_pacman_conf(
         Path("/etc/pacman.conf"), ctx.target / "etc" / "pacman.conf"
     )
+    _sync_offline_target_db(Path(OFFLINE_MIRROR_DIR), ctx.target)
 
     bind_mounts = [
-        (OFFLINE_MIRROR_DIR, OFFLINE_MIRROR_DIR),
+        (OFFLINE_MIRROR_DIR, OFFLINE_MIRROR_DIR, True),
     ]
     # build-iso.sh bundles Node only for a runtime whose setup still unpacks it.
     if NODE_PACKAGES_DIR.is_dir():
-        bind_mounts.append((str(NODE_PACKAGES_DIR), str(NODE_PACKAGES_DIR)))
+        bind_mounts.append((str(NODE_PACKAGES_DIR), str(NODE_PACKAGES_DIR), False))
     ctx.state.setdefault("bind_mounts", [])
     mounted = set(ctx.state["bind_mounts"])
-    for src, dst in bind_mounts:
+    for src, dst, read_only in bind_mounts:
         target_dst = ctx.target / dst.lstrip("/")
         target_dst.mkdir(parents=True, exist_ok=True)
         if str(target_dst) not in mounted:
             subprocess.run(["mount", "--bind", src, str(target_dst)], check=True)
+            if read_only:
+                subprocess.run(
+                    ["mount", "-o", "remount,ro,bind", str(target_dst)],
+                    check=True,
+                )
             ctx.state["bind_mounts"].append(str(target_dst))
             mounted.add(str(target_dst))
 

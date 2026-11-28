@@ -1,0 +1,48 @@
+# shellcheck shell=bash disable=SC2034
+#
+# ASUS Zenbook A16 UX3607OA (Snapdragon X2 Elite): what Omarchy's hardware
+# scripts install on it. The ISO build packs these packages as a layer over the
+# root image (builder/build-root-image.sh), and the installer extracts it in the
+# background right after the image write where layer_matches passes
+# (phases_impl._hardware_layer). The scripts then find the packages installed
+# and run no pacman. On a Zenbook A16 those two pacman transactions (firmware +
+# deferred flush) took 3.16s of a 25.36s install.
+#
+# layer_matches passes only where every script named below installs its
+# packages, so a machine never gets one its scripts would not install. It runs
+# in the target, as the scripts do. Change it with the scripts it follows.
+
+layer_arch=aarch64
+layer_snapdragon=1
+
+layer_packages=(
+  asus-zenbook-a16-firmware    # hardware/asus/fix-asus-zenbook-a16-firmware.sh
+  asus-zenbook-a16-audio       # hardware/asus/fix-asus-zenbook-a16-speakers.sh
+  ath12k-board-fallback        # hardware/fix-ath12k-board-data.sh
+  linux-omarchy-v4l2loopback   # V4L2LOOPBACK-MODULE provider for asus-zenbook-a16-support
+  asus-zenbook-a16-support     # hardware/asus/fix-asus-zenbook-a16-camera.sh
+  lsp-plugins-lv2              # hardware/speaker-tuning.sh
+)
+
+# The installer sets OMARCHY_INSTALL_KERNELS to the kernels the install
+# selects.
+layer_matches() {
+  # fix-asus-zenbook-a16-{firmware,speakers,camera}.sh: Snapdragon UX3607OA.
+  omarchy-hw-aarch64-qualcomm || return 1
+  omarchy-hw-match "UX3607OA" || return 1
+
+  # fix-ath12k-board-data.sh: QCC2072 (17cb:1112), the card whose board.bin
+  # asus-zenbook-a16-firmware ships directly, so ath12k-board-fallback needs no
+  # target-side fallback copy under /usr/lib/firmware/updates.
+  omarchy-hw-pci 17cb:1112 || return 1
+
+  # speaker-tuning.sh: only installs lsp-plugins-lv2 where a tuning matches.
+  # Pass OMARCHY_PATH/HOME explicitly because _hardware_layer runs outside
+  # run_omarchy_setup's environment.
+  OMARCHY_PATH=${OMARCHY_PATH:-/usr/share/omarchy} HOME=${HOME:-/root} \
+    omarchy-audio-tuning match >/dev/null || return 1
+
+  # linux-omarchy-v4l2loopback only covers linux-omarchy; any other kernel
+  # needs v4l2loopback-dkms instead.
+  [[ ${OMARCHY_INSTALL_KERNELS:-} == linux-omarchy ]]
+}

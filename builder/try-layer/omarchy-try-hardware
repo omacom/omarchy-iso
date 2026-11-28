@@ -71,16 +71,28 @@ rules_files() {
 # add. A line that names no device could match any, and everything is never
 # triggered: it waits for the next boot, and the log says so.
 replay_add() {
-  local line subsystem kernel name status=0
+  local line buf="" subsystem kernel vendor product name key status=0
   local -a args
-  while IFS= read -r line; do
+  local -A seen=()
+  while IFS= read -r line || [[ -n $buf ]]; do
+    if [[ -z $buf && $line =~ ^[[:space:]]*(#|$) ]]; then
+      continue
+    fi
+    if [[ $line == *\\ ]]; then
+      buf+="${line%\\} "
+      continue
+    fi
+    line="$buf$line"
+    buf=""
     [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
     if [[ $line =~ (^|[[:space:],])ACTION==\"([^\"]+)\" ]]; then
       [[ "|${BASH_REMATCH[2]}|" == *"|add|"* ]] || continue
     fi
-    subsystem="" kernel=""
+    subsystem="" kernel="" vendor="" product=""
     [[ $line =~ (^|[[:space:],])SUBSYSTEM==\"([^\"]+)\" ]] && subsystem=${BASH_REMATCH[2]}
     [[ $line =~ (^|[[:space:],])KERNEL==\"([^\"]+)\" ]] && kernel=${BASH_REMATCH[2]}
+    [[ $line =~ (^|[[:space:],])ATTR\{idVendor\}==\"([^\"]+)\" ]] && vendor=${BASH_REMATCH[2]}
+    [[ $line =~ (^|[[:space:],])ATTR\{idProduct\}==\"([^\"]+)\" ]] && product=${BASH_REMATCH[2]}
     if [[ -z $subsystem && -z $kernel ]]; then
       echo "Try Omarchy: a rule in ${1##*/} names no device by SUBSYSTEM or KERNEL; it applies at the next boot" >&2
       continue
@@ -88,6 +100,11 @@ replay_add() {
     args=()
     for name in ${subsystem//|/ }; do args+=("--subsystem-match=$name"); done
     for name in ${kernel//|/ }; do args+=("--sysname-match=$name"); done
+    [[ -n $vendor ]] && args+=("--attr-match=idVendor=$vendor")
+    [[ -n $product ]] && args+=("--attr-match=idProduct=$product")
+    key="${args[*]}"
+    [[ -n ${seen[$key]+x} ]] && continue
+    seen[$key]=1
     udevadm trigger --action=add "${args[@]}" || status=1
   done <"$1"
   return "$status"

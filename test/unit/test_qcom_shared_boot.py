@@ -327,6 +327,10 @@ build
         for module in ('qrtr','qrtr_smd','qcom_pd_mapper','qcom_q6v5_pas','pmic_glink','pmic_glink_altmode','ucsi_glink'):
             self.assertIn('module '+module+'\n',result.stdout)
         self.assertIn('firmware qcom/test/adsp.mbn',result.stdout)
+        for gpu_fw in ('qcom/gen70500_sqe.fw','qcom/gen70500_gmu.bin',
+                       'qcom/gen71500_sqe.fw','qcom/gen71500_gmu.bin',
+                       'qcom/gen80100_sqe.fw','qcom/gen80100_gmu.bin'):
+            self.assertIn('firmware '+gpu_fw+'\n',result.stdout)
         self.assertIn('RUNSCRIPT',result.stdout)
         for module in ('qrtr','qrtr_smd','qcom_pd_mapper','qcom_q6v5_pas','pmic_glink','pmic_glink_altmode','ucsi_glink'):
             env['FAIL_MODULE']=module

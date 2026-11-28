@@ -65,12 +65,12 @@ rm -f /etc/udev/rules.d/60-omarchy-io-scheduler.rules
 # firmware (a GPU driver that fails for want of firmware has already taken the
 # screen from the firmware framebuffer, and nouveau needs nvidia/ for GSP),
 # audio, microcode, and wired NICs.
-# qcom/ goes too, Adreno's included: msm keeps the display without it and
-# loads the GPU's microcode only when the DRM device is first opened
-# (msm_open -> load_gpu in drivers/gpu/drm/msm/msm_drv.c), which the installer,
-# a TUI on fbcon, never does. The DSP firmware a Snapdragon live boot needs
-# before the medium appears is in its UKI's own initramfs, which build-iso.sh
-# has this script build before it gets here.
+# Under qcom/, keep only the tiny top-level Adreno GPU microcode blobs (~2 MiB)
+# and drop the large ADSP/CDSP/modem/video subdirectories: msm requests Adreno
+# microcode during early bind / DRM open, and Try Omarchy soft-reboots with the
+# already-bound msm driver. The DSP firmware a Snapdragon live boot needs before
+# the medium appears is in its UKI's own initramfs, which build-iso.sh has this
+# script build before it gets here.
 # The installed system gets its firmware from the root image, not from here.
 fw=/usr/lib/firmware
 if [[ -d $fw ]]; then
@@ -78,13 +78,20 @@ if [[ -d $fw ]]; then
   rm -rf "$fw"/intel/iwlwifi "$fw"/intel/ibt-* "$fw"/iwlwifi-* \
     "$fw"/mediatek "$fw"/mrvl "$fw"/ath[0-9]* "$fw"/ar3k "$fw"/brcm "$fw"/cypress \
     "$fw"/rtw88 "$fw"/rtw89 "$fw"/rtlwifi "$fw"/rtl_bt "$fw"/ti-connectivity "$fw"/qca \
-    "$fw"/nxp "$fw"/libertas "$fw"/mwl8k "$fw"/mwlwifi "$fw"/airoha "$fw"/qcom \
+    "$fw"/nxp "$fw"/libertas "$fw"/mwl8k "$fw"/mwlwifi "$fw"/airoha \
     "$fw"/wfx "$fw"/rsi "$fw"/mt76* "$fw"/mt79* \
     "$fw"/dpaa2 "$fw"/cxgb3 "$fw"/cxgb4 "$fw"/mellanox "$fw"/netronome "$fw"/liquidio \
     "$fw"/qed "$fw"/cavium "$fw"/intel/ice \
     "$fw"/dvb-* "$fw"/v4l-* "$fw"/intel/ipu* "$fw"/intel/vsc "$fw"/intel/irci* \
     "$fw"/imx "$fw"/meson "$fw"/rockchip "$fw"/arm "$fw"/powervr "$fw"/nvidia/tegra* \
     "$fw"/amlogic "$fw"/cnm "$fw"/cadence "$fw"/ti-keystone "$fw"/microchip
+  if [[ -d $fw/qcom ]]; then
+    find "$fw/qcom" -mindepth 1 -maxdepth 1 \
+      ! \( \( -type f -o -type l \) \( \
+        -name 'gen*_sqe.fw*' -o -name 'gen*_gmu.bin*' -o -name 'gen*_aqe.fw*' \
+        -o -name 'a*_sqe.fw*' -o -name 'a*_gmu.bin*' -o -name 'gmu_gen*.bin*' \
+      \) \) -exec rm -rf {} +
+  fi
   echo "Live firmware: ${before} MB -> $(du -sm "$fw" | cut -f1) MB (no radio, datacenter NIC, camera or SoC firmware)."
 fi
 

@@ -678,4 +678,8 @@ printf 'of:NremoteprocT(null)Cqcom,x1e80100-adsp-pas\n' >"$reprobe_sys/bus/platf
 : >"$reprobe_sys/bus/platform/drivers_probe"
 OMARCHY_SYSFS="$reprobe_sys" bash "$LAYER_SCRIPTS/omarchy-try-reprobe" || fail "omarchy-try-reprobe failed"
 [[ $(<"$reprobe_sys/bus/platform/drivers_probe") == "sound" ]] || fail "platform sound device was not reprobed: $(cat "$reprobe_sys/bus/platform/drivers_probe")"
+rm -rf "$reprobe_sys/bus/platform/devices/sound"
+: >"$reprobe_sys/bus/platform/drivers_probe"
+OMARCHY_SYSFS="$reprobe_sys" bash "$LAYER_SCRIPTS/omarchy-try-reprobe" || fail "omarchy-try-reprobe failed without sound device"
+[[ ! -s "$reprobe_sys/bus/platform/drivers_probe" ]] || fail "reprobe must not probe bound or non-audio platform devices: $(cat "$reprobe_sys/bus/platform/drivers_probe")"
 echo "ok - omarchy-try-reprobe probes unbound Snapdragon platform sound devices only"

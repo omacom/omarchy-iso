@@ -185,13 +185,13 @@ class BuildTests(unittest.TestCase):
 
     def builder(self):
         code=(ROOT/'builder/qualcomm/live-uki.sh').read_text()
-        for old,new in (('/usr/lib/systemd/boot/hwids/aa64',str(self.root/'hwids')),('/usr/lib/systemd-stub-omarchy',str(self.root/'stub')),('/boot/',str(self.root/'boot')+'/'),('/etc/mkinitcpio.conf.d/archiso.conf',str(self.config))):
+        for old,new in (('/usr/lib/systemd/boot/hwids/aa64',str(self.root/'hwids')),('/usr/lib/systemd-stub-omarchy',str(self.root/'stub')),('/boot/',str(self.root/'boot')+'/'),('/etc/mkinitcpio.conf.d/archiso.conf',str(self.config)),('/usr/lib/modules',str(self.root/'modules'))):
             code=code.replace(old,new)
         self.executable('builder',code)
         self.executable('mkinitcpio','''#!/usr/bin/env python3
 import json,os,pathlib,sys
 root=pathlib.Path(os.environ['TEST_ROOT']); args=sys.argv[1:]
-(root/'mkinitcpio-call.json').write_text(json.dumps({'args':args,'dtbs':pathlib.Path(os.environ['OMARCHY_QCOM_DTBS_FILE']).read_text()}))
+(root/'mkinitcpio-call.json').write_text(json.dumps({'args':args,'dtbs':pathlib.Path(os.environ['OMARCHY_QCOM_DTBS_FILE']).read_text(),'conf':pathlib.Path(args[args.index('-c')+1]).read_text()}))
 if os.environ.get('FAIL_MKINITCPIO'): sys.exit(23)
 pathlib.Path(args[args.index('-g')+1]).write_bytes(b'Qualcomm initramfs')
 ''')
@@ -221,7 +221,10 @@ else:
         self.assertEqual(self.initrd.read_bytes(),b'original initramfs')
         call=json.loads((self.root/'mkinitcpio-call.json').read_text())
         self.assertIn('qcom_early_startup',call['args'])
-        self.assertEqual(call['args'][call['args'].index('-c')+1],str(self.config))
+        self.assertNotEqual(call['args'][call['args'].index('-c')+1],str(self.config))
+        self.assertIn('COMPRESSION_OPTIONS=(-T0 -19)',call['conf'])
+        self.assertNotIn('plymouth',call['conf'])
+        self.assertNotIn('archiso_pxe_',call['conf'])
         self.assertIn('x1-test.dtb',call['dtbs']); self.assertIn('glymur-test.dtb',call['dtbs']); self.assertIn('mahua-test.dtb',call['dtbs']); self.assertIn('kalambo-test.dtb',call['dtbs']); self.assertIn('purwa-test.dtb',call['dtbs']); self.assertIn('sc8180x-test.dtb',call['dtbs']); self.assertIn('sdm850-test.dtb',call['dtbs']); self.assertIn('msm8998-lenovo-test.dtb',call['dtbs']); self.assertIn('sc7180-acer-test.dtb',call['dtbs']); self.assertIn('sc7180-samsung-test.dtb',call['dtbs']); self.assertIn('sc7180-tcl-test.dtb',call['dtbs']); self.assertNotIn('sc7180-trogdor-test.dtb',call['dtbs']); self.assertIn('sc7280-hp-test.dtb',call['dtbs']); self.assertIn('sc7280-samsung-test.dtb',call['dtbs'])
         self.assertNotIn('el2',call['dtbs']); self.assertNotIn('sm8550',call['dtbs'])
         self.assertFalse(Path(call['args'][call['args'].index('-g')+1]).exists())
@@ -233,6 +236,19 @@ else:
         (self.root/'stub').mkdir(); (self.root/'stub/linuxaa64.efi.stub').write_bytes(b'stub')
         result=self.builder(); self.assertEqual(result.returncode,0,result.stderr)
         self.assertIn('--stub='+str(self.root/'stub/linuxaa64.efi.stub'),json.loads((self.root/'ukify-call.json').read_text()))
+
+    def test_uki_prefers_zboot_vmlinuz_efi_when_present(self):
+        (self.root/'boot/dtbs/test/qcom/x1-test.dtb').write_bytes(b'dtb')
+        self.config.write_text('HOOKS=(base udev archiso archiso_pxe_common plymouth block filesystems)\nCOMPRESSION_OPTIONS=(-T0)\n')
+        mod_dir=self.root/'modules/7.3.6-test'; mod_dir.mkdir(parents=True)
+        (mod_dir/'pkgbase').write_text('test\n')
+        zboot=mod_dir/'vmlinuz.efi'; zboot.write_bytes(b'MZzboot')
+        result=self.builder(); self.assertEqual(result.returncode,0,result.stderr)
+        ukify_args=json.loads((self.root/'ukify-call.json').read_text())
+        self.assertIn('--linux='+str(zboot),ukify_args)
+        mk_call=json.loads((self.root/'mkinitcpio-call.json').read_text())
+        self.assertIn('HOOKS=(base udev archiso block filesystems)',mk_call['conf'])
+        self.assertIn('COMPRESSION_OPTIONS=(-T0 -19)',mk_call['conf'])
 
     def test_failed_initramfs_cannot_produce_uki(self):
         (self.root/'boot/dtbs/test/qcom/x1-test.dtb').touch()
@@ -273,7 +289,7 @@ else:
 
     def test_install_hook_dependencies_and_failures(self):
         hook=(ROOT/'builder/qualcomm/early-startup-install').read_text()
-        helper=self.root/'firmware.py'; helper.write_text("print('qcom/test/adsp.mbn')\n")
+        helper=self.root/'firmware.py'; helper.write_text("import sys; assert sys.argv[1] == '--required', sys.argv; print('qcom/test/adsp.mbn')\n")
         hook=hook.replace('/usr/lib/initcpio/qcom-early-firmware.py',str(helper))
         script=self.root/'install'; script.write_text(hook)
         manifest=self.root/'dtbs'; manifest.write_text('test.dtb\n')

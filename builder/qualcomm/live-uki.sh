@@ -47,13 +47,49 @@ fi
 
 # The direct-boot initramfs remains untouched. The Qualcomm UKI needs its
 # firmware drivers and DT-named blobs before it can find USB installation media.
+# Drop hooks that are never used on the Snapdragon live UKI (plymouth is
+# disabled on aarch64 cmdline; PXE hooks pull hundreds of datacenter NIC drivers)
+# and compress the initramfs at zstd -19 to minimize slow UEFI BlockIO load time.
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+qcom_conf="$work/archiso-qcom.conf"
+(
+  HOOKS=()
+  # shellcheck source=/dev/null
+  source /etc/mkinitcpio.conf.d/archiso.conf
+  filtered_hooks=()
+  for hook in "${HOOKS[@]}"; do
+    case $hook in
+      plymouth|archiso_pxe_*) continue ;;
+      *) filtered_hooks+=("$hook") ;;
+    esac
+  done
+  grep -vE '^(HOOKS|COMPRESSION_OPTIONS)=' /etc/mkinitcpio.conf.d/archiso.conf || true
+  printf 'HOOKS=(%s)\nCOMPRESSION_OPTIONS=(-T0 -19)\n' "${filtered_hooks[*]}"
+) >"$qcom_conf"
 printf '%s\n' "${dtbs[@]}" >"$work/dtbs.list"
 OMARCHY_QCOM_DTBS_FILE="$work/dtbs.list" mkinitcpio \
-  -k "$kernel" -c /etc/mkinitcpio.conf.d/archiso.conf \
+  -k "$kernel" -c "$qcom_conf" \
   -A qcom_early_startup -g "$work/initramfs.img"
 initrd="$work/initramfs.img"
+
+# Prefer the zstd EFI zboot kernel image when the kernel package ships one
+# (~20 MiB vs ~62 MiB raw Image, fully compatible with systemd-stub & Secure
+# Boot), keeping raw $kernel for mkinitcpio version detection above.
+uki_linux="$kernel"
+if [[ -s /boot/vmlinuz-$1.efi ]]; then
+  uki_linux="/boot/vmlinuz-$1.efi"
+else
+  for pkgbase_file in /usr/lib/modules/*/pkgbase; do
+    if [[ -r $pkgbase_file && $(<"$pkgbase_file") == "$1" ]]; then
+      candidate="${pkgbase_file%/pkgbase}/vmlinuz.efi"
+      if [[ -s $candidate ]]; then
+        uki_linux="$candidate"
+        break
+      fi
+    fi
+  done
+fi
 
 # Each tree is a section of its own. ukify writes every section's header into
 # the room the stub leaves before its first section and stops with "Not enough
@@ -70,9 +106,9 @@ for dtb in "${dtbs[@]}"; do
   args+=("--devicetree-auto=$dtb")
 done
 
-echo "live-uki: wrapping $kernel and $initrd with ${#dtbs[@]} device trees"
+echo "live-uki: wrapping $uki_linux and $initrd with ${#dtbs[@]} device trees"
 ukify build \
-  --linux="$kernel" \
+  --linux="$uki_linux" \
   --initrd="$initrd" \
   --hwids="$hwids" \
   "${args[@]}" \

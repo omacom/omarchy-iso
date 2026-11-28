@@ -10,7 +10,6 @@ mode (including setuid/setgid/sticky), xattrs/capabilities/ACLs, timestamps,
 symlinks, special files and hardlinks.
 """
 
-from concurrent.futures import ThreadPoolExecutor
 import ctypes
 import errno
 import os
@@ -19,17 +18,42 @@ import sys
 
 CHUNK_SIZE = 1024 * 1024
 SYNC_FILE_RANGE_WRITE = 2
-# Flush every non-inline file (> 2 KiB max btrfs inline extent) asynchronously
-# so btrfs compresses 2-64 KiB files across thread_pool workers instead of
-# accumulating uncommitted delalloc metadata reservations and stalling workers
-# in handle_reserve_ticket.
-SYNC_THRESHOLD = 2048
+# Flush every non-empty file asynchronously so btrfs compresses all files
+# (including 1-2 KiB files) across thread_pool workers instead of accumulating
+# uncommitted delalloc metadata reservations and stalling in handle_reserve_ticket.
+SYNC_THRESHOLD = 1
+FORK_MIN_FILES = 64
 
 _libc = ctypes.CDLL(None, use_errno=True)
 _sync_file_range = getattr(_libc, "sync_file_range", None)
 if _sync_file_range is not None:
     _sync_file_range.argtypes = [ctypes.c_int, ctypes.c_longlong, ctypes.c_longlong, ctypes.c_uint]
     _sync_file_range.restype = ctypes.c_int
+
+
+def _usable_cpus():
+    try:
+        ncpus = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        ncpus = os.cpu_count() or 1
+    try:
+        with open("/sys/fs/cgroup/cpu.max", "r", encoding="utf-8") as f:
+            parts = f.read().split()
+        if len(parts) == 2 and parts[0] != "max":
+            quota, period = int(parts[0]), int(parts[1])
+            if quota > 0 and period > 0:
+                ncpus = min(ncpus, max(1, quota // period))
+    except (OSError, ValueError):
+        try:
+            with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", "r", encoding="utf-8") as qf, \
+                 open("/sys/fs/cgroup/cpu/cpu.cfs_period_us", "r", encoding="utf-8") as pf:
+                quota = int(qf.read().strip())
+                period = int(pf.read().strip())
+            if quota > 0 and period > 0:
+                ncpus = min(ncpus, max(1, quota // period))
+        except (OSError, ValueError):
+            pass
+    return max(1, ncpus)
 
 
 def _copy_xattrs(src, dst, *, follow_symlinks=True):
@@ -52,9 +76,10 @@ def _copy_xattrs(src, dst, *, follow_symlinks=True):
             raise
 
 
-def _copy_regular_file(job):
+def _copy_regular_file(job, is_root=None):
     src, dst, st = job
-    is_root = os.geteuid() == 0
+    if is_root is None:
+        is_root = os.geteuid() == 0
     sfd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
     try:
         dfd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -87,6 +112,41 @@ def _copy_regular_file(job):
             os.close(dfd)
     finally:
         os.close(sfd)
+
+
+def _copy_regular_files_parallel(regulars, workers, is_root):
+    if workers <= 1 or len(regulars) < FORK_MIN_FILES or not hasattr(os, "fork"):
+        for job in regulars:
+            _copy_regular_file(job, is_root)
+        return
+
+    nworkers = min(workers, len(regulars))
+    sys.stdout.flush()
+    sys.stderr.flush()
+    pids = []
+    for w in range(nworkers):
+        pid = os.fork()
+        if pid == 0:
+            try:
+                for job in regulars[w::nworkers]:
+                    _copy_regular_file(job, is_root)
+                os._exit(0)
+            except BaseException as exc:
+                try:
+                    sys.stderr.write(f"copy-tree-parallel: worker {w} failed: {exc}\n")
+                    sys.stderr.flush()
+                except OSError:
+                    pass
+                os._exit(1)
+        pids.append(pid)
+
+    failed_status = None
+    for pid in pids:
+        _, status = os.waitpid(pid, 0)
+        if status != 0 and failed_status is None:
+            failed_status = status
+    if failed_status is not None:
+        raise RuntimeError(f"copy-tree-parallel: worker failed with wait status {failed_status}")
 
 
 def copy_tree(src_root, dst_root, workers=None):
@@ -156,13 +216,12 @@ def copy_tree(src_root, dst_root, workers=None):
                 _copy_xattrs(sp, dp, follow_symlinks=False)
                 os.utime(dp, ns=(st.st_atime_ns, st.st_mtime_ns))
 
-    # Largest files first so huge binaries/fonts compress concurrently from t=0.
+    # Largest files first so huge binaries/fonts compress concurrently from t=0;
+    # forked processes avoid Python GIL futex contention on small files.
     regulars.sort(key=lambda item: item[2].st_size, reverse=True)
     if workers is None:
-        workers = max(1, os.cpu_count() or 1)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        for _ in pool.map(_copy_regular_file, regulars):
-            pass
+        workers = _usable_cpus()
+    _copy_regular_files_parallel(regulars, workers, is_root)
 
     for first_dst, extra_dst in hardlinks:
         os.link(first_dst, extra_dst)

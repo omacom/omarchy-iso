@@ -73,11 +73,14 @@ mkdir -p "$work/sfs" "$work/image"
 sfs_loop=$(attach_ro_loop "$sfs")
 mount -t squashfs -o ro,threads=multi "$sfs_loop" "$work/sfs" 2>/dev/null || mount -t squashfs -o ro "$sfs_loop" "$work/sfs"
 img_loop=$(attach_ro_loop "$work/sfs/omarchy-root.img")
-mount -t btrfs -o ro,subvol=omarchy-root "$img_loop" "$work/image"
+btrfs_threads=$(nproc)
+(( btrfs_threads > 64 )) && btrfs_threads=64
+(( btrfs_threads < 1 )) && btrfs_threads=1
+mount -t btrfs -o "ro,subvol=omarchy-root,thread_pool=$btrfs_threads" "$img_loop" "$work/image" 2>/dev/null ||
+  mount -t btrfs -o ro,subvol=omarchy-root "$img_loop" "$work/image"
 
 python3 - "$airootfs" "$work/image" "$pseudo" <<'PY'
-from concurrent.futures import ThreadPoolExecutor
-import filecmp, os, stat, sys
+import os, stat, struct, sys, tempfile
 
 live, image, pseudo = sys.argv[1], sys.argv[2], sys.argv[3]
 KEEP = ("etc", "var", "root", "boot", "usr/local", "usr/lib/systemd", "usr/lib/udev",
@@ -85,6 +88,8 @@ KEEP = ("etc", "var", "root", "boot", "usr/local", "usr/lib/systemd", "usr/lib/u
         "usr/lib/tmpfiles.d", "usr/lib/sysusers.d", "usr/lib/sysctl.d", "usr/lib/modprobe.d",
         "usr/lib/modules-load.d", "usr/lib/binfmt.d", "usr/lib/environment.d", "usr/share/factory")
 WHITEOUT_TREES = ("usr/lib/firmware", "usr/share/fonts")
+CMP_CHUNK = 262144
+FORK_MIN_CANDIDATES = 64
 
 def xattrs(path):
     return {k: os.getxattr(path, k, follow_symlinks=False) for k in os.listxattr(path, follow_symlinks=False)}
@@ -113,7 +118,16 @@ def same(a, b):
         return os.readlink(a) == os.readlink(b)
     if not stat.S_ISREG(sa.st_mode) or sa.st_size != sb.st_size or xattrs(a) != xattrs(b):
         return False
-    return filecmp.cmp(a, b, shallow=False)
+    if sa.st_size == 0:
+        return True
+    with open(a, "rb", buffering=CMP_CHUNK) as fa, open(b, "rb", buffering=CMP_CHUNK) as fb:
+        while True:
+            ba = fa.read(CMP_CHUNK)
+            bb = fb.read(CMP_CHUNK)
+            if ba != bb:
+                return False
+            if not ba:
+                return True
 
 # Ensure every KEEP directory that exists in the image also exists in live so
 # overlayfs marks it opaque instead of exposing the image's copy.
@@ -178,22 +192,75 @@ for top, dirs, files in os.walk(live):
         a, b = os.path.join(top, name), os.path.join(image, rel, name)
         candidates.append((a, b, os.lstat(a).st_size, None))
 
-def check_candidate(item):
-    a, b, size, whiteout_dir = item
-    return a, size, whiteout_dir, same(a, b)
+try:
+    ncpus = len(os.sched_getaffinity(0))
+except (AttributeError, OSError):
+    ncpus = os.cpu_count() or 1
+workers = min(32, max(1, ncpus))
 
-workers = min(16, max(1, os.cpu_count() or 1))
+matched_indices = set()
+if workers <= 1 or len(candidates) < FORK_MIN_CANDIDATES or not hasattr(os, "fork"):
+    for idx, (a, b, _, _) in enumerate(candidates):
+        if same(a, b):
+            matched_indices.add(idx)
+else:
+    nworkers = min(workers, len(candidates))
+    sys.stdout.flush()
+    sys.stderr.flush()
+    worker_files = []
+    pids = []
+    try:
+        for w in range(nworkers):
+            out_f = tempfile.TemporaryFile()
+            worker_files.append(out_f)
+            pid = os.fork()
+            if pid == 0:
+                try:
+                    buf = bytearray()
+                    for idx in range(w, len(candidates), nworkers):
+                        a, b, _, _ = candidates[idx]
+                        if same(a, b):
+                            buf.extend(struct.pack("<I", idx))
+                    if buf:
+                        out_f.write(buf)
+                        out_f.flush()
+                    os._exit(0)
+                except BaseException as exc:
+                    try:
+                        sys.stderr.write(f"dedup-airootfs: worker {w} failed: {exc}\n")
+                        sys.stderr.flush()
+                    except OSError:
+                        pass
+                    os._exit(1)
+            pids.append(pid)
+
+        failed_status = None
+        for pid in pids:
+            _, status = os.waitpid(pid, 0)
+            if status != 0 and failed_status is None:
+                failed_status = status
+        if failed_status is not None:
+            raise RuntimeError(f"dedup-airootfs: worker failed with wait status {failed_status}")
+
+        for out_f in worker_files:
+            out_f.seek(0)
+            raw = out_f.read()
+            for (idx,) in struct.iter_unpack("<I", raw):
+                matched_indices.add(idx)
+    finally:
+        for out_f in worker_files:
+            out_f.close()
+
 unlinked_dirs = set()
-with ThreadPoolExecutor(max_workers=workers) as pool:
-    for a, size, whiteout_dir, matched in pool.map(check_candidate, candidates, chunksize=32):
-        if matched:
-            os.unlink(a)
-            removed += 1
-            removed_bytes += size
-            if whiteout_dir is not None:
-                unlinked_dirs.add(whiteout_dir)
-        else:
-            kept_bytes += size
+for idx, (a, _, size, whiteout_dir) in enumerate(candidates):
+    if idx in matched_indices:
+        os.unlink(a)
+        removed += 1
+        removed_bytes += size
+        if whiteout_dir is not None:
+            unlinked_dirs.add(whiteout_dir)
+    else:
+        kept_bytes += size
 
 # Preserving directory mtimes keeps prebuilt /var/cache/fontconfig caches
 # valid after unlinking deduplicated font files.

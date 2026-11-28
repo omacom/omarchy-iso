@@ -219,7 +219,12 @@ def append_files_to_initrd(uki: Path, files: list[tuple[str, bytes]]) -> bool:
             f.seek(info["hdr_off"] + 16)
             f.write(struct.pack("<I", new_rsize))
 
-            # Update OptionalHeader.SizeOfImage (+56) and clear CheckSum (+64)
+            # Update OptionalHeader.SizeOfInitializedData (+8), SizeOfImage (+56),
+            # and clear CheckSum (+64) to match ukify.py exactly.
+            delta_vsize = new_vsize - info["vsize"]
+            old_init_data = struct.unpack_from("<I", head, info["opt_off"] + 8)[0]
+            f.seek(info["opt_off"] + 8)
+            f.write(struct.pack("<I", (old_init_data + delta_vsize) & 0xFFFFFFFF))
             f.seek(info["opt_off"] + 56)
             f.write(struct.pack("<I", new_size_of_image))
             f.seek(info["opt_off"] + 64)

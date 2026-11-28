@@ -68,50 +68,108 @@ echo "ok - the N1x UKI has a ceiling of its own"
 # Snapdragon ISOs install only Snapdragon laptops, which always build their own
 # UKI with board firmware and device trees; skip the unused generic UKI so it
 # does not bloat the root image, while ordinary builds still invoke mkinitcpio.
-uki_branch=$(awk '
-  !in_block && /^  if \[\[ -n \$\{OMARCHY_SNAPDRAGON:-\} \]\]; then$/ { in_block = 1 }
+# An image with Omarchy's boot splash gets no pre-built UKI, only the N1x
+# layer: its hook runs only in the busybox initramfs each install builds.
+splash_gate=$(awk '
+  !in_block && /^  prebuilt_ukis=1$/ { in_block = 1 }
   in_block { print; if (/^  fi$/) exit }
 ' "$builder")
-[[ -n $uki_branch ]] || fail "could not extract the OMARCHY_SNAPDRAGON pre-built UKI branch"
+[[ $splash_gate == *omarchy-splash* ]] || fail "could not extract the boot splash's pre-built UKI gate"
+uki_launches=$(awk '
+  !in_block && /^  uki_tmp=""$/ { in_block = 1 }
+  in_block { print; if (/^  fi$/) exit }
+' "$builder")
+[[ $uki_launches == *build_generic_uki_in* ]] || fail "could not extract the parallel pre-built UKI launches"
+uki_branch=$(awk '
+  !in_block && /^  if \[\[ -n \$\{OMARCHY_SNAPDRAGON:-\} \]\]; then$/ { in_block = 1 }
+  in_block { print; if (/^  n1x_script=/) n1x = 1; if (n1x && /^  fi$/) exit }
+' "$builder")
+[[ $uki_branch == *build_n1x_prebuilt_uki* ]] || fail "could not extract the OMARCHY_SNAPDRAGON and N1x pre-built UKI branches"
 
-run_uki_branch() {
-  # Two locals: within one, $snapdragon still expands to the caller's value.
-  local snapdragon=$1
-  local root="$work/root-${snapdragon:-ordinary}" log="$work/chroot-${snapdragon:-ordinary}.log"
-  mkdir -p "$root/var/lib/omarchy-iso"
-  printf 'stale' >"$root/var/lib/omarchy-iso/prebuilt-uki.efi"
+# run_uki_build <name> <splash: 1 or ""> <snapdragon: 1 or ""> <parallel: 1 or 0>
+# runs those steps in the builder's order on an aarch64 host with n1x.sh. Each
+# builder it starts writes its name to $work/calls-<name>.
+run_uki_build() {
+  # One local each: within one, a later name still sees the caller's value.
+  local name=$1
+  local splash=$2
+  local snapdragon=$3
+  local parallel=$4
+  local root="$work/root-$name" log="$work/chroot-$name.log" calls="$work/calls-$name"
+  mkdir -p "$root/var/lib/omarchy-iso" "$root/etc/kernel" "$root/usr/lib/initcpio/install" \
+    "$root/usr/share/omarchy/install/hardware"
+  # What the parallel launches copy out of the image, and the N1x script.
+  touch "$root"/etc/{vconsole.conf.prebuilt-uki,mkinitcpio-prebuilt-uki.conf,kernel/cmdline.prebuilt-uki} \
+    "$root/usr/lib/initcpio/install/omarchy-vconsole-room" "$root/usr/share/omarchy/install/hardware/n1x.sh"
+  if [[ -n $splash ]]; then
+    install -D /dev/null "$root/etc/initcpio/install/omarchy-splash"
+  else
+    printf 'stale' >"$root/var/lib/omarchy-iso/prebuilt-uki.efi"
+  fi
+  : >"$calls"
   rm -f "$log"
-  # shellcheck disable=SC2034 # read by the builder branch run through eval
+  # shellcheck disable=SC2034 # read by the builder's steps run through eval
   (
     image_kver="7.3.6-2-omarchy"
     OMARCHY_SNAPDRAGON=$snapdragon
+    OMARCHY_FAST_COMPRESSION=
+    prebuilt_async=$parallel
+    uname() { echo aarch64; }
     arch-chroot() {
       printf '%s\n' "$*" >>"$log"
       printf 'built-uki' >"$1/var/lib/omarchy-iso/prebuilt-uki.efi"
+      echo generic >>"$calls"
+    }
+    with_image_overlay() {
+      case $1 in
+        build_generic_uki_in) echo generic ;;
+        *) echo "$1" ;;
+      esac >>"$calls"
     }
     build_qualcomm_prebuilt_uki() {
       printf 'built-qualcomm-uki' >"$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm.efi"
+      echo qualcomm >>"$calls"
     }
+    build_n1x_prebuilt_uki() { echo n1x >>"$calls"; }
+    eval "$splash_gate"
+    eval "$uki_launches"
     eval "$uki_branch"
+    wait
   ) >/dev/null
 }
 
-run_uki_branch 1
-[[ ! -e $work/chroot-1.log ]] || fail "Snapdragon build must not invoke arch-chroot/mkinitcpio for generic UKI: $(cat "$work/chroot-1.log")"
-[[ ! -e $work/root-1/var/lib/omarchy-iso/prebuilt-uki.efi ]] || fail "Snapdragon build must remove stale prebuilt-uki.efi"
-if [[ $(uname -m) == aarch64 ]]; then
-  [[ $(cat "$work/root-1/var/lib/omarchy-iso/prebuilt-uki-qualcomm.efi") == "built-qualcomm-uki" ]] ||
-    fail "Snapdragon aarch64 build did not invoke build_qualcomm_prebuilt_uki"
-fi
+# expect_builds <name> <the builders it starts, sorted>
+expect_builds() {
+  local builds
+  builds=$(sort "$work/calls-$1" | paste -sd ' ')
+  [[ $builds == "$2" ]] || fail "$1 started ${builds:-no builder}, not ${2:-none}"
+}
 
-run_uki_branch ""
-[[ -f $work/chroot-ordinary.log ]] || fail "ordinary build must invoke arch-chroot/mkinitcpio"
-grep -Fq "mkinitcpio" "$work/chroot-ordinary.log" || fail "ordinary build did not invoke mkinitcpio: $(cat "$work/chroot-ordinary.log")"
-grep -Fq -- "-U /var/lib/omarchy-iso/prebuilt-uki.efi" "$work/chroot-ordinary.log" ||
-  fail "ordinary build did not target prebuilt-uki.efi: $(cat "$work/chroot-ordinary.log")"
-[[ $(cat "$work/root-ordinary/var/lib/omarchy-iso/prebuilt-uki.efi") == "built-uki" ]] ||
+for parallel in 0 1; do
+  run_uki_build "snapdragon-$parallel" "" 1 "$parallel"
+  expect_builds "snapdragon-$parallel" qualcomm
+  run_uki_build "ordinary-$parallel" "" "" "$parallel"
+  expect_builds "ordinary-$parallel" "generic n1x"
+done
+[[ ! -e $work/chroot-snapdragon-0.log ]] || fail "Snapdragon build must not invoke arch-chroot/mkinitcpio for generic UKI: $(cat "$work/chroot-snapdragon-0.log")"
+[[ ! -e $work/root-snapdragon-0/var/lib/omarchy-iso/prebuilt-uki.efi ]] || fail "Snapdragon build must remove stale prebuilt-uki.efi"
+[[ $(cat "$work/root-snapdragon-0/var/lib/omarchy-iso/prebuilt-uki-qualcomm.efi") == "built-qualcomm-uki" ]] ||
+  fail "Snapdragon aarch64 build did not invoke build_qualcomm_prebuilt_uki"
+[[ -f $work/chroot-ordinary-0.log ]] || fail "ordinary build must invoke arch-chroot/mkinitcpio"
+grep -Fq "mkinitcpio" "$work/chroot-ordinary-0.log" || fail "ordinary build did not invoke mkinitcpio: $(cat "$work/chroot-ordinary-0.log")"
+grep -Fq -- "-U /var/lib/omarchy-iso/prebuilt-uki.efi" "$work/chroot-ordinary-0.log" ||
+  fail "ordinary build did not target prebuilt-uki.efi: $(cat "$work/chroot-ordinary-0.log")"
+[[ $(cat "$work/root-ordinary-0/var/lib/omarchy-iso/prebuilt-uki.efi") == "built-uki" ]] ||
   fail "ordinary build did not write prebuilt-uki.efi"
 echo "ok - Snapdragon builds remove stale generic UKI without calling mkinitcpio, ordinary builds still build it"
+
+for parallel in 0 1; do
+  run_uki_build "splash-snapdragon-$parallel" 1 1 "$parallel"
+  expect_builds "splash-snapdragon-$parallel" ""
+  run_uki_build "splash-ordinary-$parallel" 1 "" "$parallel"
+  expect_builds "splash-ordinary-$parallel" n1x
+done
+echo "ok - an image with the boot splash gets no generic or Qualcomm UKI, and still builds the N1x layer"
 
 # The builder invokes mkinitcpio -c/-U directly and never through a preset.
 # Leaving an orphaned mkinitcpio preset pointing at prebuilt-uki.efi caused

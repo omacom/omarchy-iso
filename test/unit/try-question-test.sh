@@ -427,7 +427,7 @@ if [[ $1 == "list-units" ]]; then
   printf '%s\n' "pacman-init.service not-found failed failed pacman-init.service" \
     "omarchy-root-image-verify.service not-found failed failed omarchy-root-image-verify.service" \
     'systemd-fsck@dev-disk-by\x2dlabel-ARCH.service not-found failed failed systemd-fsck@dev-disk-by\x2dlabel-ARCH.service' \
-    "sddm.service loaded failed failed Simple Desktop Display Manager"
+    "greetd.service loaded failed failed Greeter daemon"
 else
   echo "systemctl $*" >>"$WORK/forget-calls"
 fi
@@ -593,7 +593,7 @@ run_hardware() {
 }
 mkdir -p "$hw/root/etc/systemd/system/graphical.target.wants" "$hw/root/usr/lib/firmware/updates/ath12k/WCN7850/hw2.0" \
   "$hw/root/usr/lib/systemd/user/pipewire.service.d"
-ln -sfn /usr/lib/systemd/system/sddm.service "$hw/root/etc/systemd/system/graphical.target.wants/sddm.service"
+ln -sfn /usr/lib/systemd/system/greetd.service "$hw/root/etc/systemd/system/graphical.target.wants/greetd.service"
 run_hardware env CHANGE=1 bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system || fail "the session's hardware setup failed"
 [[ $(<"$hw/calls") == "pacman -Sy --noconfirm
 omarchy-apply-hardware --install-user $(id -un)

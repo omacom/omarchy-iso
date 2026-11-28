@@ -144,7 +144,7 @@ echo "ok - the guest's script waits for the owner, installs the key once and ope
 
 # --------------------------------------- the install wait keeps to its budget
 #
-# An encrypted BIOS install whose Plymouth prompt is typed into blind, sample
+# An encrypted BIOS install whose unlock prompt is typed into blind, sample
 # after sample, still times out after INSTALL_TIMEOUT, not later.
 
 take wait_for_unattended_install answer_luks_prompt
@@ -587,10 +587,11 @@ echo "ok - the factory first boot is typed into as us after its keyboard step"
 # ------------------------------------------- the boot wait unlocks the disk
 #
 # Every boot of an encrypted install stops at the LUKS prompt, scenario
-# overlays included. An initramfs built on the machine (BIOS, or a layout
-# the pre-built UKI lacks) asks with Plymouth's lock field, which OCR reads
-# as the logo and nothing else; wait_for_ssh types into it as the install
-# wait does, and not into a booted console.
+# overlays included. A busybox initramfs (systemd-boot's, and Limine's with
+# Omarchy's boot splash, on BIOS, or for a layout the pre-built UKI lacks) asks
+# with the splash's field or Plymouth's lock field, which OCR reads as the logo
+# and nothing else; wait_for_ssh types into it as the install wait does, and
+# not into a booted console.
 
 take wait_for_ssh answer_luks_prompt type_text
 ENCRYPT=true KB_LAYOUT=uk TYPE_LAYOUT=uk

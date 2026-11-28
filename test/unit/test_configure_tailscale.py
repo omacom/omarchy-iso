@@ -113,7 +113,7 @@ class ConfigureTailscaleTest(unittest.TestCase):
 
     def test_join_unit_does_not_hold_up_boot(self):
         # A Type=oneshot wanted by multi-user.target holds the whole boot
-        # (SDDM included) hostage until the join finishes or times out --
+        # (greetd included) hostage until the join finishes or times out --
         # target units implicitly gain After= for their Wants=.
         self.configure(authkey="tskey-auth-kFAKEKEY\n")
         text = self.unit().read_text()

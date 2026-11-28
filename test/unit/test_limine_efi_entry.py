@@ -590,5 +590,154 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
         self.assertIn("cannot be read", str(caught.exception))
 
 
+class DeferredEfiBootRegisterTest(unittest.TestCase):
+    """_install_limine_efi(..., defer_register=True) overlaps slow UEFI NVRAM
+    writes with subsequent install phases and joins cleanly in validate_boot
+    or on early teardown."""
+
+    def test_defer_register_runs_in_background_and_joins(self):
+        import threading
+
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def fake_register(*_args, **_kwargs):
+            started.set()
+            release.wait(timeout=5)
+            finished.set()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "usr/share/limine").mkdir(parents=True)
+            (root / "usr/share/limine/BOOTX64.EFI").write_bytes(b"MZ")
+            ctx = types.SimpleNamespace(target=root, state={}, omarchy_install={})
+            with mock.patch.object(phases_impl.platform, "machine", return_value="x86_64"), \
+                    mock.patch.object(phases_impl, "_register_limine_efi_entry", side_effect=fake_register):
+                phases_impl._install_limine_efi(
+                    ctx, esp_mount="/boot", disk=Path("/dev/nvme0n1"), part=1, defer_register=True,
+                )
+                # Copy finished synchronously while NVRAM registration is still in flight.
+                self.assertTrue((root / "boot/EFI/limine/limine_x64.efi").is_file())
+                self.assertTrue(started.wait(timeout=2))
+                self.assertFalse(finished.is_set())
+                self.assertIn("efi_boot_register", ctx.state)
+                release.set()
+                phases_impl._join_efi_boot_register(ctx)
+                self.assertTrue(finished.is_set())
+                self.assertNotIn("efi_boot_register", ctx.state)
+
+    def test_join_propagates_worker_exception_and_stop_swallows_it(self):
+        ctx = types.SimpleNamespace(state={})
+        phases_impl._run_efi_boot_register(
+            ctx, lambda: (_ for _ in ()).throw(RuntimeError("nvram boom")), defer=True,
+        )
+        with self.assertRaisesRegex(RuntimeError, "nvram boom"):
+            phases_impl._join_efi_boot_register(ctx)
+        # Second join is a no-op.
+        phases_impl._join_efi_boot_register(ctx)
+
+        ctx2 = types.SimpleNamespace(state={})
+        phases_impl._run_efi_boot_register(
+            ctx2, lambda: (_ for _ in ()).throw(RuntimeError("nvram boom")), defer=True,
+        )
+        phases_impl.stop_efi_boot_register(ctx2)
+        self.assertNotIn("efi_boot_register", ctx2.state)
+
+    def test_serial_env_forces_synchronous_registration(self):
+        ran = []
+        ctx = types.SimpleNamespace(state={})
+        with mock.patch.dict(os.environ, {"OMARCHY_SERIAL_EFI_REGISTER": "1"}):
+            phases_impl._run_efi_boot_register(ctx, lambda: ran.append(True), defer=True)
+        self.assertEqual(ran, [True])
+        self.assertNotIn("efi_boot_register", ctx.state)
+
+    def test_deferred_output_is_buffered_until_join(self):
+        import threading
+
+        done = threading.Event()
+        seen = []
+
+        def emit_from_worker():
+            phases_impl._efi_emit("info", "reused entry")
+            phases_impl._efi_emit("error", "nvram warning")
+            done.set()
+
+        ctx = types.SimpleNamespace(state={})
+        with mock.patch.object(phases_impl, "info", lambda msg: seen.append(("info", msg))), \
+                mock.patch.object(phases_impl, "error", lambda msg: seen.append(("error", msg))):
+            phases_impl._run_efi_boot_register(ctx, emit_from_worker, defer=True)
+            self.assertTrue(done.wait(timeout=2))
+            # Nothing written to stdout/stderr while the worker ran.
+            self.assertEqual(seen, [])
+            phases_impl._join_efi_boot_register(ctx)
+        self.assertEqual(seen, [("info", "reused entry"), ("error", "nvram warning")])
+
+    def test_systemd_boot_defer_register_runs_in_background(self):
+        import threading
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def fake_register(*_args, **_kwargs):
+            started.set()
+            release.wait(timeout=5)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "usr/lib/systemd/boot/efi").mkdir(parents=True)
+            (root / "usr/lib/systemd/boot/efi/systemd-bootx64.efi").write_bytes(b"MZ")
+            ctx = types.SimpleNamespace(target=root, state={}, omarchy_install={})
+            with mock.patch.object(phases_impl.platform, "machine", return_value="x86_64"), \
+                    mock.patch.object(phases_impl, "_boot_loader", return_value="systemd-boot"), \
+                    mock.patch.object(phases_impl, "_register_limine_efi_entry", side_effect=fake_register):
+                phases_impl._install_limine_efi(
+                    ctx, esp_mount="/boot", disk=Path("/dev/nvme0n1"), part=1, defer_register=True,
+                )
+                self.assertTrue((root / "boot/EFI/systemd/systemd-bootx64.efi").is_file())
+                self.assertTrue(started.wait(timeout=2))
+                release.set()
+                phases_impl._join_efi_boot_register(ctx)
+
+    def test_validate_boot_joins_before_validating_routes_and_main_stops_on_teardown(self):
+        from orchestrator import main as orchestrator_main
+
+        order = []
+        ctx = types.SimpleNamespace(
+            target=Path("/mnt"),
+            state={},
+            is_protected=False,
+            defer_provisioning=False,
+            omarchy_install={"boot": {"esp_mount": "/boot"}, "storage": {}},
+        )
+        with mock.patch.object(phases_impl, "_join_efi_boot_register", side_effect=lambda _c: order.append("join")), \
+                mock.patch.object(phases_impl, "_assert_boot_hooks_restored"), \
+                mock.patch.object(phases_impl, "_validate_kernel_headers"), \
+                mock.patch.object(phases_impl, "_validate_limine_boot", side_effect=lambda *_a: order.append("validate")), \
+                mock.patch.object(phases_impl, "_validate_package_signing"), \
+                mock.patch.object(phases_impl, "_join_luks_keyslot_enroll"):
+            phases_impl.validate_boot(ctx)
+        self.assertEqual(order, ["join", "validate"])
+
+        teardown = []
+        main_ctx = types.SimpleNamespace(username="omarchy", target=Path("/mnt"), state={})
+        with mock.patch.object(orchestrator_main.InstallContext, "from_env", return_value=main_ctx), \
+                mock.patch.object(orchestrator_main, "run", side_effect=orchestrator_main.PhaseError("fail")), \
+                mock.patch.object(orchestrator_main, "build_phases", return_value=[]), \
+                mock.patch.object(orchestrator_main, "info"), \
+                mock.patch.object(orchestrator_main, "error"), \
+                mock.patch.object(phases_impl, "boost_cpu_governor", return_value={}), \
+                mock.patch.object(phases_impl, "restore_cpu_governors"), \
+                mock.patch.object(phases_impl, "stop_target_keyring_init"), \
+                mock.patch.object(phases_impl, "stop_luks_keyslot_enroll"), \
+                mock.patch.object(phases_impl, "stop_efi_boot_register", side_effect=lambda _c: teardown.append("stop_efi")), \
+                mock.patch.object(phases_impl, "stop_library_warmup"), \
+                mock.patch.object(phases_impl, "cleanup_bind_mounts", side_effect=lambda _c: teardown.append("cleanup_bind")), \
+                mock.patch.object(phases_impl, "cleanup_target_hook_masks"), \
+                mock.patch.object(phases_impl, "cleanup_protected_state"):
+            self.assertEqual(orchestrator_main.main(), 1)
+        self.assertEqual(teardown, ["stop_efi", "cleanup_bind"])
+
+
 if __name__ == "__main__":
     unittest.main()

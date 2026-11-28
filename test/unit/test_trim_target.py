@@ -102,8 +102,8 @@ class MainStagesTrimAfterRunTest(unittest.TestCase):
         ctx = types.SimpleNamespace(username="omarchy", target=Path("/mnt"))
         helpers = dict.fromkeys(
             ["boost_cpu_governor", "cleanup_bind_mounts", "cleanup_protected_state",
-             "cleanup_target_hook_masks", "restore_cpu_governors", "stop_library_warmup",
-             "stop_luks_keyslot_enroll", "stop_target_keyring_init"], mock.DEFAULT)
+             "cleanup_target_hook_masks", "restore_cpu_governors", "stop_efi_boot_register",
+             "stop_library_warmup", "stop_luks_keyslot_enroll", "stop_target_keyring_init"], mock.DEFAULT)
         with mock.patch.object(main.InstallContext, "from_env", return_value=ctx), \
                 mock.patch.object(main, "run", fake_run), \
                 mock.patch.object(main, "build_phases", return_value=[]), \

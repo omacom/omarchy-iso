@@ -381,10 +381,6 @@ for grub_config in "$build_cache_dir/grub/grub.cfg" "$build_cache_dir/grub/loopb
     -e "s|%KERNEL_OPTIONS%|$kernel_options|g" \
     "$grub_config"
 done
-if [[ $OMARCHY_ARCH == aarch64 ]]; then
-  # The live system's name on the network (releng's Ethernet DHCP with mDNS).
-  printf '%s\n' omarchy-n1x-rescue >"$build_cache_dir/airootfs/etc/hostname"
-fi
 if [[ -n ${OMARCHY_N1X_DEV_SSH:-} ]]; then
   # DEV ONLY (--dev-ssh): key-only SSH into the live ISO and the installed
   # system. See builder/n1x-dev-ssh/omarchy-n1x-dev-ssh; removing that

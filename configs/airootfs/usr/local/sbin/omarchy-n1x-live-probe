@@ -51,6 +51,6 @@ section() {
   if [[ -x /usr/local/sbin/omarchy-n1x-dev-ssh ]]; then
     echo "DEV image: the development key logs in as root:"
     ip -4 -brief address | awk '$1 != "lo" && $3 { print "  ssh root@" $3 }' | sed 's|/[0-9]*$||'
-    echo "  or, where mDNS works: ssh root@omarchy-n1x-rescue.local"
+    echo "  or, where mDNS works: ssh root@$(hostname).local"
   fi
 } > >(tee "$log") 2>&1

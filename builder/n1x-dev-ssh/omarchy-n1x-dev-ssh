@@ -7,7 +7,7 @@
 # (`omarchy-iso-make --dev-ssh <file>`), with password and keyboard-interactive
 # login switched off:
 #
-#   live ISO          ssh root@<address>   (hostname omarchy-n1x-rescue)
+#   live ISO          ssh root@<address>   (hostname archiso)
 #   installed system  ssh root@<address>   or  <user>@<address>
 #
 # With no argument it prepares the live ISO (omarchy-n1x-dev-ssh.service runs

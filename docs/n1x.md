@@ -57,11 +57,11 @@ The **installed system** (Limine) offers:
 
 The dev image carries the public key passed to `--dev-ssh` when it was built. Password and keyboard-interactive logins are refused everywhere; only that key works.
 
-**On the live USB**, sshd starts on boot and root accepts the key. Find the address on the laptop with `ip -4 -brief address` or from your router's DHCP leases. The live system is called `omarchy-n1x-rescue`, so this also works where mDNS reaches:
+**On the live USB**, sshd starts on boot and root accepts the key. Find the address on the laptop with `ip -4 -brief address` or from your router's DHCP leases. The live system is called `archiso`, so this also works where mDNS reaches:
 
 ```bash
 ssh root@<address>
-ssh root@omarchy-n1x-rescue.local
+ssh root@archiso.local
 ```
 
 **On a system installed from the dev image**, sshd is enabled, port 22 is open in the firewall, and both root and the user you created accept the key.

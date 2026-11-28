@@ -72,8 +72,8 @@ wait_for_desktop() {
   done
 }
 
-# The Try user's graphical session on the seat, if any. SDDM's greeter has a
-# seat session too, of class greeter, under its own user.
+# The Try user's graphical session on the seat, if any. The login screen has
+# a seat session too, of class greeter, under its own user.
 seat_session() {
   ssh_guest 'for s in $(loginctl list-sessions --no-legend | awk "\$4 == \"seat0\" { print \$1 }"); do
       [ "$(loginctl show-session "$s" -p Class --value)" = user ] &&
@@ -81,11 +81,10 @@ seat_session() {
     done' </dev/null
 }
 
-# End the desktop session with $1, as Omarchy's Logout does (uwsm stop). SDDM
-# must log the session in again rather than stop at its greeter. Two stand-ins
-# do not reach SDDM: loginctl terminate-session kills sddm-helper too, which
-# SDDM reads as a failed login and so shows nothing, and a killed Hyprland is
-# restarted inside the same session in Hyprland's crash recovery.
+# End the desktop session with $1, as Omarchy's Logout does (uwsm stop). The
+# login screen follows, and Enter logs the Try user, who has no password, in
+# again. A killed Hyprland would not reach it: Hyprland's crash recovery
+# restarts it inside the same session.
 relogin_after() {
   local old new
   old=$(seat_session)
@@ -94,12 +93,14 @@ relogin_after() {
   for _ in $(seq 1 30); do
     sleep 2
     new=$(seat_session)
-    if [[ -n $new && $new != "$old" ]] && try_ssh 'pgrep -u "$(id -u)" -x Hyprland >/dev/null && pgrep -u "$(id -u)" -x quickshell >/dev/null'; then
+    if [[ -z $new ]] && ssh_guest 'pgrep -u greeter -x quickshell >/dev/null' </dev/null; then
+      press ret
+    elif [[ -n $new && $new != "$old" ]] && try_ssh 'pgrep -u "$(id -u)" -x Hyprland >/dev/null && pgrep -u "$(id -u)" -x quickshell >/dev/null'; then
       return 0
     fi
   done
   capture_console "failure-try-relogin"
-  { echo "== after: $1"; ssh_guest 'loginctl list-sessions; echo; journalctl -b -o short-monotonic -u sddm --no-pager | tail -60' </dev/null; } \
+  { echo "== after: $1"; ssh_guest 'loginctl list-sessions; echo; journalctl -b -o short-monotonic -u greetd --no-pager | tail -60' </dev/null; } \
     >>"$RUN_DIR/failure-try-relogin.txt" 2>&1 || true
   return 1
 }
@@ -186,7 +187,7 @@ check "systemd-gpt-auto-generator is off" try_ssh \
   '[ "$(readlink /etc/systemd/system-generators/systemd-gpt-auto-generator)" = /dev/null ]'
 check "no unit failed" no_unit_failed
 # The soft reboot ends on tty1 (systemd's reduce_vt()), and the starting screen
-# is drawn there until SDDM takes the screen.
+# is drawn there until the session takes the screen.
 check "Try drew the starting screen again on tty1" try_ssh \
   'sudo journalctl -b -u omarchy-try-console -o cat | grep -qx "Drew the starting screen on tty1"'
 # The hardware setup an install runs for this machine ran in the session
@@ -234,9 +235,7 @@ check "the timezone is the one geo.omarchy.org gives" try_ssh \
   'for i in 1 2 3 4 5; do geo=$(curl -fsS --max-time 10 https://geo.omarchy.org/ | jq -r ".timezone // empty") && [ -n "$geo" ] && break; sleep 3; done; [ -n "$geo" ] && timeout 90 bash -c "until [ \"\$(readlink -f /etc/localtime)\" = \"/usr/share/zoneinfo/\$1\" ]; do sleep 2; done" _ "$geo"'
 check "no lock is asked for before a suspend" try_ssh \
   '[ "$(systemctl --user show -p ConditionResult --value omarchy-sleep-lock.service)" = no ]'
-check "a logout logs straight back in" relogin_after 'uwsm stop'
-check "SDDM state and passwordless Try theme are installed" try_ssh \
-  'sudo grep -qx "User=omarchy" /var/lib/sddm/state.conf && grep -qx "Current=omarchy-try" /etc/sddm.conf.d/99-omarchy-login.conf && [ -x /usr/local/bin/omarchy-try-session ]'
+check "a logout comes back at the login screen, and Enter logs in again" relogin_after 'uwsm stop'
 # Nothing waits for the keyring at boot; wait for it here.
 check "the session made its own pacman keyring" try_ssh \
   'timeout 120 bash -c "while systemctl is-active -q omarchy-try-keyring; do sleep 1; done" && [ "$(systemctl show -p Result --value omarchy-try-keyring)" = success ]'

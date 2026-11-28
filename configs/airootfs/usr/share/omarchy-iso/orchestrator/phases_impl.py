@@ -4125,7 +4125,7 @@ def _keymap_of(vconsole: Path) -> str:
     return ""
 
 
-def _prebuilt_uki_keymap_stale(target: Path, record: str = "prebuilt-uki.keymap") -> str:
+def _prebuilt_uki_keymap_stale(target: Path) -> str:
     """The chosen console keymap when it differs from the one baked into the
     image's UKI, else "".
 
@@ -4138,8 +4138,6 @@ def _prebuilt_uki_keymap_stale(target: Path, record: str = "prebuilt-uki.keymap"
     enrolled under AZERTY cannot be typed at a QWERTY prompt and the owner is
     locked out of a fresh install with no recovery but reinstalling. The
     caller writes the choice into the UKI (uki_vconsole.py), or builds one.
-    `record` names another pre-built image's record (systemd-boot's
-    initramfs, prebuilt-initramfs.keymap), which has no room for a layout.
 
     An image that records nothing is assumed to have built in "us", and that
     covers two cases:
@@ -4157,7 +4155,7 @@ def _prebuilt_uki_keymap_stale(target: Path, record: str = "prebuilt-uki.keymap"
     the record; being wrong that way costs the owner their disk, so unknown
     resolves to us, not to "skip the check".
     """
-    recorded = target / "var" / "lib" / "omarchy-iso" / record
+    recorded = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki.keymap"
     baked = (recorded.read_text().strip() if recorded.is_file() else "") or "us"
     vconsole = target / "etc" / "vconsole.conf"
     chosen = _keymap_of(vconsole)
@@ -4256,13 +4254,6 @@ def finalize_boot(ctx: InstallContext) -> None:
         finalize_limine_boot(ctx)
 
 
-def _remove_prebuilt_initramfs(ctx: InstallContext) -> None:
-    """Used or not, the image's pre-built initramfs has done its job once the
-    boot is set up; it would otherwise stay in @ and its factory snapshot."""
-    for leftover in (ctx.target / "var" / "lib" / "omarchy-iso").glob("prebuilt-initramfs.*"):
-        leftover.unlink()
-
-
 def _skip_unused_t2_preset(ctx: InstallContext) -> None:
     selected_kernels = ctx.user_configuration.get("kernels") or []
     if "linux-t2" not in selected_kernels and not _is_apple_t2_hardware():
@@ -4279,122 +4270,15 @@ def _systemd_boot_esp_mount(ctx: InstallContext) -> str:
     return ctx.state.get("boot_esp_mount") or _boot_intent(ctx)["esp_mount"]
 
 
-# What mkinitcpio builds an initramfs from besides the packages, as
-# build-root-image.sh's initramfs_inputs lists it: its configuration, hooks a
-# hardware script adds under /etc/initcpio, and the module options its modconf
-# hook copies in.
-INITRAMFS_INPUTS = ("etc/mkinitcpio.conf", "etc/mkinitcpio.conf.d", "etc/initcpio", "etc/modprobe.d", "usr/lib/modprobe.d")
-# Inputs that differ from the image's on every machine without changing the
-# image kernel's initramfs:
-#   zz-omarchy-kernel-modules.conf  takes out modules some installed kernel
-#       lacks, only while building for that kernel; the image's kernel built
-#       with every one of them.
-#   omarchy-toprow.conf  the top row's default (fix-fkeys.sh, every machine
-#       but a Mac). Its options reach hid_apple and hid_asus when they load in
-#       the initramfs, and the pre-built initramfs loads them without, as
-#       Limine's pre-built UKI does, until the first kernel update builds the
-#       machine's own.
-PREBUILT_INITRAMFS_IGNORED_INPUTS = (
-    f"etc/mkinitcpio.conf.d/{INITRAMFS_MODULES_CONF}",
-    "etc/modprobe.d/omarchy-toprow.conf",
-)
-PREBUILT_INITRAMFS = "var/lib/omarchy-iso/prebuilt-initramfs.img"
-
-
-def _initramfs_inputs(root: Path) -> dict[str, str]:
-    """INITRAMFS_INPUTS under root as {relative path: sha256}, read the way
-    build-root-image.sh records them: every file, a symlink hashed as the name
-    it points to (readlink's output, newline included)."""
-    inputs: dict[str, str] = {}
-
-    def add(path: Path) -> None:
-        relative = path.relative_to(root).as_posix()
-        if path.is_symlink():
-            inputs[relative] = hashlib.sha256((os.readlink(path) + "\n").encode()).hexdigest()
-        elif path.is_dir():
-            for child in path.iterdir():
-                add(child)
-        elif path.is_file():
-            inputs[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
-
-    for name in INITRAMFS_INPUTS:
-        path = root / name
-        if path.is_symlink() or path.exists():
-            add(path)
-    return inputs
-
-
 def _recorded_initramfs_inputs(recorded: Path) -> dict[str, str]:
-    """build-root-image.sh's prebuilt-initramfs.inputs, "sha256  path" lines."""
+    """A pre-built image's inputs as build-root-image.sh records them
+    (prebuilt-uki-qualcomm.inputs): "sha256  path" lines."""
     inputs = {}
     for line in recorded.read_text().splitlines():
         digest, _, path = line.partition("  ")
         if path:
             inputs[path] = digest
     return inputs
-
-
-def _changed_initramfs_inputs(target: Path) -> list[str]:
-    """The inputs of the target's initramfs that differ from those the image's
-    pre-built one was made from, PREBUILT_INITRAMFS_IGNORED_INPUTS aside."""
-    recorded = target / "var" / "lib" / "omarchy-iso" / "prebuilt-initramfs.inputs"
-    if not recorded.is_file():
-        return ["(no record of the image's)"]
-    image = _recorded_initramfs_inputs(recorded)
-    machine = _initramfs_inputs(target)
-    changed = {path for path in image.keys() | machine.keys() if image.get(path) != machine.get(path)}
-    return sorted(changed - set(PREBUILT_INITRAMFS_IGNORED_INPUTS))
-
-
-def _prebuilt_initramfs(ctx: InstallContext) -> str:
-    """The `--initramfs PKGBASE=FILE` argument that hands omarchy-boot-switch
-    install the image's pre-built initramfs (build-root-image.sh), or "" when
-    this machine builds its own.
-
-    The image's kernel as it was built, the image's keymap (an initramfs has
-    no room to write another into, so another layout builds here), no aarch64
-    board with a platform of its own, and nothing it is built from changed on
-    the machine: unlike Limine's pre-built UKI, which has a configuration of
-    its own, the initramfs is built from the target's, so the modules a
-    hardware script adds and the provisioning key's drop-in each change an
-    input. An ESP the install shares with another system builds here too: the
-    generic boot image is about twice the machine's own. BIOS doesn't reach
-    systemd-boot, and an image whose omarchy-boot-rebuild can't take the file
-    carries none (build-root-image.sh)."""
-    records = ctx.target / "var" / "lib" / "omarchy-iso"
-    image = ctx.target / PREBUILT_INITRAMFS
-    if not image.is_file():
-        return ""
-    if ctx.is_protected:
-        info("› the ESP is shared with another system; building the smaller machine-specific boot image here")
-        return ""
-    kernel_file, kver_file = records / "prebuilt-initramfs.kernel", records / "prebuilt-initramfs.kver"
-    kernel = kernel_file.read_text().strip() if kernel_file.is_file() else ""
-    kver = kver_file.read_text().strip() if kver_file.is_file() else ""
-    pkgbase = ctx.target / "usr" / "lib" / "modules" / kver / "pkgbase" if kver else None
-    if not kernel or not pkgbase or not pkgbase.is_file() or pkgbase.read_text().strip() != kernel:
-        info(f"› the pre-built initramfs is for {kernel or 'a kernel'} {kver}, which isn't installed; "
-             "building the boot image on this machine")
-        return ""
-
-    use = True
-    stale_keymap = _prebuilt_uki_keymap_stale(ctx.target, "prebuilt-initramfs.keymap")
-    if stale_keymap:
-        info(f"› keyboard layout {stale_keymap} differs from the pre-built initramfs's; "
-             "building the boot image on this machine so the LUKS prompt uses it")
-        use = False
-    if _arm_platform_boot():
-        info("› this board boots by its platform's rules; building the boot image on this machine")
-        use = False
-    changed = _changed_initramfs_inputs(ctx.target)
-    if changed:
-        info(f"› the initramfs configuration differs from the image's ({', '.join(changed)}); "
-             "building the boot image on this machine")
-        use = False
-    if not use:
-        return ""
-    info(f"› using the pre-built initramfs for {kernel} ({image.stat().st_size >> 20} MiB)")
-    return f"{kernel}=/{PREBUILT_INITRAMFS}"
 
 
 def finalize_systemd_boot(ctx: InstallContext) -> None:
@@ -4404,9 +4288,7 @@ def finalize_systemd_boot(ctx: InstallContext) -> None:
     of this install will: the boot store, mkinitcpio, a UKI per kernel with
     snapshot profiles, loader.conf and the fallback loader. The pre-built UKI
     is Limine's fast path and isn't used: the boot images carry Omarchy's own
-    snapshot and restore hooks, which it lacks. The image's pre-built initramfs
-    has them, and stands in for mkinitcpio on the image's kernel wherever the
-    machine changed nothing it is built from (_prebuilt_initramfs)."""
+    snapshot and restore hooks, which it lacks."""
     _skip_unused_t2_preset(ctx)
 
     snapper_root = ctx.target / "etc" / "snapper" / "configs" / "root"
@@ -4430,13 +4312,7 @@ def finalize_systemd_boot(ctx: InstallContext) -> None:
     if selected:
         command += ["--prefer", selected]
         info(f"› {selected} boots first")
-    prebuilt = _prebuilt_initramfs(ctx)
-    if prebuilt:
-        command += ["--initramfs", prebuilt]
-        label = "BOOT.omarchy-boot-switch install (pre-built initramfs from the image)"
-    else:
-        label = "BOOT.omarchy-boot-switch install (boot images built on this machine)"
-    with _time_step(label):
+    with _time_step("BOOT.omarchy-boot-switch install (boot images built on this machine)"):
         subprocess.run(command, check=True)
 
     subprocess.run(
@@ -4444,7 +4320,6 @@ def finalize_systemd_boot(ctx: InstallContext) -> None:
         check=False,
         capture_output=True,
     )
-    _remove_prebuilt_initramfs(ctx)
 
 
 def finalize_limine_boot(ctx: InstallContext) -> None:
@@ -4681,7 +4556,6 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     # validate_boot checks the cmdline that install ends up with.
     if "cryptdevice=" in cmdline and not used_prebuilt_uki and "cryptdevice=" not in limine_conf.read_text():
         raise RuntimeError(f"encrypted install but {limine_conf} has no cryptdevice=")
-    _remove_prebuilt_initramfs(ctx)
 
 
 def _strip_shell_quotes(value: str) -> str:

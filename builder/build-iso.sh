@@ -1452,7 +1452,10 @@ stage_snapdragon_firmware() {
     done < <(pacman --config "$online_pacman_conf" --dbpath /tmp/offlinedb -Sp \
       --print-format '%n %f' "$OMARCHY_KERNEL" "${qcom_oem_firmware[@]}")
     [[ -n $qcom_kernel_file ]] || { echo "ERROR: $OMARCHY_KERNEL is not in the offline mirror" >&2; exit 1; }
-    bash /builder/qualcomm/stage-medium-firmware.sh "${qcom_tree_packages[@]}" "$offline_mirror_dir/$qcom_kernel_file" \
+    bash /builder/qualcomm/stage-medium-firmware.sh \
+      --zap-out "$provided_root/usr/lib/firmware" \
+      --zap-manifest "$provided_root/usr/share/omarchy-iso/qcom-live-zap.list" \
+      "${qcom_tree_packages[@]}" "$offline_mirror_dir/$qcom_kernel_file" \
       "$root_image_dir/qcom-firmware" "${qcom_firmware_files[@]}"
     stage_live_qcom_provided_lists "$provided_root" "${qcom_firmware_files[@]}"
   fi
@@ -1688,6 +1691,16 @@ if (( overlap_mkarchiso )); then
     mkdir -p "$pacstrap_airootfs/usr/share/qcom-firmware-extract/provided.d"
     cp -a "$qcom_provided_dir/usr/share/qcom-firmware-extract/provided.d/." \
       "$pacstrap_airootfs/usr/share/qcom-firmware-extract/provided.d/"
+  fi
+  if [[ -n $OMARCHY_SNAPDRAGON && -d $qcom_provided_dir/usr/lib/firmware ]]; then
+    while IFS= read -r -d '' rel; do
+      install -Dm0644 "$qcom_provided_dir/usr/lib/firmware/$rel" \
+        "$pacstrap_airootfs/usr/lib/firmware/$rel"
+    done < <(cd "$qcom_provided_dir/usr/lib/firmware" && find . -type f -printf '%P\0')
+  fi
+  if [[ -n $OMARCHY_SNAPDRAGON && -f $qcom_provided_dir/usr/share/omarchy-iso/qcom-live-zap.list ]]; then
+    install -Dm0644 "$qcom_provided_dir/usr/share/omarchy-iso/qcom-live-zap.list" \
+      "$pacstrap_airootfs/usr/share/omarchy-iso/qcom-live-zap.list"
   fi
   rm -rf "$qcom_provided_dir"
 

@@ -487,8 +487,17 @@ class DedupAndBuildIsoTest(unittest.TestCase):
             (qcom / "glymur" / "adsp.mbn").write_bytes(b"adsp")
             (qcom / "venus-6.0").mkdir()
             (qcom / "venus-6.0" / "vpu.mbn").write_bytes(b"vpu")
+            zenbook = qcom / "x1p42100" / "ASUSTeK" / "zenbook-14-ux3480qa"
+            zenbook.mkdir(parents=True)
+            (zenbook / "qcdxkmsucpurwa.mbn.xz").write_bytes(b"zap")
+            (zenbook / "qcadsp8380.mbn.xz").write_bytes(b"adsp")
+            (zenbook / "qcvss8380.mbn.xz").write_bytes(b"vpu")
+            (qcom / "x1p42100" / "gen71500_zap.mbn.zst").write_bytes(b"genzap")
+            (zenbook / "board_custom_zap.mbn").write_bytes(b"customzap")
+            manifest = Path(tmp) / "qcom-live-zap.list"
+            manifest.write_text("qcom/x1p42100/ASUSTeK/zenbook-14-ux3480qa/board_custom_zap.mbn\n")
             res = subprocess.run(
-                ["bash", "-euo", "pipefail", "-c", f'fw="{fw}"\n{m.group(0)}'],
+                ["bash", "-euo", "pipefail", "-c", f'fw="{fw}"\nOMARCHY_QCOM_ZAP_MANIFEST="{manifest}"\n{m.group(0)}'],
                 capture_output=True, text=True, check=True,
             )
             self.assertEqual(res.returncode, 0)
@@ -496,6 +505,11 @@ class DedupAndBuildIsoTest(unittest.TestCase):
             self.assertTrue((qcom / "gen80100_gmu.bin.zst").is_file())
             self.assertTrue((qcom / "gen70500_sqe.fw").is_file())
             self.assertTrue((qcom / "a740_sqe.fw").is_file())
+            self.assertTrue((zenbook / "qcdxkmsucpurwa.mbn.xz").is_file())
+            self.assertTrue((qcom / "x1p42100" / "gen71500_zap.mbn.zst").is_file())
+            self.assertTrue((zenbook / "board_custom_zap.mbn").is_file())
+            self.assertFalse((zenbook / "qcadsp8380.mbn.xz").exists())
+            self.assertFalse((zenbook / "qcvss8380.mbn.xz").exists())
             self.assertFalse((qcom / "glymur").exists())
             self.assertFalse((qcom / "venus-6.0").exists())
 

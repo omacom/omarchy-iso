@@ -18,8 +18,9 @@ firmware = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(firmware)
 
 
-def dtb(compatible='qcom,x1e80100-adsp-pas', name='qcom/vendor/adsp.mbn'):
-    strings = b'model\0compatible\0firmware-name\0'
+def dtb(compatible='qcom,x1e80100-adsp-pas', name='qcom/vendor/adsp.mbn',
+        zap=None, zap_status='okay', gpu_status='okay'):
+    strings = b'model\0compatible\0firmware-name\0status\0'
     data = bytearray()
     def word(n): data.extend(struct.pack('>I', n))
     def text(value):
@@ -29,7 +30,15 @@ def dtb(compatible='qcom,x1e80100-adsp-pas', name='qcom/vendor/adsp.mbn'):
     word(1); text(b'\0'); prop(0, b'Test board\0')
     word(1); text(b'remoteproc@1000\0')
     prop(6, compatible.encode()+b'\0'); prop(17, name.encode()+b'\0')
-    word(2); word(2); word(9)
+    word(2)
+    if zap is not None:
+        word(1); text(b'gpu@3d00000\0')
+        prop(31, gpu_status.encode()+b'\0')
+        word(1); text(b'zap-shader\0')
+        prop(17, zap.encode()+b'\0')
+        prop(31, zap_status.encode()+b'\0')
+        word(2); word(2)
+    word(2); word(9)
     return struct.pack('>10I', 0xd00dfeed,56+len(data)+len(strings),56,56+len(data),40,17,16,0,len(strings),len(data))+bytes(16)+data+strings
 
 
@@ -69,6 +78,22 @@ class FirmwareTests(unittest.TestCase):
             result=subprocess.run(['python3',script,'--required',str(manifest)],capture_output=True,text=True)
             self.assertEqual(result.stdout,'qcom/vendor/adsp.mbn\n',result.stderr)
 
+    def test_zap_shaders_lists_only_enabled_gpu_zap_nodes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            a = root / 'a.dtb'
+            b = root / 'b.dtb'
+            c = root / 'c.dtb'
+            a.write_bytes(dtb(name='qcom/vendor/adsp.mbn', zap='qcom/x1p42100/ASUSTeK/zenbook/qcdxkmsucpurwa.mbn'))
+            b.write_bytes(dtb(name='qcom/other/adsp.mbn', zap='qcom/disabled/qcdxkmsuc.mbn', zap_status='disabled'))
+            c.write_bytes(dtb(name='qcom/other2/adsp.mbn', zap='qcom/disabled-parent/qcdxkmsuc.mbn', gpu_status='disabled'))
+            manifest = root / 'dtbs.list'
+            manifest.write_text(f'{a}\n{b}\n{c}\n')
+            script = str(ROOT / 'builder/qualcomm/early-firmware.py')
+            result = subprocess.run(['python3', script, '--zap-shaders', str(manifest)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, 'qcom/x1p42100/ASUSTeK/zenbook/qcdxkmsucpurwa.mbn\n')
+
 
 class StageMediumFirmwareTests(unittest.TestCase):
     """Run the real medium-firmware staging against synthetic packages."""
@@ -90,8 +115,12 @@ class StageMediumFirmwareTests(unittest.TestCase):
                 info=tarfile.TarInfo(member); info.type=tarfile.SYMTYPE; info.linkname=target; tar.addfile(info)
         return str(path)
 
-    def stage(self,kernel,*packages,trees=()):
+    def stage(self,kernel,*packages,trees=(),zap_out=None,zap_manifest=None):
         flags=[arg for package in trees for arg in ('--trees',package)]
+        if zap_out is not None:
+            flags.extend(['--zap-out',str(zap_out)])
+        if zap_manifest is not None:
+            flags.extend(['--zap-manifest',str(zap_manifest)])
         return subprocess.run(['bash',str(self.SCRIPT),*flags,kernel,str(self.out),*packages],capture_output=True,text=True)
 
     def staged(self):
@@ -114,6 +143,32 @@ class StageMediumFirmwareTests(unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(self.staged(),['SHA256SUMS','qcom/other/audio-dsp.mbn.zst','qcom/vendor/qcadsp8380.mbn.xz'])
         self.assertIn('2 files',result.stdout)
+
+    def test_zap_out_stages_oem_gpu_zap_shaders_separately_from_medium_adsp(self):
+        kernel=self.package('kernel.pkg.tar',{
+            self.DTBS+'x1p42100-asus-zenbook-14-ux3480qa.dtb':dtb(
+                name='qcom/x1p42100/ASUSTeK/zenbook/qcadsp8380.mbn',
+                zap='qcom/x1p42100/ASUSTeK/zenbook/qcdxkmsucpurwa.mbn',
+            ),
+        })
+        oem=self.package('oem.pkg.tar',{
+            self.FW+'x1p42100/ASUSTeK/zenbook/qcadsp8380.mbn.xz':b'adsp',
+            self.FW+'x1p42100/ASUSTeK/zenbook/qcdxkmsucpurwa.mbn.xz':b'zap',
+            self.FW+'x1p42100/ASUSTeK/zenbook/qcvss8380.mbn.xz':b'vpu',
+        })
+        zap_out=self.root/'live-fw'
+        (zap_out/'preexisting.bin').parent.mkdir(parents=True,exist_ok=True)
+        (zap_out/'preexisting.bin').write_bytes(b'keep')
+        zap_manifest=self.root/'qcom-live-zap.list'
+        result=self.stage(kernel,oem,zap_out=zap_out,zap_manifest=zap_manifest)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('1 GPU zap-shader files staged',result.stdout)
+        # Medium ADSP directory has only the required ADSP blob and its SHA256SUMS.
+        self.assertEqual(self.staged(),['SHA256SUMS','qcom/x1p42100/ASUSTeK/zenbook/qcadsp8380.mbn.xz'])
+        # Live firmware directory receives only the tiny GPU zap shader, not ADSP or VPU.
+        zap_files=sorted(str(p.relative_to(zap_out)) for p in zap_out.rglob('*') if p.is_file())
+        self.assertEqual(zap_files,['preexisting.bin','qcom/x1p42100/ASUSTeK/zenbook/qcdxkmsucpurwa.mbn.xz'])
+        self.assertEqual(zap_manifest.read_text(),'qcom/x1p42100/ASUSTeK/zenbook/qcdxkmsucpurwa.mbn.xz\n')
 
     def test_sha256sums_is_what_the_boot_hook_reads(self):
         kernel=self.package('kernel.pkg.tar',{self.DTBS+'x1e80100-vendor-laptop.dtb':dtb(name='qcom/vendor/adsp.mbn')})

@@ -82,19 +82,50 @@ def firmware_inventory(dtbs):
     return inventory
 
 
+def node_enabled(nodes, path):
+    """Return True when path and every ancestor node in DT are enabled."""
+    parts = path.split('/')
+    for idx in range(len(parts)):
+        ancestor = '/'.join(parts[:idx + 1])
+        node = nodes.get(ancestor)
+        if node is not None and node.get('status', b'okay\0').rstrip(b'\0') not in (b'okay', b'ok'):
+            return False
+    return True
+
+
+def zap_shader_firmware(dtbs):
+    """List GPU zap-shader firmware named by enabled /zap-shader nodes."""
+    names = set()
+    for dtb in dtbs:
+        nodes = properties(dtb)
+        for path, node in nodes.items():
+            if not (path == 'zap-shader' or path.endswith('/zap-shader')):
+                continue
+            if not node_enabled(nodes, path):
+                continue
+            names.update(strings(node.get('firmware-name', b'')))
+    return sorted(names)
+
+
 def main():
     # --required lists only what starting the firmware owner needs: the files
     # the ISO stages on the medium (stage-medium-firmware.sh).
+    # --zap-shaders lists the tiny per-board Adreno GPU zap shaders the live
+    # root needs so msm finishes GPU init before Try Omarchy soft-reboots.
     args = sys.argv[1:]
-    required_only = args[:1] == ['--required']
-    if required_only:
+    mode = 'all'
+    if args[:1] in (['--required'], ['--zap-shaders']):
+        mode = args[0]
         args = args[1:]
     if len(args) != 1:
-        raise SystemExit('usage: early-firmware.py [--required] DTB-LIST')
-    dtbs = [Path(line) for line in Path(args[0]).read_text().splitlines()]
-    inventory = firmware_inventory([path.read_bytes() for path in dtbs])
-    names = sorted({name for board in inventory
-                    for name in board['required'] + ([] if required_only else board['optional'])})
+        raise SystemExit('usage: early-firmware.py [--required|--zap-shaders] DTB-LIST')
+    dtbs = [Path(line).read_bytes() for line in Path(args[0]).read_text().splitlines() if line.strip()]
+    if mode == '--zap-shaders':
+        names = zap_shader_firmware(dtbs)
+    else:
+        inventory = firmware_inventory(dtbs)
+        names = sorted({name for board in inventory
+                        for name in board['required'] + ([] if mode == '--required' else board['optional'])})
     for name in names:
         if Path(name).is_absolute() or '..' in Path(name).parts or any(c in name for c in '*?[]\\\n\r'):
             raise RuntimeError('Unsafe device-tree firmware name: ' + repr(name))

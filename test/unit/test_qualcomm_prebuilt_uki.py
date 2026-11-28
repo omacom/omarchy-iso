@@ -235,6 +235,14 @@ class QualcommPrebuiltUkiTests(unittest.TestCase):
                 "FILES+=(/usr/lib/firmware/qcom/extra.bin)\n"
             )
             self.assertIsNone(self.check())
+            # Conditional inline FILES+= entry must also trigger a full rebuild.
+            (self.conf / "qcom-firmware.conf").write_text(
+                "_qcom_fw_files=(/usr/lib/firmware/qcom/x1p42100/ASUSTeK/zenbook/zap.mbn.xz)\n"
+                "_qcom_fw_names=(qcom/x1p42100/ASUSTeK/zenbook/zap.mbn)\n"
+                "FILES+=(\"$_qcom_fw_found\")\n"
+                "[[ -f /usr/lib/firmware/qcom/extra.bin ]] && FILES+=(/usr/lib/firmware/qcom/extra.bin)\n"
+            )
+            self.assertIsNone(self.check())
 
     def test_optional_module_lookup_with_target_module_tree(self):
         from unittest.mock import patch
@@ -246,7 +254,10 @@ class QualcommPrebuiltUkiTests(unittest.TestCase):
         (kdir / "modules.dep").write_text("kernel/drivers/soc/qcom/present_mod.ko.zst:\n")
         (self.state / "prebuilt-uki.kernel").write_text("linux-omarchy\n")
 
+        seen_cmds = []
+
         def fake_modinfo(cmd, **kwargs):
+            seen_cmds.append(list(cmd))
             mod = cmd[-1]
             if mod == "present_mod":
                 return subprocess.CompletedProcess(
@@ -254,16 +265,22 @@ class QualcommPrebuiltUkiTests(unittest.TestCase):
                 )
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="modinfo: ERROR: Module not found.\n")
 
+        expected_prefix = ["modinfo", "--basedir", str(self.target), "-k", kdir.name, "-F", "filename"]
         with patch("orchestrator.phases_impl.subprocess.run", side_effect=fake_modinfo):
             # Absent optional module (smem?) is skipped cleanly.
             (self.conf / "qualcomm-platform.conf").write_text("MODULES+=(pinctrl-glymur? smem?)\n")
             self.assertEqual(self.check(), self.state / "prebuilt-uki-qualcomm.efi")
+            self.assertEqual(seen_cmds, [[*expected_prefix, "smem"]])
+            seen_cmds.clear()
             # Present optional module not covered by prebuilt UKI forces rebuild.
             (self.conf / "qualcomm-platform.conf").write_text("MODULES+=(pinctrl-glymur? present_mod?)\n")
             self.assertIsNone(self.check())
-            # Required absent module (no trailing ?) forces rebuild.
+            self.assertEqual(seen_cmds, [[*expected_prefix, "present_mod"]])
+            seen_cmds.clear()
+            # Required absent module (no trailing ?) forces rebuild without calling modinfo.
             (self.conf / "qualcomm-platform.conf").write_text("MODULES+=(pinctrl-glymur? smem)\n")
             self.assertIsNone(self.check())
+            self.assertEqual(seen_cmds, [])
 
     def test_adsp_blacklist_and_unexpected_modprobe_build_their_own(self):
         (self.modprobe / "qualcomm-adsp-nofw.conf").write_text("blacklist qcom_q6v5_pas\n")

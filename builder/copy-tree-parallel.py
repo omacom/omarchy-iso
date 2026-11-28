@@ -24,12 +24,38 @@ SYNC_FILE_RANGE_WRITE = 2
 # accumulating uncommitted delalloc metadata reservations and stalling workers
 # in handle_reserve_ticket.
 SYNC_THRESHOLD = 2048
+SMALL_LOCALITY_CUTOFF = 8192
 
 _libc = ctypes.CDLL(None, use_errno=True)
 _sync_file_range = getattr(_libc, "sync_file_range", None)
 if _sync_file_range is not None:
     _sync_file_range.argtypes = [ctypes.c_int, ctypes.c_longlong, ctypes.c_longlong, ctypes.c_uint]
     _sync_file_range.restype = ctypes.c_int
+
+
+def _usable_cpus():
+    try:
+        ncpus = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        ncpus = os.cpu_count() or 1
+    try:
+        with open("/sys/fs/cgroup/cpu.max", "r", encoding="utf-8") as f:
+            parts = f.read().split()
+        if len(parts) == 2 and parts[0] != "max":
+            quota, period = int(parts[0]), int(parts[1])
+            if quota > 0 and period > 0:
+                ncpus = min(ncpus, max(1, quota // period))
+    except (OSError, ValueError):
+        try:
+            with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", "r", encoding="utf-8") as qf, \
+                 open("/sys/fs/cgroup/cpu/cpu.cfs_period_us", "r", encoding="utf-8") as pf:
+                quota = int(qf.read().strip())
+                period = int(pf.read().strip())
+            if quota > 0 and period > 0:
+                ncpus = min(ncpus, max(1, quota // period))
+        except (OSError, ValueError):
+            pass
+    return max(1, ncpus)
 
 
 def _copy_xattrs(src, dst, *, follow_symlinks=True):
@@ -87,6 +113,21 @@ def _copy_regular_file(job):
             os.close(dfd)
     finally:
         os.close(sfd)
+
+
+def _regular_sort_key(item):
+    # Largest files first so huge binaries/fonts compress concurrently from t=0.
+    # Below 8 KiB, group non-inline (2-8 KiB) and inline (<= 2 KiB) files by
+    # extension and path so adjacent extents and metadata leaves share similar
+    # content inside mksquashfs's 256 KiB zstd blocks.
+    sp, _, st = item
+    sz = st.st_size
+    if sz >= SMALL_LOCALITY_CUTOFF:
+        return (0, -sz, sp)
+    ext = os.path.splitext(sp)[1]
+    if sz > SYNC_THRESHOLD:
+        return (1, ext, sp)
+    return (2, ext, sp)
 
 
 def copy_tree(src_root, dst_root, workers=None):
@@ -156,10 +197,9 @@ def copy_tree(src_root, dst_root, workers=None):
                 _copy_xattrs(sp, dp, follow_symlinks=False)
                 os.utime(dp, ns=(st.st_atime_ns, st.st_mtime_ns))
 
-    # Largest files first so huge binaries/fonts compress concurrently from t=0.
-    regulars.sort(key=lambda item: item[2].st_size, reverse=True)
+    regulars.sort(key=_regular_sort_key)
     if workers is None:
-        workers = max(1, os.cpu_count() or 1)
+        workers = _usable_cpus()
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for _ in pool.map(_copy_regular_file, regulars):
             pass

@@ -51,21 +51,9 @@ python3 "$here/early-firmware.py" --required "$work/dtbs.list" >"$work/wanted"
 
 rm -rf "$out"
 mkdir -p "$out"
-for package in "$@"; do
-  # Each wanted name, in any compression the firmware loader accepts.
-  mapfile -t members < <(bsdtar -tf "$package" | awk '
-    NR == FNR {
-      want["usr/lib/firmware/" $0] = 1
-      want["usr/lib/firmware/" $0 ".xz"] = 1
-      want["usr/lib/firmware/" $0 ".zst"] = 1
-      next
-    }
-    $0 in want
-  ' "$work/wanted" -)
-  (( ${#members[@]} )) || continue
-  bsdtar -xf "$package" -C "$out" --strip-components 3 "${members[@]}"
-done
-
+if (( $# > 0 )); then
+  python3 "$here/extract-firmware.py" firmware "$work/wanted" "$work" "$out" "$@"
+fi
 # A symlink would be left out of SHA256SUMS and the hook could not check it.
 if links=$(find "$out" -type l) && [[ -n $links ]]; then
   echo "stage-medium-firmware: firmware shipped as a symlink, which the medium cannot check:" >&2

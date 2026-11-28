@@ -25,13 +25,9 @@ qcom_oem_firmware_packages() {
 # firmware for a package the install omits and huge linux-firmware-* archives
 # are never scanned.
 stage_live_qcom_provided_lists() {
-  local target_airootfs=$1 pkg entries
-  local -a lists=()
+  local target_airootfs=$1 here
   shift
-  for pkg in "$@"; do
-    entries=$(bsdtar -tf "$pkg") || return 1
-    mapfile -t lists < <(printf '%s\n' "$entries" | grep -E '^usr/share/qcom-firmware-extract/provided\.d/[^/]+\.list$' || true)
-    (( ${#lists[@]} > 0 )) || continue
-    bsdtar -xf "$pkg" -C "$target_airootfs" "${lists[@]}" || return 1
-  done
+  (( $# > 0 )) || return 0
+  here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+  python3 "$here/qualcomm/extract-firmware.py" provided-lists "$target_airootfs" "$@"
 }

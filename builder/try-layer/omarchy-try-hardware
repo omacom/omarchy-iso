@@ -65,6 +65,46 @@ rules_files() {
   done | sort
 }
 
+# True when a udev rule line contains only GOTO=/LABEL= flow control and pure
+# match comparisons (== or !=, excluding command-running PROGRAM/IMPORT keys).
+is_flow_control_rule() {
+  local rest=$1 has_flow=0 tok="" ch in_quote=0 escaped=0 i len=${#1}
+  local -a tokens=()
+  for ((i = 0; i < len; i++)); do
+    ch=${rest:i:1}
+    if ((escaped)); then
+      tok+=$ch
+      escaped=0
+    elif ((in_quote)) && [[ $ch == \\ ]]; then
+      tok+=$ch
+      escaped=1
+    elif [[ $ch == \" ]]; then
+      tok+=$ch
+      in_quote=$((1 - in_quote))
+    elif [[ $ch == , ]] && ((!in_quote)); then
+      tokens+=("$tok")
+      tok=""
+    else
+      tok+=$ch
+    fi
+  done
+  ((!in_quote)) || return 1
+  tokens+=("$tok")
+  for tok in "${tokens[@]}"; do
+    [[ $tok =~ ^[[:space:]]*$ ]] && continue
+    if [[ $tok =~ ^[[:space:]]*(GOTO|LABEL)[[:space:]]*=[[:space:]]*\"[^\"]+\"[[:space:]]*$ ]]; then
+      has_flow=1
+    elif [[ $tok =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)(\{[^}]+\})?[[:space:]]*(==|!=)[[:space:]]*[ie]?\"[^\"]*\"[[:space:]]*$ ]]; then
+      case ${BASH_REMATCH[1]} in
+        PROGRAM | IMPORT) return 1 ;;
+      esac
+    else
+      return 1
+    fi
+  done
+  ((has_flow))
+}
+
 # An add event for the devices a rules file's lines name, by SUBSYSTEM== and
 # KERNEL==, one trigger per line, as udevadm's matches for one call combine
 # across lines. Only lines an add event reaches: no ACTION==, or one that lists
@@ -93,6 +133,12 @@ replay_add() {
     [[ $line =~ (^|[[:space:],])KERNEL==\"([^\"]+)\" ]] && kernel=${BASH_REMATCH[2]}
     [[ $line =~ (^|[[:space:],])ATTR\{idVendor\}==\"([^\"]+)\" ]] && vendor=${BASH_REMATCH[2]}
     [[ $line =~ (^|[[:space:],])ATTR\{idProduct\}==\"([^\"]+)\" ]] && product=${BASH_REMATCH[2]}
+    # Pure flow-control lines (LABEL="..." or match-only ... GOTO="...") apply
+    # no device setting on their own; the device rules inside the jump target
+    # are replayed individually below.
+    if is_flow_control_rule "$line"; then
+      continue
+    fi
     if [[ -z $subsystem && -z $kernel ]]; then
       echo "Try Omarchy: a rule in ${1##*/} names no device by SUBSYSTEM or KERNEL; it applies at the next boot" >&2
       continue

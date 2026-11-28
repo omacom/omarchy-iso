@@ -644,6 +644,51 @@ grep -qx 'udevadm trigger --action=add --subsystem-match=usb --attr-match=idVend
 grep -qx 'udevadm trigger --action=add --subsystem-match=usb --attr-match=idVendor=04b4 --attr-match=idVendor=05ac' "$hw/calls" ||
   fail "pipe-separated idVendor values were not split: $(cat "$hw/calls")"
 rm -f "$hw/root/etc/udev/rules.d/90-multiline.rules"
+# Pure GOTO/LABEL flow-control guards (such as 90-asus-zenbook-14-ux3480qa-power.rules)
+# are skipped silently, while action-bearing rules without SUBSYSTEM/KERNEL still warn.
+: >"$hw/err"
+cat >"$hw/omarchy/bin/omarchy-apply-hardware-goto" <<'EOF'
+#!/bin/bash
+cat >"$HW/root/etc/udev/rules.d/90-goto.rules" <<'RULES'
+ATTR{[dmi/id]sys_vendor}=="ASUS*", ATTR{[dmi/id]board_name}=="UX3480QA*", GOTO="ux_start"
+GOTO = "ux_end", ENV{FOO}=="1"
+SUBSYSTEM=="pci", ENV{FOO}==i"bar", GOTO="ux_end"
+LABEL="ux_start"
+ACTION=="add|change", SUBSYSTEM=="pci", ATTR{power/control}="auto"
+LABEL="ux_end"
+RULES
+EOF
+chmod +x "$hw/omarchy/bin/omarchy-apply-hardware-goto"
+mv "$hw/omarchy/bin/omarchy-apply-hardware" "$hw/omarchy/bin/omarchy-apply-hardware.orig"
+mv "$hw/omarchy/bin/omarchy-apply-hardware-goto" "$hw/omarchy/bin/omarchy-apply-hardware"
+run_hardware bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system 2>"$hw/err" ||
+  fail "the session's hardware setup failed on GOTO/LABEL rules"
+mv "$hw/omarchy/bin/omarchy-apply-hardware.orig" "$hw/omarchy/bin/omarchy-apply-hardware"
+[[ ! -s $hw/err ]] || fail "GOTO/LABEL flow-control lines printed unexpected warnings: $(cat "$hw/err")"
+grep -qx 'udevadm trigger --action=add --subsystem-match=pci' "$hw/calls" ||
+  fail "guarded PCI rule after LABEL was not replayed: $(cat "$hw/calls")"
+rm -f "$hw/root/etc/udev/rules.d/90-goto.rules"
+# Action-bearing rules combined with GOTO (without SUBSYSTEM/KERNEL) must still warn.
+: >"$hw/err"
+cat >"$hw/omarchy/bin/omarchy-apply-hardware-goto-act" <<'EOF'
+#!/bin/bash
+cat >"$HW/root/etc/udev/rules.d/90-goto-act.rules" <<'RULES'
+RUN{program}+="/usr/bin/true", GOTO="ux_end"
+SYSCTL{kernel/sysrq}="1", GOTO="ux_end"
+IMPORT{builtin}=="hwdb", GOTO="ux_end"
+PROGRAM!="/usr/bin/false", GOTO="ux_end"
+ENV{FOO} = "bar", GOTO="ux_end"
+RULES
+EOF
+chmod +x "$hw/omarchy/bin/omarchy-apply-hardware-goto-act"
+mv "$hw/omarchy/bin/omarchy-apply-hardware" "$hw/omarchy/bin/omarchy-apply-hardware.orig"
+mv "$hw/omarchy/bin/omarchy-apply-hardware-goto-act" "$hw/omarchy/bin/omarchy-apply-hardware"
+run_hardware bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system 2>"$hw/err" ||
+  fail "the session's hardware setup failed on action+GOTO rules"
+mv "$hw/omarchy/bin/omarchy-apply-hardware.orig" "$hw/omarchy/bin/omarchy-apply-hardware"
+[[ $(grep -c '90-goto-act.rules names no device' "$hw/err") == 5 ]] ||
+  fail "action-bearing GOTO rules were silently skipped: $(cat "$hw/err")"
+rm -f "$hw/root/etc/udev/rules.d/90-goto-act.rules"
 rm -rf "$hw/root/etc/systemd/system/multi-user.target.wants" "$hw/root/etc/systemd/system/hibernate.target.wants"
 run_hardware bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system || fail "the session's hardware setup failed with nothing to do"
 [[ $(<"$hw/calls") == "pacman -Sy --noconfirm

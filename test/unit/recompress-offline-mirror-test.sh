@@ -90,3 +90,29 @@ actual_sha=$(sha256sum "$mirror/lvl3-1.0-1-any.pkg.tar.zst" | awk '{print $1}')
 [[ -f "$db_dir/already-long-1.0-1/desc" && -f "$db_dir/archlinuxarm-keyring-1.0-1/desc" ]] ||
   fail "untouched packages disappeared from offline.db"
 echo "ok - recompresses lvl3 packages, updates offline.db, keeps keyring sig and high-window packages"
+
+# Parallel LPT pool with multiple candidates removes stale .sig files, updates
+# offline.db deterministically, and leaves archlinuxarm-keyring untouched.
+mirror_par="$fixture/mirror-par"
+mkdir -p "$mirror_par"
+make_pkg "$mirror_par" lvl3-a -3
+make_pkg "$mirror_par" lvl3-b -3
+make_pkg "$mirror_par" archlinuxarm-keyring -3
+repo-add -q "$mirror_par/offline.db.tar.gz" "$mirror_par"/*.pkg.tar.zst >/dev/null 2>&1
+rm -f "$mirror_par"/offline.db*.old "$mirror_par"/offline.files*.old
+
+par_out=$(OMARCHY_FAST_COMPRESSION=0 OMARCHY_RECOMPRESS_THREADS=2 bash "$script" "$mirror_par")
+grep -q "repacked 2 of 2 packages (" <<<"$par_out" ||
+  fail "expected 2 of 2 repacked in parallel run, got: $par_out"
+[[ ! -e "$mirror_par/lvl3-a-1.0-1-any.pkg.tar.zst.sig" && ! -e "$mirror_par/lvl3-b-1.0-1-any.pkg.tar.zst.sig" ]] ||
+  fail "stale .sig remained after parallel recompression"
+[[ -f "$mirror_par/archlinuxarm-keyring-1.0-1-any.pkg.tar.zst.sig" ]] ||
+  fail "archlinuxarm-keyring .sig was removed in parallel run"
+
+db_par="$fixture/db-par"
+mkdir -p "$db_par"
+bsdtar -xf "$mirror_par/offline.db.tar.gz" -C "$db_par"
+par_db_sha=$(awk '/^%SHA256SUM%$/ { getline; print }' "$db_par/lvl3-a-1.0-1/desc")
+par_actual_sha=$(sha256sum "$mirror_par/lvl3-a-1.0-1-any.pkg.tar.zst" | awk '{print $1}')
+[[ $par_db_sha == "$par_actual_sha" ]] || fail "parallel offline.db SHA256SUM mismatch"
+echo "ok - parallel LPT pool repacks candidates, updates offline.db, and keeps keyring sig"

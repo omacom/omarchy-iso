@@ -195,6 +195,46 @@ class StageMediumFirmwareTests(unittest.TestCase):
         self.assertNotEqual(result.returncode,0)
         self.assertIn('symlink',result.stderr)
 
+    def test_stream_tar_drains_trailing_padding_beyond_pipe_buffer(self):
+        ext_spec = importlib.util.spec_from_file_location(
+            'extract_firmware', ROOT / 'builder/qualcomm/extract-firmware.py'
+        )
+        ext = importlib.util.module_from_spec(ext_spec)
+        ext_spec.loader.exec_module(ext)
+
+        fake_bin = self.root / 'fake-bin'
+        fake_bin.mkdir()
+        fake_bsdtar = fake_bin / 'bsdtar'
+        fake_bsdtar.write_text(
+            "#!/usr/bin/env python3\n"
+            "import io, sys, tarfile\n"
+            "buf = io.BytesIO()\n"
+            "with tarfile.open(fileobj=buf, mode='w') as tf:\n"
+            "    info = tarfile.TarInfo('usr/lib/firmware/qcom/test.mbn')\n"
+            "    payload = b'ok'\n"
+            "    info.size = len(payload)\n"
+            "    tf.addfile(info, io.BytesIO(payload))\n"
+            "try:\n"
+            "    sys.stdout.buffer.write(buf.getvalue())\n"
+            "    # Write >64 KiB of trailing padding after the tar EOF blocks so a\n"
+            "    # reader that closes stdout early triggers BrokenPipeError.\n"
+            "    sys.stdout.buffer.write(b'\\0' * (256 * 1024))\n"
+            "    sys.stdout.buffer.flush()\n"
+            "except BrokenPipeError:\n"
+            "    sys.stderr.write('bsdtar: Write error\\n')\n"
+            "    sys.exit(1)\n"
+        )
+        fake_bsdtar.chmod(0o755)
+
+        seen = []
+        old_path = os.environ.get('PATH', '')
+        os.environ['PATH'] = f"{fake_bin}:{old_path}"
+        try:
+            ext._stream_tar('dummy.pkg', lambda _tf, m: seen.append(m.name))
+        finally:
+            os.environ['PATH'] = old_path
+        self.assertEqual(seen, ['usr/lib/firmware/qcom/test.mbn'])
+
     def test_symlink_followed_by_regular_file_cannot_overwrite_outside_file(self):
         sentinel=self.root/'outside-sentinel.txt'
         sentinel.write_bytes(b'intact')

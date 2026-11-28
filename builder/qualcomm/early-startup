@@ -331,9 +331,12 @@ run_earlyhook() {
         }
     done
     # Do not deadlock a deferred firmware probe by waiting before its suppliers
-    # can autoload. No filesystems are mounted by initramfs udev coldplug.
+    # can autoload, while keeping USB host controllers out of this trigger so
+    # udev cannot autoload dwc3-qcom/xhci-plat-hcd before firmware and Type-C
+    # setup finish. No filesystems are mounted by initramfs udev coldplug.
     udevadm trigger --action=add --type=subsystems &&
-        udevadm trigger --action=add --type=devices || {
+        udevadm trigger --action=add --type=devices \
+            --attr-nomatch=modalias='*dwc3*' --attr-nomatch=modalias='*xhci*' || {
             qcom_startup_fail 'cannot trigger firmware suppliers'; return 1;
         }
     qcom_startup_wait || return 1
@@ -342,6 +345,10 @@ run_earlyhook() {
         # shellcheck disable=SC2086
         modprobe -qab $preload_usb || qcom_startup_log 'some USB preload modules were unavailable'
     fi
+    udevadm trigger --action=add --type=devices \
+        --attr-match=modalias='*dwc3*' --attr-match=modalias='*xhci*' || {
+        qcom_startup_fail 'cannot trigger USB host controllers'; return 1;
+    }
 }
 
 qcom_startup_mount() {

@@ -394,9 +394,12 @@ run_hook || :
         self.assertIn('Type-C ports registered before disk search', self.kmsg)
         self.assertLess(events.index('module phy-qcom-qmp-combo'), events.index('module qcom_q6v5_pas'))
         self.assertLess(events.index('module ps883x'), events.index('module qcom_q6v5_pas'))
+        self.assertIn("udev trigger --action=add --type=devices --attr-nomatch=modalias=*dwc3* --attr-nomatch=modalias=*xhci*", events)
+        self.assertLess(events.index('--attr-nomatch=modalias=*dwc3*'), events.index('typec-ready'))
         self.assertLess(events.index('module ucsi_glink'), events.index('typec-ready'))
         self.assertLess(events.index('typec-ready'), events.index('module dwc3-qcom'))
         self.assertLess(events.index('typec-ready'), events.index('module xhci-plat-hcd'))
+        self.assertLess(events.index('typec-ready'), events.index('--attr-match=modalias=*dwc3*'))
         self.assertTrue(events.endswith('mounted /sysroot\n'), events)
 
     def test_missing_typec_ports_does_not_block_mount(self):

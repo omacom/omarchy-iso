@@ -54,22 +54,30 @@ upper="$work/upper"
 merged="$work/merged"
 
 try_bg_pids=()
+stop_pid_tree() {
+  local pid=$1 child
+  for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+    stop_pid_tree "$child"
+  done
+  kill -TERM "$pid" 2>/dev/null || true
+}
 cleanup() {
   local status=$? pid
   set +e
   if (( ${#try_bg_pids[@]} > 0 )); then
     for pid in "${try_bg_pids[@]}"; do
-      kill -TERM "$pid" 2>/dev/null || true
+      stop_pid_tree "$pid"
     done
     wait "${try_bg_pids[@]}" 2>/dev/null || true
   fi
   if mountpoint -q "$work" 2>/dev/null; then
-    umount -R "$work" || { echo "WARNING: $work is still mounted; leaving it" >&2; return $status; }
+    umount -R "$work" || { sleep 0.2; umount -R "$work" || { echo "WARNING: $work is still mounted; leaving it" >&2; return $status; }; }
   fi
   rm -rf "$work"
   return $status
 }
 trap cleanup EXIT
+trap 'exit 143' TERM INT
 
 # On a tmpfs of its own: overlayfs refuses an upper directory on another
 # overlay, which is what /tmp is inside the build container.

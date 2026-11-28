@@ -27,6 +27,15 @@ build() {
         [[ -n $firmware ]] || continue
         add_firmware "$firmware" || warning "Qualcomm device-tree firmware unavailable: $firmware"
     done <<<"$names"
+    # Adreno X1 / X2 GPU microcode (~200 KiB compressed): msm requests these
+    # once when it binds early in boot, so keeping them in the live UKI ensures
+    # the GPU stays initialized across soft-reboot into Try Omarchy.
+    for firmware in \
+        qcom/gen70500_sqe.fw qcom/gen70500_gmu.bin \
+        qcom/gen71500_sqe.fw qcom/gen71500_gmu.bin \
+        qcom/gen80100_sqe.fw qcom/gen80100_gmu.bin; do
+        add_firmware "$firmware" || warning "Qualcomm Adreno GPU firmware unavailable: $firmware"
+    done
     add_runscript
 }
 

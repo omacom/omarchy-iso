@@ -244,8 +244,42 @@ qcom_startup_wait() {
     qcom_startup_log "firmware started: $qcom_startup_profile=$qcom_startup_current"
 }
 
+qcom_startup_has_pmic_glink() {
+    local file
+    for file in /sys/bus/platform/devices/*/of_node/compatible; do
+        [ -r "$file" ] || continue
+        if [ -r "${file%compatible}status" ] &&
+            ! grep -Eq '^(okay|ok)' "${file%compatible}status"; then
+            continue
+        fi
+        if grep -Fq 'qcom,pmic-glink' "$file"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+qcom_startup_wait_typec() {
+    local deadline port
+    qcom_startup_has_pmic_glink || return 0
+    deadline=$(( $(qcom_startup_now) + 5 ))
+    while :; do
+        for port in /sys/class/typec/port*; do
+            if [ -e "$port" ]; then
+                qcom_startup_note 'Type-C ports registered before disk search'
+                return 0
+            fi
+        done
+        if [ "$(qcom_startup_now)" -ge "$deadline" ]; then
+            qcom_startup_note 'Type-C ports did not appear within 5 s; continuing'
+            return 0
+        fi
+        sleep 0.1
+    done
+}
+
 run_earlyhook() {
-    local module timeout
+    local module timeout preload_other='' preload_usb=''
     [ "$(getarg omarchy.qcom_early)" = 1 ] || return 0
     qcom_startup_active=1
     qcom_startup_failed=''
@@ -271,10 +305,23 @@ run_earlyhook() {
     esac
     qcom_startup_preflight || return 1
     [ "$qcom_startup_active" = 1 ] || return 0
+    # Defer USB host controller preloads until after SOCCP/ADSP attaches and
+    # pmic_glink registers the Type-C ports, so orientation and mode
+    # notifications reach the combo PHY and retimers before USB-C sticks
+    # enumerate (otherwise a mid-boot PHY reconfigure can reset UAS drives).
+    for module in ${MODULES:-}; do
+        case "$module" in
+            dwc3-qcom|dwc3_qcom|dwc3-qcom-legacy|dwc3_qcom_legacy|xhci-plat-hcd|xhci_plat_hcd)
+                preload_usb="$preload_usb $module" ;;
+            *)
+                preload_other="$preload_other $module" ;;
+        esac
+    done
     # Providers from the source image's normal preload list must bind too.
     # A failed optional preload is diagnosed by the required processor check.
-    if [ -n "${MODULES:-}" ]; then
-        modprobe -qab $MODULES || qcom_startup_log 'some source preload modules were unavailable'
+    if [ -n "$preload_other" ]; then
+        # shellcheck disable=SC2086
+        modprobe -qab $preload_other || qcom_startup_log 'some source preload modules were unavailable'
     fi
     # Explicit modprobe bypasses the alias blacklist; automatic coldplug keeps
     # respecting it on the legacy path. Load QRTR without waiting for Wi-Fi.
@@ -284,12 +331,24 @@ run_earlyhook() {
         }
     done
     # Do not deadlock a deferred firmware probe by waiting before its suppliers
-    # can autoload. No filesystems are mounted by initramfs udev coldplug.
+    # can autoload, while keeping USB host controllers out of this trigger so
+    # udev cannot autoload dwc3-qcom/xhci-plat-hcd before firmware and Type-C
+    # setup finish. No filesystems are mounted by initramfs udev coldplug.
     udevadm trigger --action=add --type=subsystems &&
-        udevadm trigger --action=add --type=devices || {
+        udevadm trigger --action=add --type=devices \
+            --attr-nomatch=modalias='*dwc3*' --attr-nomatch=modalias='*xhci*' || {
             qcom_startup_fail 'cannot trigger firmware suppliers'; return 1;
         }
-    qcom_startup_wait
+    qcom_startup_wait || return 1
+    qcom_startup_wait_typec
+    if [ -n "$preload_usb" ]; then
+        # shellcheck disable=SC2086
+        modprobe -qab $preload_usb || qcom_startup_log 'some USB preload modules were unavailable'
+    fi
+    udevadm trigger --action=add --type=devices \
+        --attr-match=modalias='*dwc3*' --attr-match=modalias='*xhci*' || {
+        qcom_startup_fail 'cannot trigger USB host controllers'; return 1;
+    }
 }
 
 qcom_startup_mount() {

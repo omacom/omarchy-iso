@@ -479,6 +479,33 @@ class DedupAndBuildIsoTest(unittest.TestCase):
         self.assertNotIn("for iso in /out/*.iso; do", text)
         self.assertLess(text.index('chown -R "$HOST_UID:$HOST_GID" /out/'), text.index("iso_fail_bytes="))
 
+    def test_customize_airootfs_keeps_adreno_gpu_firmware_and_drops_qcom_dsp(self):
+        script = (ROOT / "configs/airootfs/root/customize_airootfs.sh").read_text()
+        m = re.search(r"if \[\[ -d \$fw/qcom \]\]; then.*?\n  fi", script, re.S)
+        self.assertIsNotNone(m)
+        with tempfile.TemporaryDirectory() as tmp:
+            fw = Path(tmp) / "firmware"
+            qcom = fw / "qcom"
+            (qcom / "glymur").mkdir(parents=True)
+            (qcom / "gen80100_sqe.fw.zst").write_bytes(b"sqe")
+            (qcom / "gen80100_gmu.bin.zst").write_bytes(b"gmu")
+            (qcom / "gen70500_sqe.fw").write_bytes(b"sqe7")
+            (qcom / "a740_sqe.fw").write_bytes(b"a740")
+            (qcom / "glymur" / "adsp.mbn").write_bytes(b"adsp")
+            (qcom / "venus-6.0").mkdir()
+            (qcom / "venus-6.0" / "vpu.mbn").write_bytes(b"vpu")
+            res = subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", f'fw="{fw}"\n{m.group(0)}'],
+                capture_output=True, text=True, check=True,
+            )
+            self.assertEqual(res.returncode, 0)
+            self.assertTrue((qcom / "gen80100_sqe.fw.zst").is_file())
+            self.assertTrue((qcom / "gen80100_gmu.bin.zst").is_file())
+            self.assertTrue((qcom / "gen70500_sqe.fw").is_file())
+            self.assertTrue((qcom / "a740_sqe.fw").is_file())
+            self.assertFalse((qcom / "glymur").exists())
+            self.assertFalse((qcom / "venus-6.0").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

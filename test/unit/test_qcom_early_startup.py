@@ -17,7 +17,7 @@ class EarlyStartup(unittest.TestCase):
                  timeout='3', disabled=False, kernel_blacklist='',
                  firmware_names=('qcom/vendor/adsp.mbn', 'qcom/vendor/adsp_dtb.mbn'),
                  firmware_files=None, driver_loaded=False, medium=None, medium_sums=None,
-                 uuid=''):
+                 uuid='', modules='', pmic_glink=False):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             def write(name, text):
@@ -67,6 +67,11 @@ class EarlyStartup(unittest.TestCase):
                 write('usr/lib/firmware/'+firmware, 'firmware')
             if driver_loaded:
                 (root/'sys/module/qcom_q6v5_pas').mkdir(parents=True)
+            if pmic_glink:
+                write('dt/pmic-glink/compatible', 'qcom,glymur-pmic-glink\0qcom,pmic-glink\0')
+                gdev = root/'sys/bus/platform/devices/pmic-glink'
+                gdev.mkdir(parents=True)
+                (gdev/'of_node').symlink_to(root/'dt/pmic-glink')
             # Relocate all filesystem access in the production hook. There is
             # no production environment override for reading a different sysfs.
             paths = ('/proc/device-tree/', '/proc/sys/kernel/', '/usr/lib/firmware', '/sys/', '/dev/kmsg',
@@ -86,6 +91,13 @@ getarg() {
  esac
 }
 modprobe() {
+ if [ "$1" = -qab ]; then
+   shift
+   for m in "$@"; do
+     printf 'module %s\n' "$m" >>"$ROOT/events"
+   done
+   return 0
+ fi
  printf 'module %s\n' "$1" >>"$ROOT/events"
  [ "$MODE:$1" != fail:qcom_q6v5_pas ] && [ "$MODE" != "fail-module:$1" ]
 }
@@ -124,6 +136,10 @@ sleep() {
  if [ "$MODE" = delay ] && [ "$n" -eq 2 ]; then
    printf 'running\n' >"$ROOT/sys/class/remoteproc/remoteproc7/state"
  fi
+ if [ "$MODE" = typec-delay ] && [ "$n" -eq 2 ]; then
+   mkdir -p "$ROOT/sys/class/typec/port0"
+   printf 'typec-ready\n' >>"$ROOT/events"
+ fi
 }
 original_mount() { printf 'mounted %s\n' "$*" >>"$ROOT/events"; }
 . "$ROOT/hook"
@@ -137,7 +153,7 @@ run_hook || :
             harness += before_mount + '\n"$mount_handler" /sysroot\n'
             env = os.environ | {'ROOT': tmp, 'MODE': mode, 'ENABLED': enabled, 'PATH':str(root/'bin'),
                                 'BLACKLIST': blacklist, 'KERNEL_BLACKLIST': kernel_blacklist,
-                                'TIMEOUT': timeout, 'UUID': uuid}
+                                'TIMEOUT': timeout, 'UUID': uuid, 'MODULES': modules}
             shell = os.environ.get('QCOM_TEST_SHELL', '/bin/sh')
             command = [shell]
             if Path(shell).name == 'busybox':
@@ -367,6 +383,34 @@ run_hook || :
                 self.assertNotIn('udev', events)
                 self.assertNotIn('mount -r', events)
                 self.assertEqual(self.firmware, [])
+
+    def test_usb_host_preloads_wait_for_soccp_and_typec_registration(self):
+        result, events = self.run_case(
+            profile='soccp', state='attached', firmware_files=(),
+            modules='phy-qcom-qmp-combo dwc3-qcom xhci-plat-hcd ps883x',
+            pmic_glink=True, mode='typec-delay',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('Type-C ports registered before disk search', self.kmsg)
+        self.assertLess(events.index('module phy-qcom-qmp-combo'), events.index('module qcom_q6v5_pas'))
+        self.assertLess(events.index('module ps883x'), events.index('module qcom_q6v5_pas'))
+        self.assertIn("udev trigger --action=add --type=devices --attr-nomatch=modalias=*dwc3* --attr-nomatch=modalias=*xhci*", events)
+        self.assertLess(events.index('--attr-nomatch=modalias=*dwc3*'), events.index('typec-ready'))
+        self.assertLess(events.index('module ucsi_glink'), events.index('typec-ready'))
+        self.assertLess(events.index('typec-ready'), events.index('module dwc3-qcom'))
+        self.assertLess(events.index('typec-ready'), events.index('module xhci-plat-hcd'))
+        self.assertLess(events.index('typec-ready'), events.index('--attr-match=modalias=*dwc3*'))
+        self.assertTrue(events.endswith('mounted /sysroot\n'), events)
+
+    def test_missing_typec_ports_does_not_block_mount(self):
+        result, events = self.run_case(
+            profile='soccp', state='attached', firmware_files=(),
+            modules='dwc3-qcom xhci-plat-hcd', pmic_glink=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('Type-C ports did not appear within 5 s; continuing', self.kmsg)
+        self.assertIn('module dwc3-qcom', events)
+        self.assertTrue(events.endswith('mounted /sysroot\n'), events)
 
 
 if __name__ == '__main__':

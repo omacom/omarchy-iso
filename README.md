@@ -114,7 +114,7 @@ Scenarios in `test/integration.d/` install the ISO once (unattended via cidata) 
 ```
 
 - `factory-reset` fixtures Windows and foreign Linux boot entries on the ESP (and Limine entries on BIOS), runs `omarchy-system-factory-reset`, and asserts foreign entries survive while the old Omarchy identity is retired.
-- `corrupt-image` flips one byte inside `omarchy-root.sfs` (located via `xorriso`) and proves `omarchy-root-image-verify.service` halts pre-flight with "re-flash" before touching the disk (runs standalone with `OMARCHY_INTEGRATION_ISO`).
+- `corrupt-image` flips one byte inside `omarchy-root.sfs` (located via `xorriso`) and checks that a failed `omarchy-root-image-verify.service` halts pre-flight with "re-flash" and leaves a disk containing an existing filesystem byte-for-byte unchanged (runs standalone with `OMARCHY_INTEGRATION_ISO`).
 
 ### Upgrade testing
 

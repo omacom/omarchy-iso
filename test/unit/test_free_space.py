@@ -435,18 +435,29 @@ class PhasesIntegrationTests(unittest.TestCase):
                                           "efi_start_b": 1, "efi_end_b": 2,
                                           "root_start_b": 2, "root_end_b": 3, "encrypt": True})
             order = []
-            with mock.patch.object(phases, "verify_install_medium", side_effect=lambda _: order.append("medium")),                     mock.patch.object(phases, "validate_free_space_plan", side_effect=lambda _: order.append("plan")),                     mock.patch.object(phases, "verify_protected_mounts", side_effect=AssertionError("must not run")):
+            with (
+                mock.patch.object(phases, "verify_install_medium", side_effect=lambda _: order.append("medium")),
+                mock.patch.object(phases, "validate_free_space_plan", side_effect=lambda _: order.append("plan")),
+                mock.patch.object(phases, "verify_protected_mounts", side_effect=AssertionError("must not run")),
+                mock.patch.object(phases, "_prepare_archinstall_config", side_effect=lambda _: order.append("config")),
+            ):
                 phases.prepare_install_target(ctx)
-            self.assertEqual(order, ["medium", "plan"])
+            self.assertEqual(order, ["medium", "plan", "config"])
 
     def test_prepare_install_target_preserves_caller_pre_mounted_config(self):
         phases = self._load_phases()
         with tempfile.TemporaryDirectory() as tmpdir:
             ctx = make_ctx(Path(tmpdir), None)
             order = []
-            with mock.patch.object(phases, "verify_protected_mounts", side_effect=lambda _: order.append("mounts")),                     mock.patch.object(phases, "_root_image_target_mounts", return_value=([], "/dev/mapper/omarchy_root")),                     mock.patch.object(phases, "verify_pre_mounted_root_empty", side_effect=lambda *_: order.append("empty")),                     mock.patch.object(phases, "verify_install_medium", side_effect=lambda _: order.append("medium")):
+            with (
+                mock.patch.object(phases, "verify_protected_mounts", side_effect=lambda _: order.append("mounts")),
+                mock.patch.object(phases, "_root_image_target_mounts", return_value=([], "/dev/mapper/omarchy_root")),
+                mock.patch.object(phases, "verify_pre_mounted_root_empty", side_effect=lambda *_: order.append("empty")),
+                mock.patch.object(phases, "verify_install_medium", side_effect=lambda _: order.append("medium")),
+                mock.patch.object(phases, "_prepare_archinstall_config", side_effect=lambda _: order.append("config")),
+            ):
                 phases.prepare_install_target(ctx)
-            self.assertEqual(order, ["mounts", "empty", "medium"])
+            self.assertEqual(order, ["mounts", "empty", "medium", "config"])
 
     def test_cleanup_protected_state_rolls_back_only_created_parts(self):
         phases = self._load_phases()

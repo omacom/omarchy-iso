@@ -541,6 +541,8 @@ def _publish_verify_progress(ctx: InstallContext, helper_done: threading.Event |
     def hashing(state: str) -> bool:
         return state == "activating" and not (helper_done and helper_done.is_set())
 
+    if helper_done and helper_done.is_set():
+        return
     try:
         image = ROOT_IMAGE.stat().st_size
     except OSError:
@@ -549,34 +551,52 @@ def _publish_verify_progress(ctx: InstallContext, helper_done: threading.Event |
     mirror_total = sum(size for _, size in mirror)
     total = image + mirror_total
     if mirror:
-        state = _verify_state_when_started(MIRROR_VERIFY_UNIT)
+        state = _verify_state_when_started(MIRROR_VERIFY_UNIT, helper_done)
         while hashing(state):
             done = _mirror_bytes_hashed(mirror)
             if done is not None:
                 _write_phase_progress(ctx, done / total)
-            time.sleep(0.5)
+            if _verify_wait(0.5, helper_done):
+                return
             state = _verify_unit_property("ActiveState", MIRROR_VERIFY_UNIT)
+        if helper_done and helper_done.is_set():
+            return
         # The image's unit starts once the mirror's is done (the mirror's is
         # ordered Before= it).
-        image_state = _verify_state_when_started(ROOT_IMAGE_VERIFY_UNIT)
+        image_state = _verify_state_when_started(ROOT_IMAGE_VERIFY_UNIT, helper_done)
     else:
+        if helper_done and helper_done.is_set():
+            return
         image_state = _verify_unit_property("ActiveState")
     while image and hashing(image_state):
         pos = _hasher_read_pos()
         if pos is not None:
             _write_phase_progress(ctx, (mirror_total + pos) / total)
-        time.sleep(0.5)
+        if _verify_wait(0.5, helper_done):
+            return
         image_state = _verify_unit_property("ActiveState")
 
 
-def _verify_state_when_started(unit: str) -> str:
+def _verify_wait(seconds: float, helper_done: threading.Event | None) -> bool:
+    """Wait up to `seconds`, returning True immediately when helper_done fires."""
+    if helper_done is not None:
+        return helper_done.wait(seconds)
+    time.sleep(seconds)
+    return False
+
+
+def _verify_state_when_started(unit: str, helper_done: threading.Event | None = None) -> str:
     """A verify unit's ActiveState, given a moment to leave inactive: one
     ordered after another sits there until systemd starts its queued job."""
+    state = "inactive"
     for _ in range(10):
+        if helper_done and helper_done.is_set():
+            return state
         state = _verify_unit_property("ActiveState", unit)
         if state != "inactive":
             return state
-        time.sleep(0.2)
+        if _verify_wait(0.2, helper_done):
+            return state
     return state
 
 

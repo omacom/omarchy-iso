@@ -95,7 +95,7 @@ await_verdict() {
   UNIT=$1
   local what=$2 load_state state tail msg
   local reported=false settling=0 unanswered=0
-  local where last_where="" last_move=$SECONDS starting=""
+  local where last_where="" last_move=$SECONDS last_check=-1 starting=""
   load_state=$(unit_prop LoadState)
   [[ -n $load_state ]] || fail "systemd is not answering about $UNIT; cannot verify $what"
   [[ $load_state == loaded ]] || fail "$UNIT is not on this live system; cannot verify $what"
@@ -170,14 +170,17 @@ await_verdict() {
         # (the slow-medium scenario's 256 KB/s does); a read hung in the driver
         # does not. No offset to read (between files, /proc gone) is not a
         # stall: the timeout still stands behind it.
-        if where=$(hash_where); then
-          if [[ $where != "$last_where" ]]; then
-            last_where=$where last_move=$SECONDS
-          elif ((SECONDS - last_move >= ${OMARCHY_VERIFY_STALL_SECONDS:-60})); then
-            fail "install medium stopped responding: try another USB stick or port"$'\n'"reading $what made no progress for $((SECONDS - last_move)) s"
+        if ((SECONDS > last_check)); then
+          last_check=$SECONDS
+          if where=$(hash_where); then
+            if [[ $where != "$last_where" ]]; then
+              last_where=$where last_move=$SECONDS
+            elif ((SECONDS - last_move >= ${OMARCHY_VERIFY_STALL_SECONDS:-60})); then
+              fail "install medium stopped responding: try another USB stick or port"$'\n'"reading $what made no progress for $((SECONDS - last_move)) s"
+            fi
           fi
         fi
-        sleep 0.5
+        sleep 0.1
         ;;
       deactivating)
         # A start timeout stops the unit before it settles into failed, and the

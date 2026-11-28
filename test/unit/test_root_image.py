@@ -274,6 +274,88 @@ class PublishVerifyProgressTest(unittest.TestCase):
             phases_impl._publish_verify_progress(ctx=None)
         show.assert_not_called()
 
+    def test_helper_done_wakes_progress_wait_immediately(self):
+        import threading
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stream = (Path(tmp) / "omarchy-root.sfs").resolve()
+            stream.write_bytes(b"\0" * 4096)
+            entered = threading.Event()
+            done = threading.Event()
+
+            with mock.patch.object(phases_impl, "ROOT_IMAGE", stream), \
+                 mock.patch.object(phases_impl, "_mirror_files", return_value=[]), \
+                 mock.patch.object(phases_impl, "_verify_unit_property", return_value="activating"), \
+                 mock.patch.object(phases_impl, "_hasher_read_pos", return_value=1024), \
+                 mock.patch.object(phases_impl, "_write_phase_progress", side_effect=lambda *_: entered.set()):
+                thread = threading.Thread(
+                    target=phases_impl._publish_verify_progress, args=(None, done), daemon=True,
+                )
+                thread.start()
+                self.assertTrue(entered.wait(timeout=2))
+                t0 = time.monotonic()
+                done.set()
+                thread.join(timeout=2)
+                elapsed = time.monotonic() - t0
+            self.assertFalse(thread.is_alive())
+            self.assertLess(elapsed, 0.2)
+
+    def test_helper_done_wakes_mirror_and_startup_waits_immediately(self):
+        import threading
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stream = (Path(tmp) / "omarchy-root.sfs").resolve()
+            stream.write_bytes(b"\0" * 4096)
+            pkg = (Path(tmp) / "a.pkg.tar.zst").resolve()
+            pkg.write_bytes(b"\1" * 1024)
+
+            # Mirror loop wakeup
+            entered = threading.Event()
+            done = threading.Event()
+            with mock.patch.object(phases_impl, "ROOT_IMAGE", stream), \
+                 mock.patch.object(phases_impl, "_mirror_files", return_value=[(pkg, 1024)]), \
+                 mock.patch.object(phases_impl, "_verify_unit_property", return_value="activating"), \
+                 mock.patch.object(phases_impl, "_mirror_bytes_hashed", return_value=512), \
+                 mock.patch.object(phases_impl, "_write_phase_progress", side_effect=lambda *_: entered.set()):
+                thread = threading.Thread(
+                    target=phases_impl._publish_verify_progress, args=(None, done), daemon=True,
+                )
+                thread.start()
+                self.assertTrue(entered.wait(timeout=2))
+                t0 = time.monotonic()
+                done.set()
+                thread.join(timeout=2)
+                self.assertLess(time.monotonic() - t0, 0.2)
+
+            # _verify_state_when_started retry loop wakeup + short-circuit
+            probed = threading.Event()
+            done2 = threading.Event()
+
+            def fake_prop(*_args):
+                probed.set()
+                return "inactive"
+
+            with mock.patch.object(phases_impl, "_verify_unit_property", side_effect=fake_prop) as show:
+                thread = threading.Thread(
+                    target=phases_impl._verify_state_when_started,
+                    args=(phases_impl.MIRROR_VERIFY_UNIT, done2),
+                    daemon=True,
+                )
+                thread.start()
+                self.assertTrue(probed.wait(timeout=2))
+                t0 = time.monotonic()
+                done2.set()
+                thread.join(timeout=2)
+                self.assertLess(time.monotonic() - t0, 0.15)
+                self.assertEqual(show.call_count, 1)
+
+            # Already-set event makes _publish_verify_progress skip systemctl entirely
+            done3 = threading.Event()
+            done3.set()
+            with mock.patch.object(phases_impl, "_verify_unit_property") as show:
+                phases_impl._publish_verify_progress(None, done3)
+            show.assert_not_called()
+
 
 class PrepareInstallTargetTest(unittest.TestCase):
     """prepare_install_target wires the checks together per install mode."""

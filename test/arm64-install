@@ -202,10 +202,12 @@ check() { # description, then a command run in the guest that must succeed
   # crashing plymouthd with SIGSEGV inside udev_monitor_receive_device(). Ignore
   # only that exact core-dump so real plymouth or unit failures still fail CI.
   if [[ $(guest 'systemctl show -p Result --value plymouth-start.service' 2>/dev/null) == core-dump ]] &&
-     [[ $(guest 'systemctl show -p ExecMainStatus --value plymouth-start.service' 2>/dev/null) == 11 ]] &&
-     guest "echo $GUEST_PASSWORD | sudo -S -p '' systemctl status plymouth-start.service --no-pager --lines=40" 2>/dev/null | grep -q 'udev_monitor_receive_device'; then
-    echo "arm64-install: ignoring known upstream plymouthd quit-time SEGV in udev_monitor_receive_device" >&2
-    failed_units+=" | grep -v '^plymouth-start\\.service'"
+     [[ $(guest 'systemctl show -p ExecMainStatus --value plymouth-start.service' 2>/dev/null) == 11 ]]; then
+    plymouth_status=$(guest "echo $GUEST_PASSWORD | sudo -S -p '' systemctl status plymouth-start.service --no-pager --lines=40" 2>/dev/null || true)
+    if [[ $plymouth_status == *udev_monitor_receive_device* ]]; then
+      echo "arm64-install: ignoring known upstream plymouthd quit-time SEGV in udev_monitor_receive_device" >&2
+      failed_units+=" | grep -v '^plymouth-start\\.service'"
+    fi
   fi
   check "no unit failed" "[ -z \"\$($failed_units)\" ]"
   check "the desktop is up: Hyprland is running" 'for i in $(seq 1 60); do pgrep -x Hyprland && exit 0; sleep 1; done; exit 1'

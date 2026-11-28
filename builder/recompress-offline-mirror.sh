@@ -15,12 +15,14 @@
 # repo-add so %CSIZE% and %SHA256SUM% match.
 #
 # Candidates run largest-first (LPT) in parallel within strict CPU and memory
-# budgets (measured ~760 MiB RSS per active --ultra -22 --long=27 thread,
-# capped to <=25% of usable RAM and <=12 GiB on <64 GiB hosts so 16-32 GiB CI
-# runners never OOM alongside build-root-image.sh's tmpfs staging tree).
-# Multi-threaded jobs use -B64M --zstd=overlapLog=8 so large archives like
-# nvidia-utils scale across threads instead of stalling on zstd's default
-# 512 MiB jobSize.
+# budgets (measured ~730-760 MiB RSS per active --ultra -22 --long=27 thread,
+# respecting cgroup memory.max and cpu.max and reserving headroom for
+# build-root-image.sh's concurrent tmpfs staging tree). When two or more
+# >=256 MiB packages exist (e.g. nvidia-utils + linux-firmware-qcom on aarch64),
+# their token budgets are split so both run concurrently from t=0 instead of
+# serializing behind one another. Multi-threaded jobs use -B64M
+# --zstd=overlapLog=8 so large archives scale across threads instead of
+# stalling on zstd's default 512 MiB jobSize.
 #
 # Skipped under OMARCHY_FAST_COMPRESSION=1 so --fast builds stay quick.
 
@@ -55,13 +57,19 @@ import threading
 mirror_dir, work_dir, repacked_list_path, stats_path = sys.argv[1:5]
 
 WINDOW_THRESHOLD = 32 * 1024 * 1024
+LARGE_PKG_THRESHOLD = 256 * 1024 * 1024
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 # Measured peak RSS for zstd --ultra -22 --long=27 -B64M --zstd=overlapLog=8 is
 # ~730-760 MiB per active thread; 800 MiB/thread leaves safe headroom.
 PER_THREAD_MEM_BYTES = 800 * 1024 * 1024
-MAX_MEM_BUDGET_BYTES = 12 * 1024 * 1024 * 1024
-HIGH_MEM_HOST_THRESHOLD_BYTES = 64 * 1024 * 1024 * 1024
-HIGH_MEM_BUDGET_BYTES = 20 * 1024 * 1024 * 1024
+# 64 GiB hosts report ~62.8 GiB MemTotal and ~55-61 GiB MemAvailable when
+# recompression starts (before build-root-image.sh fills its ~11 GiB tmpfs);
+# 32 GiB CI runners report ~25-30 GiB MemAvailable at the same point.
+HIGH_MEM_HOST_THRESHOLD_BYTES = 48 * 1024 * 1024 * 1024
+HIGH_MEM_BUDGET_BYTES = 22 * 1024 * 1024 * 1024
+MID_MEM_HOST_THRESHOLD_BYTES = 24 * 1024 * 1024 * 1024
+MID_MEM_BUDGET_BYTES = 8 * 1024 * 1024 * 1024
+LOW_MEM_BUDGET_BYTES = 4 * 1024 * 1024 * 1024
 
 
 def zstd_window_size(path):
@@ -88,6 +96,31 @@ def zstd_window_size(path):
     if fcs_flag == 2:
         return struct.unpack_from("<I", hdr, fcs_off)[0] if len(hdr) >= fcs_off + 4 else None
     return struct.unpack_from("<Q", hdr, fcs_off)[0] if len(hdr) >= fcs_off + 8 else None
+
+
+def read_usable_cpus():
+    try:
+        ncpus = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        ncpus = os.cpu_count() or 1
+    try:
+        with open("/sys/fs/cgroup/cpu.max", "r", encoding="utf-8") as f:
+            parts = f.read().split()
+        if len(parts) == 2 and parts[0] != "max":
+            quota, period = int(parts[0]), int(parts[1])
+            if quota > 0 and period > 0:
+                ncpus = min(ncpus, max(1, quota // period))
+    except (OSError, ValueError):
+        try:
+            with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", "r", encoding="utf-8") as qf, \
+                 open("/sys/fs/cgroup/cpu/cpu.cfs_period_us", "r", encoding="utf-8") as pf:
+                quota = int(qf.read().strip())
+                period = int(pf.read().strip())
+            if quota > 0 and period > 0:
+                ncpus = min(ncpus, max(1, quota // period))
+        except (OSError, ValueError):
+            pass
+    return max(1, ncpus)
 
 
 def read_usable_memory_bytes():
@@ -161,10 +194,14 @@ if not candidates:
 # LPT (largest-first) so huge packages start at t=0 across parallel workers.
 candidates.sort(key=lambda item: (-item[0], item[1]))
 
-ncpus = max(1, os.cpu_count() or 1)
+ncpus = read_usable_cpus()
 usable_mem = read_usable_memory_bytes()
-mem_cap = HIGH_MEM_BUDGET_BYTES if usable_mem >= HIGH_MEM_HOST_THRESHOLD_BYTES else MAX_MEM_BUDGET_BYTES
-mem_budget = min(usable_mem // 4, mem_cap)
+if usable_mem >= HIGH_MEM_HOST_THRESHOLD_BYTES:
+    mem_budget = min((usable_mem * 2) // 5, HIGH_MEM_BUDGET_BYTES)
+elif usable_mem >= MID_MEM_HOST_THRESHOLD_BYTES:
+    mem_budget = min(usable_mem // 3, MID_MEM_BUDGET_BYTES)
+else:
+    mem_budget = min(usable_mem // 4, LOW_MEM_BUDGET_BYTES)
 total_threads = min(ncpus, max(1, mem_budget // PER_THREAD_MEM_BYTES))
 env_threads = os.environ.get("OMARCHY_RECOMPRESS_THREADS")
 if env_threads:
@@ -173,11 +210,17 @@ if env_threads:
     except ValueError:
         pass
 
+large_count = sum(1 for sz, _, _ in candidates if sz >= LARGE_PKG_THRESHOLD)
+first_large_threads = min(total_threads, 16, max(1, (total_threads * 4) // 7))
+other_large_threads = min(total_threads, 16, max(1, total_threads - first_large_threads))
 
-def threads_for_package(orig_size):
+
+def threads_for_package(orig_size, rank):
     if total_threads <= 1:
         return 1
-    if orig_size >= 256 * 1024 * 1024:
+    if orig_size >= LARGE_PKG_THRESHOLD:
+        if large_count >= 2:
+            return first_large_threads if rank == 0 else other_large_threads
         return min(total_threads, 16, max(1, (total_threads * 2) // 3))
     if orig_size >= 64 * 1024 * 1024:
         return min(total_threads, 4, max(1, total_threads // 4))
@@ -190,10 +233,10 @@ token_cond = threading.Condition()
 free_tokens = total_threads
 
 
-def process_one(item):
+def process_one(indexed_item):
     global free_tokens
-    orig_size, name, pkg = item
-    threads = threads_for_package(orig_size)
+    rank, (orig_size, name, pkg) = indexed_item
+    threads = threads_for_package(orig_size, rank)
     if threads > 1:
         zstd_args = [
             "zstd", "-q", f"-T{threads}", "--ultra", "-22", "--long=27",
@@ -259,7 +302,7 @@ def process_one(item):
 
 max_workers = min(len(candidates), total_threads)
 with ThreadPoolExecutor(max_workers=max_workers) as pool:
-    results = list(pool.map(process_one, candidates))
+    results = list(pool.map(process_one, enumerate(candidates)))
 
 repacked = sorted((r[3], r[4]) for r in results if r[0])
 before_bytes = sum(r[1] for r in results if r[0])

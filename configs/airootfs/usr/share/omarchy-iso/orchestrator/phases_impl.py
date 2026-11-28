@@ -4089,15 +4089,33 @@ def _qualcomm_qcom_firmware_files(target: Path) -> list[tuple[str, Path]] | None
     if not conf.is_file():
         return []
     text = conf.read_text(errors="ignore")
-    # Reject unexpected hooks/binaries/modules inside qcom-firmware.conf.
-    if re.search(r"^\s*(?:HOOKS|BINARIES|MODULES)\s*\+?=", text, re.M):
+    uncommented = "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+    # Reject unexpected hooks/binaries/modules anywhere in qcom-firmware.conf.
+    if re.search(r"(?:^|[\s;&|(])(?:HOOKS|BINARIES|MODULES)\s*\+?=", uncommented, re.M):
         return None
-    m_files = re.search(r"^\s*_qcom_fw_files=\(([^)]*)\)", text, re.M | re.S)
-    m_names = re.search(r"^\s*_qcom_fw_names=\(([^)]*)\)", text, re.M | re.S)
+    m_files = re.search(r"^\s*_qcom_fw_files=\(([^)]*)\)", uncommented, re.M | re.S)
+    m_names = re.search(r"^\s*_qcom_fw_names=\(([^)]*)\)", uncommented, re.M | re.S)
     if not m_files and not m_names:
         return None
 
     raw_files = [t.strip("'\"") for t in (m_files.group(1).split() if m_files else []) if t.strip("'\"")]
+    # Reject any FILES= / FILES+= assignment anywhere in the file (including
+    # inline conditionals like `[[ -f ... ]] && FILES+=(...)`) whose tokens fall
+    # outside the generated _qcom_fw_found loop or raw_files.
+    allowed_file_tokens = {"$_qcom_fw_found", "${_qcom_fw_found}", *raw_files}
+    for m_extra in re.finditer(r"(?:^|[\s;&|(])FILES(?:\[[^\]]*\])?\s*\+?=", uncommented, re.M):
+        rest = uncommented[m_extra.end():]
+        if rest.startswith("("):
+            close = rest.find(")")
+            if close < 0:
+                return None
+            body = rest[1:close]
+        else:
+            m_val = re.match(r"[^\s;&|]+", rest)
+            body = m_val.group(0) if m_val else ""
+        tokens = [tok.strip("'\"") for tok in body.split() if tok.strip("'\"")]
+        if not tokens or any(tok not in allowed_file_tokens for tok in tokens):
+            return None
     raw_names = [t.strip("'\"") for t in (m_names.group(1).split() if m_names else []) if t.strip("'\"")]
     count = max(len(raw_files), len(raw_names))
     if count == 0:

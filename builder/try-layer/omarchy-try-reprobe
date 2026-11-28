@@ -1,12 +1,13 @@
 #!/bin/bash
 #
-# Try Omarchy: probe again every PCI and USB device that has no driver.
-# omarchy-try-reprobe.service runs it once, early in a Try session.
+# Try Omarchy: probe again every PCI, USB, and platform audio device that has
+# no driver. omarchy-try-reprobe.service runs it once, early in a Try session.
 #
 # Try starts from the live installer by a soft reboot, which keeps the
 # kernel's drivers. The live system runs some devices without what they need
-# (no radio firmware, no SOF audio), and omarchy-try lets those go before the
-# soft reboot; a Wi-Fi driver may have released its card already. udev's
+# (no radio firmware, no SOF audio, no Qualcomm ASoC topology firmware), and
+# omarchy-try lets PCI controllers go before the soft reboot; a Wi-Fi or
+# platform ASoC sound card driver may have released its device already. udev's
 # coldplug in the session replays uevents without probing a driver that is
 # already loaded, so without this those devices stay without one: no Wi-Fi,
 # no sound. Written to drivers_probe, a device is matched again against every
@@ -17,5 +18,21 @@ sysfs=${OMARCHY_SYSFS:-/sys}
 for device in "$sysfs"/bus/pci/devices/* "$sysfs"/bus/usb/devices/*; do
   [[ -e $device && ! -e $device/driver ]] || continue
   printf '%s' "${device##*/}" >"${device%/devices/*}/drivers_probe" 2>/dev/null || true
+done
+
+# Snapdragon laptops expose audio as a Device Tree platform device (e.g.
+# "sound" with modalias of:Nsound...Cqcom,x1e80100-sndcard), not a PCI audio
+# controller. Re-probe only unbound platform sound devices so unrelated
+# platform devices (such as blacklisted remoteprocs) are left untouched.
+for device in "$sysfs"/bus/platform/devices/*; do
+  [[ -e $device && ! -e $device/driver ]] || continue
+  name=${device##*/}
+  modalias=""
+  [[ -r $device/modalias ]] && read -r modalias <"$device/modalias" || true
+  case "$name|$modalias" in
+    sound\|*|*sndcard*|*sound*)
+      printf '%s' "$name" >"$sysfs/bus/platform/drivers_probe" 2>/dev/null || true
+      ;;
+  esac
 done
 exit 0

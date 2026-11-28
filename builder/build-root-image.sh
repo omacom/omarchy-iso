@@ -155,7 +155,11 @@ write_layer() {
 install_layer_packages() {
   local merged=$1
   shift
-  pacstrap -C "$effective_pacman_conf" -c -G -M "$merged" --needed "$@" || return 1
+  # Keep hardware-probing ALPM hooks (60-ath12k-board-fallback.hook) from
+  # inspecting the build host's PCI tree and writing host-specific files into
+  # the layer.
+  ATH12K_BOARD_SYSFS=/nonexistent \
+    pacstrap -C "$effective_pacman_conf" -c -G -M "$merged" --needed "$@" || return 1
   # Skip redundant depmod/ldconfig when pacstrap's own 60-depmod.hook / libalpm
   # already wrote fresh indexes into this empty overlay upper directory.
   if [[ -z ${layer_upper:-} || ! -f $layer_upper/usr/lib/modules/$image_kver/modules.dep ]]; then
@@ -233,10 +237,11 @@ with_image_overlay() {
 # layer_matches, which only the installer runs.
 hardware_layers=${OMARCHY_HARDWARE_LAYERS:-}
 
-# The packages hardware layer file $1 installs on this build's architecture.
+# The packages hardware layer file $1 installs on this build's architecture
+# (and variant: layer_snapdragon=1 layers are packed only on Snapdragon ISOs).
 hardware_layer_packages() {
   # shellcheck disable=SC2016 # expanded by the inner shell
-  bash -c 'source "$1" && [[ $layer_arch == "$2" ]] && printf "%s\n" "${layer_packages[@]}"' _ "$1" "$(uname -m)"
+  bash -c 'source "$1" && [[ $layer_arch == "$2" ]] && [[ ${layer_snapdragon:-0} != 1 || -n ${OMARCHY_SNAPDRAGON:-} ]] && printf "%s\n" "${layer_packages[@]}"' _ "$1" "$(uname -m)"
 }
 
 # Omarchy's hardware scripts install these packages once the user exists, and

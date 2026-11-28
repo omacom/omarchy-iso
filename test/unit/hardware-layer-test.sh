@@ -123,6 +123,30 @@ touch "$work/sys/devices/platform/thinkpad_acpi/dytc_lapmode"
 sof_matches && fail "intel-sof-laptop matched a ThinkPad with DYTC lapmode"
 echo "ok - intel-sof-laptop does not match where any of its scripts would install nothing"
 
+# The ASUS Zenbook A16 (UX3607OA) Snapdragon layer matches only when every
+# script whose packages it carries would install them.
+a16_matches() {
+  # shellcheck disable=SC2016 # expanded by the inner shell
+  OMARCHY_INSTALL_KERNELS=${KERNELS-linux-omarchy} bash -c '
+    omarchy-hw-aarch64-qualcomm() { [[ ${NO_QCOM:-} != 1 ]]; }
+    omarchy-hw-match() { [[ $# == 1 && $1 == "UX3607OA" && ${NO_MODEL:-} != 1 ]]; }
+    omarchy-hw-pci() { [[ $# == 1 && $1 == "17cb:1112" && ${NO_WIFI:-} != 1 ]]; }
+    omarchy-audio-tuning() { [[ $1 == match && -n ${OMARCHY_PATH:-} && -n ${HOME:-} && ${NO_TUNING:-} != 1 ]]; }
+    source "$1"
+    layer_matches' _ "$layers/asus-zenbook-a16.layer"
+}
+
+a16_matches || fail "asus-zenbook-a16 did not match an ASUS Zenbook A16 UX3607OA"
+echo "ok - asus-zenbook-a16 matches an ASUS Zenbook A16 UX3607OA"
+
+NO_QCOM=1 a16_matches && fail "asus-zenbook-a16 matched without Qualcomm hardware"
+NO_MODEL=1 a16_matches && fail "asus-zenbook-a16 matched a different model"
+NO_WIFI=1 a16_matches && fail "asus-zenbook-a16 matched without the QCC2072 Wi-Fi card"
+NO_TUNING=1 a16_matches && fail "asus-zenbook-a16 matched without a speaker tuning"
+KERNELS="linux-omarchy linux-lts" a16_matches && fail "asus-zenbook-a16 matched with a second kernel"
+KERNELS="" a16_matches && fail "asus-zenbook-a16 matched without being told the kernels"
+echo "ok - asus-zenbook-a16 does not match where any of its scripts would install nothing"
+
 # A hardware layer is installed with --noscriptlet, and the packages that
 # carry a scriptlet are listed in pacman's order for the installer to run once
 # the user exists. Only what pacman installed after the given log line counts.
@@ -160,17 +184,22 @@ other=aarch64
 [[ $arch == aarch64 ]] && other=x86_64
 printf 'layer_arch=%s\nlayer_packages=(one two)\nlayer_matches() { :; }\n' "$arch" >"$hardware_layers/native.layer"
 printf 'layer_arch=%s\nlayer_packages=(three)\nlayer_matches() { :; }\n' "$other" >"$hardware_layers/foreign.layer"
+printf 'layer_arch=%s\nlayer_snapdragon=1\nlayer_packages=(qcom)\nlayer_matches() { :; }\n' "$arch" >"$hardware_layers/snapdragon.layer"
 printf 'layer_arch=%s\nlayer_packages=(four)\nlayer_matches() { :; }\n' "$arch" >"$hardware_layers/broken.layer"
 touch "$(layer_path broken)"
 with_image_overlay() {
   echo "$*" >>"$work/calls"
   [[ $2 != broken ]]
 }
-build_hardware_layers >/dev/null
+OMARCHY_SNAPDRAGON="" build_hardware_layers >/dev/null
 grep -qxF "build_hardware_layer_in native one two" "$work/calls" || fail "the native layer was not built: $(cat "$work/calls")"
 if grep -q foreign "$work/calls"; then fail "a layer for another architecture was built"; fi
+if grep -q snapdragon "$work/calls"; then fail "a snapdragon layer was built without OMARCHY_SNAPDRAGON"; fi
 [[ ! -e $(layer_path broken) ]] || fail "a layer that failed to build was left to ship"
-echo "ok - each layer is built for its own architecture, and one that fails is not shipped"
+: >"$work/calls"
+OMARCHY_SNAPDRAGON=1 build_hardware_layers >/dev/null
+grep -qxF "build_hardware_layer_in snapdragon qcom" "$work/calls" || fail "the snapdragon layer was not built with OMARCHY_SNAPDRAGON=1: $(cat "$work/calls")"
+echo "ok - each layer is built for its own architecture and variant, and one that fails is not shipped"
 
 # build-iso.sh hands the directory over, and the layers are packed once the
 # image's tree is final, after its build-only files are gone.

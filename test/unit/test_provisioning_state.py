@@ -471,28 +471,23 @@ class ConfigureLoginDeferProvisioningTest(unittest.TestCase):
         run_patch.start()
         self.addCleanup(run_patch.stop)
 
-    def login(self, *args):
-        """The target's omarchy-system-login, run on the target's tree."""
-        return [str(self.target / "usr/bin/omarchy-system-login"), "--root", str(self.target), *args]
-
     def test_deferred_provisioning_login_leaves_user_state_to_first_boot(self):
         ctx = make_ctx(self.target, encrypt=True)
         phases_impl.configure_login(ctx)
 
-        self.assertNotIn(self.login()[0], [cmd[0] for cmd in self.calls])
+        self.assertTrue((self.target / "etc/sddm.conf.d/99-omarchy-login.conf").exists())
+        self.assertFalse((self.target / "etc/sddm.conf.d/autologin.conf").exists())
+        self.assertFalse((self.target / "var/lib/sddm/state.conf").exists())
+        self.assertTrue(any("sddm.service" in cmd for cmd in self.calls))
 
     def test_normal_encrypted_login_still_autologs_in(self):
         ctx = make_ctx(self.target, defer_provisioning=False, encrypt=True, username="jeff")
         phases_impl.configure_login(ctx)
 
-        self.assertIn(self.login("jeff", "--autologin"), self.calls)
-        self.assertNotIn("arch-chroot", [cmd[0] for cmd in self.calls])
-
-    def test_unencrypted_login_shows_the_login_screen(self):
-        ctx = make_ctx(self.target, defer_provisioning=False, encrypt=False, username="jeff")
-        phases_impl.configure_login(ctx)
-
-        self.assertIn(self.login("jeff"), self.calls)
+        autologin = (self.target / "etc/sddm.conf.d/autologin.conf").read_text()
+        self.assertIn("User=jeff", autologin)
+        state = (self.target / "var/lib/sddm/state.conf").read_text()
+        self.assertIn("User=jeff", state)
 
 
 class ConfigureSshAccessDeferProvisioningTest(unittest.TestCase):

@@ -432,31 +432,9 @@ fi
 # When --local-source is in effect, build omarchy* from the mounted source
 # trees and drop them in the offline mirror. Otherwise pacman -Syw below
 # downloads the published versions from the omarchy network mirror.
-# Further packages a --local-source build makes itself
-# (OMARCHY_EXTRA_LOCAL_PACKAGES) join local_packages, which the downloads and
-# resolutions below leave out by name. Another package that depends on one
-# would still pull in its published build, so pacman is told the local build
-# is installed, with what it provides (--assume-installed).
-extra_local_packages=()
-assume_local_installed=()
 if [[ -d /omarchy-source && -d /omarchy-pkgs ]]; then
   bash /builder/build-omarchy-packages.sh "$offline_mirror_dir"
   LOCAL_OMARCHY_BUILD=1
-  read -r -a extra_local_packages <<<"${OMARCHY_EXTRA_LOCAL_PACKAGES:-}"
-  for local_package_name in "${extra_local_packages[@]}"; do
-    local_packages+=("$local_package_name")
-    for candidate in "$offline_mirror_dir/$local_package_name-"[0-9]*.pkg.tar.*; do
-      [[ $candidate == *.sig ]] && continue
-      read -r candidate_name candidate_version < <(pacman -Qp "$candidate")
-      [[ $candidate_name == "$local_package_name" ]] || continue
-      assume_local_installed+=(--assume-installed "$candidate_name=$candidate_version")
-      # Published packages may depend on its sonames instead (hyprtoolkit:
-      # libaquamarine.so=15-64).
-      while read -r provided; do
-        assume_local_installed+=(--assume-installed "$provided")
-      done < <(bsdtar -xOf "$candidate" .PKGINFO | sed -n 's/^provides = //p')
-    done
-  done
   # A rebuild of the same revision produces the same filename with different
   # bytes. pacman consults /var/cache/pacman/pkg (the host's cache, kept across
   # --keep-pkg-cache builds) before the mirror, and a stale copy from an
@@ -978,8 +956,7 @@ fi
 download_offline_packages() {
   local op=${1:--Sw}
   pacman --config "$online_pacman_conf" --noconfirm "$op" \
-    "${all_packages[@]}" --cachedir "$offline_mirror_dir/" --dbpath /tmp/offlinedb --needed \
-    "${assume_local_installed[@]}"
+    "${all_packages[@]}" --cachedir "$offline_mirror_dir/" --dbpath /tmp/offlinedb --needed
 }
 
 # A repository may occasionally republish a package without changing its
@@ -1018,8 +995,7 @@ rebuild_offline_repo_db() {
 # nothing; what the ISO ships is decided below.
 if ! resolved_package_files="$(
   pacman --config "$online_pacman_conf" --noconfirm \
-    --dbpath /tmp/offlinedb -S --print --print-format '%f' "${all_packages[@]}" \
-    "${assume_local_installed[@]}"
+    --dbpath /tmp/offlinedb -S --print --print-format '%f' "${all_packages[@]}"
 )"; then
   echo "ERROR: could not resolve the package files required by the offline mirror" >&2
   exit 1
@@ -1099,10 +1075,9 @@ rebuild_offline_repo_db
 #                                audio DSPs
 #   tailscale                    installed only when an autoinstall drive
 #                                staged an auth key
-# Both CPU microcodes stay in the image although a machine needs only one: a
-# pre-built UKI, where the image has one, is made with autodetect skipped, so
-# its microcode hook bundles both, and every install early-loads its own on
-# first boot.
+# Both CPU microcodes stay in the image although a machine needs only one: the
+# pre-built UKI is made with autodetect skipped, so its microcode hook bundles
+# both, and every install early-loads its own on first boot.
 # omarchy-apply-system still installs more from omarchy-other.packages as the
 # hardware dictates.
 per_machine_packages=(alsa-firmware sof-firmware tailscale)
@@ -1132,7 +1107,7 @@ image_package_list() {
     else
       grep -hv '^#\|^$' "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
     fi
-    printf '%s\n' "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE" "${extra_local_packages[@]}"
+    printf '%s\n' "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"
   } | sort -u
 }
 mapfile -t image_packages < <(image_package_list)
@@ -1210,8 +1185,7 @@ image_package_index() {
 # the live root is pacstrapped from this mirror and then left in it.
 if ! installable_files="$(
   pacman --config "$online_pacman_conf" --noconfirm \
-    --dbpath /tmp/offlinedb -S --print --print-format '%f' "${target_packages[@]}" \
-    "${assume_local_installed[@]}"
+    --dbpath /tmp/offlinedb -S --print --print-format '%f' "${target_packages[@]}"
 )"; then
   echo "ERROR: could not resolve the packages an install can ask for" >&2
   exit 1

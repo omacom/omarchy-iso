@@ -129,7 +129,7 @@ class BuildTryLayerTest(unittest.TestCase):
         cls.text = TRY_LAYER.read_text()
 
     def test_enables_bluetooth_and_retires_networkd(self):
-        self.assertRegex(self.text, r"greetd\.service\s+systemd-oomd\.service\s+bluetooth\.service")
+        self.assertRegex(self.text, r"sddm\.service\s+systemd-oomd\.service\s+bluetooth\.service")
         self.assertIn("systemd-networkd.service", self.text)
         self.assertIn("systemd-networkd-wait-online.service", self.text)
 
@@ -239,8 +239,15 @@ class BuildTryLayerTest(unittest.TestCase):
         self.assertIn("browser-policy.sh", self.text)
         self.assertIn("theme-system.sh", self.text)
 
-    def test_greetd_logs_the_user_in(self):
-        self.assertIn('in_try omarchy-system-login "$TRY_USER" --autologin', self.text)
+    def test_hardens_sddm_autologin_state_greeter_and_session_wrapper(self):
+        self.assertIn("sddm.service.d/10-omarchy-try-udev.conf", self.text)
+        self.assertIn("udevadm settle --timeout=10", self.text)
+        self.assertIn("Current=omarchy-try", self.text)
+        self.assertIn("Relogin=true", self.text)
+        self.assertIn("/var/lib/sddm/state.conf", self.text)
+        self.assertIn("chown sddm:sddm /var/lib/sddm /var/lib/sddm/state.conf", self.text)
+        self.assertIn("omarchy-try-session", self.text)
+        self.assertIn('sddm.login("$TRY_USER", "", root.sessionIndex)', self.text)
 
     def test_strips_nvim_git_and_symlinks_duplicate_theme_backgrounds(self):
         snippet = re.search(

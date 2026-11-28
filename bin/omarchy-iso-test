@@ -4,7 +4,7 @@
 # drives the real interactive install flow the way a user would — reading
 # each screen through QMP screendumps + OCR, and answering with virtual
 # keystrokes. Nothing in the product is bypassed or stubbed: the configurator
-# wizard, install dashboard, reboot prompt, and login screen are all exercised.
+# wizard, install dashboard, reboot prompt, and SDDM login are all exercised.
 #
 # After first boot it logs into a console TTY (typed, like everything else)
 # to authorize an SSH key, snapshots the installed disk, then boots a
@@ -1085,8 +1085,8 @@ verify_oem_setup() {
 }
 
 # The deferred-provisioning first boot runs the user form on tty1 (omarchy-provision-owner) before
-# the login screen. Encrypted deferred-provisioning installs auto-unlock from the staged keyfile,
-# so there is no LUKS prompt to answer here either way.
+# SDDM. Encrypted deferred-provisioning installs auto-unlock from the staged keyfile, so there
+# is no LUKS prompt to answer here either way.
 drive_provision_owner() {
   log "Driving the deferred-provisioning first-boot setup"
 
@@ -1260,7 +1260,7 @@ wait_for_install() {
   done
 }
 
-# Encrypted boots stop at the LUKS passphrase prompt. The unlock prompt isn't
+# Encrypted boots stop at the LUKS passphrase prompt. Plymouth's prompt isn't
 # reliably OCR-able, so type the passphrase on an interval until a console
 # login becomes reachable; early keystrokes are harmlessly discarded.
 unlock_luks() {
@@ -1372,7 +1372,7 @@ EOF
 }
 
 # Get a freshly booted system to a running Hyprland session, typing at the
-# LUKS prompt and/or login screen exactly like a user would.
+# LUKS prompt and/or SDDM greeter exactly like a user would.
 establish_session() {
   if $ENCRYPT; then
     local waited=0
@@ -1402,7 +1402,7 @@ establish_session() {
   local waited=0
   until session_started; do
     if ! $ENCRYPT; then
-      # The login screen is the install's user's, and asks for the password
+      # SDDM remembers the user and focuses the password field
       if ((waited == 0)); then
         capture_console "success-session-01-login"
       fi
@@ -1603,9 +1603,8 @@ install_phase() {
       echo "WARN: timezone is '${got_tz:-<empty>}' (expected the owner's choice, not UTC)" >&2
     fi
 
-    # Deferred first-boot setup hands straight off to the login screen once
-    # the oneshot service exits — no celebration screen, no Start Omarchy
-    # button to confirm.
+    # Deferred first-boot setup hands straight off to SDDM once the oneshot
+    # service exits — no celebration screen, no Start Omarchy button to confirm.
     capture_console "success-provision-09-handoff"
   fi
 

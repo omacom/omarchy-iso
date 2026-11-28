@@ -333,8 +333,8 @@ notice() {
 # stops. At the end, systemd switches back to tty1 and frees every other
 # console (reduce_vt() in its src/core/main.c). So the screen is also kept in
 # /run, which the soft reboot keeps, and the Try system draws it on tty1 first
-# thing (builder/try-layer/omarchy-try-console). It stays there until the
-# session takes the screen.
+# thing (builder/try-layer/omarchy-try-console). It stays there until SDDM
+# takes the screen.
 TRY_VT="${TRY_VT:-7}"
 TRY_CONSOLE="${TRY_CONSOLE:-/dev/tty$TRY_VT}"
 TRY_SCREEN="${TRY_SCREEN:-/run/omarchy-try/console}"

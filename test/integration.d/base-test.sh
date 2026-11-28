@@ -531,12 +531,11 @@ installed_boot_loader() {
 # Answer an encrypted boot's LUKS prompt, given what OCR read off the screen.
 # The busybox encrypt hook asks "A password is required to access the root
 # volume"; systemd-cryptsetup (the pre-built UKI's initramfs) asks "Please
-# enter passphrase for disk root". A busybox initramfs, which every
-# systemd-boot install boots and a Limine one wherever it has no pre-built UKI
-# (an image with Omarchy's boot splash, BIOS, or a layout the pre-built UKI
-# lacks), asks with the splash's field, or Plymouth's lock field, under the
-# logo: OCR reads the logo ("OMARCHY", "OMARCHS" at this size, "0MMARCHY"
-# with tesseract 5.5) and nothing else: one short word around "arch". Once an encrypted run has
+# enter passphrase for disk root". An initramfs mkinitcpio builds on the
+# machine (on BIOS, or for a layout the pre-built UKI lacks) asks with
+# Plymouth's lock field under the logo: OCR reads the logo ("OMARCHY",
+# "OMARCHS" at this size, "0MMARCHY" with tesseract 5.5) and nothing else:
+# one short word around "arch". Once an encrypted run has
 # shown nothing but the logo for two samples in a row, nothing but that
 # prompt is listening to the keyboard, so type the passphrase blind. The
 # installer's dashboard always carries more text ("Installing Omarchy",

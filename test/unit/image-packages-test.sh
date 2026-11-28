@@ -4,8 +4,8 @@
 # go only to the machines that need them: archinstall's audio step adds the
 # firmware by the loaded sound driver, and Tailscale comes with an autoinstall
 # auth key. In the image they land on every disk, and every update downloads
-# them again. Both microcodes stay: a pre-built UKI, where the image has one,
-# bundles both, so every machine early-loads its own on first boot.
+# them again. Both microcodes stay: the pre-built UKI bundles both, so every
+# machine early-loads its own on first boot.
 
 set -euo pipefail
 

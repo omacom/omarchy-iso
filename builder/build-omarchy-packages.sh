@@ -52,22 +52,17 @@ for pkg in "${packages[@]}"; do
   rm -f "$offline_mirror_dir/$pkg-"*.pkg.tar.*
 done
 
-# Copy $1's recipe from the pkgs checkout to $work_dir/$1, owned by builder.
-stage_recipe() {
+for pkg in "${packages[@]}"; do
   echo "----------------------------------------"
-  echo "Building $1"
+  echo "Building $pkg"
   echo "----------------------------------------"
-  if [[ ! -d "/omarchy-pkgs/pkgbuilds/$1" ]]; then
-    echo "ERROR: package source not found: /omarchy-pkgs/pkgbuilds/$1" >&2
+  pkg_work="$work_dir/$pkg"
+  if [[ ! -d "/omarchy-pkgs/pkgbuilds/$pkg" ]]; then
+    echo "ERROR: package source not found: /omarchy-pkgs/pkgbuilds/$pkg" >&2
     exit 1
   fi
-  cp -a "/omarchy-pkgs/pkgbuilds/$1" "$work_dir/$1"
-  chown -R builder:builder "$work_dir/$1"
-}
-
-for pkg in "${packages[@]}"; do
-  stage_recipe "$pkg"
-  pkg_work="$work_dir/$pkg"
+  cp -a "/omarchy-pkgs/pkgbuilds/$pkg" "$pkg_work"
+  chown -R builder:builder "$pkg_work"
 
   # The container's makepkg.conf compresses single-threaded and makes with one
   # job; use every core of the build host for both. su resets the environment,
@@ -79,41 +74,6 @@ for pkg in "${packages[@]}"; do
     MAKEFLAGS='-j$(nproc)' \
     makepkg --noconfirm --skippgpcheck --skipchecksums --nodeps -f
   "
-done
-
-# Further packages from the pkgs checkout (OMARCHY_EXTRA_LOCAL_PACKAGES), built
-# in place of their published builds: a patched dependency under test, say.
-# Unlike the Omarchy packages they compile, so what they build with is
-# installed first, by root here rather than by makepkg through sudo. Each is
-# installed once built, so one later in the list builds against it: name a
-# dependency before what depends on it. build-iso.sh keeps the published build
-# of each out of the mirror.
-read -r -a extra_packages <<<"${OMARCHY_EXTRA_LOCAL_PACKAGES:-}"
-for pkg in "${extra_packages[@]}"; do
-  rm -f "$offline_mirror_dir/$pkg-"[0-9]*.pkg.tar.*
-  stage_recipe "$pkg"
-  pkg_work="$work_dir/$pkg"
-  mapfile -t build_deps < <(
-    su builder -c "cd '$pkg_work' && makepkg --printsrcinfo" |
-      sed -n "s/^\t\(make\|check\)\?depends\(_$(uname -m)\)\? = //p"
-  )
-  # Only what nothing installed satisfies, as makepkg -s asks (pacman -T):
-  # pacman -S would fail on a version only an extra built before has, or
-  # downgrade that extra to the published build.
-  mapfile -t build_deps < <(pacman -T "${build_deps[@]}")
-  if (( ${#build_deps[@]} > 0 )); then
-    pacman -S --needed --noconfirm --asdeps "${build_deps[@]}"
-  fi
-  # makepkg checks signed sources against the keys the recipe ships, as
-  # omarchy-pkgs' own build does.
-  su builder -c "
-    cd '$pkg_work' &&
-    if [[ -d keys/pgp ]]; then gpg --batch --import keys/pgp/*.asc; fi &&
-    PKGDEST='$work_dir' \
-    MAKEFLAGS='-j$(nproc)' \
-    makepkg --noconfirm --nodeps -f
-  "
-  pacman -U --noconfirm "$work_dir/$pkg-"[0-9]*.pkg.tar.*
 done
 
 mkdir -p "$offline_mirror_dir"
@@ -141,6 +101,3 @@ echo
 echo "Built Omarchy packages, placed in $offline_mirror_dir:"
 # shellcheck disable=SC2010 # package file names, which makepkg makes
 ls "$offline_mirror_dir"/omarchy*.pkg.tar.* | grep -v '\.sig$' | sed 's|^|  |'
-for pkg in "${extra_packages[@]}"; do
-  printf '  %s\n' "$offline_mirror_dir/$pkg-"[0-9]*.pkg.tar.*
-done

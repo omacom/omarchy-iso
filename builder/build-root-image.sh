@@ -77,6 +77,73 @@ n1x_module_lines() {
   grep -hE '^\s*MODULES\s*\+?=' "$1" | sed -E 's/\s+/ /g; s/^ //; s/ $//' | sort -u
 }
 
+# The pre-built initramfs becomes the boot image of every systemd-boot install
+# that keeps the defaults, with the kernel next to it on the ESP, so it gets
+# the UKI's ceiling. Without kms it measures about 50 MiB.
+prebuilt_initramfs_size_ok() {
+  local bytes limit=$((128 * 1024 * 1024))
+  bytes=$(stat -c %s "$1")
+  if ((bytes > limit)); then
+    echo "ERROR: the pre-built initramfs is $bytes bytes, over the $limit limit" >&2
+    return 1
+  fi
+}
+
+# What mkinitcpio builds an initramfs from besides the packages: its
+# configuration, the hooks a hardware script adds under /etc/initcpio, and the
+# module options its modconf hook copies in. One "sha256  path" line per file
+# under the root $1, paths relative to it, sorted; a symlink is hashed as the
+# name it points to. The installer reads the target's the same way
+# (phases_impl._initramfs_inputs) and builds the initramfs on the machine when
+# they differ.
+initramfs_inputs() {
+  local root=$1 path hash
+  while IFS= read -r -d '' path; do
+    if [[ -L $root/$path ]]; then
+      hash=$(readlink "$root/$path" | sha256sum)
+    else
+      hash=$(sha256sum <"$root/$path")
+    fi
+    printf '%s  %s\n' "${hash%% *}" "$path"
+  done < <(cd "$root" && find etc/mkinitcpio.conf etc/mkinitcpio.conf.d etc/initcpio etc/modprobe.d usr/lib/modprobe.d \
+    \( -type f -o -type l \) -print0 2>/dev/null | LC_ALL=C sort -z)
+}
+
+# Build /var/lib/omarchy-iso/prebuilt-initramfs.img in the image at $root for
+# its kernel $image_kver, and record what the installer checks before it uses
+# it. Each step returns on failure: set -e does not apply in a function whose
+# status the caller tests.
+build_prebuilt_initramfs() {
+  local dir=/var/lib/omarchy-iso hook
+  local image=$dir/prebuilt-initramfs.img
+
+  # /usr/bin/mkinitcpio, as omarchy-boot-rebuild calls it: the one first in
+  # PATH is limine-mkinitcpio-hook's wrapper, which answers for plain
+  # mkinitcpio whatever this did.
+  arch-chroot "$root" /usr/bin/mkinitcpio -k "$image_kver" -g "$image" -S autodetect,kms 2>&1 | tail -25 || return 1
+  [[ -s $root$image ]] || return 1
+
+  # The hook set is the platform's baseline (00-omarchy-hooks.conf), read on
+  # the build host: make sure it is the busybox one systemd-boot needs, with
+  # the encrypt hook for cryptdevice= and Omarchy's snapshot and restore hooks.
+  arch-chroot "$root" lsinitcpio "$image" >"$work/prebuilt-initramfs.list" || return 1
+  for hook in encrypt omarchy-snapshot-overlay omarchy-restore; do
+    if ! grep -qx "hooks/$hook" "$work/prebuilt-initramfs.list"; then
+      echo "WARNING: the pre-built initramfs has no $hook hook" >&2
+      return 1
+    fi
+  done
+
+  printf '%s\n' "$image_kernel" >"$root$dir/prebuilt-initramfs.kernel"
+  printf '%s\n' "$image_kver" >"$root$dir/prebuilt-initramfs.kver"
+  # The console keymap the keymap hook compiled in, which the hashed inputs
+  # below don't cover (vconsole.conf).
+  # shellcheck source=/dev/null # the image's own vconsole.conf
+  ( [ -f "$root/etc/vconsole.conf" ] && . "$root/etc/vconsole.conf"; printf '%s\n' "${KEYMAP:-}" ) \
+    >"$root$dir/prebuilt-initramfs.keymap"
+  initramfs_inputs "$root" >"$root$dir/prebuilt-initramfs.inputs"
+}
+
 # Layers: what one kind of machine adds to the image on disk, packed next to
 # the image for the installer to extract (phases_impl._apply_platform_layer).
 # Installing the NVIDIA stack at install time took 22.6s on an N1x, 16s of it
@@ -275,14 +342,12 @@ build_hardware_layers() {
   fi
 }
 
-# Pacstrap N1x's packages into the overlay at $1 (upper directory $2) and pack
-# them as the N1x layer; where the image has a generic UKI, also set up N1x's
-# boot-time state there and build its UKI with the modules of n1x.sh ($3). Each
-# step returns on failure: set -e does not apply in a function whose status the
-# caller tests.
+# Set up N1x's boot-time state in the overlay at $1 (upper directory $2), pack
+# its packages as the N1x layer, and build its UKI there. Each step returns on
+# failure: set -e does not apply in a function whose status the caller tests.
 build_n1x_uki_in() {
-  local merged=$1 upper=$2 n1x_sh=$3 line
-  local -a modules=(thunderbolt) line_modules n1x_packages n1x_lines
+  local merged=$1 upper=$2 line
+  local -a modules=(thunderbolt) line_modules n1x_packages
 
   # Every package the N1x list adds to the image, as the installer would
   # install them (_platform_delta_packages), from the same mirror.
@@ -292,13 +357,6 @@ build_n1x_uki_in() {
 
   # Before anything below writes boot-time state into the overlay.
   write_layer "$upper" aarch64-n1x || return 1
-  # Its UKI is the generic one's config with N1x's modules.
-  [[ -f $root/var/lib/omarchy-iso/prebuilt-uki.efi ]] || return 0
-  mapfile -t n1x_lines < <(n1x_module_lines "$n1x_sh")
-  if ((${#n1x_lines[@]} == 0)); then
-    echo "WARNING: $n1x_sh writes no MODULES lines" >&2
-    return 1
-  fi
 
   # As n1x.sh sets up an N1x whose GPU drives the panel: nvidia-drm's fbdev
   # draws the console and Plymouth's LUKS prompt.
@@ -603,11 +661,16 @@ build_qualcomm_prebuilt_uki() {
   with_image_overlay build_qualcomm_uki_in
 }
 
-# Build the N1x layer, and /var/lib/omarchy-iso/prebuilt-uki-n1x.efi where the
-# image has a generic UKI, from a throwaway overlay of $root, for the n1x.sh at
-# $1. Runs while the generic UKI's config and cmdline are still in $root.
+# Build /var/lib/omarchy-iso/prebuilt-uki-n1x.efi from a throwaway overlay of
+# $root. Runs while the generic UKI's config and cmdline are still in $root.
 build_n1x_prebuilt_uki() {
-  with_image_overlay build_n1x_uki_in "$1"
+  local -a n1x_lines
+  mapfile -t n1x_lines < <(n1x_module_lines "$1")
+  if ((${#n1x_lines[@]} == 0)); then
+    echo "WARNING: $1 writes no MODULES lines" >&2
+    return 1
+  fi
+  with_image_overlay build_n1x_uki_in
 }
 
 pacman_conf="${1:-}"
@@ -888,61 +951,51 @@ if [[ -z $image_kver ]]; then
 else
   # The kernel package this image carries: linux-omarchy since upstream made it
   # the default, stock linux before. The installer names the UKI
-  # and its Limine entry after it, and with or without a pre-built UKI boots a
-  # selected kernel other than this one first.
+  # and its Limine entry after it.
   image_kernel=$(<"$root/usr/lib/modules/${image_kver}/pkgbase")
   echo "$image_kernel" >"$root/var/lib/omarchy-iso/prebuilt-uki.kernel"
+  # The early-loading modules configured when this UKI is built. A machine whose
+  # hardware scripts add to them (nvidia.sh, fix-t2.sh) builds its own UKI.
+  { grep -hE '^\s*MODULES\s*\+?=' "$root"/etc/mkinitcpio.conf.d/*.conf 2>/dev/null || true; } |
+    sed -E 's/\s+/ /g; s/^ //; s/ $//' | sort -u >"$root/var/lib/omarchy-iso/prebuilt-uki.modules"
+  # The console keymap this UKI is built with. omarchy_hooks.conf runs the
+  # `keymap` hook, which compiles the keymap named by /etc/vconsole.conf into
+  # the initramfs at build time, and bundles vconsole.conf itself for Plymouth.
+  # Both are fixed here, at image build, to whatever this image has: in
+  # practice nothing, so mkinitcpio falls back to us. The installer writes the
+  # user's choice into the target's /etc/vconsole.conf afterwards, which cannot
+  # reach an initramfs that is only copied, so an install picking another
+  # layout writes it into the room reserved below, or builds its own UKI
+  # where an image has none. Recording the value is what lets the installer
+  # tell the difference.
+  #
+  # The LUKS passphrase prompt runs from this initramfs, so a stale `us` makes
+  # a passphrase enrolled under another layout untypeable and locks the owner
+  # out of a fresh install (upstream omarchy#8196).
+  # shellcheck source=/dev/null # the image's own vconsole.conf
+  ( [ -f "$root/etc/vconsole.conf" ] && . "$root/etc/vconsole.conf"; printf '%s\n' "${KEYMAP:-}" ) \
+    >"$root/var/lib/omarchy-iso/prebuilt-uki.keymap"
 
-  # Omarchy's boot splash (omarchy-settings' omarchy-splash hook) runs only in
-  # a busybox initramfs, and these UKIs' are systemd ones, with Plymouth. An
-  # image with the splash gets neither the generic nor the Snapdragon UKI
-  # here: each install builds its own, so the splash is there from the first
-  # boot.
-  if [[ -f $root/etc/initcpio/install/omarchy-splash ]]; then
-    echo "No pre-built UKI: the image draws the unlock prompt with omarchy-splash"
-  else
-    # The early-loading modules configured when this UKI is built. A machine whose
-    # hardware scripts add to them (nvidia.sh, fix-t2.sh) builds its own UKI.
-    { grep -hE '^\s*MODULES\s*\+?=' "$root"/etc/mkinitcpio.conf.d/*.conf 2>/dev/null || true; } |
-      sed -E 's/\s+/ /g; s/^ //; s/ $//' | sort -u >"$root/var/lib/omarchy-iso/prebuilt-uki.modules"
-    # The console keymap this UKI is built with. omarchy_hooks.conf runs the
-    # `keymap` hook, which compiles the keymap named by /etc/vconsole.conf into
-    # the initramfs at build time, and bundles vconsole.conf itself for Plymouth.
-    # Both are fixed here, at image build, to whatever this image has: in
-    # practice nothing, so mkinitcpio falls back to us. The installer writes the
-    # user's choice into the target's /etc/vconsole.conf afterwards, which cannot
-    # reach an initramfs that is only copied, so an install picking another
-    # layout writes it into the room reserved below, or builds its own UKI
-    # where an image has none. Recording the value is what lets the installer
-    # tell the difference.
-    #
-    # The LUKS passphrase prompt runs from this initramfs, so a stale `us` makes
-    # a passphrase enrolled under another layout untypeable and locks the owner
-    # out of a fresh install (upstream omarchy#8196).
-    # shellcheck source=/dev/null # the image's own vconsole.conf
-    ( [ -f "$root/etc/vconsole.conf" ] && . "$root/etc/vconsole.conf"; printf '%s\n' "${KEYMAP:-}" ) \
-      >"$root/var/lib/omarchy-iso/prebuilt-uki.keymap"
-
-    # The pre-built UKI's own config. Naming a config with -c makes mkinitcpio
-    # skip /etc/mkinitcpio.conf.d, which is where omarchy_hooks.conf sets the
-    # busybox hook list (udev ... encrypt): that list needs cryptdevice= and
-    # root= on the cmdline, which a build-time UKI cannot know. The systemd
-    # hook set needs neither: systemd-gpt-auto-generator finds the root
-    # partition by its GPT type, and if it is LUKS, sd-encrypt unlocks it at a
-    # passphrase prompt (plymouth draws it). One UKI for plain and encrypted
-    # installs; the first kernel update rebuilds it from the drop-ins as usual.
-    # Persistent dm-crypt flags (discards, no read workqueue) come from the LUKS2
-    # header, written by the installer at open time, not from the cmdline.
-    # limine-snapper-sync boots read-only snapshots through its busybox
-    # `btrfs-overlayfs` hook (an overlay with a tmpfs upper over the snapshot).
-    # The systemd initramfs has no equivalent, so a snapshot booted with the
-    # pre-built UKI would come up read-only. This is the same
-    # logic as a oneshot in the initrd: after sysroot.mount, before
-    # initrd-root-fs.target, mount an overlay on top of /sysroot when it is a
-    # read-only btrfs snapshot subvolume. Installed as an ordinary mkinitcpio
-    # hook so a systemd-hook rebuild would keep it too.
-    install -d "$root/usr/lib/initcpio/install" "$root/usr/lib/omarchy"
-    cat >"$root/usr/lib/omarchy/snapshot-overlay" <<'SCRIPT'
+  # The pre-built UKI's own config. Naming a config with -c makes mkinitcpio
+  # skip /etc/mkinitcpio.conf.d, which is where omarchy_hooks.conf sets the
+  # busybox hook list (udev ... encrypt): that list needs cryptdevice= and
+  # root= on the cmdline, which a build-time UKI cannot know. The systemd
+  # hook set needs neither: systemd-gpt-auto-generator finds the root
+  # partition by its GPT type, and if it is LUKS, sd-encrypt unlocks it at a
+  # passphrase prompt (plymouth draws it). One UKI for plain and encrypted
+  # installs; the first kernel update rebuilds it from the drop-ins as usual.
+  # Persistent dm-crypt flags (discards, no read workqueue) come from the LUKS2
+  # header, written by the installer at open time, not from the cmdline.
+  # limine-snapper-sync boots read-only snapshots through its busybox
+  # `btrfs-overlayfs` hook (an overlay with a tmpfs upper over the snapshot).
+  # The systemd initramfs has no equivalent, so a snapshot booted with the
+  # pre-built UKI would come up read-only. This is the same
+  # logic as a oneshot in the initrd: after sysroot.mount, before
+  # initrd-root-fs.target, mount an overlay on top of /sysroot when it is a
+  # read-only btrfs snapshot subvolume. Installed as an ordinary mkinitcpio
+  # hook so a systemd-hook rebuild would keep it too.
+  install -d "$root/usr/lib/initcpio/install" "$root/usr/lib/omarchy"
+  cat >"$root/usr/lib/omarchy/snapshot-overlay" <<'SCRIPT'
 #!/bin/bash
 # Mount an overlay over /sysroot when it is a read-only btrfs snapshot, so a
 # snapshot chosen from the boot menu is writable for the session (changes go
@@ -957,8 +1010,8 @@ mkdir -p "$ram" && mount -t tmpfs cowspace "$ram" && mkdir -p "$ram/upper" "$ram
 mount -t overlay overlay -o "lowerdir=$root,upperdir=$ram/upper,workdir=$ram/work" "$root"   && echo "[snapshot-overlay] overlay mounted on $root"
 exit 0
 SCRIPT
-    chmod 0755 "$root/usr/lib/omarchy/snapshot-overlay"
-    cat >"$root/usr/lib/initcpio/install/sd-btrfs-overlayfs" <<'INSTALL'
+  chmod 0755 "$root/usr/lib/omarchy/snapshot-overlay"
+  cat >"$root/usr/lib/initcpio/install/sd-btrfs-overlayfs" <<'INSTALL'
 #!/usr/bin/env bash
 build() {
     add_module btrfs
@@ -980,9 +1033,9 @@ read-only btrfs snapshot with a tmpfs overlay so it is writable for the session.
 HELPEOF
 }
 INSTALL
-    chmod 0755 "$root/usr/lib/initcpio/install/sd-btrfs-overlayfs"
-    install -d "$root/usr/lib/systemd/system"
-    cat >"$root/usr/lib/systemd/system/omarchy-snapshot-overlay.service" <<'UNIT'
+  chmod 0755 "$root/usr/lib/initcpio/install/sd-btrfs-overlayfs"
+  install -d "$root/usr/lib/systemd/system"
+  cat >"$root/usr/lib/systemd/system/omarchy-snapshot-overlay.service" <<'UNIT'
 [Unit]
 Description=Overlay for a read-only btrfs snapshot root (initrd)
 DefaultDependencies=no
@@ -997,35 +1050,35 @@ RemainAfterExit=yes
 ExecStart=/usr/lib/omarchy/snapshot-overlay
 UNIT
 
-    # No kms hook. With autodetect skipped it would add every DRM driver and its
-    # firmware (nouveau's GSP firmware alone is ~110 MB): the UKI measured 247 MiB
-    # with it. Limine boots a UKI as an EFI chainload into one contiguous block
-    # below 4 GiB, and UKIs that size panic it on some laptops
-    # (omacom/omarchy#5980), as a 241 MiB initramfs does GRUB (#128). Without
-    # kms, Plymouth's LUKS prompt draws on the firmware framebuffer (simpledrm);
-    # the installed system's own rebuilds autodetect and keep kms.
-    # Room for the installer to write the install's keyboard layout into the
-    # UKI in place (orchestrator/uki_vconsole.py), as for the cmdline below: an
-    # install on another layout than us then has no UKI to build, 4.7 s of the
-    # install. The initramfs gets every console keymap (1.3 MB), since
-    # sd-vconsole adds only the one vconsole.conf names at build time, and an
-    # /etc/vconsole.conf of one 512-byte comment line. add_file_early puts that
-    # file in the early cpio, the uncompressed archive at the start of the
-    # initramfs, where the installer finds its bytes and overwrites them. Until
-    # then it is a comment, and the initramfs comes up in us as before.
-    cat >"$root/usr/lib/initcpio/install/omarchy-vconsole-room" <<'INSTALL'
+  # No kms hook. With autodetect skipped it would add every DRM driver and its
+  # firmware (nouveau's GSP firmware alone is ~110 MB): the UKI measured 247 MiB
+  # with it. Limine boots a UKI as an EFI chainload into one contiguous block
+  # below 4 GiB, and UKIs that size panic it on some laptops
+  # (omacom/omarchy#5980), as a 241 MiB initramfs does GRUB (#128). Without
+  # kms, Plymouth's LUKS prompt draws on the firmware framebuffer (simpledrm);
+  # the installed system's own rebuilds autodetect and keep kms.
+  # Room for the installer to write the install's keyboard layout into the
+  # UKI in place (orchestrator/uki_vconsole.py), as for the cmdline below: an
+  # install on another layout than us then has no UKI to build, 4.7 s of the
+  # install. The initramfs gets every console keymap (1.3 MB), since
+  # sd-vconsole adds only the one vconsole.conf names at build time, and an
+  # /etc/vconsole.conf of one 512-byte comment line. add_file_early puts that
+  # file in the early cpio, the uncompressed archive at the start of the
+  # initramfs, where the installer finds its bytes and overwrites them. Until
+  # then it is a comment, and the initramfs comes up in us as before.
+  cat >"$root/usr/lib/initcpio/install/omarchy-vconsole-room" <<'INSTALL'
 #!/usr/bin/env bash
 build() {
     add_full_dir /usr/share/kbd/keymaps
     add_file_early /etc/vconsole.conf.prebuilt-uki /etc/vconsole.conf 644
 }
 INSTALL
-    chmod 0755 "$root/usr/lib/initcpio/install/omarchy-vconsole-room"
-    vconsole_room="# omarchy.vconsole_room "
-    printf '%s%s\n' "$vconsole_room" "$(printf '%*s' $((512 - ${#vconsole_room} - 1)) '' | tr ' ' '#')" \
-      >"$root/etc/vconsole.conf.prebuilt-uki"
+  chmod 0755 "$root/usr/lib/initcpio/install/omarchy-vconsole-room"
+  vconsole_room="# omarchy.vconsole_room "
+  printf '%s%s\n' "$vconsole_room" "$(printf '%*s' $((512 - ${#vconsole_room} - 1)) '' | tr ' ' '#')" \
+    >"$root/etc/vconsole.conf.prebuilt-uki"
 
-    cat >"$root/etc/mkinitcpio-prebuilt-uki.conf" <<'CONF'
+  cat >"$root/etc/mkinitcpio-prebuilt-uki.conf" <<'CONF'
 MODULES=(thunderbolt)
 BINARIES=()
 FILES=()
@@ -1034,80 +1087,106 @@ COMPRESSION="zstd"
 COMPRESSION_OPTIONS=(-T0)
 CONF
 
-    # Bundle the mount-event burst override into the pre-built systemd initramfs:
-    # mkinitcpio's systemd hook does not copy /etc/systemd/system.conf.d/, so PID 1
-    # in the initrd otherwise hits the default 5/s mount-monitor-dispatch rate
-    # limit and stalls sysroot.mount for 1.0 s (systemd/systemd#28264). The N1x
-    # UKI derives its config from this file and inherits FILES automatically.
-    if [[ -f $root/etc/systemd/system.conf.d/20-mount-events.conf ]]; then
-      echo 'FILES+=(/etc/systemd/system.conf.d/20-mount-events.conf)' >>"$root/etc/mkinitcpio-prebuilt-uki.conf"
-    else
-      echo "WARNING: /etc/systemd/system.conf.d/20-mount-events.conf missing from image; initrd mount rate limit override skipped"
-    fi
-
-    # Room for the installer to write the real cmdline into the UKI in place
-    # (orchestrator/uki_cmdline.py): one placeholder parameter pads .cmdline to
-    # 1800 bytes, under the kernel's 2048. A dotted name is a module parameter
-    # to the kernel, so until it is overwritten it is ignored without a warning.
-    prebuilt_cmdline=$(tr -s '\n ' ' ' <"$root/etc/kernel/cmdline")
-    prebuilt_cmdline="${prebuilt_cmdline% } omarchy.cmdline_room="
-    printf '%s%s\n' "$prebuilt_cmdline" "$(printf '%*s' $((1800 - ${#prebuilt_cmdline})) '' | tr ' ' 0)" \
-      >"$root/etc/kernel/cmdline.prebuilt-uki"
-
-    if [[ -n ${OMARCHY_SNAPDRAGON:-} ]]; then
-      # A Snapdragon ISO installs only Snapdragon laptops, so skip the generic
-      # UKI and pre-build the Snapdragon UKI (all Snapdragon DTBs via
-      # DeviceTreeAuto + HWIDs + shared Qualcomm early modules + Adreno microcode)
-      # so standard Snapdragon installs copy it in place instead of spending ~7s
-      # running mkinitcpio + ukify on the target.
-      rm -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" \
-        "$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm".{efi,modules,files,dropins,compatibles,inputs}
-      if [[ $(uname -m) == aarch64 ]] && ! build_qualcomm_prebuilt_uki; then
-        echo "WARNING: no Qualcomm pre-built UKI; Snapdragon installs will build their own"
-        rm -f "$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm".{efi,modules,files,dropins,compatibles,inputs}
-      fi
-    else
-      echo "Pre-building the UKI in the image (kver=$image_kver, generic cmdline, systemd and sd-encrypt hooks, no autodetect)"
-      # mkinitcpio is called directly: the preset flow (-P) runs Limine's install
-      # hooks, which fail without a mounted ESP.
-      if arch-chroot "$root" mkinitcpio \
-           -k "/usr/lib/modules/${image_kver}/vmlinuz" \
-           -c /etc/mkinitcpio-prebuilt-uki.conf \
-           --cmdline /etc/kernel/cmdline.prebuilt-uki \
-           -U /var/lib/omarchy-iso/prebuilt-uki.efi \
-           -S autodetect 2>&1 | tail -25 ; then
-        if [[ -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
-          echo "Pre-built UKI: $(du -h "$root/var/lib/omarchy-iso/prebuilt-uki.efi" | cut -f1)"
-          prebuilt_uki_size_ok "$root/var/lib/omarchy-iso/prebuilt-uki.efi" || exit 1
-        else
-          echo "WARNING: mkinitcpio ran but left no UKI; the installer will build one"
-        fi
-      else
-        echo "WARNING: mkinitcpio failed; the installer will build the UKI"
-        # Clean up any partial output that would upset btrfs shrink downstream.
-        rm -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi"
-      fi
-    fi
+  # Bundle the mount-event burst override into the pre-built systemd initramfs:
+  # mkinitcpio's systemd hook does not copy /etc/systemd/system.conf.d/, so PID 1
+  # in the initrd otherwise hits the default 5/s mount-monitor-dispatch rate
+  # limit and stalls sysroot.mount for 1.0 s (systemd/systemd#28264). The N1x
+  # UKI derives its config from this file and inherits FILES automatically.
+  if [[ -f $root/etc/systemd/system.conf.d/20-mount-events.conf ]]; then
+    echo 'FILES+=(/etc/systemd/system.conf.d/20-mount-events.conf)' >>"$root/etc/mkinitcpio-prebuilt-uki.conf"
+  else
+    echo "WARNING: /etc/systemd/system.conf.d/20-mount-events.conf missing from image; initrd mount rate limit override skipped"
   fi
 
-  # N1x: its layer, and a second pre-built UKI where the image has the first.
-  # Its hardware setup always adds the same early-loading modules, the NVIDIA
-  # stack for early KMS and the I2C keyboard for the LUKS prompt, so the
-  # generic UKI never fits it and every N1x built its own at install, about
-  # 20s. This one is built with them, read from the image's own n1x.sh so the
-  # two cannot drift, and recorded the same way; the installer copies it where
-  # the machine's lines match (_n1x_prebuilt_uki).
+  # Room for the installer to write the real cmdline into the UKI in place
+  # (orchestrator/uki_cmdline.py): one placeholder parameter pads .cmdline to
+  # 1800 bytes, under the kernel's 2048. A dotted name is a module parameter
+  # to the kernel, so until it is overwritten it is ignored without a warning.
+  prebuilt_cmdline=$(tr -s '\n ' ' ' <"$root/etc/kernel/cmdline")
+  prebuilt_cmdline="${prebuilt_cmdline% } omarchy.cmdline_room="
+  printf '%s%s\n' "$prebuilt_cmdline" "$(printf '%*s' $((1800 - ${#prebuilt_cmdline})) '' | tr ' ' 0)" \
+    >"$root/etc/kernel/cmdline.prebuilt-uki"
+
+  if [[ -n ${OMARCHY_SNAPDRAGON:-} ]]; then
+    # A Snapdragon ISO installs only Snapdragon laptops, so skip the generic
+    # UKI and pre-build the Snapdragon UKI (all Snapdragon DTBs via
+    # DeviceTreeAuto + HWIDs + shared Qualcomm early modules + Adreno microcode)
+    # so standard Snapdragon installs copy it in place instead of spending ~7s
+    # running mkinitcpio + ukify on the target.
+    rm -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" \
+      "$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm".{efi,modules,files,dropins,compatibles,inputs}
+    if [[ $(uname -m) == aarch64 ]] && ! build_qualcomm_prebuilt_uki; then
+      echo "WARNING: no Qualcomm pre-built UKI; Snapdragon installs will build their own"
+      rm -f "$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm".{efi,modules,files,dropins,compatibles,inputs}
+    fi
+  else
+    echo "Pre-building the UKI in the image (kver=$image_kver, generic cmdline, systemd and sd-encrypt hooks, no autodetect)"
+    # mkinitcpio is called directly: the preset flow (-P) runs Limine's install
+    # hooks, which fail without a mounted ESP.
+    if arch-chroot "$root" mkinitcpio \
+         -k "/usr/lib/modules/${image_kver}/vmlinuz" \
+         -c /etc/mkinitcpio-prebuilt-uki.conf \
+         --cmdline /etc/kernel/cmdline.prebuilt-uki \
+         -U /var/lib/omarchy-iso/prebuilt-uki.efi \
+         -S autodetect 2>&1 | tail -25 ; then
+      if [[ -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
+        echo "Pre-built UKI: $(du -h "$root/var/lib/omarchy-iso/prebuilt-uki.efi" | cut -f1)"
+        prebuilt_uki_size_ok "$root/var/lib/omarchy-iso/prebuilt-uki.efi" || exit 1
+      else
+        echo "WARNING: mkinitcpio ran but left no UKI; the installer will build one"
+      fi
+    else
+      echo "WARNING: mkinitcpio failed; the installer will build the UKI"
+      # Clean up any partial output that would upset btrfs shrink downstream.
+      rm -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi"
+    fi
+  fi
+  # N1x: a second pre-built UKI. Its hardware setup always adds the same
+  # early-loading modules, the NVIDIA stack for early KMS and the I2C keyboard
+  # for the LUKS prompt, so the generic UKI never fits it and every N1x built
+  # its own at install, about 20s. This one is built with them, read from the
+  # image's own n1x.sh so the two cannot drift, and recorded the same way; the
+  # installer copies it where the machine's lines match (_n1x_prebuilt_uki).
   # The NVIDIA packages go into a throwaway overlay of the image, never into
   # the image itself. What they add is packed from that overlay as the N1x
   # layer, which the installer extracts on an N1x, so the driver in the UKI is
   # the one on disk.
   n1x_script="$root/usr/share/omarchy/install/hardware/n1x.sh"
-  if [[ $(uname -m) == aarch64 && -z ${OMARCHY_SNAPDRAGON:-} && -f $n1x_script ]]; then
+  if [[ $(uname -m) == aarch64 && -z ${OMARCHY_SNAPDRAGON:-} && -f $n1x_script && -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
     build_n1x_prebuilt_uki "$n1x_script" || {
       echo "WARNING: no N1x pre-built UKI or layer; N1x installs build their own and pacstrap the NVIDIA stack"
       rm -f "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.modules" \
         "$(layer_path aarch64-n1x)"
     }
+  fi
+
+  # systemd-boot's fast path, as the UKI is Limine's: the initramfs
+  # omarchy-boot-switch install builds on the target, 4 s of the install, built
+  # here once. The UKI's systemd hook set can't stand in: systemd-boot's boot
+  # images need Omarchy's busybox hooks for snapshots and restores. So this is
+  # the image's own mkinitcpio configuration, as the target would read it, made
+  # generic the way the UKI is: autodetect skipped, and kms with it, which
+  # without autodetect bundles every GPU's firmware (237 MB measured). The LUKS
+  # prompt then draws on the firmware framebuffer, and the first kernel update
+  # builds the machine's own, with both. The installer passes it to
+  # omarchy-boot-switch install (--initramfs) where nothing it is built from
+  # changed on the machine (phases_impl._prebuilt_initramfs), and builds one
+  # otherwise. A Snapdragon ISO installs only Snapdragon laptops, whose
+  # platform builds its own, so it ships none.
+  rm -f "$root"/var/lib/omarchy-iso/prebuilt-initramfs.*
+  # An image whose omarchy-boot-rebuild can't take it (an older omarchy) gets
+  # none: installs build theirs, as before.
+  if ! grep -q -- '--initramfs' "$root/usr/bin/omarchy-boot-rebuild" 2>/dev/null; then
+    echo "omarchy-boot-rebuild takes no pre-built initramfs; none is built"
+  elif [[ -z ${OMARCHY_SNAPDRAGON:-} ]]; then
+    echo "Pre-building systemd-boot's initramfs in the image (kver=$image_kver, the image's hooks, no autodetect, no kms)"
+    if build_prebuilt_initramfs; then
+      echo "Pre-built initramfs: $(du -h "$root/var/lib/omarchy-iso/prebuilt-initramfs.img" | cut -f1)"
+      prebuilt_initramfs_size_ok "$root/var/lib/omarchy-iso/prebuilt-initramfs.img" || exit 1
+    else
+      echo "WARNING: no pre-built initramfs; systemd-boot installs build theirs"
+      rm -f "$root"/var/lib/omarchy-iso/prebuilt-initramfs.*
+    fi
   fi
 
   # Only this build uses these; the installed system has no use for them.

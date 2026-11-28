@@ -8,7 +8,7 @@
 # copy in /run (the configurator's try_console), which the soft reboot keeps.
 # The soft reboot ends on tty1, with every other console freed (reduce_vt() in
 # systemd's src/core/main.c), so without this the screen stays black until
-# the session takes it.
+# SDDM takes it.
 
 sysfs=${OMARCHY_SYSFS:-/sys}
 screens=${OMARCHY_TRY_SCREENS:-/run/omarchy-try}

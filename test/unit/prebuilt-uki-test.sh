@@ -69,8 +69,8 @@ echo "ok - the N1x UKI has a ceiling of its own"
 # UKI with board firmware and device trees; skip the unused generic UKI so it
 # does not bloat the root image, while ordinary builds still invoke mkinitcpio.
 uki_branch=$(awk '
-  !in_block && /^    if \[\[ -n \$\{OMARCHY_SNAPDRAGON:-\} \]\]; then$/ { in_block = 1 }
-  in_block { print; if (/^    fi$/) exit }
+  !in_block && /^  if \[\[ -n \$\{OMARCHY_SNAPDRAGON:-\} \]\]; then$/ { in_block = 1 }
+  in_block { print; if (/^  fi$/) exit }
 ' "$builder")
 [[ -n $uki_branch ]] || fail "could not extract the OMARCHY_SNAPDRAGON pre-built UKI branch"
 

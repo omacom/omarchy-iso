@@ -1099,9 +1099,10 @@ rebuild_offline_repo_db
 #                                audio DSPs
 #   tailscale                    installed only when an autoinstall drive
 #                                staged an auth key
-# Both CPU microcodes stay in the image although a machine needs only one: the
-# pre-built UKI is made with autodetect skipped, so its microcode hook bundles
-# both, and every install early-loads its own on first boot.
+# Both CPU microcodes stay in the image although a machine needs only one: a
+# pre-built UKI, where the image has one, is made with autodetect skipped, so
+# its microcode hook bundles both, and every install early-loads its own on
+# first boot.
 # omarchy-apply-system still installs more from omarchy-other.packages as the
 # hardware dictates.
 per_machine_packages=(alsa-firmware sof-firmware tailscale)

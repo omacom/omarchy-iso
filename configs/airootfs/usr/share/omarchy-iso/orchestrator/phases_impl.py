@@ -21,7 +21,7 @@ Phase ordering (full-disk and protected/pre-mounted):
     run_system_finalizer   → arch-chroot root omarchy-apply-system, including Snapper
     finalize_limine_boot   → final Limine config/UKI build after hardware drop-ins
     run_chroot_finalizer   → arch-chroot -u user omarchy-provision-user
-    configure_login        → sddm state + encrypted-install autologin
+    configure_login        → greetd login screen + encrypted-install autologin
     configure_ssh_access   → authorized_keys for autoinstall; no-op otherwise
     configure_tailscale    → tailnet join staged for first boot; no-op otherwise
     validate_boot          → assert UKI / limine.conf / kernel cmdline are sane,
@@ -4491,7 +4491,9 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
 
 
     # With a pre-built UKI in the image, copy it to the ESP and skip the ~4 s
-    # of limine-mkinitcpio. Without one, build it here as before.
+    # of limine-mkinitcpio. Without one, build it here as before. An image
+    # whose Omarchy draws the unlock prompt with its boot splash has none
+    # (build-root-image.sh): the splash needs the busybox initramfs built here.
     #
     # Encrypted installs take the pre-built path too. build-root-image.sh
     # builds the UKI with the systemd hook set plus sd-encrypt, and Limine
@@ -4574,7 +4576,7 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     if selected:
         text = "\n".join(l for l in default_limine.read_text().splitlines() if not re.match(r"\s*BOOT_ORDER\s*=", l))
         default_limine.write_text(f'{text}\nBOOT_ORDER="{selected}, {selected}-*, *, *fallback, Snapshots"\n')
-        info(f"› {selected} boots first; the pre-built UKI is for {prebuilt_kernel}")
+        info(f"› {selected} boots first; the image's kernel is {prebuilt_kernel}")
 
     # A UKI is a UEFI executable. On BIOS firmware Limine boots a kernel and
     # initramfs pair, and limine-entry-tool --add-uki refuses ("Your system is
@@ -4840,100 +4842,25 @@ def _read_omarchy_mirror() -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# configure_login: seed SDDM's last user/session for the password-only Omarchy
-# greeter. Encrypted installs autologin because the LUKS prompt is the auth
-# boundary; unencrypted installs leave SDDM as the auth screen.
+# configure_login: point greetd's login screen at the install's user. Encrypted
+# installs autologin because the LUKS prompt is the auth boundary; unencrypted
+# installs leave the login screen as the auth screen.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _target_group_gid(target: Path, group: str) -> int | None:
-    group_file = target / "etc" / "group"
-    if not group_file.is_file():
-        return None
-    for line in group_file.read_text().splitlines():
-        parts = line.split(":")
-        if len(parts) >= 3 and parts[0] == group:
-            try:
-                return int(parts[2])
-            except ValueError:
-                return None
-    return None
-
-
-def _sddm_service_enabled(target: Path) -> bool:
-    """Whether sddm.service is already enabled as display-manager.service in
-    target (as install/config/enable-services.sh does) and not masked."""
-    etc_systemd = target / "etc" / "systemd" / "system"
-    unit = target / "usr" / "lib" / "systemd" / "system" / "sddm.service"
-    if not unit.is_file():
-        return False
-    override = etc_systemd / "sddm.service"
-    if override.is_symlink() and os.readlink(override) == "/dev/null":
-        return False
-    dm_link = etc_systemd / "display-manager.service"
-    if not dm_link.is_symlink():
-        return False
-    return os.readlink(dm_link) in (
-        "/usr/lib/systemd/system/sddm.service",
-        "/lib/systemd/system/sddm.service",
-    )
-
-
 def configure_login(ctx: InstallContext) -> None:
-    sddm_dir = ctx.target / "etc" / "sddm.conf.d"
-    sddm_dir.mkdir(parents=True, exist_ok=True)
-    (sddm_dir / "99-omarchy-login.conf").write_text(
-        "[Theme]\nCurrent=omarchy\n\n"
-        "[Users]\nRememberLastUser=true\nRememberLastSession=true\n"
-    )
-
-    autologin_conf = sddm_dir / "autologin.conf"
-    if ctx.encrypt and not ctx.defer_provisioning:
-        autologin_conf.write_text(
-            "[Autologin]\n"
-            f"User={ctx.username}\n"
-            "Session=omarchy.desktop\n"
-        )
-    else:
-        # deferred-provisioning installs have no user yet; omarchy-provision-owner writes autologin
-        # and SDDM state at first boot once the owner exists.
-        autologin_conf.unlink(missing_ok=True)
-
+    # Deferred-provisioning installs have no user yet; omarchy-provision-owner
+    # sets the login up at first boot.
     if not ctx.defer_provisioning:
-        state_dir = ctx.target / "var" / "lib" / "sddm"
-        state_dir.mkdir(parents=True, exist_ok=True)
-        state_file = state_dir / "state.conf"
-        state_file.write_text(
-            f"[Last]\nSession=omarchy.desktop\nUser={ctx.username}\n"
+        login = [ctx.username, "--autologin"] if ctx.encrypt else [ctx.username]
+        # The target's own, run from here on its tree rather than in a chroot.
+        # Uncaptured, so a refusal ("no such user") shows in the install log.
+        subprocess.run(
+            [str(ctx.target / "usr" / "bin" / "omarchy-system-login"), "--root", str(ctx.target), *login],
+            check=True,
         )
-        sddm_entry = _target_passwd_entry(ctx.target, "sddm")
-        sddm_gid = _target_group_gid(ctx.target, "sddm")
-        if (sddm_entry is not None and sddm_gid is not None
-                and not state_dir.is_symlink() and not state_file.is_symlink()):
-            uid = sddm_entry[0]
-            try:
-                os.chown(state_dir, uid, sddm_gid, follow_symlinks=False)
-                os.chown(state_file, uid, sddm_gid, follow_symlinks=False)
-            except OSError:
-                subprocess.run(
-                    ["arch-chroot", str(ctx.target), "chown", "sddm:sddm",
-                     "/var/lib/sddm", "/var/lib/sddm/state.conf"],
-                    check=False, capture_output=True,
-                )
-        else:
-            subprocess.run(
-                ["arch-chroot", str(ctx.target), "chown", "sddm:sddm",
-                 "/var/lib/sddm", "/var/lib/sddm/state.conf"],
-                check=False, capture_output=True,
-            )
 
     autologin = ctx.target / "etc" / "systemd" / "system" / "getty@tty1.service.d" / "autologin.conf"
     autologin.unlink(missing_ok=True)
-
-    if not _sddm_service_enabled(ctx.target):
-        subprocess.run(
-            ["systemctl", f"--root={ctx.target}", "enable", "sddm.service"],
-            check=False, capture_output=True,
-        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5050,7 +4977,7 @@ TAILSCALE_AUTHKEY_TARGET = "/etc/tailscale/authkey"
 # network-online.target can be reached before there is real connectivity, so
 # retry inside the boot -- but NOT as a oneshot: target units implicitly gain
 # After= for their Wants=, so a oneshot in multi-user.target holds the whole
-# boot (SDDM included) hostage until it finishes. Type=simple counts as
+# boot (greetd included) hostage until it finishes. Type=simple counts as
 # started the moment it forks, letting boot proceed while the join retries in
 # the background for as long as the boot lasts. Cleanup lives inside the
 # script because it must only run after a successful join: the key is removed
@@ -5273,7 +5200,7 @@ def _validate_limine_boot(ctx: InstallContext, boot: dict, storage: dict, esp_mo
             # Hardware packages (omarchy-hw-intel-ptl, …) can swap the configured
             # kernel out mid-install, so trust what's on disk over what we asked
             # for. But while the configured kernel is installed, require its own
-            # UKI: the image always carries the prebuilt stock UKI, which must not
+            # UKI: an image's prebuilt stock UKI, where it has one, must not
             # hide a failed linux-t2 build (the rule of omacom/omarchy-iso#145).
             uki_dir = esp_mount / "EFI" / "Linux"
             installed_kernels = _installed_kernels(ctx)

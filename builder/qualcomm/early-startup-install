@@ -18,8 +18,11 @@ build() {
         return 1
     }
     # These drivers obtain firmware names from DT, so modinfo alone cannot
-    # include the blobs. Keep mkinitcpio's normal updates/compression lookup.
-    names=$(python3 /usr/lib/initcpio/qcom-early-firmware.py "$OMARCHY_QCOM_DTBS_FILE") || return 1
+    # include the blobs. Request only --required (ADSP owner) blobs: optional
+    # CDSP/SLPI/GPU/video blobs are never started in initramfs and bloat the
+    # live UKI that GRUB must read over slow UEFI BlockIO. Keep mkinitcpio's
+    # normal updates/compression lookup.
+    names=$(python3 /usr/lib/initcpio/qcom-early-firmware.py --required "$OMARCHY_QCOM_DTBS_FILE") || return 1
     while IFS= read -r firmware; do
         [[ -n $firmware ]] || continue
         add_firmware "$firmware" || warning "Qualcomm device-tree firmware unavailable: $firmware"

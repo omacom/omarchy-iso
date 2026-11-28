@@ -11,6 +11,9 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+UNIT_DIR = Path(__file__).resolve().parent
+if str(UNIT_DIR) not in sys.path:
+    sys.path.insert(0, str(UNIT_DIR))
 ZENBOOK_CHID = "5b6d366d-9a43-536d-9637-8e47abfb8e63"
 
 
@@ -167,9 +170,45 @@ class QualcommPrebuiltUkiTests(unittest.TestCase):
         )
         self.assertIsNone(self.check())
 
-    def test_windows_extracted_qcom_firmware_conf_builds_its_own(self):
+    def test_windows_extracted_qcom_firmware_conf_uses_initrd_append_when_valid(self):
+        from test_uki_initrd_append import _make_fake_uki
+
+        # Real unsigned PE32+ UKI with trailing .initrd + tiny board zap shader
+        (self.state / "prebuilt-uki-qualcomm.efi").write_bytes(_make_fake_uki())
+        fw_path = self.target / "usr/lib/firmware/qcom/x1p42100/ASUSTeK/zenbook-14-ux3480qa/qcdxkmsucpurwa.mbn.xz"
+        fw_path.parent.mkdir(parents=True, exist_ok=True)
+        fw_path.write_bytes(b"ZAP" * 64)
+        (self.conf / "qcom-firmware.conf").write_text(
+            "_qcom_fw_files=(/usr/lib/firmware/qcom/x1p42100/ASUSTeK/zenbook-14-ux3480qa/qcdxkmsucpurwa.mbn.xz)\n"
+            "_qcom_fw_names=(qcom/x1p42100/ASUSTeK/zenbook-14-ux3480qa/qcdxkmsucpurwa.mbn)\n"
+        )
+        self.assertEqual(self.check(), self.state / "prebuilt-uki-qualcomm.efi")
+        resolved = self.phases_impl._qualcomm_qcom_firmware_files(self.target)
+        self.assertEqual(
+            resolved,
+            [("usr/lib/firmware/qcom/x1p42100/ASUSTeK/zenbook-14-ux3480qa/qcdxkmsucpurwa.mbn.xz", fw_path)],
+        )
+
+        # Signed UKI (cannot append) falls back cleanly to rebuilding
+        (self.state / "prebuilt-uki-qualcomm.efi").write_bytes(_make_fake_uki(signed=True))
+        self.assertIsNone(self.check())
+
+        # Unrecognized qcom-firmware.conf syntax falls back cleanly to rebuilding
+        (self.state / "prebuilt-uki-qualcomm.efi").write_bytes(_make_fake_uki())
         (self.conf / "qcom-firmware.conf").write_text("FILES+=(/usr/lib/firmware/updates/qcom/zap.mbn)\n")
         self.assertIsNone(self.check())
+
+    def test_nested_hwid_subdir_and_quiet_efivars_hook_are_accepted(self):
+        # Move HWID JSON into a linux-omarchy/ subdirectory (matching linux-omarchy-dtbs)
+        src = self.hwids / "glymur-asus-zenbook-a16-ux3607oa.json"
+        nested = self.hwids / "linux-omarchy" / src.name
+        nested.parent.mkdir(parents=True, exist_ok=True)
+        src.rename(nested)
+        # Add the busybox-only omarchy-quiet-efivars install hook written by qualcomm/initramfs.sh
+        hook = self.target / "etc/initcpio/install/omarchy-quiet-efivars"
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_text("#!/bin/bash\nbuild() { :; }\n")
+        self.assertEqual(self.check(), self.state / "prebuilt-uki-qualcomm.efi")
 
     def test_adsp_blacklist_and_unexpected_modprobe_build_their_own(self):
         (self.modprobe / "qualcomm-adsp-nofw.conf").write_text("blacklist qcom_q6v5_pas\n")

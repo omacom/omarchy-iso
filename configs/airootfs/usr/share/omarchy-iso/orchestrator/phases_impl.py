@@ -3891,6 +3891,10 @@ _SYSTEM_MKINITCPIO_DROPINS = frozenset({
 # laptops (top-row Fn-key defaults) without needing a fresh initramfs.
 _QUALCOMM_ALLOWED_MODPROBE_DIFFS = frozenset({
     "etc/modprobe.d/omarchy-toprow.conf",
+    # Written by install/hardware/qualcomm/initramfs.sh on every Qualcomm
+    # laptop; only patches busybox init_functions and is a no-op under the
+    # pre-built UKI's systemd hook set (already permitted in HOOKS+= below).
+    "etc/initcpio/install/omarchy-quiet-efivars",
 })
 
 _QUALCOMM_UUID_RE = re.compile(
@@ -3948,7 +3952,7 @@ def _qualcomm_hwid_matches(
     if not chids:
         return False
 
-    for path in hwids_dir.glob("*.json"):
+    for path in hwids_dir.rglob("*.json"):
         try:
             data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
         except (OSError, ValueError):
@@ -4038,6 +4042,106 @@ def _normalize_firmware_literal(token: str) -> str:
     return token
 
 
+_QUALCOMM_QCOM_FW_DROPIN = "qcom-firmware.conf"
+_QUALCOMM_EXTRA_FW_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _qualcomm_target_kernel_lacks_module(target: Path, module: str) -> bool:
+    """Return True when the target's installed prebuilt kernel genuinely has no
+    module or alias matching `module`, matching mkinitcpio's `mod?` skip rules."""
+    modules_root = target / "usr" / "lib" / "modules"
+    if not modules_root.is_dir():
+        return False
+    kernel_file = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki.kernel"
+    wanted_kernel = kernel_file.read_text().strip() if kernel_file.is_file() else ""
+    kdirs = [
+        d for d in sorted(modules_root.iterdir())
+        if d.is_dir() and (d / "modules.dep").is_file()
+        and (not wanted_kernel or ((d / "pkgbase").is_file() and (d / "pkgbase").read_text().strip() == wanted_kernel))
+    ]
+    if not kdirs:
+        return False
+    for kdir in kdirs:
+        try:
+            res = subprocess.run(
+                ["modinfo", "--basedir", str(target), "-k", kdir.name, "-F", "filename", module],
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            return False
+        if res.returncode == 0 and res.stdout.strip():
+            return False
+    return True
+
+
+def _qualcomm_qcom_firmware_files(target: Path) -> list[tuple[str, Path]] | None:
+    """Resolve early DRM firmware files listed by qcom-firmware-extract's
+    etc/mkinitcpio.conf.d/qcom-firmware.conf.
+
+    Returns [] when qcom-firmware.conf does not exist, a list of
+    (initrd_rel_path, host_path) tuples when every listed firmware resolves
+    cleanly within _QUALCOMM_EXTRA_FW_MAX_BYTES, or None when the drop-in uses
+    unexpected syntax or references a missing/oversized file (triggering a full
+    mkinitcpio rebuild).
+    """
+    conf = target / "etc" / "mkinitcpio.conf.d" / _QUALCOMM_QCOM_FW_DROPIN
+    if not conf.is_file():
+        return []
+    text = conf.read_text(errors="ignore")
+    # Reject unexpected hooks/binaries/modules inside qcom-firmware.conf.
+    if re.search(r"^\s*(?:HOOKS|BINARIES|MODULES)\s*\+?=", text, re.M):
+        return None
+    m_files = re.search(r"^\s*_qcom_fw_files=\(([^)]*)\)", text, re.M | re.S)
+    m_names = re.search(r"^\s*_qcom_fw_names=\(([^)]*)\)", text, re.M | re.S)
+    if not m_files and not m_names:
+        return None
+
+    raw_files = [t.strip("'\"") for t in (m_files.group(1).split() if m_files else []) if t.strip("'\"")]
+    raw_names = [t.strip("'\"") for t in (m_names.group(1).split() if m_names else []) if t.strip("'\"")]
+    count = max(len(raw_files), len(raw_names))
+    if count == 0:
+        return []
+
+    fw_root = (target / "usr" / "lib" / "firmware").resolve()
+    resolved: list[tuple[str, Path]] = []
+    seen: set[str] = set()
+    total_bytes = 0
+    for i in range(count):
+        found: Path | None = None
+        if i < len(raw_files) and raw_files[i].startswith("/usr/lib/firmware/"):
+            cand = target / raw_files[i].lstrip("/")
+            if cand.is_file():
+                found = cand
+        if found is None and i < len(raw_names):
+            rel_name = raw_names[i].lstrip("/")
+            for suffix in ("", ".zst", ".xz"):
+                for base_dir in ("usr/lib/firmware/updates", "usr/lib/firmware"):
+                    cand = target / base_dir / f"{rel_name}{suffix}"
+                    if cand.is_file():
+                        found = cand
+                        break
+                if found is not None:
+                    break
+        if found is None:
+            return None
+        try:
+            real_found = found.resolve(strict=True)
+            real_found.relative_to(fw_root)
+        except (OSError, ValueError):
+            return None
+        rel_in_target = found.relative_to(target).as_posix()
+        if rel_in_target in seen:
+            continue
+        seen.add(rel_in_target)
+        size = real_found.stat().st_size
+        total_bytes += size
+        if total_bytes > _QUALCOMM_EXTRA_FW_MAX_BYTES:
+            return None
+        resolved.append((rel_in_target, real_found))
+    return resolved
+
+
 def _qualcomm_prebuilt_uki(
     target: Path,
     platform_name: str,
@@ -4063,8 +4167,6 @@ def _qualcomm_prebuilt_uki(
     recorded_dropins_path = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-qualcomm.dropins"
     recorded_inputs_path = target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki-qualcomm.inputs"
     if not uki.is_file() or not recorded_mods_path.is_file() or platform_name != "aarch64-qualcomm":
-        return None
-    if (target / "etc" / "mkinitcpio.conf.d" / "qcom-firmware.conf").exists():
         return None
     if (target / "etc" / "modprobe.d" / "qualcomm-adsp-nofw.conf").exists():
         return None
@@ -4103,9 +4205,20 @@ def _qualcomm_prebuilt_uki(
                 tok = tok.strip("'\"")
                 if not tok or tok.startswith("$"):
                     continue
-                if tok.rstrip("?").replace("-", "_") not in covered_mods:
-                    return None
+                optional = tok.endswith("?")
+                mod_name = tok.rstrip("?").replace("-", "_")
+                if mod_name not in covered_mods:
+                    if not (optional and _qualcomm_target_kernel_lacks_module(target, mod_name)):
+                        return None
         if conf.name in system_dropins:
+            continue
+        if conf.name == _QUALCOMM_QCOM_FW_DROPIN:
+            from .uki_initrd_append import can_append_initrd
+            extra_fw = _qualcomm_qcom_firmware_files(target)
+            if extra_fw is None:
+                return None
+            if extra_fw and not can_append_initrd(uki):
+                return None
             continue
         for match in re.finditer(r"^\s*HOOKS\s*\+?=\(([^)]*)\)", text, re.M | re.S):
             body = "\n".join(line.split("#", 1)[0] for line in match.group(1).splitlines())
@@ -4650,6 +4763,15 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
                     if not embed_vconsole(esp_uki, vconsole):
                         raise RuntimeError(f"could not write keyboard layout {stale_keymap} into {esp_uki}")
                     info(f"› UKI carries keyboard layout {stale_keymap} for the console and the LUKS prompt")
+            if qualcomm_uki:
+                extra_fw = _qualcomm_qcom_firmware_files(ctx.target) or []
+                if extra_fw:
+                    with _time_step("LIMINE.append_initrd_firmware (early Qualcomm DRM firmware)"):
+                        from .uki_initrd_append import append_files_to_initrd
+                        payload = [(arc, path.read_bytes()) for arc, path in extra_fw]
+                        if not append_files_to_initrd(esp_uki, payload):
+                            raise RuntimeError(f"could not append early Qualcomm firmware into {esp_uki}")
+                        info(f"› UKI carries {len(payload)} board firmware file(s) in appended initrd overlay")
             with _time_step("LIMINE.embed_cmdline (pre-built UKI boots without a loader)"):
                 from .uki_cmdline import embed_cmdline
                 if embed_cmdline(esp_uki, cmdline):

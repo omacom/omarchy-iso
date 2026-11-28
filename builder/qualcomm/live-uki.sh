@@ -53,31 +53,20 @@ fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 qcom_conf="$work/archiso-qcom.conf"
-python3 - /etc/mkinitcpio.conf.d/archiso.conf "$qcom_conf" <<'PY'
-import re, sys
-from pathlib import Path
-
-src, dst = Path(sys.argv[1]), Path(sys.argv[2])
-drop = {
-    "plymouth",
-    "archiso_pxe_common",
-    "archiso_pxe_nbd",
-    "archiso_pxe_http",
-    "archiso_pxe_nfs",
-}
-text = src.read_text()
-text = re.sub(
-    r"^HOOKS=\(([^)]*)\)$",
-    lambda m: "HOOKS=(" + " ".join(h for h in m.group(1).split() if h not in drop) + ")",
-    text,
-    flags=re.M,
-)
-if re.search(r"^COMPRESSION_OPTIONS=", text, re.M):
-    text = re.sub(r"^COMPRESSION_OPTIONS=.*$", "COMPRESSION_OPTIONS=(-T0 -19)", text, flags=re.M)
-else:
-    text += "\nCOMPRESSION_OPTIONS=(-T0 -19)\n"
-dst.write_text(text)
-PY
+(
+  HOOKS=()
+  # shellcheck source=/dev/null
+  source /etc/mkinitcpio.conf.d/archiso.conf
+  filtered_hooks=()
+  for hook in "${HOOKS[@]}"; do
+    case $hook in
+      plymouth|archiso_pxe_*) continue ;;
+      *) filtered_hooks+=("$hook") ;;
+    esac
+  done
+  grep -vE '^(HOOKS|COMPRESSION_OPTIONS)=' /etc/mkinitcpio.conf.d/archiso.conf || true
+  printf 'HOOKS=(%s)\nCOMPRESSION_OPTIONS=(-T0 -19)\n' "${filtered_hooks[*]}"
+) >"$qcom_conf"
 printf '%s\n' "${dtbs[@]}" >"$work/dtbs.list"
 OMARCHY_QCOM_DTBS_FILE="$work/dtbs.list" mkinitcpio \
   -k "$kernel" -c "$qcom_conf" \

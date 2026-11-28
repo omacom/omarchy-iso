@@ -3384,13 +3384,13 @@ def _prepare_target_setup(ctx: InstallContext) -> None:
         target_dst.mkdir(parents=True, exist_ok=True)
         if str(target_dst) not in mounted:
             subprocess.run(["mount", "--bind", src, str(target_dst)], check=True)
+            ctx.state["bind_mounts"].append(str(target_dst))
+            mounted.add(str(target_dst))
             if read_only:
                 subprocess.run(
                     ["mount", "-o", "remount,ro,bind", str(target_dst)],
                     check=True,
                 )
-            ctx.state["bind_mounts"].append(str(target_dst))
-            mounted.add(str(target_dst))
 
     _copy_firmware_stage_into_target(ctx)
 

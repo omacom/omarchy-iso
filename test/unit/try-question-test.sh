@@ -665,3 +665,21 @@ run_hardware bash "$LAYER_SCRIPTS/omarchy-try-hardware" --user || fail "the sess
 runuser $hw/omarchy/install/user/hardware/dell/xps13-text-scaling.sh" ]] ||
   fail "the session's user hardware setup ran: $(cat "$hw/calls")"
 pass "the session runs the install's hardware setup and its user steps, and applies what they changed"
+
+# omarchy-try-reprobe also probes unbound platform audio devices (Snapdragon
+# ASoC sound cards whose topology firmware was trimmed in the live installer)
+# without touching unrelated unbound platform devices.
+reprobe_sys="$work/reprobe-sys"
+mkdir -p "$reprobe_sys/bus/pci/devices/0000:00:1f.3"          "$reprobe_sys/bus/usb/devices/1-1"          "$reprobe_sys/bus/platform/devices/sound"          "$reprobe_sys/bus/platform/devices/6800000.remoteproc"          "$reprobe_sys/bus/platform/devices/bound-sound/driver"
+printf 'of:NsoundT(null)Cqcom,x1e80100-sndcard\n' >"$reprobe_sys/bus/platform/devices/sound/modalias"
+printf 'of:NremoteprocT(null)Cqcom,x1e80100-adsp-pas\n' >"$reprobe_sys/bus/platform/devices/6800000.remoteproc/modalias"
+: >"$reprobe_sys/bus/pci/drivers_probe"
+: >"$reprobe_sys/bus/usb/drivers_probe"
+: >"$reprobe_sys/bus/platform/drivers_probe"
+OMARCHY_SYSFS="$reprobe_sys" bash "$LAYER_SCRIPTS/omarchy-try-reprobe" || fail "omarchy-try-reprobe failed"
+[[ $(<"$reprobe_sys/bus/platform/drivers_probe") == "sound" ]] || fail "platform sound device was not reprobed: $(cat "$reprobe_sys/bus/platform/drivers_probe")"
+rm -rf "$reprobe_sys/bus/platform/devices/sound"
+: >"$reprobe_sys/bus/platform/drivers_probe"
+OMARCHY_SYSFS="$reprobe_sys" bash "$LAYER_SCRIPTS/omarchy-try-reprobe" || fail "omarchy-try-reprobe failed without sound device"
+[[ ! -s "$reprobe_sys/bus/platform/drivers_probe" ]] || fail "reprobe must not probe bound or non-audio platform devices: $(cat "$reprobe_sys/bus/platform/drivers_probe")"
+echo "ok - omarchy-try-reprobe probes unbound Snapdragon platform sound devices only"

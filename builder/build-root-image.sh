@@ -109,24 +109,26 @@ initramfs_inputs() {
     \( -type f -o -type l \) -print0 2>/dev/null | LC_ALL=C sort -z)
 }
 
-# Build /var/lib/omarchy-iso/prebuilt-initramfs.img in the image at $root for
-# its kernel $image_kver, and record what the installer checks before it uses
-# it. Each step returns on failure: set -e does not apply in a function whose
-# status the caller tests.
+# Build /var/lib/omarchy-iso/prebuilt-initramfs.img in the image at $1 (default
+# $root) for its kernel $image_kver, writing outputs to $2 (default
+# $root/var/lib/omarchy-iso). Each step returns on failure: set -e does not
+# apply in a function whose status the caller tests.
 build_prebuilt_initramfs() {
+  local target_root=${1:-$root}
+  local out_dir=${2:-$root/var/lib/omarchy-iso}
   local dir=/var/lib/omarchy-iso hook
   local image=$dir/prebuilt-initramfs.img
 
   # /usr/bin/mkinitcpio, as omarchy-boot-rebuild calls it: the one first in
   # PATH is limine-mkinitcpio-hook's wrapper, which answers for plain
   # mkinitcpio whatever this did.
-  arch-chroot "$root" /usr/bin/mkinitcpio -k "$image_kver" -g "$image" -S autodetect,kms 2>&1 | tail -25 || return 1
-  [[ -s $root$image ]] || return 1
+  arch-chroot "$target_root" /usr/bin/mkinitcpio -k "$image_kver" -g "$image" -S autodetect,kms 2>&1 | tail -25 || return 1
+  [[ -s $target_root$image ]] || return 1
 
   # The hook set is the platform's baseline (00-omarchy-hooks.conf), read on
   # the build host: make sure it is the busybox one systemd-boot needs, with
   # the encrypt hook for cryptdevice= and Omarchy's snapshot and restore hooks.
-  arch-chroot "$root" lsinitcpio "$image" >"$work/prebuilt-initramfs.list" || return 1
+  arch-chroot "$target_root" lsinitcpio "$image" >"$work/prebuilt-initramfs.list" || return 1
   for hook in encrypt omarchy-snapshot-overlay omarchy-restore; do
     if ! grep -qx "hooks/$hook" "$work/prebuilt-initramfs.list"; then
       echo "WARNING: the pre-built initramfs has no $hook hook" >&2
@@ -134,14 +136,57 @@ build_prebuilt_initramfs() {
     fi
   done
 
-  printf '%s\n' "$image_kernel" >"$root$dir/prebuilt-initramfs.kernel"
-  printf '%s\n' "$image_kver" >"$root$dir/prebuilt-initramfs.kver"
+  if [[ $out_dir != "$target_root$dir" ]]; then
+    install -m 0644 "$target_root$image" "$out_dir/prebuilt-initramfs.img" || return 1
+  fi
+  printf '%s\n' "$image_kernel" >"$out_dir/prebuilt-initramfs.kernel"
+  printf '%s\n' "$image_kver" >"$out_dir/prebuilt-initramfs.kver"
   # The console keymap the keymap hook compiled in, which the hashed inputs
   # below don't cover (vconsole.conf).
   # shellcheck source=/dev/null # the image's own vconsole.conf
   ( [ -f "$root/etc/vconsole.conf" ] && . "$root/etc/vconsole.conf"; printf '%s\n' "${KEYMAP:-}" ) \
-    >"$root$dir/prebuilt-initramfs.keymap"
-  initramfs_inputs "$root" >"$root$dir/prebuilt-initramfs.inputs"
+    >"$out_dir/prebuilt-initramfs.keymap"
+  initramfs_inputs "$root" >"$out_dir/prebuilt-initramfs.inputs"
+}
+
+build_prebuilt_initramfs_in() {
+  local merged=$1 _upper=$2 out_dir=$3
+  echo "Pre-building systemd-boot's initramfs in the image (kver=$image_kver, the image's hooks, no autodetect, no kms)"
+  build_prebuilt_initramfs "$merged" "$out_dir" || return 1
+  echo "Pre-built initramfs: $(du -h "$out_dir/prebuilt-initramfs.img" | cut -f1)"
+  prebuilt_initramfs_size_ok "$out_dir/prebuilt-initramfs.img" || return 2
+}
+
+install_uki_tmp_files() {
+  local dst=$1
+  install -Dm0755 "$uki_tmp/omarchy-vconsole-room" "$dst/usr/lib/initcpio/install/omarchy-vconsole-room" || return 1
+  install -Dm0644 "$uki_tmp/vconsole.conf.prebuilt-uki" "$dst/etc/vconsole.conf.prebuilt-uki" || return 1
+  install -Dm0644 "$uki_tmp/mkinitcpio-prebuilt-uki.conf" "$dst/etc/mkinitcpio-prebuilt-uki.conf" || return 1
+  install -Dm0644 "$uki_tmp/cmdline.prebuilt-uki" "$dst/etc/kernel/cmdline.prebuilt-uki" || return 1
+}
+
+build_generic_uki_in() {
+  local merged=$1 _upper=$2 out_dir=$3
+  install_uki_tmp_files "$merged" || return 1
+  echo "Pre-building the UKI in the image (kver=$image_kver, generic cmdline, systemd and sd-encrypt hooks, no autodetect)"
+  if arch-chroot "$merged" mkinitcpio \
+       -k "/usr/lib/modules/${image_kver}/vmlinuz" \
+       -c /etc/mkinitcpio-prebuilt-uki.conf \
+       --cmdline /etc/kernel/cmdline.prebuilt-uki \
+       -U /var/lib/omarchy-iso/prebuilt-uki.efi \
+       -S autodetect 2>&1 | tail -25 ; then
+    if [[ -f "$merged/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
+      echo "Pre-built UKI: $(du -h "$merged/var/lib/omarchy-iso/prebuilt-uki.efi" | cut -f1)"
+      prebuilt_uki_size_ok "$merged/var/lib/omarchy-iso/prebuilt-uki.efi" || return 2
+      install -m 0644 "$merged/var/lib/omarchy-iso/prebuilt-uki.efi" "$out_dir/prebuilt-uki.efi" || return 1
+    else
+      echo "WARNING: mkinitcpio ran but left no UKI; the installer will build one"
+      return 3
+    fi
+  else
+    echo "WARNING: mkinitcpio failed; the installer will build the UKI"
+    return 1
+  fi
 }
 
 # Layers: what one kind of machine adds to the image on disk, packed next to
@@ -191,8 +236,14 @@ install_layer_packages() {
   local merged=$1
   shift
   pacstrap -C "$effective_pacman_conf" -c -G -M "$merged" --needed "$@" || return 1
-  arch-chroot "$merged" depmod "$image_kver" || return 1
-  arch-chroot "$merged" ldconfig || return 1
+  # Skip redundant depmod/ldconfig when pacstrap's own 60-depmod.hook / libalpm
+  # already wrote fresh indexes into this empty overlay upper directory.
+  if [[ -z ${layer_upper:-} || ! -f $layer_upper/usr/lib/modules/$image_kver/modules.dep ]]; then
+    arch-chroot "$merged" depmod "$image_kver" || return 1
+  fi
+  if [[ -z ${layer_upper:-} || ! -f $layer_upper/etc/ld.so.cache ]]; then
+    arch-chroot "$merged" ldconfig || return 1
+  fi
   systemd-sysusers --root="$merged" || return 1
 }
 
@@ -237,7 +288,7 @@ _with_image_overlay() {
        -o "lowerdir=$root,upperdir=$overlay/rw/upper,workdir=$overlay/rw/work" "$overlay/merged"; then
     "$run" "$overlay/merged" "$overlay/rw/upper" "$@" &
     child_pid=$!
-    wait "$child_pid" || status=1
+    wait "$child_pid" || status=$?
     child_pid=""
     umount -R "$overlay/merged" || status=1
   else
@@ -274,7 +325,7 @@ hardware_layer_packages() {
 # that carry a scriptlet are listed for the installer to run once the user
 # exists (phases_impl._run_layer_scriptlets).
 build_hardware_layer_in() {
-  local merged=$1 upper=$2 name=$3 logged=0
+  local merged=$1 upper=$2 name=$3 logged=0 layer_upper=$2
   shift 3
   echo "Packing the $name hardware layer: $*"
   [[ -f $merged/var/log/pacman.log ]] && logged=$(wc -l <"$merged/var/log/pacman.log")
@@ -342,21 +393,15 @@ build_hardware_layers() {
   fi
 }
 
-# Set up N1x's boot-time state in the overlay at $1 (upper directory $2), pack
-# its packages as the N1x layer, and build its UKI there. Each step returns on
-# failure: set -e does not apply in a function whose status the caller tests.
-build_n1x_uki_in() {
-  local merged=$1 upper=$2 line
-  local -a modules=(thunderbolt) line_modules n1x_packages
+# Build prebuilt-uki-n1x.efi inside an overlay whose lower layer already holds
+# the N1x packages (from install_layer_packages), writing outputs to $2.
+build_n1x_uki_stage() {
+  local merged=$1 out_dir=${2:-$root/var/lib/omarchy-iso} line
+  local -a modules=(thunderbolt) line_modules
 
-  # Every package the N1x list adds to the image, as the installer would
-  # install them (_platform_delta_packages), from the same mirror.
-  mapfile -t n1x_packages < <(grep -hv '^\s*#\|^\s*$' "$merged/usr/share/omarchy/install/omarchy-aarch64-n1x.packages")
-  ((${#n1x_packages[@]})) || return 1
-  install_layer_packages "$merged" "${n1x_packages[@]}" || return 1
-
-  # Before anything below writes boot-time state into the overlay.
-  write_layer "$upper" aarch64-n1x || return 1
+  if [[ -n ${uki_tmp:-} && -d ${uki_tmp:-} ]]; then
+    install_uki_tmp_files "$merged" || return 1
+  fi
 
   # As n1x.sh sets up an N1x whose GPU drives the panel: nvidia-drm's fbdev
   # draws the console and Plymouth's LUKS prompt.
@@ -389,7 +434,7 @@ INSTALL
   sed -E \
     -e "s/^MODULES=.*/MODULES=(${modules[*]})/" \
     -e 's/ plymouth / plymouth sd-omarchy-n1x-boot-brightness /' \
-    "$root/etc/mkinitcpio-prebuilt-uki.conf" >"$merged/etc/mkinitcpio-prebuilt-uki-n1x.conf" || return 1
+    "$merged/etc/mkinitcpio-prebuilt-uki.conf" >"$merged/etc/mkinitcpio-prebuilt-uki-n1x.conf" || return 1
   grep -q " plymouth sd-omarchy-n1x-boot-brightness " "$merged/etc/mkinitcpio-prebuilt-uki-n1x.conf" || return 1
 
   echo "Pre-building the N1x UKI (modules: ${modules[*]})"
@@ -398,14 +443,95 @@ INSTALL
     -c /etc/mkinitcpio-prebuilt-uki-n1x.conf \
     --cmdline /etc/kernel/cmdline.prebuilt-uki \
     -U /var/lib/omarchy-iso/prebuilt-uki-n1x.efi \
-    -S autodetect 2>&1 | tail -25
+    -S autodetect 2>&1 | tail -25 || return 1
   [[ -f "$merged/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" ]] || return 1
   n1x_prebuilt_uki_size_ok "$merged/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" || return 1
-  install -m 0644 "$merged/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" || return 1
-  echo "Pre-built N1x UKI: $(du -h "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" | cut -f1)"
+  install -m 0644 "$merged/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" "$out_dir/prebuilt-uki-n1x.efi" || return 1
+  echo "Pre-built N1x UKI: $(du -h "$out_dir/prebuilt-uki-n1x.efi" | cut -f1)"
   # The lines an N1x install will have: the image's own and n1x.sh's.
   { cat "$root/var/lib/omarchy-iso/prebuilt-uki.modules"; printf '%s\n' "${n1x_lines[@]}"; } |
-    sort -u >"$root/var/lib/omarchy-iso/prebuilt-uki-n1x.modules"
+    sort -u >"$out_dir/prebuilt-uki-n1x.modules"
+}
+
+# Set up N1x's packages in a throwaway overlay of $root, freeze its upper
+# directory read-only, then pack the N1x layer tarball concurrently with
+# building prebuilt-uki-n1x.efi in a second overlay stacked over it.
+_build_n1x_stacked_overlay() {
+  local out_dir=${1:-$root/var/lib/omarchy-iso}
+  local overlay child_pid="" layer_pid="" uki_pid="" status=0 layer_rc=0 uki_rc=0
+  local -a n1x_packages
+  overlay=$(mktemp -d)
+  cleanup_n1x_overlay() {
+    local rc=$? pid mp
+    set +e
+    for pid in "$child_pid" "$layer_pid" "$uki_pid"; do
+      [[ -n $pid ]] || continue
+      stop_pid_tree "$pid"
+      wait "$pid" 2>/dev/null || true
+    done
+    for mp in "$overlay/uki-merged" "$overlay/uki-rw" "$overlay/merged" "$overlay/rw"; do
+      if mountpoint -q "$mp" 2>/dev/null; then
+        umount -R "$mp" 2>/dev/null || { sleep 0.2; umount -R "$mp" 2>/dev/null || true; }
+      fi
+    done
+    rm -rf "$overlay"
+    exit "$rc"
+  }
+  trap cleanup_n1x_overlay EXIT
+  trap 'exit 143' TERM INT
+  mkdir -p "$overlay/rw" "$overlay/merged" "$overlay/uki-rw" "$overlay/uki-merged"
+  mount -t tmpfs -o size=6G omarchy-n1x-layer "$overlay/rw" || exit 1
+  mkdir -p "$overlay/rw/upper" "$overlay/rw/work"
+  mount -t overlay omarchy-n1x-layer \
+    -o "lowerdir=$root,upperdir=$overlay/rw/upper,workdir=$overlay/rw/work" "$overlay/merged" || exit 1
+
+  mapfile -t n1x_packages < <(grep -hv '^\s*#\|^\s*$' "$overlay/merged/usr/share/omarchy/install/omarchy-aarch64-n1x.packages")
+  ((${#n1x_packages[@]})) || exit 1
+  (
+    layer_upper="$overlay/rw/upper"
+    install_layer_packages "$overlay/merged" "${n1x_packages[@]}"
+  ) &
+  child_pid=$!
+  wait "$child_pid" || status=$?
+  child_pid=""
+  umount -R "$overlay/merged" || status=1
+  (( status == 0 )) || exit "$status"
+
+  # $overlay/rw/upper is now unmounted and read-only: pack the N1x layer
+  # concurrently with building the N1x UKI on a stacked overlay over it.
+  write_layer "$overlay/rw/upper" aarch64-n1x >"$overlay/layer.log" 2>&1 &
+  layer_pid=$!
+
+  if mount -t tmpfs -o size=4G omarchy-n1x-uki "$overlay/uki-rw" &&
+     mkdir -p "$overlay/uki-rw/upper" "$overlay/uki-rw/work" &&
+     mount -t overlay omarchy-n1x-uki \
+       -o "lowerdir=$overlay/rw/upper:$root,upperdir=$overlay/uki-rw/upper,workdir=$overlay/uki-rw/work,index=off,metacopy=off" \
+       "$overlay/uki-merged"; then
+    build_n1x_uki_stage "$overlay/uki-merged" "$out_dir" >"$overlay/uki.log" 2>&1 &
+    uki_pid=$!
+  else
+    uki_rc=1
+  fi
+
+  wait "$layer_pid" || layer_rc=$?
+  layer_pid=""
+  [[ -f $overlay/layer.log ]] && cat "$overlay/layer.log"
+
+  if [[ -n $uki_pid ]]; then
+    wait "$uki_pid" || uki_rc=$?
+    uki_pid=""
+  fi
+  [[ -f $overlay/uki.log ]] && cat "$overlay/uki.log"
+
+  if mountpoint -q "$overlay/uki-merged" 2>/dev/null; then
+    umount -R "$overlay/uki-merged" || status=1
+  fi
+  if mountpoint -q "$overlay/uki-rw" 2>/dev/null; then
+    umount "$overlay/uki-rw" || status=1
+  fi
+  umount "$overlay/rw" || status=1
+  (( layer_rc == 0 && uki_rc == 0 )) || status=1
+  exit "$status"
 }
 
 # The Snapdragon UKI carries the arm64 kernel (63 MiB), the Qualcomm early
@@ -553,12 +679,16 @@ QUALCOMM_ADRENO_FIRMWARE=(
 # modules that resolve in $image_kver, and the Adreno GPU microcode. Runs while
 # the generic UKI's config and cmdline are still in $root.
 build_qualcomm_uki_in() {
-  local merged=$1 _upper=$2
+  local merged=$1 _upper=$2 out_dir=${3:-$root/var/lib/omarchy-iso}
   local stub=/usr/lib/systemd-stub-omarchy/linuxaa64.efi.stub
   local hwids=/usr/lib/systemd/boot/hwids/aa64
   local dtb_dir="$merged/boot/dtbs/$image_kernel/qcom"
   local mod fn fw suffix dir dtb sections n_dtb
   local -a loadable_modules=() covered_modules=() firmware_files=() recorded_firmware=() dtbs=() dtb_paths=()
+
+  if [[ -n ${uki_tmp:-} && -d ${uki_tmp:-} ]]; then
+    install_uki_tmp_files "$merged" || return 1
+  fi
 
   [[ -f $merged$stub ]] || { echo "WARNING: $stub missing; skipping Qualcomm pre-built UKI" >&2; return 1; }
   [[ -d $merged$hwids ]] || { echo "WARNING: $hwids missing; skipping Qualcomm pre-built UKI" >&2; return 1; }
@@ -580,10 +710,12 @@ build_qualcomm_uki_in() {
   done
   ((${#dtbs[@]} > 0)) || { echo "WARNING: no Qualcomm DTBs in $dtb_dir; skipping Qualcomm pre-built UKI" >&2; return 1; }
 
-  # Resolve inside $merged against $image_kver so we use the image's own kmod,
-  # never pass ?/builtins/absent modules to MODULES=(), and record only what
-  # actually resolved (loadable or built-in) as covered.
-  for mod in "${qcom_modules[@]}"; do
+  # Resolve inside $merged against $image_kver in a single chroot invocation
+  # (rather than one arch-chroot mount/unmount cycle per module), preserving
+  # exact per-module modinfo -F filename semantics for loadable, builtin, and
+  # aliased modules.
+  if ((${#qcom_modules[@]} == 1)); then
+    mod=${qcom_modules[0]}
     fn=$(arch-chroot "$merged" modinfo -k "$image_kver" -F filename "$mod" 2>/dev/null || true)
     if [[ $fn == /* ]]; then
       loadable_modules+=("$mod")
@@ -591,7 +723,25 @@ build_qualcomm_uki_in() {
     elif [[ $fn == "(builtin)" ]]; then
       covered_modules+=("$mod")
     fi
-  done
+  else
+    while IFS=$'\t' read -r mod fn; do
+      if [[ $fn == /* ]]; then
+        loadable_modules+=("$mod")
+        covered_modules+=("$mod")
+      elif [[ $fn == "(builtin)" ]]; then
+        covered_modules+=("$mod")
+      fi
+    done < <(
+      # shellcheck disable=SC2016 # expanded by the inner shell
+      arch-chroot "$merged" bash -c '
+        kver=$1; shift
+        for m in "$@"; do
+          f=$(modinfo -k "$kver" -F filename "$m" 2>/dev/null | head -n1 || true)
+          printf "%s\t%s\n" "$m" "$f"
+        done
+      ' _ "$image_kver" "${qcom_modules[@]}"
+    )
+  fi
   ((${#loadable_modules[@]} > 0)) || { echo "WARNING: no Qualcomm modules resolved in $image_kver; skipping Qualcomm pre-built UKI" >&2; return 1; }
 
   for fw in "${QUALCOMM_ADRENO_FIRMWARE[@]}"; do
@@ -607,7 +757,7 @@ build_qualcomm_uki_in() {
   done
 
   sed -E "s/^MODULES=.*/MODULES=(${loadable_modules[*]})/" \
-    "$root/etc/mkinitcpio-prebuilt-uki.conf" >"$merged/etc/mkinitcpio-prebuilt-uki-qualcomm.conf" || return 1
+    "$merged/etc/mkinitcpio-prebuilt-uki.conf" >"$merged/etc/mkinitcpio-prebuilt-uki-qualcomm.conf" || return 1
   if ((${#firmware_files[@]} > 0)); then
     printf 'FILES+=(%s)\n' "${firmware_files[*]}" >>"$merged/etc/mkinitcpio-prebuilt-uki-qualcomm.conf" || return 1
   fi
@@ -637,40 +787,46 @@ build_qualcomm_uki_in() {
 
   qualcomm_prebuilt_uki_size_ok "$merged/var/lib/omarchy-iso/prebuilt-uki-qualcomm.efi" || return 1
   install -m 0644 "$merged/var/lib/omarchy-iso/prebuilt-uki-qualcomm.efi" \
-    "$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm.efi" || return 1
-  echo "Pre-built Qualcomm UKI: $(du -h "$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm.efi" | cut -f1)"
-  printf '%s\n' "${covered_modules[@]}" | sort -u >"$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm.modules" || return 1
+    "$out_dir/prebuilt-uki-qualcomm.efi" || return 1
+  echo "Pre-built Qualcomm UKI: $(du -h "$out_dir/prebuilt-uki-qualcomm.efi" | cut -f1)"
+  printf '%s\n' "${covered_modules[@]}" | sort -u >"$out_dir/prebuilt-uki-qualcomm.modules" || return 1
   if ((${#recorded_firmware[@]} > 0)); then
-    printf '%s\n' "${recorded_firmware[@]}" | sort -u >"$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm.files" || return 1
+    printf '%s\n' "${recorded_firmware[@]}" | sort -u >"$out_dir/prebuilt-uki-qualcomm.files" || return 1
   else
-    : >"$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm.files" || return 1
+    : >"$out_dir/prebuilt-uki-qualcomm.files" || return 1
   fi
   (cd "$root/etc/mkinitcpio.conf.d" 2>/dev/null && printf '%s\n' *.conf | grep -v '^\*\.conf$' | LC_ALL=C sort -u || true) \
-    >"$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm.dropins" || return 1
-  qualcomm_dtb_compatibles "${dtb_paths[@]}" >"$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm.compatibles" || return 1
-  qualcomm_initramfs_inputs "$root" >"$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm.inputs" || return 1
+    >"$out_dir/prebuilt-uki-qualcomm.dropins" || return 1
+  qualcomm_dtb_compatibles "${dtb_paths[@]}" >"$out_dir/prebuilt-uki-qualcomm.compatibles" || return 1
+  qualcomm_initramfs_inputs "$root" >"$out_dir/prebuilt-uki-qualcomm.inputs" || return 1
 }
 
 build_qualcomm_prebuilt_uki() {
+  local out_dir=${1:-$root/var/lib/omarchy-iso}
   local -a qcom_modules
   mapfile -t qcom_modules < <(qualcomm_module_names "$root")
   if ((${#qcom_modules[@]} == 0)); then
     echo "WARNING: no Qualcomm initramfs modules found under $root" >&2
     return 1
   fi
-  with_image_overlay build_qualcomm_uki_in
+  with_image_overlay build_qualcomm_uki_in "$out_dir"
 }
 
 # Build /var/lib/omarchy-iso/prebuilt-uki-n1x.efi from a throwaway overlay of
-# $root. Runs while the generic UKI's config and cmdline are still in $root.
+# $root. Runs while the generic UKI's config and cmdline are still available.
 build_n1x_prebuilt_uki() {
+  local script=$1 out_dir=${2:-$root/var/lib/omarchy-iso}
   local -a n1x_lines
-  mapfile -t n1x_lines < <(n1x_module_lines "$1")
+  mapfile -t n1x_lines < <(n1x_module_lines "$script")
   if ((${#n1x_lines[@]} == 0)); then
-    echo "WARNING: $1 writes no MODULES lines" >&2
+    echo "WARNING: $script writes no MODULES lines" >&2
     return 1
   fi
-  with_image_overlay build_n1x_uki_in
+  if [[ ${n1x_overlay_direct:-0} == 1 ]]; then
+    _build_n1x_stacked_overlay "$out_dir"
+  else
+    ( _build_n1x_stacked_overlay "$out_dir" )
+  fi
 }
 
 pacman_conf="${1:-}"
@@ -764,21 +920,56 @@ stop_image_gpg_agents() {
   done
 }
 
+# Return the smaller of host MemAvailable and remaining container cgroup memory
+# in KiB so memory-limited containers do not stage or overlap past their limit.
+usable_memory_kb() {
+  local host_kb=0 total_kb=0 cgroup_free_kb="" raw cur
+  host_kb=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null || echo 0)
+  total_kb=$(awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo 2>/dev/null || echo 0)
+  (( host_kb > 0 )) || host_kb=$total_kb
+
+  if [[ -r /sys/fs/cgroup/memory.max ]]; then
+    read -r raw </sys/fs/cgroup/memory.max 2>/dev/null || raw=""
+    if [[ $raw =~ ^[0-9]+$ ]] && (( ${#raw} <= 18 )); then
+      cur=0
+      [[ -r /sys/fs/cgroup/memory.current ]] && read -r cur </sys/fs/cgroup/memory.current 2>/dev/null || true
+      [[ $cur =~ ^[0-9]+$ ]] && (( ${#cur} <= 18 )) || cur=0
+      cgroup_free_kb=$(( raw > cur ? (raw - cur) / 1024 : 0 ))
+    fi
+  elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+    read -r raw </sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || raw=""
+    if [[ $raw =~ ^[0-9]+$ ]] && (( ${#raw} <= 18 )) && (( total_kb == 0 || raw / 1024 < total_kb )); then
+      cur=0
+      [[ -r /sys/fs/cgroup/memory/memory.usage_in_bytes ]] && read -r cur </sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null || true
+      [[ $cur =~ ^[0-9]+$ ]] && (( ${#cur} <= 18 )) || cur=0
+      cgroup_free_kb=$(( raw > cur ? (raw - cur) / 1024 : 0 ))
+    fi
+  fi
+
+  if [[ -n $cgroup_free_kb ]] && (( host_kb == 0 || cgroup_free_kb < host_kb )); then
+    printf '%s\n' "$cgroup_free_kb"
+  else
+    printf '%s\n' "$host_kb"
+  fi
+}
+
 hardware_layer_pids=()
 hardware_layer_names=()
 hardware_layer_logs=()
+prebuilt_pids=()
 try_layer_pid=""
 cleanup() {
   local status=$? pid
   set +e
-  for pid in "${hardware_layer_pids[@]}"; do
-    kill -TERM "$pid" 2>/dev/null || true
+  for pid in "${prebuilt_pids[@]}" "${hardware_layer_pids[@]}"; do
+    [[ -n $pid ]] || continue
+    stop_pid_tree "$pid"
   done
   if [[ -n $try_layer_pid ]]; then
     stop_pid_tree "$try_layer_pid"
   fi
-  if (( ${#hardware_layer_pids[@]} > 0 )) || [[ -n $try_layer_pid ]]; then
-    wait "${hardware_layer_pids[@]}" ${try_layer_pid:+"$try_layer_pid"} 2>/dev/null || true
+  if (( ${#prebuilt_pids[@]} > 0 || ${#hardware_layer_pids[@]} > 0 )) || [[ -n $try_layer_pid ]]; then
+    wait "${prebuilt_pids[@]}" "${hardware_layer_pids[@]}" ${try_layer_pid:+"$try_layer_pid"} 2>/dev/null || true
   fi
   stop_image_gpg_agents
   if mountpoint -q "$stage" 2>/dev/null; then
@@ -814,7 +1005,7 @@ if [[ ${OMARCHY_FAST_COMPRESSION:-} == 1 ]]; then
 else
   # Stage in tmpfs when ample memory is free so pacstrap avoids disk I/O before
   # the parallel copy into the compressed btrfs image.
-  mem_avail_kb=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null || echo 0)
+  mem_avail_kb=$(usable_memory_kb)
   if (( mem_avail_kb >= 20 * 1024 * 1024 )); then
     mount -t tmpfs -o size=16G,mode=0755 omarchy-root-stage "$stage" 2>/dev/null || true
   fi
@@ -1107,38 +1298,116 @@ CONF
   printf '%s%s\n' "$prebuilt_cmdline" "$(printf '%*s' $((1800 - ${#prebuilt_cmdline})) '' | tr ' ' 0)" \
     >"$root/etc/kernel/cmdline.prebuilt-uki"
 
-  if [[ -n ${OMARCHY_SNAPDRAGON:-} ]]; then
-    # A Snapdragon ISO installs only Snapdragon laptops, so skip the generic
-    # UKI and pre-build the Snapdragon UKI (all Snapdragon DTBs via
-    # DeviceTreeAuto + HWIDs + shared Qualcomm early modules + Adreno microcode)
-    # so standard Snapdragon installs copy it in place instead of spending ~7s
-    # running mkinitcpio + ukify on the target.
-    rm -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" \
-      "$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm".{efi,modules,files,dropins,compatibles,inputs}
-    if [[ $(uname -m) == aarch64 ]] && ! build_qualcomm_prebuilt_uki; then
-      echo "WARNING: no Qualcomm pre-built UKI; Snapdragon installs will build their own"
-      rm -f "$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm".{efi,modules,files,dropins,compatibles,inputs}
+  # Once the staging tree is ready, pre-built UKIs/initramfs, hardware layers,
+  # Try layers, and the parallel btrfs copy are all independent read-only
+  # consumers of $root. Stage the four temporary UKI build files outside $root
+  # and remove them from $root before mounting any overlay so $root stays
+  # strictly read-only while every overlay and copy-tree-parallel.py overlap.
+  stage_async=0
+  prebuilt_async=0
+  stage_mem_avail_kb=$(usable_memory_kb)
+  if [[ ${OMARCHY_FAST_COMPRESSION:-} != 1 ]]; then
+    if (( stage_mem_avail_kb >= 12 * 1024 * 1024 )); then
+      stage_async=1
     fi
-  else
-    echo "Pre-building the UKI in the image (kver=$image_kver, generic cmdline, systemd and sd-encrypt hooks, no autodetect)"
-    # mkinitcpio is called directly: the preset flow (-P) runs Limine's install
-    # hooks, which fail without a mounted ESP.
-    if arch-chroot "$root" mkinitcpio \
-         -k "/usr/lib/modules/${image_kver}/vmlinuz" \
-         -c /etc/mkinitcpio-prebuilt-uki.conf \
-         --cmdline /etc/kernel/cmdline.prebuilt-uki \
-         -U /var/lib/omarchy-iso/prebuilt-uki.efi \
-         -S autodetect 2>&1 | tail -25 ; then
-      if [[ -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
-        echo "Pre-built UKI: $(du -h "$root/var/lib/omarchy-iso/prebuilt-uki.efi" | cut -f1)"
-        prebuilt_uki_size_ok "$root/var/lib/omarchy-iso/prebuilt-uki.efi" || exit 1
-      else
-        echo "WARNING: mkinitcpio ran but left no UKI; the installer will build one"
+    # Require >= 16 GiB free on top of $stage + mirror recompression before
+    # launching concurrent UKI/N1x/initramfs overlays so 32 GiB runners never
+    # approach OOM, while 64 GiB hosts overlap the full ~210 s UKI chain.
+    if (( stage_mem_avail_kb >= 16 * 1024 * 1024 )); then
+      prebuilt_async=1
+    fi
+  elif (( stage_mem_avail_kb >= 6 * 1024 * 1024 )); then
+    prebuilt_async=1
+  fi
+
+  uki_tmp=""
+  prebuilt_out="$work/prebuilt-out"
+  generic_uki_pid=""
+  qcom_uki_pid=""
+  n1x_uki_pid=""
+  initramfs_pid=""
+  generic_uki_log="$work/prebuilt-uki.log"
+  qcom_uki_log="$work/prebuilt-uki-qualcomm.log"
+  n1x_uki_log="$work/prebuilt-uki-n1x.log"
+  initramfs_log="$work/prebuilt-initramfs.log"
+  if (( prebuilt_async )); then
+    uki_tmp="$work/uki-tmp"
+    mkdir -p "$uki_tmp" "$prebuilt_out"
+    cp -p "$root/usr/lib/initcpio/install/omarchy-vconsole-room" "$uki_tmp/omarchy-vconsole-room"
+    cp -p "$root/etc/vconsole.conf.prebuilt-uki" "$uki_tmp/vconsole.conf.prebuilt-uki"
+    cp -p "$root/etc/mkinitcpio-prebuilt-uki.conf" "$uki_tmp/mkinitcpio-prebuilt-uki.conf"
+    cp -p "$root/etc/kernel/cmdline.prebuilt-uki" "$uki_tmp/cmdline.prebuilt-uki"
+    rm -f "$root/etc/mkinitcpio-prebuilt-uki.conf" "$root/etc/kernel/cmdline.prebuilt-uki" \
+      "$root/etc/vconsole.conf.prebuilt-uki" "$root/usr/lib/initcpio/install/omarchy-vconsole-room" \
+      "$root/var/lib/omarchy-iso/prebuilt-uki.efi" \
+      "$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm".{efi,modules,files,dropins,compatibles,inputs} \
+      "$root/var/lib/omarchy-iso/prebuilt-uki-n1x".{efi,modules} \
+      "$root"/var/lib/omarchy-iso/prebuilt-initramfs.*
+    if [[ ${OMARCHY_FAST_COMPRESSION:-} == 1 ]]; then
+      btrfs filesystem sync "$mnt"
+    fi
+    if [[ -n ${OMARCHY_SNAPDRAGON:-} ]]; then
+      if [[ $(uname -m) == aarch64 ]]; then
+        build_qualcomm_prebuilt_uki "$prebuilt_out" >"$qcom_uki_log" 2>&1 &
+        qcom_uki_pid=$!
+        prebuilt_pids+=("$qcom_uki_pid")
       fi
     else
-      echo "WARNING: mkinitcpio failed; the installer will build the UKI"
-      # Clean up any partial output that would upset btrfs shrink downstream.
-      rm -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi"
+      with_image_overlay build_generic_uki_in "$prebuilt_out" >"$generic_uki_log" 2>&1 &
+      generic_uki_pid=$!
+      prebuilt_pids+=("$generic_uki_pid")
+      n1x_script="$root/usr/share/omarchy/install/hardware/n1x.sh"
+      if [[ $(uname -m) == aarch64 && -f $n1x_script ]]; then
+        n1x_overlay_direct=1 build_n1x_prebuilt_uki "$n1x_script" "$prebuilt_out" >"$n1x_uki_log" 2>&1 &
+        n1x_uki_pid=$!
+        prebuilt_pids+=("$n1x_uki_pid")
+      fi
+      if ! grep -q -- '--initramfs' "$root/usr/bin/omarchy-boot-rebuild" 2>/dev/null; then
+        echo "omarchy-boot-rebuild takes no pre-built initramfs; none is built"
+      else
+        with_image_overlay build_prebuilt_initramfs_in "$prebuilt_out" >"$initramfs_log" 2>&1 &
+        initramfs_pid=$!
+        prebuilt_pids+=("$initramfs_pid")
+      fi
+    fi
+  fi
+
+  if [[ -n ${OMARCHY_SNAPDRAGON:-} ]]; then
+    if (( ! ${prebuilt_async:-0} )); then
+      # A Snapdragon ISO installs only Snapdragon laptops, so skip the generic
+      # UKI and pre-build the Snapdragon UKI (all Snapdragon DTBs via
+      # DeviceTreeAuto + HWIDs + shared Qualcomm early modules + Adreno microcode)
+      # so standard Snapdragon installs copy it in place instead of spending ~7s
+      # running mkinitcpio + ukify on the target.
+      rm -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" \
+        "$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm".{efi,modules,files,dropins,compatibles,inputs}
+      if [[ $(uname -m) == aarch64 ]] && ! build_qualcomm_prebuilt_uki; then
+        echo "WARNING: no Qualcomm pre-built UKI; Snapdragon installs will build their own"
+        rm -f "$root/var/lib/omarchy-iso/prebuilt-uki-qualcomm".{efi,modules,files,dropins,compatibles,inputs}
+      fi
+    fi
+  else
+    if (( ! ${prebuilt_async:-0} )); then
+      echo "Pre-building the UKI in the image (kver=$image_kver, generic cmdline, systemd and sd-encrypt hooks, no autodetect)"
+      # mkinitcpio is called directly: the preset flow (-P) runs Limine's install
+      # hooks, which fail without a mounted ESP.
+      if arch-chroot "$root" mkinitcpio \
+           -k "/usr/lib/modules/${image_kver}/vmlinuz" \
+           -c /etc/mkinitcpio-prebuilt-uki.conf \
+           --cmdline /etc/kernel/cmdline.prebuilt-uki \
+           -U /var/lib/omarchy-iso/prebuilt-uki.efi \
+           -S autodetect 2>&1 | tail -25 ; then
+        if [[ -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
+          echo "Pre-built UKI: $(du -h "$root/var/lib/omarchy-iso/prebuilt-uki.efi" | cut -f1)"
+          prebuilt_uki_size_ok "$root/var/lib/omarchy-iso/prebuilt-uki.efi" || exit 1
+        else
+          echo "WARNING: mkinitcpio ran but left no UKI; the installer will build one"
+        fi
+      else
+        echo "WARNING: mkinitcpio failed; the installer will build the UKI"
+        # Clean up any partial output that would upset btrfs shrink downstream.
+        rm -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi"
+      fi
     fi
   fi
   # N1x: a second pre-built UKI. Its hardware setup always adds the same
@@ -1152,7 +1421,7 @@ CONF
   # layer, which the installer extracts on an N1x, so the driver in the UKI is
   # the one on disk.
   n1x_script="$root/usr/share/omarchy/install/hardware/n1x.sh"
-  if [[ $(uname -m) == aarch64 && -z ${OMARCHY_SNAPDRAGON:-} && -f $n1x_script && -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
+  if (( ! prebuilt_async )) && [[ $(uname -m) == aarch64 && -z ${OMARCHY_SNAPDRAGON:-} && -f $n1x_script && -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
     build_n1x_prebuilt_uki "$n1x_script" || {
       echo "WARNING: no N1x pre-built UKI or layer; N1x installs build their own and pacstrap the NVIDIA stack"
       rm -f "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.modules" \
@@ -1173,76 +1442,48 @@ CONF
   # changed on the machine (phases_impl._prebuilt_initramfs), and builds one
   # otherwise. A Snapdragon ISO installs only Snapdragon laptops, whose
   # platform builds its own, so it ships none.
-  rm -f "$root"/var/lib/omarchy-iso/prebuilt-initramfs.*
-  # An image whose omarchy-boot-rebuild can't take it (an older omarchy) gets
-  # none: installs build theirs, as before.
-  if ! grep -q -- '--initramfs' "$root/usr/bin/omarchy-boot-rebuild" 2>/dev/null; then
-    echo "omarchy-boot-rebuild takes no pre-built initramfs; none is built"
-  elif [[ -z ${OMARCHY_SNAPDRAGON:-} ]]; then
-    echo "Pre-building systemd-boot's initramfs in the image (kver=$image_kver, the image's hooks, no autodetect, no kms)"
-    if build_prebuilt_initramfs; then
-      echo "Pre-built initramfs: $(du -h "$root/var/lib/omarchy-iso/prebuilt-initramfs.img" | cut -f1)"
-      prebuilt_initramfs_size_ok "$root/var/lib/omarchy-iso/prebuilt-initramfs.img" || exit 1
-    else
-      echo "WARNING: no pre-built initramfs; systemd-boot installs build theirs"
-      rm -f "$root"/var/lib/omarchy-iso/prebuilt-initramfs.*
+  if (( ! prebuilt_async )); then
+    rm -f "$root"/var/lib/omarchy-iso/prebuilt-initramfs.*
+    # An image whose omarchy-boot-rebuild can't take it (an older omarchy) gets
+    # none: installs build theirs, as before.
+    if ! grep -q -- '--initramfs' "$root/usr/bin/omarchy-boot-rebuild" 2>/dev/null; then
+      echo "omarchy-boot-rebuild takes no pre-built initramfs; none is built"
+    elif [[ -z ${OMARCHY_SNAPDRAGON:-} ]]; then
+      echo "Pre-building systemd-boot's initramfs in the image (kver=$image_kver, the image's hooks, no autodetect, no kms)"
+      if build_prebuilt_initramfs; then
+        echo "Pre-built initramfs: $(du -h "$root/var/lib/omarchy-iso/prebuilt-initramfs.img" | cut -f1)"
+        prebuilt_initramfs_size_ok "$root/var/lib/omarchy-iso/prebuilt-initramfs.img" || exit 1
+      else
+        echo "WARNING: no pre-built initramfs; systemd-boot installs build theirs"
+        rm -f "$root"/var/lib/omarchy-iso/prebuilt-initramfs.*
+      fi
     fi
   fi
 
   # Only this build uses these; the installed system has no use for them.
-  rm -f "$root/etc/mkinitcpio-prebuilt-uki.conf" "$root/etc/kernel/cmdline.prebuilt-uki" \
-    "$root/etc/vconsole.conf.prebuilt-uki" "$root/usr/lib/initcpio/install/omarchy-vconsole-room"
+  if (( ! prebuilt_async )); then
+    rm -f "$root/etc/mkinitcpio-prebuilt-uki.conf" "$root/etc/kernel/cmdline.prebuilt-uki" \
+      "$root/etc/vconsole.conf.prebuilt-uki" "$root/usr/lib/initcpio/install/omarchy-vconsole-room"
+  fi
 fi
 
-# Once the staging tree is final and read-only, hardware layers, Try layers and
-# the parallel copy into the compressed btrfs image are independent read-only
-# consumers of $stage. Overlap them when ample RAM is free (>= 12 GiB available
-# on top of $stage) so 32 GiB CI runners stay under their 24 GiB ceiling.
-# Return the smaller of host MemAvailable and remaining container cgroup memory
-# in KiB so memory-limited containers do not overlap layers past their limit.
-usable_memory_kb() {
-  local host_kb=0 total_kb=0 cgroup_free_kb="" raw cur
-  host_kb=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null || echo 0)
-  total_kb=$(awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo 2>/dev/null || echo 0)
-  (( host_kb > 0 )) || host_kb=$total_kb
-
-  if [[ -r /sys/fs/cgroup/memory.max ]]; then
-    read -r raw </sys/fs/cgroup/memory.max 2>/dev/null || raw=""
-    if [[ $raw =~ ^[0-9]+$ ]] && (( ${#raw} <= 18 )); then
-      cur=0
-      [[ -r /sys/fs/cgroup/memory.current ]] && read -r cur </sys/fs/cgroup/memory.current 2>/dev/null || true
-      [[ $cur =~ ^[0-9]+$ ]] && (( ${#cur} <= 18 )) || cur=0
-      cgroup_free_kb=$(( raw > cur ? (raw - cur) / 1024 : 0 ))
+# When $image_kver was empty, still decide whether read-only stage consumers
+# can overlap with the parallel btrfs copy.
+if [[ -z $image_kver ]]; then
+  stage_async=0
+  prebuilt_async=0
+  if [[ ${OMARCHY_FAST_COMPRESSION:-} != 1 ]]; then
+    stage_mem_avail_kb=$(usable_memory_kb)
+    if (( stage_mem_avail_kb >= 12 * 1024 * 1024 )); then
+      stage_async=1
     fi
-  elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
-    read -r raw </sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || raw=""
-    if [[ $raw =~ ^[0-9]+$ ]] && (( ${#raw} <= 18 )) && (( total_kb == 0 || raw / 1024 < total_kb )); then
-      cur=0
-      [[ -r /sys/fs/cgroup/memory/memory.usage_in_bytes ]] && read -r cur </sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null || true
-      [[ $cur =~ ^[0-9]+$ ]] && (( ${#cur} <= 18 )) || cur=0
-      cgroup_free_kb=$(( raw > cur ? (raw - cur) / 1024 : 0 ))
-    fi
-  fi
-
-  if [[ -n $cgroup_free_kb ]] && (( host_kb == 0 || cgroup_free_kb < host_kb )); then
-    printf '%s\n' "$cgroup_free_kb"
-  else
-    printf '%s\n' "$host_kb"
-  fi
-}
-
-stage_async=0
-if [[ ${OMARCHY_FAST_COMPRESSION:-} != 1 ]]; then
-  stage_mem_avail_kb=$(usable_memory_kb)
-  if (( stage_mem_avail_kb >= 12 * 1024 * 1024 )); then
-    stage_async=1
   fi
 fi
 
 # Hardware layers, now that the image's tree is final: each is the difference
 # its packages make to the image as it ships.
 if [[ -n $image_kver ]]; then
-  hardware_layers_async=$stage_async
+  hardware_layers_async=$(( stage_async || prebuilt_async ))
   build_hardware_layers
 fi
 
@@ -1252,7 +1493,7 @@ fi
 # (mkinitcpio/Limine) stay masked when pacstrap installs Try packages.
 try_layer_log="$work/try-layer.log"
 if [[ -n ${OMARCHY_TRY_LAYER:-} ]]; then
-  if (( stage_async )); then
+  if (( stage_async || prebuilt_async )); then
     bash /builder/build-try-layer.sh "$root" "$OMARCHY_TRY_LAYER" "${OMARCHY_TRY_CHANNEL:-stable}" "$effective_pacman_conf" >"$try_layer_log" 2>&1 &
     try_layer_pid=$!
   else
@@ -1260,18 +1501,8 @@ if [[ -n ${OMARCHY_TRY_LAYER:-} ]]; then
   fi
 fi
 
-if [[ ${OMARCHY_FAST_COMPRESSION:-} != 1 ]]; then
-  # Now create the compressed btrfs filesystem and populate it in parallel across
-  # every CPU so zstd:15 runs at full host parallelism, then join all read-only
-  # consumers and free the staging tree before shrinking and packing.
-  mount_root_btrfs
-
-  echo "Populating btrfs root image with $IMAGE_COMPRESS across $(nproc) CPUs"
-  copy_start=$(date +%s)
-  python3 "$(dirname -- "${BASH_SOURCE[0]}")/copy-tree-parallel.py" "$stage" "$mnt/$IMAGE_SUBVOLUME"
-  btrfs filesystem sync "$mnt"
-  echo "Populated btrfs root image in $(( $(date +%s) - copy_start ))s"
-
+join_stage_consumers() {
+  local i hw_status try_status
   for i in "${!hardware_layer_pids[@]}"; do
     hw_status=0
     wait "${hardware_layer_pids[i]}" || hw_status=$?
@@ -1292,11 +1523,101 @@ if [[ ${OMARCHY_FAST_COMPRESSION:-} != 1 ]]; then
     rm -f "$try_layer_log"
     (( try_status == 0 )) || exit "$try_status"
   fi
+}
+
+join_prebuilt_boot_images() {
+  local target_root=$1
+  local qcom_status=0 generic_status=0 n1x_status=0 initramfs_status=0
+  local f pid copy_rc=0
+  local -a copy_pids=()
+  (( prebuilt_async )) || return 0
+
+  if [[ -n $qcom_uki_pid ]]; then
+    wait "$qcom_uki_pid" || qcom_status=$?
+    [[ -f $qcom_uki_log ]] && cat "$qcom_uki_log"
+    rm -f "$qcom_uki_log"
+    if (( qcom_status != 0 )); then
+      echo "WARNING: no Qualcomm pre-built UKI; Snapdragon installs will build their own"
+      rm -f "$prebuilt_out/prebuilt-uki-qualcomm".{efi,modules,files,dropins,compatibles,inputs}
+    fi
+  fi
+
+  if [[ -n $generic_uki_pid ]]; then
+    wait "$generic_uki_pid" || generic_status=$?
+    [[ -f $generic_uki_log ]] && cat "$generic_uki_log"
+    rm -f "$generic_uki_log"
+    if (( generic_status == 2 )); then
+      exit 1
+    elif (( generic_status != 0 )); then
+      rm -f "$prebuilt_out/prebuilt-uki.efi"
+    fi
+  fi
+
+  if [[ -n $n1x_uki_pid ]]; then
+    wait "$n1x_uki_pid" || n1x_status=$?
+    [[ -f $n1x_uki_log ]] && cat "$n1x_uki_log"
+    rm -f "$n1x_uki_log"
+    if [[ ! -f $prebuilt_out/prebuilt-uki.efi ]]; then
+      rm -f "$prebuilt_out/prebuilt-uki-n1x.efi" "$prebuilt_out/prebuilt-uki-n1x.modules" \
+        "$(layer_path aarch64-n1x)"
+    elif (( n1x_status != 0 )); then
+      echo "WARNING: no N1x pre-built UKI or layer; N1x installs build their own and pacstrap the NVIDIA stack"
+      rm -f "$prebuilt_out/prebuilt-uki-n1x.efi" "$prebuilt_out/prebuilt-uki-n1x.modules" \
+        "$(layer_path aarch64-n1x)"
+    fi
+  fi
+
+  if [[ -n $initramfs_pid ]]; then
+    wait "$initramfs_pid" || initramfs_status=$?
+    [[ -f $initramfs_log ]] && cat "$initramfs_log"
+    rm -f "$initramfs_log"
+    if (( initramfs_status == 2 )); then
+      exit 1
+    elif (( initramfs_status != 0 )); then
+      echo "WARNING: no pre-built initramfs; systemd-boot installs build theirs"
+      rm -f "$prebuilt_out"/prebuilt-initramfs.*
+    fi
+  fi
+  prebuilt_pids=()
+
+  # Copy the finished prebuilt boot artifacts into the btrfs image in parallel
+  # so btrfs compresses all of them concurrently before syncing.
+  for f in "$prebuilt_out"/*; do
+    [[ -f $f ]] || continue
+    install -m 0644 "$f" "$target_root/var/lib/omarchy-iso/${f##*/}" &
+    copy_pids+=($!)
+  done
+  for pid in "${copy_pids[@]}"; do
+    wait "$pid" || copy_rc=1
+  done
+  (( copy_rc == 0 )) || exit 1
+  btrfs filesystem sync "$mnt"
+}
+
+if [[ ${OMARCHY_FAST_COMPRESSION:-} != 1 ]]; then
+  # Now create the compressed btrfs filesystem and populate it in parallel across
+  # every CPU so zstd:15 runs at full host parallelism, then join all read-only
+  # consumers and free the staging tree before shrinking and packing.
+  mount_root_btrfs
+
+  echo "Populating btrfs root image with $IMAGE_COMPRESS across $(nproc) CPUs"
+  copy_start=$(date +%s)
+  python3 "$(dirname -- "${BASH_SOURCE[0]}")/copy-tree-parallel.py" "$stage" "$mnt/$IMAGE_SUBVOLUME"
+  btrfs filesystem sync "$mnt"
+  echo "Populated btrfs root image in $(( $(date +%s) - copy_start ))s"
+
+  join_prebuilt_boot_images "$mnt/$IMAGE_SUBVOLUME"
+  join_stage_consumers
 
   if mountpoint -q "$stage" 2>/dev/null; then
     umount -R "$stage"
   fi
   rm -rf "$stage"
+else
+  # Under --fast, $mnt/$IMAGE_SUBVOLUME is the lowerdir of all overlays, so
+  # join Try and hardware layers before writing prebuilt artifacts into it.
+  join_stage_consumers
+  join_prebuilt_boot_images "$mnt/$IMAGE_SUBVOLUME"
 fi
 
 # The image is the loop backing file itself: the same on-disk bytes, written

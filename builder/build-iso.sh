@@ -1545,6 +1545,10 @@ if (( overlap_mkarchiso )); then
   # presence check, while stage_shipped_mirror runs in parallel and moves the
   # finished mirror directly into work/<arch>/airootfs before pass 2.
   rm -rf "$build_cache_dir/airootfs/var/cache/omarchy/mirror/offline"
+  # Strip the staged-mirror file_permissions entry from the container copy of
+  # profiledef.sh so pass 1's _make_custom_airootfs does not fail realpath on
+  # the not-yet-moved directory; we apply 0:0:775 after moving it in below.
+  sed -i '\|^[[:space:]]*\["/var/cache/omarchy/mirror/offline/"\]=|d' "$build_cache_dir/profiledef.sh"
   staged_mirror_dir="$build_cache_dir/staged-mirror"
   staged_mirror_meta="$build_cache_dir/staged-mirror-meta"
   rm -rf "$staged_mirror_dir" "$staged_mirror_meta"

@@ -74,7 +74,7 @@ replay_add() {
   local line buf="" subsystem kernel vendor product name key status=0
   local -a args
   local -A seen=()
-  while IFS= read -r line || [[ -n $buf ]]; do
+  while IFS= read -r line || [[ -n $line || -n $buf ]]; do
     if [[ -z $buf && $line =~ ^[[:space:]]*(#|$) ]]; then
       continue
     fi
@@ -100,8 +100,8 @@ replay_add() {
     args=()
     for name in ${subsystem//|/ }; do args+=("--subsystem-match=$name"); done
     for name in ${kernel//|/ }; do args+=("--sysname-match=$name"); done
-    [[ -n $vendor ]] && args+=("--attr-match=idVendor=$vendor")
-    [[ -n $product ]] && args+=("--attr-match=idProduct=$product")
+    for name in ${vendor//|/ }; do args+=("--attr-match=idVendor=$name"); done
+    for name in ${product//|/ }; do args+=("--attr-match=idProduct=$name"); done
     key="${args[*]}"
     [[ -n ${seen[$key]+x} ]] && continue
     seen[$key]=1

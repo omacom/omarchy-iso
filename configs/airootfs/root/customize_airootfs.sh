@@ -65,12 +65,13 @@ rm -f /etc/udev/rules.d/60-omarchy-io-scheduler.rules
 # firmware (a GPU driver that fails for want of firmware has already taken the
 # screen from the firmware framebuffer, and nouveau needs nvidia/ for GSP),
 # audio, microcode, and wired NICs.
-# Under qcom/, keep only the tiny top-level Adreno GPU microcode blobs (~2 MiB)
-# and drop the large ADSP/CDSP/modem/video subdirectories: msm requests Adreno
-# microcode during early bind / DRM open, and Try Omarchy soft-reboots with the
-# already-bound msm driver. The DSP firmware a Snapdragon live boot needs before
-# the medium appears is in its UKI's own initramfs, which build-iso.sh has this
-# script build before it gets here.
+# Under qcom/, keep only the top-level Adreno GPU microcode blobs (~2.4 MiB
+# uncompressed across Adreno generations) and drop the large ADSP/CDSP/modem/
+# video subdirectories: msm requests Adreno microcode during early bind / DRM
+# open, and Try Omarchy soft-reboots with the already-bound msm driver. The DSP
+# firmware a Snapdragon live boot needs before the medium appears is in its
+# UKI's own initramfs, which build-iso.sh has this script build before it gets
+# here.
 # The installed system gets its firmware from the root image, not from here.
 fw=/usr/lib/firmware
 if [[ -d $fw ]]; then

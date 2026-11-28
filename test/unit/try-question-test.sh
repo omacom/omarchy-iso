@@ -627,6 +627,7 @@ ACTION=="add|bind|change", SUBSYSTEM=="platform", DRIVER=="xhci-hcd", \
   ATTR{power/control}="auto"
 ACTION=="add|change", SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="0329", \
   ATTR{power/control}="auto"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="04b4|05ac", ATTR{power/control}="auto"
 RULES
 EOF
 chmod +x "$hw/omarchy/bin/omarchy-apply-hardware-multi"
@@ -640,6 +641,8 @@ mv "$hw/omarchy/bin/omarchy-apply-hardware.orig" "$hw/omarchy/bin/omarchy-apply-
   fail "duplicate platform triggers were not deduplicated: $(cat "$hw/calls")"
 grep -qx 'udevadm trigger --action=add --subsystem-match=usb --attr-match=idVendor=0bda --attr-match=idProduct=0329' "$hw/calls" ||
   fail "USB rule was not scoped by idVendor/idProduct: $(cat "$hw/calls")"
+grep -qx 'udevadm trigger --action=add --subsystem-match=usb --attr-match=idVendor=04b4 --attr-match=idVendor=05ac' "$hw/calls" ||
+  fail "pipe-separated idVendor values were not split: $(cat "$hw/calls")"
 rm -f "$hw/root/etc/udev/rules.d/90-multiline.rules"
 rm -rf "$hw/root/etc/systemd/system/multi-user.target.wants" "$hw/root/etc/systemd/system/hibernate.target.wants"
 run_hardware bash "$LAYER_SCRIPTS/omarchy-try-hardware" --system || fail "the session's hardware setup failed with nothing to do"

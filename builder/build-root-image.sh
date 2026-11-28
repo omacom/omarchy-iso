@@ -137,7 +137,7 @@ build_prebuilt_initramfs() {
   done
 
   if [[ $out_dir != "$target_root$dir" ]]; then
-    install -m 0644 "$target_root$image" "$out_dir/prebuilt-initramfs.img" || return 1
+    cp -p "$target_root$image" "$out_dir/prebuilt-initramfs.img" || return 1
   fi
   printf '%s\n' "$image_kernel" >"$out_dir/prebuilt-initramfs.kernel"
   printf '%s\n' "$image_kver" >"$out_dir/prebuilt-initramfs.kver"
@@ -178,7 +178,7 @@ build_generic_uki_in() {
     if [[ -f "$merged/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
       echo "Pre-built UKI: $(du -h "$merged/var/lib/omarchy-iso/prebuilt-uki.efi" | cut -f1)"
       prebuilt_uki_size_ok "$merged/var/lib/omarchy-iso/prebuilt-uki.efi" || return 2
-      install -m 0644 "$merged/var/lib/omarchy-iso/prebuilt-uki.efi" "$out_dir/prebuilt-uki.efi" || return 1
+      cp -p "$merged/var/lib/omarchy-iso/prebuilt-uki.efi" "$out_dir/prebuilt-uki.efi" || return 1
     else
       echo "WARNING: mkinitcpio ran but left no UKI; the installer will build one"
       return 3
@@ -1584,7 +1584,7 @@ join_prebuilt_boot_images() {
   # so btrfs compresses all of them concurrently before syncing.
   for f in "$prebuilt_out"/*; do
     [[ -f $f ]] || continue
-    install -m 0644 "$f" "$target_root/var/lib/omarchy-iso/${f##*/}" &
+    cp -p "$f" "$target_root/var/lib/omarchy-iso/${f##*/}" &
     copy_pids+=($!)
   done
   for pid in "${copy_pids[@]}"; do

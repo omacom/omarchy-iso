@@ -2284,6 +2284,7 @@ def _install_limine_omarchy(ctx: InstallContext, installer, config) -> None:
             part=int(efi_partition.partn),
             removable=bootloader_removable,
             replaced_guids=ctx.state.get("replaced_partition_guids"),
+            defer_register=True,
         )
     else:
         _install_limine_bios(ctx, boot_partition)
@@ -2330,6 +2331,95 @@ def _default_limine_efi_binary() -> str:
     return f"limine_{_efi_arch_suffix().lower()}.efi"
 
 
+_EFI_LOG_BUFFER = threading.local()
+
+
+def _efi_emit(kind: str, text: str) -> None:
+    events = getattr(_EFI_LOG_BUFFER, "events", None)
+    if events is not None:
+        events.append((kind, text))
+        return
+    if kind == "stdout":
+        sys.stdout.write(text)
+        sys.stdout.flush()
+    elif kind == "info":
+        info(text)
+    elif kind == "error":
+        error(text)
+
+
+def _flush_efi_events(events: list[tuple[str, str]]) -> None:
+    while events:
+        kind, text = events.pop(0)
+        _efi_emit(kind, text)
+
+
+def _run_efi_boot_register(ctx: InstallContext, fn: Callable[[], None], *, defer: bool) -> None:
+    """Run UEFI NVRAM boot-entry registration, optionally off the critical path.
+
+    Slow EFI variable stores (e.g. ~3 s for delete/create/BootNext on
+    Snapdragon laptops) otherwise stall installing the target while all CPUs
+    sit idle. Neither target setup nor finalize_boot (--no-efi-register)
+    touches UEFI NVRAM; run_oem_setup and validate_boot join this thread before
+    checking boot routes, and main()'s finally joins it on early failure.
+    """
+    state = getattr(ctx, "state", None)
+    if not defer or not isinstance(state, dict) or os.environ.get("OMARCHY_SERIAL_EFI_REGISTER") == "1":
+        fn()
+        return
+
+    _join_efi_boot_register(ctx)
+    errors: list[BaseException] = []
+    events: list[tuple[str, str]] = []
+
+    def _worker() -> None:
+        _EFI_LOG_BUFFER.events = events
+        try:
+            fn()
+        except BaseException as exc:  # noqa: BLE001 - re-raised at join
+            errors.append(exc)
+        finally:
+            _EFI_LOG_BUFFER.events = None
+
+    thread = threading.Thread(target=_worker, name="omarchy-efi-register", daemon=True)
+    state["efi_boot_register"] = (thread, errors, events)
+    thread.start()
+
+
+def _join_efi_boot_register(ctx: InstallContext, *, raise_on_error: bool = True) -> None:
+    state = getattr(ctx, "state", None)
+    pending = state.get("efi_boot_register") if isinstance(state, dict) else None
+    if pending is None:
+        return
+    thread, errors, events = pending
+    with _time_step("STEP.join_efi_boot_register"):
+        thread.join()
+    # Keep the handle in ctx.state until join returns so KeyboardInterrupt
+    # still leaves stop_efi_boot_register a thread to wait on.
+    state.pop("efi_boot_register", None)
+    _flush_efi_events(events)
+    if errors and raise_on_error:
+        raise errors[0]
+
+
+def stop_efi_boot_register(ctx: InstallContext) -> None:
+    """Exit path: wait briefly for any in-flight UEFI NVRAM registration
+    without masking the install's own error or skipping remaining cleanups."""
+    state = getattr(ctx, "state", None)
+    pending = state.get("efi_boot_register") if isinstance(state, dict) else None
+    if pending is None:
+        return
+    thread, _errors, events = pending
+    try:
+        thread.join(timeout=15)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        state.pop("efi_boot_register", None)
+    if not thread.is_alive():
+        _flush_efi_events(events)
+
+
 def _install_limine_efi(
     ctx: InstallContext,
     *,
@@ -2341,6 +2431,7 @@ def _install_limine_efi(
     efi_binary: str | None = None,
     pre_state: dict | None = None,
     replaced_guids: set[str] | None = None,
+    defer_register: bool = False,
 ) -> None:
     if efi_binary is None:
         efi_binary = _default_limine_efi_binary()
@@ -2352,6 +2443,7 @@ def _install_limine_efi(
         _install_systemd_boot_efi(
             ctx, esp_mount=esp_mount, disk=disk, part=part, removable=removable,
             pre_state=pre_state, replaced_guids=replaced_guids,
+            defer_register=defer_register,
         )
         return
 
@@ -2364,12 +2456,13 @@ def _install_limine_efi(
     hook_command = f"/usr/bin/cp /usr/share/limine/{source_name} {target_path}"
     _write_limine_pacman_hook(ctx.target, hook_command)
 
-    _register_limine_efi_entry(
-        disk,
-        part,
-        _limine_efi_loader(esp_path, efi_binary),
-        pre_state=pre_state,
-        replaced_guids=replaced_guids,
+    loader = _limine_efi_loader(esp_path, efi_binary)
+    _run_efi_boot_register(
+        ctx,
+        lambda: _register_limine_efi_entry(
+            disk, part, loader, pre_state=pre_state, replaced_guids=replaced_guids,
+        ),
+        defer=defer_register,
     )
 
 
@@ -2382,6 +2475,7 @@ def _install_systemd_boot_efi(
     removable: bool = False,
     pre_state: dict | None = None,
     replaced_guids: set[str] | None = None,
+    defer_register: bool = False,
 ) -> None:
     """systemd-boot at \\EFI\\systemd\\, where omarchy-boot-switch install keeps
     it, with its "Omarchy Boot" entry first. A removable install takes only the
@@ -2392,9 +2486,14 @@ def _install_systemd_boot_efi(
         _copy_required(source, ctx.target / esp_mount.lstrip("/") / "EFI" / "BOOT" / f"BOOT{_efi_arch_suffix()}.EFI")
         return
     _copy_required(source, ctx.target / esp_mount.lstrip("/") / "EFI" / "systemd" / f"systemd-boot{arch_name}.efi")
-    _register_limine_efi_entry(
-        disk, part, _systemd_boot_loader(), pre_state=pre_state, label=SYSTEMD_BOOT_LABEL,
-        replaced_guids=replaced_guids,
+    loader = _systemd_boot_loader()
+    _run_efi_boot_register(
+        ctx,
+        lambda: _register_limine_efi_entry(
+            disk, part, loader, pre_state=pre_state, label=SYSTEMD_BOOT_LABEL,
+            replaced_guids=replaced_guids,
+        ),
+        defer=defer_register,
     )
 
 
@@ -2462,7 +2561,7 @@ def _register_limine_efi_entry(
                 deleted.append(num)
     if identical:
         limine_num = identical[0]
-        info(f"› Reusing the '{label}' boot entry Boot{limine_num}, which already starts this loader")
+        _efi_emit("info", f"› Reusing the '{label}' boot entry Boot{limine_num}, which already starts this loader")
     else:
         created = _create_limine_efi_entry(disk, part, loader, label)
         detail = (created.stderr or "").strip()
@@ -2476,10 +2575,9 @@ def _register_limine_efi_entry(
             _warn_boot_entry_refused(f"{reason}: {detail}" if detail else reason, label)
             return
         if created.stdout:
-            sys.stdout.write(created.stdout)
-            sys.stdout.flush()
+            _efi_emit("stdout", created.stdout)
         if detail:
-            error(f"efibootmgr: {detail}")
+            _efi_emit("error", f"efibootmgr: {detail}")
 
         # The entry just created: a "Limine" entry the earlier listing did not
         # show. Firmware that keeps one option per device path can answer the
@@ -2554,11 +2652,12 @@ def _register_limine_efi_entry(
             # entry exists either way, so this costs Omarchy its place at the front
             # of the list, not its boot route.
             order_detail = (ordered.stderr or "").strip() or f"exit status {ordered.returncode}"
-            error(
+            _efi_emit(
+                "error",
                 f"Warning: the '{label}' boot entry was registered but this firmware would "
                 f"not reorder BootOrder to put it first ({order_detail}). Omarchy is reachable "
                 "from the firmware boot menu (F11, F12 or Esc on most boards); move it to "
-                "the top of the firmware's own boot priority list to make it the default."
+                "the top of the firmware's own boot priority list to make it the default.",
             )
 
     # Some firmware keeps its own priority list and writes it back over
@@ -2570,10 +2669,11 @@ def _register_limine_efi_entry(
     nexted = capture(["efibootmgr", "--bootnext", limine_num])
     if nexted.returncode != 0:
         next_detail = (nexted.stderr or "").strip() or f"exit status {nexted.returncode}"
-        error(
+        _efi_emit(
+            "error",
             f"Warning: this firmware would not set BootNext to the '{label}' entry ({next_detail}). "
             "If the first reboot starts another system, pick Omarchy from the firmware "
-            "boot menu (F11, F12 or Esc on most boards)."
+            "boot menu (F11, F12 or Esc on most boards).",
         )
 
 
@@ -2601,12 +2701,13 @@ def _warn_boot_entry_refused(reason: str, label: str = "Limine") -> None:
     is the one place that decides whether an install is reachable, and it already
     refuses to finish when both routes are missing.
     """
-    error(
+    _efi_emit(
+        "error",
         f"Warning: this firmware would not register a '{label}' UEFI boot entry. {reason}. "
         f"The install continues: where Omarchy writes EFI/BOOT/BOOT{_efi_arch_suffix()}.EFI on an EFI "
         "partition of its own, firmware takes that path when nothing in NVRAM matches. "
         "The boot check at the end of the install stops an install that ends up with "
-        "neither route."
+        "neither route.",
     )
 
 
@@ -3728,8 +3829,9 @@ def oem_scripts(ctx: InstallContext) -> list[Path]:
 
 
 def run_oem_setup(ctx: InstallContext) -> None:
-    # A script may install packages, which reads the keyring the unit writes.
+    # A script may install packages (reading the keyring) or inspect UEFI boot entries.
     _join_target_keyring_init(ctx)
+    _join_efi_boot_register(ctx)
 
     staged = ctx.target / OEM_SCRIPTS_TARGET_DIR
     shutil.rmtree(staged, ignore_errors=True)
@@ -5114,6 +5216,7 @@ def _tailscale_authkey(path: Path) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def validate_boot(ctx: InstallContext) -> None:
+    _join_efi_boot_register(ctx)
     _assert_boot_hooks_restored(ctx)
     _validate_kernel_headers(ctx)
 

@@ -140,6 +140,24 @@ class StageMediumFirmwareTests(unittest.TestCase):
         self.assertNotEqual(result.returncode,0)
         self.assertIn('symlink',result.stderr)
 
+    def test_symlink_followed_by_regular_file_cannot_overwrite_outside_file(self):
+        sentinel=self.root/'outside-sentinel.txt'
+        sentinel.write_bytes(b'intact')
+        kernel=self.package('kernel.pkg.tar',{self.DTBS+'x1e80100-vendor-laptop.dtb':dtb(name='qcom/vendor/adsp.mbn')})
+        vendor=self.root/'evil-vendor.pkg.tar'
+        with tarfile.open(vendor,'w') as archive:
+            link=tarfile.TarInfo(self.FW+'vendor/adsp.mbn.xz')
+            link.type=tarfile.SYMTYPE; link.linkname=str(sentinel)
+            archive.addfile(link)
+            info=tarfile.TarInfo(self.FW+'vendor/adsp.mbn.xz')
+            payload=b'overwritten'
+            info.size=len(payload)
+            archive.addfile(info,io.BytesIO(payload))
+        result=self.stage(kernel,vendor)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('symlink',result.stderr)
+        self.assertEqual(sentinel.read_bytes(),b'intact')
+
     def test_nothing_to_stage_fails_the_build(self):
         kernel=self.package('kernel.pkg.tar',{self.DTBS+'x1e80100-vendor-laptop.dtb':dtb(name='qcom/vendor/adsp.mbn')})
         unrelated=self.package('unrelated.pkg.tar',{self.FW+'elsewhere/adsp.mbn':b'x'})

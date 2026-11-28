@@ -4098,6 +4098,16 @@ def _qualcomm_qcom_firmware_files(target: Path) -> list[tuple[str, Path]] | None
         return None
 
     raw_files = [t.strip("'\"") for t in (m_files.group(1).split() if m_files else []) if t.strip("'\"")]
+    # Reject any FILES= / FILES+= entry outside the generated _qcom_fw_found loop
+    # (or raw_files itself) so an extra firmware file cannot be silently skipped.
+    allowed_file_tokens = {"$_qcom_fw_found", "${_qcom_fw_found}", *raw_files}
+    for m_extra in re.finditer(r"^\s*FILES\s*\+?=(?:\(([^)]*)\)|(\S+))", text, re.M | re.S):
+        body = m_extra.group(1) if m_extra.group(1) is not None else m_extra.group(2)
+        for line in body.splitlines():
+            for tok in line.split("#", 1)[0].split():
+                clean = tok.strip("'\"")
+                if clean and clean not in allowed_file_tokens:
+                    return None
     raw_names = [t.strip("'\"") for t in (m_names.group(1).split() if m_names else []) if t.strip("'\"")]
     count = max(len(raw_files), len(raw_names))
     if count == 0:

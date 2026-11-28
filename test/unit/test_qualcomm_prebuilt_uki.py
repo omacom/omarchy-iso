@@ -210,6 +210,61 @@ class QualcommPrebuiltUkiTests(unittest.TestCase):
         hook.write_text("#!/bin/bash\nbuild() { :; }\n")
         self.assertEqual(self.check(), self.state / "prebuilt-uki-qualcomm.efi")
 
+    def test_qcom_firmware_conf_rejects_extra_files_entries(self):
+        fw = self.target / "usr/lib/firmware/qcom/x1p42100/ASUSTeK/zenbook/zap.mbn.xz"
+        fw.parent.mkdir(parents=True, exist_ok=True)
+        fw.write_bytes(b"zap")
+        extra = self.target / "usr/lib/firmware/qcom/extra.bin"
+        extra.write_bytes(b"extra")
+        # Standard generated qcom-firmware.conf with _qcom_fw_found loop is accepted.
+        (self.conf / "qcom-firmware.conf").write_text(
+            "_qcom_fw_files=(/usr/lib/firmware/qcom/x1p42100/ASUSTeK/zenbook/zap.mbn.xz)\n"
+            "_qcom_fw_names=(qcom/x1p42100/ASUSTeK/zenbook/zap.mbn)\n"
+            "FILES+=(\"$_qcom_fw_found\")\n"
+        )
+        # Note: dummy UKI in setUp is not a real PE binary, so can_append_initrd returns False;
+        # mock can_append_initrd to verify qcom-firmware.conf parsing directly.
+        from unittest.mock import patch
+        with patch("orchestrator.uki_initrd_append.can_append_initrd", return_value=True):
+            self.assertEqual(self.check(), self.state / "prebuilt-uki-qualcomm.efi")
+            # Adding an extra literal FILES+= entry must trigger a full rebuild (return None).
+            (self.conf / "qcom-firmware.conf").write_text(
+                "_qcom_fw_files=(/usr/lib/firmware/qcom/x1p42100/ASUSTeK/zenbook/zap.mbn.xz)\n"
+                "_qcom_fw_names=(qcom/x1p42100/ASUSTeK/zenbook/zap.mbn)\n"
+                "FILES+=(\"$_qcom_fw_found\")\n"
+                "FILES+=(/usr/lib/firmware/qcom/extra.bin)\n"
+            )
+            self.assertIsNone(self.check())
+
+    def test_optional_module_lookup_with_target_module_tree(self):
+        from unittest.mock import patch
+        import subprocess
+
+        kdir = self.target / "usr/lib/modules/7.3.6-10-omarchy"
+        kdir.mkdir(parents=True, exist_ok=True)
+        (kdir / "pkgbase").write_text("linux-omarchy\n")
+        (kdir / "modules.dep").write_text("kernel/drivers/soc/qcom/present_mod.ko.zst:\n")
+        (self.state / "prebuilt-uki.kernel").write_text("linux-omarchy\n")
+
+        def fake_modinfo(cmd, **kwargs):
+            mod = cmd[-1]
+            if mod == "present_mod":
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout="/usr/lib/modules/7.3.6-10-omarchy/kernel/present_mod.ko.zst\n", stderr=""
+                )
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="modinfo: ERROR: Module not found.\n")
+
+        with patch("orchestrator.phases_impl.subprocess.run", side_effect=fake_modinfo):
+            # Absent optional module (smem?) is skipped cleanly.
+            (self.conf / "qualcomm-platform.conf").write_text("MODULES+=(pinctrl-glymur? smem?)\n")
+            self.assertEqual(self.check(), self.state / "prebuilt-uki-qualcomm.efi")
+            # Present optional module not covered by prebuilt UKI forces rebuild.
+            (self.conf / "qualcomm-platform.conf").write_text("MODULES+=(pinctrl-glymur? present_mod?)\n")
+            self.assertIsNone(self.check())
+            # Required absent module (no trailing ?) forces rebuild.
+            (self.conf / "qualcomm-platform.conf").write_text("MODULES+=(pinctrl-glymur? smem)\n")
+            self.assertIsNone(self.check())
+
     def test_adsp_blacklist_and_unexpected_modprobe_build_their_own(self):
         (self.modprobe / "qualcomm-adsp-nofw.conf").write_text("blacklist qcom_q6v5_pas\n")
         self.assertIsNone(self.check())

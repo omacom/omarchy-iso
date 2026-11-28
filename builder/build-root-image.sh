@@ -455,7 +455,8 @@ INSTALL
 
 # Set up N1x's packages in a throwaway overlay of $root, freeze its upper
 # directory read-only, then pack the N1x layer tarball concurrently with
-# building prebuilt-uki-n1x.efi in a second overlay stacked over it.
+# building prebuilt-uki-n1x.efi, where the image gets pre-built UKIs, in a
+# second overlay stacked over it.
 _build_n1x_stacked_overlay() {
   local out_dir=${1:-$root/var/lib/omarchy-iso}
   local overlay child_pid="" layer_pid="" uki_pid="" status=0 layer_rc=0 uki_rc=0
@@ -502,7 +503,9 @@ _build_n1x_stacked_overlay() {
   write_layer "$overlay/rw/upper" aarch64-n1x >"$overlay/layer.log" 2>&1 &
   layer_pid=$!
 
-  if mount -t tmpfs -o size=4G omarchy-n1x-uki "$overlay/uki-rw" &&
+  if (( ! prebuilt_ukis )); then
+    :
+  elif mount -t tmpfs -o size=4G omarchy-n1x-uki "$overlay/uki-rw" &&
      mkdir -p "$overlay/uki-rw/upper" "$overlay/uki-rw/work" &&
      mount -t overlay omarchy-n1x-uki \
        -o "lowerdir=$overlay/rw/upper:$root,upperdir=$overlay/uki-rw/upper,workdir=$overlay/uki-rw/work,index=off,metacopy=off" \
@@ -1142,9 +1145,22 @@ if [[ -z $image_kver ]]; then
 else
   # The kernel package this image carries: linux-omarchy since upstream made it
   # the default, stock linux before. The installer names the UKI
-  # and its Limine entry after it.
+  # and its Limine entry after it, and with or without a pre-built UKI boots a
+  # selected kernel other than this one first.
   image_kernel=$(<"$root/usr/lib/modules/${image_kver}/pkgbase")
   echo "$image_kernel" >"$root/var/lib/omarchy-iso/prebuilt-uki.kernel"
+
+  # Omarchy's boot splash (omarchy-settings' omarchy-splash hook) runs only in
+  # a busybox initramfs, and these UKIs' are systemd ones, with Plymouth. An
+  # image with the splash gets no generic, Snapdragon or N1x UKI here, only
+  # the N1x layer: each install builds its own, so the splash is there from
+  # the first boot.
+  prebuilt_ukis=1
+  if [[ -f $root/etc/initcpio/install/omarchy-splash ]]; then
+    prebuilt_ukis=0
+    echo "No pre-built UKI: the image draws the unlock prompt with omarchy-splash"
+  fi
+
   # The early-loading modules configured when this UKI is built. A machine whose
   # hardware scripts add to them (nvidia.sh, fix-t2.sh) builds its own UKI.
   { grep -hE '^\s*MODULES\s*\+?=' "$root"/etc/mkinitcpio.conf.d/*.conf 2>/dev/null || true; } |
@@ -1347,15 +1363,17 @@ CONF
       btrfs filesystem sync "$mnt"
     fi
     if [[ -n ${OMARCHY_SNAPDRAGON:-} ]]; then
-      if [[ $(uname -m) == aarch64 ]]; then
+      if [[ $(uname -m) == aarch64 ]] && (( prebuilt_ukis )); then
         build_qualcomm_prebuilt_uki "$prebuilt_out" >"$qcom_uki_log" 2>&1 &
         qcom_uki_pid=$!
         prebuilt_pids+=("$qcom_uki_pid")
       fi
     else
-      with_image_overlay build_generic_uki_in "$prebuilt_out" >"$generic_uki_log" 2>&1 &
-      generic_uki_pid=$!
-      prebuilt_pids+=("$generic_uki_pid")
+      if (( prebuilt_ukis )); then
+        with_image_overlay build_generic_uki_in "$prebuilt_out" >"$generic_uki_log" 2>&1 &
+        generic_uki_pid=$!
+        prebuilt_pids+=("$generic_uki_pid")
+      fi
       n1x_script="$root/usr/share/omarchy/install/hardware/n1x.sh"
       if [[ $(uname -m) == aarch64 && -f $n1x_script ]]; then
         n1x_overlay_direct=1 build_n1x_prebuilt_uki "$n1x_script" "$prebuilt_out" >"$n1x_uki_log" 2>&1 &
@@ -1373,7 +1391,7 @@ CONF
   fi
 
   if [[ -n ${OMARCHY_SNAPDRAGON:-} ]]; then
-    if (( ! ${prebuilt_async:-0} )); then
+    if (( ! ${prebuilt_async:-0} && prebuilt_ukis )); then
       # A Snapdragon ISO installs only Snapdragon laptops, so skip the generic
       # UKI and pre-build the Snapdragon UKI (all Snapdragon DTBs via
       # DeviceTreeAuto + HWIDs + shared Qualcomm early modules + Adreno microcode)
@@ -1387,7 +1405,7 @@ CONF
       fi
     fi
   else
-    if (( ! ${prebuilt_async:-0} )); then
+    if (( ! ${prebuilt_async:-0} && prebuilt_ukis )); then
       echo "Pre-building the UKI in the image (kver=$image_kver, generic cmdline, systemd and sd-encrypt hooks, no autodetect)"
       # mkinitcpio is called directly: the preset flow (-P) runs Limine's install
       # hooks, which fail without a mounted ESP.
@@ -1410,18 +1428,20 @@ CONF
       fi
     fi
   fi
-  # N1x: a second pre-built UKI. Its hardware setup always adds the same
-  # early-loading modules, the NVIDIA stack for early KMS and the I2C keyboard
-  # for the LUKS prompt, so the generic UKI never fits it and every N1x built
-  # its own at install, about 20s. This one is built with them, read from the
-  # image's own n1x.sh so the two cannot drift, and recorded the same way; the
-  # installer copies it where the machine's lines match (_n1x_prebuilt_uki).
+  # N1x: its layer, and a second pre-built UKI where the image has the first.
+  # Its hardware setup always adds the same early-loading modules, the NVIDIA
+  # stack for early KMS and the I2C keyboard for the LUKS prompt, so the
+  # generic UKI never fits it and every N1x built its own at install, about
+  # 20s. This one is built with them, read from the image's own n1x.sh so the
+  # two cannot drift, and recorded the same way; the installer copies it where
+  # the machine's lines match (_n1x_prebuilt_uki).
   # The NVIDIA packages go into a throwaway overlay of the image, never into
   # the image itself. What they add is packed from that overlay as the N1x
   # layer, which the installer extracts on an N1x, so the driver in the UKI is
   # the one on disk.
   n1x_script="$root/usr/share/omarchy/install/hardware/n1x.sh"
-  if (( ! prebuilt_async )) && [[ $(uname -m) == aarch64 && -z ${OMARCHY_SNAPDRAGON:-} && -f $n1x_script && -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
+  if (( ! prebuilt_async )) && [[ $(uname -m) == aarch64 && -z ${OMARCHY_SNAPDRAGON:-} && -f $n1x_script ]] &&
+    { (( ! prebuilt_ukis )) || [[ -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; }; then
     build_n1x_prebuilt_uki "$n1x_script" || {
       echo "WARNING: no N1x pre-built UKI or layer; N1x installs build their own and pacstrap the NVIDIA stack"
       rm -f "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.efi" "$root/var/lib/omarchy-iso/prebuilt-uki-n1x.modules" \
@@ -1557,7 +1577,7 @@ join_prebuilt_boot_images() {
     wait "$n1x_uki_pid" || n1x_status=$?
     [[ -f $n1x_uki_log ]] && cat "$n1x_uki_log"
     rm -f "$n1x_uki_log"
-    if [[ ! -f $prebuilt_out/prebuilt-uki.efi ]]; then
+    if (( prebuilt_ukis )) && [[ ! -f $prebuilt_out/prebuilt-uki.efi ]]; then
       rm -f "$prebuilt_out/prebuilt-uki-n1x.efi" "$prebuilt_out/prebuilt-uki-n1x.modules" \
         "$(layer_path aarch64-n1x)"
     elif (( n1x_status != 0 )); then

@@ -85,9 +85,10 @@ ssh_vm 'cat /proc/cmdline' >"$state/cmdline"
 # A quoted here-document, not a single-quoted string: an apostrophe in a
 # comment ended that string, and this host ran the rest of the script itself.
 root "$(cat <<'GUEST'
-  # The ISO writes autologin only for encrypted installs; a test has nobody at
-  # SDDM, and a desktop check that skips for want of a session reads as a pass.
-  printf "[Autologin]\nUser=omarchy\nSession=omarchy.desktop\n" >/etc/sddm.conf.d/autologin.conf
+  # The ISO sets autologin only for encrypted installs; a test has nobody at
+  # the login screen, and a desktop check that skips for want of a session
+  # reads as a pass.
+  omarchy-system-login omarchy --autologin
 
   # The image is public and its password is too, so SSH takes keys only. sshd
   # keeps the first value it reads, hence a name that sorts first.

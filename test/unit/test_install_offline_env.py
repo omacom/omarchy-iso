@@ -64,47 +64,6 @@ class MiseOfflineTest(unittest.TestCase):
                 1,
             )
 
-    def test_configure_login_skips_chroots_when_sddm_enabled_and_uid_known(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp)
-            (target / "etc").mkdir(parents=True)
-            (target / "etc" / "passwd").write_text("sddm:x:970:970:SDDM:/var/lib/sddm:/sbin/nologin\n")
-            (target / "etc" / "group").write_text("sddm:x:970:\n")
-            unit = target / "usr" / "lib" / "systemd" / "system" / "sddm.service"
-            unit.parent.mkdir(parents=True)
-            unit.write_text("[Unit]\nDescription=SDDM\n")
-            dm = target / "etc" / "systemd" / "system" / "display-manager.service"
-            dm.parent.mkdir(parents=True)
-            dm.symlink_to("/usr/lib/systemd/system/sddm.service")
-
-            ctx = mock.Mock(target=target, username="dhh", encrypt=True, defer_provisioning=False)
-            with mock.patch.object(phases_impl.os, "chown") as chown_mock, \
-                    mock.patch.object(phases_impl.subprocess, "run") as run_mock:
-                phases_impl.configure_login(ctx)
-
-            self.assertEqual(chown_mock.call_count, 2)
-            for call in chown_mock.call_args_list:
-                self.assertEqual(call.args[1:], (970, 970))
-                self.assertEqual(call.kwargs, {"follow_symlinks": False})
-            run_mock.assert_not_called()
-            self.assertIn("User=dhh", (target / "etc/sddm.conf.d/autologin.conf").read_text())
-            self.assertIn("User=dhh", (target / "var/lib/sddm/state.conf").read_text())
-
-    def test_configure_login_uses_offline_systemctl_when_sddm_not_enabled(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp)
-            ctx = mock.Mock(target=target, username="dhh", encrypt=False, defer_provisioning=True)
-            with mock.patch.object(phases_impl.subprocess, "run") as run_mock:
-                phases_impl.configure_login(ctx)
-
-            self.assertFalse((target / "var/lib/sddm/state.conf").exists())
-            self.assertFalse((target / "etc/sddm.conf.d/autologin.conf").exists())
-            run_mock.assert_called_once_with(
-                ["systemctl", f"--root={target}", "enable", "sddm.service"],
-                check=False,
-                capture_output=True,
-            )
-
 
     def test_sync_offline_target_db_replaces_stale_image_db(self):
         with tempfile.TemporaryDirectory() as tmp:

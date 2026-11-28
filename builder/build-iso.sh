@@ -1069,6 +1069,19 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
   done
 fi
 
+# Omarchy's boot splash is untested with systemd-boot: an image with it doesn't
+# ship omarchy-boot-systemd, whose UEFI installs would boot the two together.
+# Integrating them is its own work.
+if [[ -n $boot_swap_package ]]; then
+  for settings_file in "${required_package_files[@]}"; do
+    [[ $settings_file == "$OMARCHY_SETTINGS_PACKAGE"-[0-9]* ]] || continue
+    if bsdtar -tf "$offline_mirror_dir/$settings_file" etc/initcpio/install/omarchy-splash >/dev/null 2>&1; then
+      echo "ERROR: $OMARCHY_SETTINGS_PACKAGE has Omarchy's boot splash, which does not support $boot_swap_package yet" >&2
+      exit 1
+    fi
+  done
+fi
+
 printf '%s\n' "${required_package_files[@]}" |
   bash /builder/prune-offline-mirror.sh "$offline_mirror_dir"
 
@@ -1089,9 +1102,10 @@ rebuild_offline_repo_db
 #                                audio DSPs
 #   tailscale                    installed only when an autoinstall drive
 #                                staged an auth key
-# Both CPU microcodes stay in the image although a machine needs only one: the
-# pre-built UKI is made with autodetect skipped, so its microcode hook bundles
-# both, and every install early-loads its own on first boot.
+# Both CPU microcodes stay in the image although a machine needs only one: a
+# pre-built UKI, where the image has one, is made with autodetect skipped, so
+# its microcode hook bundles both, and every install early-loads its own on
+# first boot.
 # omarchy-apply-system still installs more from omarchy-other.packages as the
 # hardware dictates.
 per_machine_packages=(alsa-firmware sof-firmware tailscale)
